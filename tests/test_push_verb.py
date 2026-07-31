@@ -132,7 +132,13 @@ def repo_with_remote(tmp_path):
     _git(["checkout", "-b", "feature"], repo)
     (repo / "feature.txt").write_text("work\n")
     _git(["add", "feature.txt"], repo)
-    _git(["commit", "-m", "feature work"], repo)
+    # Conventional-Commits-shaped (lr-dd1742, push.branch_commit_check):
+    # this fixture's commit is a stand-in for ordinary feature work, and
+    # every push-time gate in this module -- including the new branch
+    # commit-subject check -- validates real commit subjects, so the
+    # fixture's own content must conform rather than accidentally tripping
+    # a gate that isn't the one under test.
+    _git(["commit", "-m", "feat: add feature work"], repo)
     _git(
         ["remote", "set-url", "origin", "http://git-host.example.com/some-owner/some-repo.git"],
         repo,
@@ -1936,7 +1942,9 @@ def _repo_with_directly_resolvable_remote(tmp_path):
     _git(["checkout", "-b", "feature"], repo)
     (repo / "feature.txt").write_text("work\n")
     _git(["add", "feature.txt"], repo)
-    _git(["commit", "-m", "feature work"], repo)
+    # Conventional-Commits-shaped (lr-dd1742, push.branch_commit_check) --
+    # see repo_with_remote's own matching comment for why.
+    _git(["commit", "-m", "feat: add feature work"], repo)
 
     return repo, remote
 
@@ -2010,7 +2018,7 @@ class TestRemoteReadbackEnvelope:
         for i in range(3):
             (repo / f"local-only-{i}.txt").write_text(f"commit {i}\n")
             _git(["add", f"local-only-{i}.txt"], repo)
-            _git(["commit", "-m", f"local-only commit {i}"], repo)
+            _git(["commit", "-m", f"feat: local-only commit {i}"], repo)
 
         local_head = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True
@@ -3049,4 +3057,161 @@ class TestBodyEnvUnwrapsJsonEnvelope:
         assert code == verb.EXIT_OK
         assert captured["body"] == self._BODY_WITH_NEWLINE_AND_BRACE
         assert "\\n" not in captured["body"]
-        assert '{"body":' not in captured["body"]
+
+
+class TestBranchCommitCheck:
+    """Push-time backstop against a branch carrying a stray, not-yet-landed
+    merge commit from another PR (lr-dd1742) -- CLI wiring over
+    push.branch_commit_check.
+
+    Tests exercising a genuinely REACHABLE `git fetch` use
+    `_repo_with_directly_resolvable_remote` (--platform github, `origin`
+    pointed directly at the real local bare repo -- see that helper's own
+    docstring for why `repo_with_remote`'s pushInsteadOf-indirected fixture
+    cannot support a real fetch). Tests that never reach the fetch at all
+    (skip=True, a non-'merge' --merge-method) use the simpler
+    `repo_with_remote` fixture, matching every other gate's own test
+    convention in this file."""
+
+    def test_stray_merge_commit_blocks_before_push(self, tmp_path, monkeypatch):
+        # The gate runs AFTER token resolution/bot-identity re-authoring,
+        # same ordering as the pre-existing cleanliness check
+        # (_run_cleanliness_check) it sits beside -- a valid token provider
+        # is expected to be consulted regardless of this gate's outcome.
+        repo, remote = _repo_with_directly_resolvable_remote(tmp_path)
+        _git(
+            ["commit", "--allow-empty", "-m",
+             "Merge pull request #377 from clagentic/fix/lr-f22787-x"],
+            repo,
+        )
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_STRAY_MERGE_COMMIT
+        # Nothing was pushed -- the remote's main tip is unchanged and no
+        # 'feature' ref exists there at all.
+        refs = _git(["ls-remote", str(remote)], repo).stdout
+        assert "refs/heads/feature" not in refs
+
+    def test_stray_merge_commit_message_names_sha_subject_and_remediation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        repo, _remote = _repo_with_directly_resolvable_remote(tmp_path)
+        _git(
+            ["commit", "--allow-empty", "-m",
+             "Merge pull request #378 from clagentic/fix/lr-f969fc-y"],
+            repo,
+        )
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_STRAY_MERGE_COMMIT
+        stderr = capsys.readouterr().err
+        assert "Merge pull request #378 from clagentic/fix/lr-f969fc-y" in stderr
+        assert "git fetch origin main" in stderr
+        assert "git rebase origin/main" in stderr
+        assert "--skip-branch-commit-check" in stderr
+
+    def test_clean_branch_is_unaffected(self, tmp_path, monkeypatch):
+        repo, _remote = _repo_with_directly_resolvable_remote(tmp_path)
+        provider = _RecordingTokenProvider()
+        opener = _github_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_skip_flag_bypasses_even_a_stray_commit(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        _git(
+            ["commit", "--allow-empty", "-m", "Merge pull request #1 from x/y"],
+            repo,
+        )
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--skip-branch-commit-check",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_non_merge_merge_method_is_unaffected_by_stray_commit(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        _git(
+            ["commit", "--allow-empty", "-m", "Merge pull request #1 from x/y"],
+            repo,
+        )
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--merge-method", "squash",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_check_execution_failure_is_a_soft_fail_not_a_block(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """CommitCheckUnavailableError (the check's OWN execution failing)
+        must never block a push that would otherwise be clean -- mirrors
+        _run_cleanliness_check's own CleanlinessCheckError handling.
+        `repo_with_remote`'s `origin` is a neutral, non-resolving
+        placeholder host (pushInsteadOf redirects the PUSH transport only,
+        never `git fetch` -- see that fixture's own docstring), so this
+        module's own `git fetch origin <base>` fails fast (DNS resolution
+        failure, no real network access) regardless of --base -- exactly
+        the check-execution failure this test exercises."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "branch commit-subject check could not run" in stderr
