@@ -165,6 +165,7 @@ import sys
 from pathlib import Path
 
 from clagentic_loadout._version import get_version
+from clagentic_loadout.merge.commit_subjects import REAL_MERGE_METHOD
 from clagentic_loadout.merge.errors import TitleInvalidError
 from clagentic_loadout.merge.title_gate import check_pr_title
 from clagentic_loadout.platform_detect import (
@@ -174,6 +175,11 @@ from clagentic_loadout.platform_detect import (
     resolve_platform,
 )
 from clagentic_loadout.push import git_coords, github_backend, identity
+from clagentic_loadout.push.branch_commit_check import (
+    CommitCheckUnavailableError,
+    StrayMergeCommitError,
+    check_branch_for_stray_merge_commits,
+)
 from clagentic_loadout.push.cleanliness_check import (
     CleanlinessCheckError,
     ScratchLitterFoundError,
@@ -269,6 +275,16 @@ EXIT_BODY_FILE_UNREADABLE = 27
 #: specifically "the sanctioned staging mechanism has nothing valid for this
 #: invocation," never a raw filesystem/path failure.
 EXIT_BODY_ENV_UNAVAILABLE = 28
+#: The branch being pushed carries a commit in <fetched base>..HEAD with a
+#: non-Conventional-Commits subject (push.branch_commit_check,
+#: StrayMergeCommitError) -- the shape a stray, not-yet-landed merge commit
+#: from another PR always has. A push-time backstop for the SAME grammar
+#: merge.commit_subjects already enforces at merge time (EXIT_COMMIT_SUBJECT
+#: _INVALID=30 on the merge verb), fired here instead, minutes after the
+#: offending commit was introduced rather than hours later after build,
+#: review, and security audit have already run against it. See --merge-method
+#: / --skip-branch-commit-check.
+EXIT_STRAY_MERGE_COMMIT = 29
 
 
 class PushVerbError(Exception):
@@ -307,7 +323,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "only), untracked-and-unignored files matching a configurable "
             "scratch-pattern list (.clagentic/loadout/config.yaml "
             "push.scratch_patterns) are WARNED about on stderr; --strict "
-            f"fails instead, exit {EXIT_SCRATCH_LITTER_FOUND}."
+            f"fails instead, exit {EXIT_SCRATCH_LITTER_FOUND}. On a "
+            "--merge-method='merge' repo (default), every commit in "
+            "<fetched --base>..HEAD is also checked against the same "
+            "Conventional Commits grammar; a non-conformant subject (e.g. a "
+            "stray merge commit from another PR) fails closed, exit "
+            f"{EXIT_STRAY_MERGE_COMMIT} -- see --skip-branch-commit-check."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -508,6 +529,38 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"({EXIT_SCRATCH_LITTER_FOUND}=EXIT_SCRATCH_LITTER_FOUND). Default: "
         "warn on stderr and continue.",
     )
+    parser.add_argument(
+        "--merge-method",
+        default=REAL_MERGE_METHOD,
+        dest="merge_method",
+        help="The RESOLVED merge method this repo/PR will land with -- "
+        f"the SAME value the merge gate's own branch commit-subject check "
+        f"keys on (merge.commit_subjects.REAL_MERGE_METHOD, default "
+        f"{REAL_MERGE_METHOD!r}). Only affects the branch commit-subject "
+        "check below; never forwarded to any push or PR-open call. Pass "
+        "the value your dispatcher already resolves for this repo's "
+        "eventual `loadout-merge --merge-method` call, so the two stay in "
+        "sync rather than deriving the signal twice.",
+    )
+    parser.add_argument(
+        "--skip-branch-commit-check",
+        action="store_true",
+        default=False,
+        dest="skip_branch_commit_check",
+        help="Bypass the push-time branch commit-subject check (create-PR "
+        "path only, --merge-method='merge' repos only). Default: enforced. "
+        "Before pushing, every commit in <fetched base>..HEAD is checked "
+        "against the same Conventional Commits grammar the merge gate's "
+        "commit-subject check (merge.commit_subjects) applies at merge "
+        "time -- catching a branch that carries a stray, not-yet-landed "
+        "merge commit from another PR minutes after it was introduced "
+        "rather than hours later at the merge gate. A CommitCheckUnavailable"
+        "Error (the fetch/log itself failing, e.g. origin unreachable) is a "
+        "soft-fail: warned on stderr, never blocks the push. A found "
+        f"offender exits {EXIT_STRAY_MERGE_COMMIT} "
+        f"({EXIT_STRAY_MERGE_COMMIT}=EXIT_STRAY_MERGE_COMMIT). Use of this "
+        "flag is logged to stderr for audit.",
+    )
     return parser
 
 
@@ -705,6 +758,48 @@ def _run_cleanliness_check(project_root: Path, *, strict: bool) -> None:
         print(
             f"push: WARNING -- untracked, unignored scratch litter found "
             f"before push:\n{listed}",
+            file=sys.stderr,
+        )
+
+
+def _run_branch_commit_check(
+    project_root: Path, *, base_branch: str, remote: str, merge_method: str, skip: bool
+) -> None:
+    """Push-time branch commit-subject check (lr-dd1742,
+    push.branch_commit_check) -- catches a branch carrying a stray,
+    not-yet-landed merge commit from another PR at push time instead of
+    hours later at the merge gate (merge.commit_subjects' own
+    EXIT_COMMIT_SUBJECT_INVALID). No-op for any *merge_method* other than
+    "merge" (see push.branch_commit_check's own docstring for why this
+    reuses merge.commit_subjects.REAL_MERGE_METHOD rather than a second
+    signal), and when *skip* is True (logged here for audit, mirroring
+    _check_title_gate's own bypass logging).
+
+    A CommitCheckUnavailableError (the underlying git fetch/log failing --
+    unreachable origin, no such base branch) is a SOFT-FAIL: warned on
+    stderr, never blocks the push -- this check's own inability to run must
+    never refuse a push that would otherwise be clean, exactly like
+    _run_cleanliness_check's own CleanlinessCheckError handling.
+
+    Raises push.branch_commit_check.StrayMergeCommitError when at least one
+    offending commit is found; caught at the CLI boundary in main() and
+    mapped to EXIT_STRAY_MERGE_COMMIT.
+    """
+    if skip:
+        print(
+            f"push: branch commit-subject check BYPASSED via "
+            f"--skip-branch-commit-check for {project_root} "
+            f"(base={base_branch!r}, remote={remote!r})",
+            file=sys.stderr,
+        )
+        return
+    try:
+        check_branch_for_stray_merge_commits(
+            project_root, base_branch, merge_method=merge_method, remote=remote, skip=False,
+        )
+    except CommitCheckUnavailableError as exc:
+        print(
+            f"push: branch commit-subject check could not run -- {exc}",
             file=sys.stderr,
         )
 
@@ -1061,6 +1156,9 @@ def main(
     except ScratchLitterFoundError as exc:
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_SCRATCH_LITTER_FOUND
+    except StrayMergeCommitError as exc:
+        print(f"push: {exc}", file=sys.stderr)
+        return EXIT_STRAY_MERGE_COMMIT
 
 
 def _run(
@@ -1503,6 +1601,14 @@ def _run_create_pr(
         _fail(str(exc), code=EXIT_AUTHOR_MISMATCH)
 
     _run_cleanliness_check(project_root, strict=args.strict_cleanliness)
+
+    _run_branch_commit_check(
+        project_root,
+        base_branch=args.base,
+        remote=remote_name,
+        merge_method=args.merge_method,
+        skip=args.skip_branch_commit_check,
+    )
 
     other_platform_label = PLATFORM_FORGEJO if args.platform == PLATFORM_GITHUB else PLATFORM_GITHUB
     try:
