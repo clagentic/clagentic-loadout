@@ -1,0 +1,184 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/common.json",
+  "title": "clagentic: loadout common schema fragments",
+  "description": "Shared fragments referenced by the dispatch envelope schemas (envelope-in.json, envelope-out.json). Field definitions here are authoritative for the published loadout contract set.\n\ncontract_revision common@2: added the `followup` fragment (a generic, minimal work-item descriptor used by envelope-out.json's `followups[]`). All prior fragments are unchanged -- this is an additive migration. NOTE: the $id path segment stays `v1` because sibling schemas in this directory resolve `$ref: \"common.json#/...\"` relative to their own base URI (same directory) -- bumping this file's $id alone breaks that relative resolution for every other schema here. A package-wide $id version bump is a separate, coordinated release decision, not a per-file one; see docs/integration.md's \"Envelope contract versions\" section for the tracked contract_revision numbers.",
+  "$defs": {
+    "task_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Opaque work-item identifier scoping this invocation. Shape is deployment-defined (a task tracker key, ticket ID, or any stable string); loadout does not assume a specific tracker or ID pattern."
+    },
+    "commit_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Full (non-abbreviated) git commit SHA, lowercase hex, exactly 40 characters. Every SHA field in an envelope is a typed value validated at compose time, not a hand-carried string compared downstream. A shorter abbreviated form must be resolved to the full 40-character value (e.g. via `git rev-parse`) before it is placed in a field that uses this fragment; consumers normalize surrounding whitespace before validating but do not relax the 40-character requirement."
+    },
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target project name. Resolves against the deployment's own project registry; loadout treats this as an opaque identifier."
+    },
+    "agent_name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "minLength": 1,
+      "maxLength": 64,
+      "description": "Normalized lowercase role/agent identifier (e.g. 'builder', 'reviewer', 'merger'). The published contract declares the SHAPE only — which concrete names or roles are valid for a given deployment is supplied by that deployment's own cast/roster configuration, never by this schema."
+    },
+    "actor": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {
+            "kind": { "const": "human" },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Resolved human identity. Canonical form only — no aliases; canonicalization is a deployment concern."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name"],
+          "properties": {
+            "kind": { "const": "agent" },
+            "name": { "$ref": "#/$defs/agent_name" }
+          }
+        }
+      ],
+      "description": "A structured human or agent identity ({kind, name}). Used in invoker and participants[], and is one accepted shape for authorized_by. See #/$defs/authorized_by for the field that also accepts a plain-string provenance form."
+    },
+    "authorized_by": {
+      "oneOf": [
+        { "$ref": "#/$defs/actor" },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "description": "Provenance string form. Any non-empty provenance string is accepted at the shape level — this is not an enum of literal names; freeform provenance parentheticals (e.g. an approving identity plus context) are legitimate. The load-bearing SEMANTIC constraint (an autonomous agent must never self-authorize a release-gated action) is enforced by the deployment's merge-gate logic, not by this schema."
+        }
+      ],
+      "description": "Who approved this work. Accepts either the structured actor object ({kind, name}) or a plain provenance string. For release-gated actions the approving identity must resolve to a human or an authorized project role — never an agent authorizing itself; that check happens at the deployment's merge gate, not here."
+    },
+    "invoked_by": {
+      "$ref": "#/$defs/actor",
+      "description": "Who dispatched this specific invocation. May equal authorized_by or may be an intermediate orchestrator."
+    },
+    "participant": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name", "role", "position"],
+          "properties": {
+            "kind": { "const": "human" },
+            "name": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Canonical human identity. No aliases; canonicalization is a deployment concern."
+            },
+            "role": { "$ref": "#/$defs/participant_role" },
+            "position": { "$ref": "#/$defs/participant_position" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name", "role", "position"],
+          "properties": {
+            "kind": { "const": "agent" },
+            "name": {
+              "$ref": "#/$defs/agent_name",
+              "description": "Agent/role name. Validated against the shape only — mapping a name to a concrete cast entry is a deployment concern, not this schema's."
+            },
+            "role": { "$ref": "#/$defs/participant_role" },
+            "position": { "$ref": "#/$defs/participant_position" }
+          }
+        }
+      ],
+      "description": "A single participant in a conversation. Shape mirrors actor: oneOf{human, agent} so that name shape is mechanically enforced for agents."
+    },
+    "participant_role": {
+      "enum": ["invoker", "invokee", "author", "interlocutor"],
+      "description": "Enumerated participant role. No freeform values."
+    },
+    "participant_position": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Ordering within the participants array. Stable across retries of the same invocation."
+    },
+    "conversation_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "UUIDv7, issued exactly once per top-level dispatch. Inherited by every child, sibling, and retry invocation in the tree. Retries do NOT mint a new conversation_id — they increment attempt. Globally unique across a deployment."
+    },
+    "invocation_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+      "description": "UUIDv7 for a single agent invocation. Distinct from conversation_id: a conversation may contain many invocations."
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Retry counter for this invocation_id. First attempt = 1. The dispatching layer increments on retry; agents never touch this."
+    },
+    "invocation_ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the dispatching layer constructed the envelope."
+    },
+    "status": {
+      "enum": ["ok", "failed", "blocked"],
+      "description": "ok: work completed as contracted. failed: agent tried and could not complete (bug, infra, transient). blocked: agent refused because preconditions were not met (gating criteria failed, inputs invalid). blocked is not an error — it is a valid outcome for a gate-role agent."
+    },
+    "error_code": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{2,63}$",
+      "description": "Machine-readable error code, SCREAMING_SNAKE_CASE. No free-form error strings in envelopes — prose goes in the linked result artifact, not the trace."
+    },
+    "agent_result_path": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Reference to the agent's full result artifact (a path, URI, or deployment-defined locator). The concrete storage convention — where results live and how they are addressed — is deployment configuration, not part of this published contract. The artifact may contain prose, diffs, and tool output that are explicitly forbidden from the envelope itself."
+    },
+    "followup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary"],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "description": "Short, non-prose description of the follow-up work item. Detailed context belongs in the result artifact (agent_result_path), not here."
+        },
+        "kind": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "Deployment-defined categorization (e.g. 'refactor', 'security', 'docs'). Open string, shape-only -- loadout does not enumerate valid kinds."
+        },
+        "related_path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "Optional file or resource path the follow-up concerns. Opaque to loadout."
+        },
+        "priority": {
+          "type": "string",
+          "enum": ["low", "normal", "high"],
+          "description": "Optional coarse priority hint. A deployment's own consumer decides what to do with it; loadout assigns no other meaning."
+        }
+      },
+      "description": "A generic, minimal work-item descriptor. This is NOT a task-tracker record -- it carries no tracker ID, no assignee, no status. loadout defines only the SHAPE; whether and how a deployment turns this into a tracked task (or does nothing with it) is entirely that deployment's concern (CLAUDE.md hard rule 6a)."
+    }
+  }
+}

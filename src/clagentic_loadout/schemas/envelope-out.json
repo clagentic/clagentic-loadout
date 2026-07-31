@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/envelope-out.json",
+  "title": "Dispatch envelope — outbound from agent",
+  "description": "The structured return from an autonomous agent invocation. This is what lands in the deployment's trace/attribution record. additionalProperties:false, mechanical whitelist — the field set is a stable, versioned public contract.\n\nNo prompt text, tool call arguments, response bodies, or secret values belong in this envelope. Prose and detailed artifacts live in the result artifact referenced by agent_result_path — the envelope is metadata only.\n\ncontract_revision envelope-out@2: added optional `followups[]` (see common.json#/$defs/followup). Additive-only migration -- every prior envelope-out payload (no followups key) still validates unchanged; `followups` is not in `required`. The $id path segment stays `v1` for relative-$ref-resolution reasons (see common.json's description); the tracked version number for this migration is the `contract_revision` note itself plus docs/integration.md's \"Envelope contract versions\" table.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id",
+    "agent_name",
+    "invoker",
+    "status",
+    "conversation_id",
+    "invocation_id",
+    "attempt",
+    "participants",
+    "invocation_ts",
+    "duration_ms",
+    "tool_call_count",
+    "error_codes",
+    "agent_result_path"
+  ],
+  "properties": {
+    "task_id": { "$ref": "common.json#/$defs/task_id" },
+    "agent_name": { "$ref": "common.json#/$defs/agent_name" },
+    "invoker": { "$ref": "common.json#/$defs/actor" },
+    "status": { "$ref": "common.json#/$defs/status" },
+    "conversation_id": { "$ref": "common.json#/$defs/conversation_id" },
+    "invocation_id": { "$ref": "common.json#/$defs/invocation_id" },
+    "attempt": { "$ref": "common.json#/$defs/attempt" },
+    "participants": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "common.json#/$defs/participant" }
+    },
+    "invocation_ts": { "$ref": "common.json#/$defs/invocation_ts" },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock duration from dispatch handoff to envelope return."
+    },
+    "cost_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Estimated cost in USD. Optional — omit if the agent does not consume metered resources."
+    },
+    "tool_call_count": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Total tool invocations this agent made during the run. Includes retries."
+    },
+    "error_codes": {
+      "type": "array",
+      "items": { "$ref": "common.json#/$defs/error_code" },
+      "description": "Machine-readable error codes. Empty array on status=ok. Prose explanations go in the result artifact, not here."
+    },
+    "agent_result_path": { "$ref": "common.json#/$defs/agent_result_path" },
+    "followups": {
+      "type": "array",
+      "items": { "$ref": "common.json#/$defs/followup" },
+      "description": "Optional list of follow-up work items the agent identified but did not act on (e.g. drive-by refactors returned per code-craft rule 1). Empty or omitted when there are none. Each item is a generic descriptor (common.json#/$defs/followup) -- this field carries no task-creation semantics; a deployment's own consumer decides whether and how to act on it."
+    }
+  }
+}

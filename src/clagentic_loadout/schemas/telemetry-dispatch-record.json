@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/telemetry-dispatch-record.json",
+  "title": "Telemetry dispatch record",
+  "description": "State-machine record for one agent dispatch: pre-spawn (status=in_flight) and post-spawn (status in {completed, failed, refused, timed_out}) writes share this shape, consolidating the source dispatch-record + spawn-meta pair into one loadout event schema. The spawn env block (spawn_env) carries whatever identity/attribution keys the deployment's spawn convention injects — loadout does not enumerate specific env var names here, that set is deployment-defined. additionalProperties:false, mechanical whitelist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "dispatch_id", "status", "ts"],
+  "properties": {
+    "schema": { "const": "telemetry-dispatch-record/v1" },
+    "dispatch_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque identifier for this dispatch, stable across its pre-spawn and post-spawn writes. Shape is caller-defined."
+    },
+    "status": {
+      "enum": ["in_flight", "completed", "failed", "refused", "timed_out"],
+      "description": "Dispatch lifecycle state. in_flight: pre-spawn write, child session not yet resolved. Terminal states carry completed_ts + result_summary."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when this write was made."
+    },
+    "target_session_id": {
+      "type": ["string", "null"],
+      "description": "The spawned child session identifier, once known. null on the pre-spawn write."
+    },
+    "completed_ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the dispatch reached a terminal status. Present only on terminal writes."
+    },
+    "result_summary": {
+      "type": "string",
+      "maxLength": 1024,
+      "description": "Short, non-prose outcome summary. Detailed artifacts live outside the telemetry record."
+    },
+    "spawn_env": {
+      "type": "object",
+      "description": "Opaque map of the identity/attribution env keys injected into the spawned subprocess. Loadout carries this through without interpreting individual keys — mapping specific keys to meaning is a deployment concern."
+    }
+  }
+}

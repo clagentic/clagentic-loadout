@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/telemetry-agent-run.json",
+  "title": "Telemetry agent-run record",
+  "description": "One completed agent invocation's usage/cost/outcome summary, emitted after the subprocess exits. Transport-agnostic: the emitter hands this record to a configured sink, it does not itself know about any specific collector. additionalProperties:false, mechanical whitelist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "record_id",
+    "agent_name",
+    "spawn_id",
+    "started_at",
+    "finished_at",
+    "exit_status",
+    "recorded_at"
+  ],
+  "properties": {
+    "schema": { "const": "telemetry-agent-run/v1" },
+    "record_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique identifier for this run record (e.g. a UUID)."
+    },
+    "agent_name": { "$ref": "common.json#/$defs/agent_name" },
+    "spawn_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque identifier for the spawn that produced this run. Shape is caller-defined."
+    },
+    "initiator": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Freeform label for what triggered this dispatch (e.g. 'operator', 'cli', 'scheduled'). Loadout does not enumerate a fixed set — the deployment's dispatch surface defines its own initiator vocabulary."
+    },
+    "host": {
+      "type": "string",
+      "description": "Hostname the run executed on. Optional — omit when the deployment does not want host attribution in the record."
+    },
+    "conversation_id": { "$ref": "common.json#/$defs/conversation_id" },
+    "task_id": { "$ref": "common.json#/$defs/task_id" },
+    "started_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the run started."
+    },
+    "finished_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the run finished."
+    },
+    "duration_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Wall-clock duration in milliseconds."
+    },
+    "model_used": {
+      "type": "string",
+      "description": "Identifier of the primary model used for this run. Optional — omit when unknown."
+    },
+    "tokens_in": { "type": "integer", "minimum": 0 },
+    "tokens_out": { "type": "integer", "minimum": 0 },
+    "tokens_cache_read": { "type": "integer", "minimum": 0 },
+    "tokens_cache_creation": { "type": "integer", "minimum": 0 },
+    "cost_estimate_usd": { "type": "number", "minimum": 0 },
+    "billing_mode": {
+      "type": "string",
+      "description": "Freeform label for the billing arrangement in effect (e.g. 'api', 'subscription'). Deployment-defined vocabulary."
+    },
+    "exit_status": {
+      "enum": ["ok", "crash", "blocked", "budget_exhausted", "timed_out", "unknown"],
+      "description": "Terminal outcome of the run."
+    },
+    "error_codes": {
+      "type": "array",
+      "items": { "$ref": "common.json#/$defs/error_code" }
+    },
+    "num_turns": { "type": "integer", "minimum": 0 },
+    "pr_url": {
+      "type": "string",
+      "description": "URL of the PR this run produced, if any. Optional."
+    },
+    "project": {
+      "$ref": "common.json#/$defs/project"
+    },
+    "attempt": { "$ref": "common.json#/$defs/attempt" },
+    "recorded_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the emitter recorded this event (may differ from finished_at if emission is deferred)."
+    }
+  }
+}

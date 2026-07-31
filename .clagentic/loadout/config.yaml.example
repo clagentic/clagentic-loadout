@@ -1,0 +1,125 @@
+# .clagentic/loadout/config.yaml — STARTER TEMPLATE
+#
+# This is a clean starting point for a repo's own repo-local loadout config.
+# It carries NO deployment values (no real HOME, no real forge base URL, no
+# agent names) -- every value below is either a role token (builder,
+# reviewer, merger, lead -- vocabulary only, never an agent identity) or a
+# placeholder you fill in during /loadout-init. See docs/loadout-init.md for
+# the guided workflow this template is the copy source for, and
+# docs/provisioning.md for the full schema reference each section below
+# links to.
+#
+# This file is a COMMITTED example — copy it to config.yaml (gitignored,
+# never committed) and edit, or run /loadout-init to scaffold + walk through
+# it interactively. See docs/loadout-init.md "Installing the skill" /
+# "What ships" for the full guided workflow this is the copy source for.
+#
+# One sectioned file, one top-level key per verb/feature -- the convention
+# every section owner in this package follows (wait:, roles:, merge:).
+
+# ---------------------------------------------------------------------------
+# roles: -- which loadout verbs each ROLE may invoke (docs/provisioning.md
+# "Step 1 -- declare the role's verb set"). Replace-not-merge: a role you
+# omit here is simply not provisioned, never silently inherited from a
+# built-in default. Role names are vocabulary only -- builder/reviewer/
+# security/merger/lead, or any role name you invent -- never an agent name.
+#
+# security is included here: an earlier version of this template shipped
+# WITHOUT a security key below, while merge.required_reviewer_roles further
+# down names it as a required reviewer role -- a config that looked like a
+# gate but could never satisfy it, since a role absent from this section has
+# no verb set and can never emit a verdict. Rename or remove it if this repo
+# genuinely has no separate security-review role; keep required_reviewer_roles
+# below in sync with whatever you decide here.
+# ---------------------------------------------------------------------------
+roles:
+  builder:
+    - push
+  reviewer:
+    - git-host-api
+    - review-post
+    - stage-body
+  security:
+    - git-host-api
+    - review-post
+  merger:
+    - merge
+    - push
+    - release-dispatch
+    - release-detect
+  lead:
+    - git-host-api
+
+# ---------------------------------------------------------------------------
+# merge: -- merge-gate declarations (docs/provisioning.md "Merge-gate config
+# homes"). Every key here is REPO-TIER policy (never an identity/login/
+# credential -- those live in the deployment-tier user config instead).
+# ---------------------------------------------------------------------------
+merge:
+  # merge_requirements: each key REPLACES its own default when present;
+  # a key you omit keeps its own built-in default. No implicit default is
+  # applied to a key you never mention.
+  merge_requirements:
+    # ci_pass: on/off toggle for the CI-status gate. Set explicitly --
+    # there is no silent default here on purpose: pick true (this repo has
+    # CI and it must be green before merge) or false (this repo has no CI,
+    # or CI is intentionally not a merge gate).
+    ci_pass: true
+    tests_pass: true
+    # max_changed_files: 30
+
+  # required_reviewer_roles: roles whose clean reviewer verdict is required
+  # before a merge is authorized. Role vocabulary only. Once this merge:
+  # section exists at all, this key is REQUIRED -- omitting it is a
+  # config-load error, not a silent "no reviewer gate." Declare the real
+  # role(s) here, or declare an explicit `required_reviewer_roles: []` if
+  # this repo intentionally has no reviewer-verdict gate (contrast with
+  # authorized_roles below, whose absence has always safely defaulted to
+  # fail-closed). Every role named here MUST also be a key under roles:
+  # above with a real verb set -- a role with no verb set can never emit
+  # the verdict this gate requires from it (loadout-doctor FAILS this
+  # shape, not just warns). This template ships both `reviewer`
+  # and `security` since both are declared under roles: above; drop
+  # `security` from this list (and from roles: above) if this repo has no
+  # separate security-review role.
+  required_reviewer_roles:
+    - reviewer
+    - security
+
+  # authorized_roles: roles permitted to hold merge authority (execute the
+  # actual merge). Absent/empty means NO role holds merge authority yet --
+  # fail-closed by construction; a repo must explicitly grant this. Unlike
+  # required_reviewer_roles above, omitting this key is safe to leave
+  # implicit -- there is no shape here where silence could be mistaken for
+  # "any role may merge."
+  authorized_roles:
+    - merger
+
+  # pre_checks: ordered read-only-by-convention commands the merge gate
+  # runs BEFORE authorizing a merge (same cmd/description/on_failure shape
+  # as post_merge_steps below). Optional -- omit for a repo gated purely by
+  # CI + reviewer verdicts.
+  # pre_checks:
+  #   - cmd: "make lint"
+  #     description: "lint pass before merge"
+  #     on_failure: fail
+
+  # post_merge_steps: commands run in THIS repo's own working tree after
+  # loadout-merge actually merges a PR here (e.g. a self-install step).
+  # ELICIT deployment values (HOME, forge base URL, install paths) from the
+  # operator per-deployment during /loadout-init -- NEVER copy another
+  # deployment's real values into this file (rule 1). Optional -- omit
+  # entirely for a repo with no post-merge automation.
+  # post_merge_steps:
+  #   - cmd: "scripts/install.sh"
+  #     description: "self-install the merged build"
+  #     on_failure: fail
+
+  # sync_tree_after_merge: whether loadout-merge advances a --repo-path
+  # working tree to the merged base-branch tip after a successful merge.
+  # Defaults to true when omitted -- so the tree a merge just landed is left
+  # positioned where the NEXT dispatch into this repo needs it (an updated
+  # local base branch, never a stale feature-branch checkout or a detached
+  # HEAD). Set to false to opt this repo out entirely and leave --repo-path
+  # exactly where the caller last checked it out.
+  # sync_tree_after_merge: true

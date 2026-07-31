@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Env / secrets
+.env
+*.env
+!.env.example
+
+# Per-deployment repo-local loadout config: scaffolded by
+# /loadout-init or copied from config.yaml.example, carries THIS
+# deployment's own real values (forge base URL, HOME, post-merge steps) --
+# never committed. The tracked artifact is config.yaml.example.
+.clagentic/loadout/config.yaml
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Agent scratch (must never appear — per-spawn TMPDIR is the rule; these are a backstop)
+pr-body-*
+.pr-body-*
+*-scratch-*
+.scratch-*
+.scratch_*
+.commit-msg-*
+.scratch*/
+.homecheck-*
+*.diff-check*
+HANDOFF.md
+test_zzz_scratch_probe_*
+tests/_debug_*.py
+.diff_review.txt
+.head_init_check.txt

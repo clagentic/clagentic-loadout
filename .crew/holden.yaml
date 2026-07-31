@@ -1,0 +1,124 @@
+# .crew/holden.yaml — HOLDEN per-project configuration template
+#
+# Generated from: examples/starter-holden.yaml (lr-c65e)
+# Schema: schemas/holden.schema.json
+#
+# DROP THIS FILE AT: <project-root>/.crew/holden.yaml
+# Then customize the sections below for your project.
+#
+# What this file does:
+#   - Specializes HOLDEN as the project lead for the given project:
+#     project identity, status line, responsibilities, scope, failure modes.
+#   - All fields are optional; omit any you don't need and HOLDEN falls
+#     back to vanilla defaults (read-only, generic status, standard loop).
+#
+# What this file does NOT do:
+#   - Grant HOLDEN write access (HOLDEN is read-only on code by contract)
+#   - Dispatch crew agents (dispatch requires explicit operator authorization)
+#   - Configure AMoS, NAOMI, or PEACHES (those use their own .crew/*.yaml)
+#
+# INSTALLATION POLICY: holden.yaml is recommended for any repo where a
+# project lead runs in the working tree (effectively all clagentic repos).
+# A minimal file with just schema_version: 1 gives you vanilla HOLDEN
+# with no project specialization. Add fields progressively.
+
+schema_version: 1
+
+# -----------------------------------------------------------------------
+# project
+# -----------------------------------------------------------------------
+# Display name for this project in HOLDEN's status lines and log output.
+# Defaults to the repo root directory name when absent.
+#
+# project: my-project
+
+# -----------------------------------------------------------------------
+# home_project
+# -----------------------------------------------------------------------
+# LORE project slug used for lore orient, lore task, lore search.
+# Must exactly match the project slug registered in PROGRAM.md §3.
+# Defaults to the repo root directory name when absent.
+#
+# home_project: my-project
+
+# -----------------------------------------------------------------------
+# project_summary
+# -----------------------------------------------------------------------
+# 1-2 sentence blurb appended after health indicators in the status line.
+# Helps orient the operator when switching between projects. Absent = empty string.
+#
+# project_summary: >-
+#   Brief description of what this project does and why it matters.
+
+# -----------------------------------------------------------------------
+# status_line_template  (optional)
+# -----------------------------------------------------------------------
+# Template string for the per-turn status line. Available variables:
+#   {health}, {open_p1s}, {project}, {project_summary}
+# Default: '{project}: {health}, {open_p1s}'
+#
+# status_line_template: "{project}: {health}, {open_p1s}"
+
+# -----------------------------------------------------------------------
+# responsibilities  (optional)
+# -----------------------------------------------------------------------
+# Replaces HOLDEN's vanilla 6-point responsibility list when present.
+# Add project-specific instructions as short strings.
+#
+# responsibilities:
+#   - >-
+#     Surface P0/P1 tasks unprompted every turn until closed. P2+ on request.
+#   - >-
+#     Engram-first reflex. Run lore search <topic> before Grep/Explore.
+#   - >-
+#     Cross-project scope: answer questions about this project only; route
+#     others to the operator or the relevant lead.
+
+# -----------------------------------------------------------------------
+# read_scope_paths  (optional)
+# -----------------------------------------------------------------------
+# Additional filesystem paths HOLDEN may Read, Grep, or Glob.
+# The project working tree root is always in scope; these are additive.
+# Cross-project reads require explicit listing — absent = denied.
+#
+# read_scope_paths:
+#   - "/workspace/my-project/"
+#   - "/workspace/project-agents/"
+#   - "/workspace/CLAUDE.md"
+#   - "/root/.claude/CLAUDE.md"
+
+# -----------------------------------------------------------------------
+# project_gates  (optional)
+# -----------------------------------------------------------------------
+# Hard rules HOLDEN checks before any AMoS dispatch. If a gate fires,
+# HOLDEN refuses the dispatch and surfaces gate id + rule to the operator.
+#
+# project_gates:
+#   - id: "my-project.example-gate"
+#     rule: "Describe the condition and what must happen before dispatch."
+#     cite: "Source of authority for this rule."
+
+# -----------------------------------------------------------------------
+# env  (optional)
+# -----------------------------------------------------------------------
+# Base environment injected into every teammate spawn for this project.
+# Teammate spawns receive a stripped env; HOME and Go toolchain vars are
+# the most common missing pieces (lr-59dc; GOCACHE absence breaks amos).
+#
+# env:
+#   HOME: "/root"
+#   GOROOT: "/usr/local/go"
+#   GOPATH: "/root/go"
+#   GOCACHE: "/root/.cache/go-build"
+#   PATH: "/usr/local/go/bin:/root/go/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+# -----------------------------------------------------------------------
+# teammate_models  (optional)
+# -----------------------------------------------------------------------
+# Per-teammate model pin applied at spawn time.
+# peaches MUST be pinned to claude-haiku (carrier + cost constraint).
+# naomi must NOT appear here — naomi is never a teammate.
+#
+# teammate_models:
+#   amos: claude-sonnet
+#   peaches: claude-haiku

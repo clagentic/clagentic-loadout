@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/telemetry-trace-event.json",
+  "title": "Telemetry trace event",
+  "description": "One dispatch-envelope observation emitted by the loadout telemetry emitter. Wraps a validated envelope-in or envelope-out payload (see envelope-in.json / envelope-out.json) with the event kind and emission timestamp. A sink receives a stream of these records — one per envelope handoff during an invocation's lifecycle. additionalProperties:false, mechanical whitelist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "kind", "ts", "envelope"],
+  "properties": {
+    "schema": { "const": "telemetry-trace-event/v1" },
+    "kind": {
+      "enum": ["envelope_in", "envelope_out"],
+      "description": "envelope_in: dispatch start, the inbound envelope the caller constructed. envelope_out: dispatch exit, the outbound envelope the agent returned."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the emitter recorded this event."
+    },
+    "envelope": {
+      "type": "object",
+      "description": "The validated envelope payload (matches envelope-in.json or envelope-out.json depending on kind). Carried as an opaque object at this layer — the emitter does not re-embed the envelope schema, it trusts the caller already validated it via clagentic_loadout.envelope before emitting."
+    }
+  }
+}

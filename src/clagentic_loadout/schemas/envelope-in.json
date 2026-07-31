@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/envelope-in.json",
+  "title": "Dispatch envelope — inbound to agent",
+  "description": "The structured payload a dispatching layer constructs and hands to an autonomous agent. additionalProperties:false, mechanical whitelist — the field set is a stable, versioned public contract. Agent-specific input is carried in `payload`; the shape of `payload` for a given agent role is defined by that deployment's own agent-specific schema, not by this envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "agent_name",
+    "invoker",
+    "authorized_by",
+    "conversation_id",
+    "invocation_id",
+    "attempt",
+    "participants",
+    "invocation_ts"
+  ],
+  "properties": {
+    "task_id": {
+      "$ref": "common.json#/$defs/task_id",
+      "description": "Optional at the envelope layer. A deployment's own per-agent contract determines whether a given invocation mode requires it (e.g. a task-scoped mode requires it; an ad-hoc mode may omit it)."
+    },
+    "project": {
+      "$ref": "common.json#/$defs/project",
+      "description": "Target project for this dispatch."
+    },
+    "agent_name": {
+      "$ref": "common.json#/$defs/agent_name",
+      "description": "The target agent/role. The dispatching layer validates that the payload matches that agent's own input schema and that the caller is authorized to invoke this agent."
+    },
+    "invoker": {
+      "$ref": "common.json#/$defs/actor",
+      "description": "Who dispatched this invocation. Filled in by the dispatching layer from session identity — agents cannot spoof it."
+    },
+    "authorized_by": {
+      "$ref": "common.json#/$defs/authorized_by",
+      "description": "Who approved this work. Required; must resolve to a human or an authorized project role for anything that lands a change on a protected branch — an agent cannot self-authorize."
+    },
+    "conversation_id": { "$ref": "common.json#/$defs/conversation_id" },
+    "invocation_id": { "$ref": "common.json#/$defs/invocation_id" },
+    "attempt": { "$ref": "common.json#/$defs/attempt" },
+    "participants": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "common.json#/$defs/participant" },
+      "description": "Full participant list for this invocation. Must include the invoker (role=invoker) and the target agent (role=invokee)."
+    },
+    "invocation_ts": { "$ref": "common.json#/$defs/invocation_ts" },
+    "payload": {
+      "type": "object",
+      "description": "Agent-specific input. Shape is defined by the target agent's own input schema, which the dispatching layer validates after validating this envelope. Never appears in outbound traces — see envelope-out.json."
+    }
+  }
+}

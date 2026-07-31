@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clagentic.ai/schemas/loadout/review-result.schema.json",
+  "title": "review-result verdict block",
+  "description": "The JSON payload embedded in a fenced ```review-result``` block inside a reviewer's PR comment (clagentic_loadout.merge.verdict). Single source of truth for the field set shared by the emit side (build_verdict_block) and the gate-consumer side (parse_verdict_block, read_reviewer_verdict — the merge gate's verdict-fence assertion). Field set is deliberately minimal: reviewer identity, outcome, the SHA the reviewer evaluated, and the PR number.\n\nNOTE on head_sha: this schema intentionally does NOT declare a format pattern on head_sha. read_reviewer_verdict() performs a dedicated full-40-char clagentic_loadout.sha.validate_sha(allow_abbreviated=False) check AFTER parse_verdict_block() returns, raising a specific 'malformed head_sha stamp' error distinct from a generic schema violation. Adding a head_sha pattern at the schema layer would upstage that dedicated check and its distinct error message.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reviewer", "review_status", "head_sha", "pr_number"],
+  "properties": {
+    "reviewer": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Name/role that produced this verdict. Not constrained to any enum here: the value is the reviewer's own self-reported name and is authenticated independently by comment authorship (user.login), not by this field."
+    },
+    "review_status": {
+      "type": "string",
+      "enum": ["clean", "blocking"],
+      "description": "Verdict outcome."
+    },
+    "head_sha": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Hex git SHA the reviewer evaluated, hand-carried for the SHA-stamp freshness check. Shape (full 40-char lowercase hex) is validated downstream, not by this schema."
+    },
+    "pr_number": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "PR number the verdict applies to."
+    }
+  }
+}

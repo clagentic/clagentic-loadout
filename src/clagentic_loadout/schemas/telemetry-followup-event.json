@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/telemetry-followup-event.json",
+  "title": "Telemetry followup event",
+  "description": "One follow-up work item emitted from an envelope-out's `followups[]` (see envelope-out.json, common.json#/$defs/followup). loadout's ingest helper (clagentic_loadout.telemetry.emitter.emit_followup_events) emits exactly one of these records per followup entry, to whatever sink the deployment has configured. This record carries no task-tracker semantics -- no tracker ID, no assignee, no status. Turning a followup event into a tracked task (or ignoring it) is entirely a deployment concern (CLAUDE.md hard rule 6a); loadout's job ends at emitting this typed record. additionalProperties:false, mechanical whitelist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "task_id", "agent_name", "ts", "followup"],
+  "properties": {
+    "schema": { "const": "telemetry-followup-event/v1" },
+    "task_id": {
+      "type": ["string", "null"],
+      "description": "The opaque work-item ref of the invocation that produced this followup (envelope-out.json's task_id), carried through unchanged. null when the source envelope omitted task_id."
+    },
+    "agent_name": {
+      "type": "string",
+      "description": "The agent/role that produced this followup (envelope-out.json's agent_name), carried through unchanged."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the emitter recorded this event."
+    },
+    "followup": {
+      "type": "object",
+      "description": "The followup descriptor itself (matches common.json#/$defs/followup). Carried as an opaque object at this layer, same convention as telemetry-trace-event.json's envelope field -- the emitter trusts the caller already validated the source envelope via clagentic_loadout.envelope before emitting."
+    }
+  }
+}

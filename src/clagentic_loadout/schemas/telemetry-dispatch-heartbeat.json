@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/telemetry-dispatch-heartbeat.json",
+  "title": "Telemetry dispatch heartbeat",
+  "description": "contract_revision: 1 (new schema — dispatch-liveness convention). A liveness pulse a running dispatch may emit between long steps, referencing an in-flight dispatch_id (see telemetry-dispatch-record.json). Deliberately a SIBLING record, not an added telemetry-dispatch-record.json status value: the dispatch-record schema is a strict pre-spawn/terminal state machine (one in_flight write, one terminal write) and a heartbeat is neither — it is non-terminal, may be emitted any number of times, and carries no completed_ts/result_summary. Keeping it a separate schema leaves telemetry-dispatch-record.json's existing shape and DISPATCH_STATUSES enum completely unchanged (true backward compatibility, not just additive-enum), and lets heartbeat-specific fields (progress) evolve independently. A consumer correlates heartbeats to a dispatch by dispatch_id and treats the most recent heartbeat ts (relative to now) as its liveness signal, distinguishing still-working from stalled without polling unrelated proxies (git HEAD, output-file mtime). loadout defines the record shape and a sink-routed emitter only — it does not decide heartbeat cadence, does not schedule emission, and does not itself detect staleness; that consumption logic is a deployment/harness concern (CLAUDE.md hard rule 2). additionalProperties:false, mechanical whitelist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "dispatch_id", "ts"],
+  "properties": {
+    "schema": { "const": "telemetry-dispatch-heartbeat/v1" },
+    "dispatch_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The dispatch this heartbeat belongs to — matches the dispatch_id of the telemetry-dispatch-record.json in_flight write for the same dispatch. Shape is caller-defined, same convention as the dispatch-record schema."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when this heartbeat was emitted."
+    },
+    "progress": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "Optional short, non-prose step/progress label (e.g. \"running test suite\", \"tool round 4\"). Purely descriptive — no schema-enforced vocabulary, a consumer treats it as opaque display text."
+    }
+  }
+}

@@ -1,0 +1,80 @@
+[project]
+name = "clagentic_loadout"
+version = "0.2.0"
+description = "Role-scoped agent tooling: verbs, attested identity, per-use minted credentials, and merge-gate enforcement for autonomous coding agents."
+readme = "README.md"
+license = { file = "LICENSE" }
+keywords = [
+    "agents",
+    "autonomous-agents",
+    "git",
+    "ci-cd",
+    "developer-tools",
+    "merge-gate",
+]
+# There is no official PyPI trove identifier for FSL-1.1-MIT (Functional
+# Source License) -- it is not one of the SPDX-derived licenses PyPI's
+# classifier list recognizes. Rather than misrepresent it under an
+# unrelated OSI-approved id, this uses the generic non-OSI classifier
+# ("License :: Other/Proprietary License") alongside the authoritative
+# `license = {file = "LICENSE"}` above, which already names FSL-1.1-MIT
+# exactly (see LICENSE for the full license text and terms).
+classifiers = [
+    "License :: Other/Proprietary License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "jsonschema>=4.18",
+    "referencing>=0.30",
+    "PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://clagentic.ai"
+Repository = "https://github.com/clagentic/clagentic-loadout"
+Documentation = "https://github.com/clagentic/clagentic-loadout#readme"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+clagentic-loadout = "clagentic_loadout.cli:main"
+loadout-poll-wait = "clagentic_loadout.wait.cli:poll_wait_main"
+loadout-scoped-test-wait = "clagentic_loadout.wait.cli:scoped_test_wait_main"
+loadout-release-dispatch = "clagentic_loadout.release.dispatch:main"
+loadout-release-detect = "clagentic_loadout.release.detector:main"
+loadout-git-host-api = "clagentic_loadout.transport.git_host_api:main"
+loadout-stage-body = "clagentic_loadout.transport.stage_body_verb:main"
+loadout-review-post = "clagentic_loadout.review.verb:main"
+loadout-acquire = "clagentic_loadout.acquire.verb:main"
+loadout-push = "clagentic_loadout.push.verb:main"
+loadout-merge = "clagentic_loadout.merge.verb:main"
+loadout-close-pr = "clagentic_loadout.merge.close_verb:main"
+loadout-post-merge = "clagentic_loadout.merge.post_merge_verb:main"
+loadout-provision-allowlist = "clagentic_loadout.provisioning.cli:main"
+loadout-doctor = "clagentic_loadout.doctor.cli:main"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+clagentic_loadout = ["schemas/*.json", "loadout_init/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100

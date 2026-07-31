@@ -1,0 +1,70 @@
+# .crew/bobbie.yaml — BOBBIE per-project configuration template
+#
+# Generated from: examples/starter-bobbie.yaml (lr-c65e)
+# Schema: schemas/crew-config.schema.json (security block, lr-4d7c)
+#
+# DROP THIS FILE AT: <project-root>/.crew/bobbie.yaml
+# Then customize the sections below for your project.
+#
+# What this file does:
+#   - Adds project-specific security rules ON TOP of BOBBIE's default
+#     RULEBOOK.md namespaces (bobbie.secret, bobbie.bleed, bobbie.dep,
+#     bobbie.sast)
+#   - Optionally overrides scanner defaults (secret/sast/dependency)
+#   - BOBBIE will cite your rules as <project>.<rule> in findings
+#
+# What this file does NOT do:
+#   - Replace the baseline RULEBOOK (default namespaces always apply)
+#   - Grant BOBBIE write access to code (it is read-only on code)
+#   - Gate merges itself (NAOMI is the merge gate; BOBBIE informs NAOMI)
+#
+# Convention: rule id namespace = project name. E.g. for project "lore",
+# use ids like "lore.no-forgejo-pat-in-scripts" or "lore.audit-log-required".
+
+schema_version: 1
+
+security:
+  rules:
+    # ------------------------------------------------------------------
+    # EXAMPLE: blocking rule — a secret pattern that must never appear
+    # ------------------------------------------------------------------
+    # - id: <project>.no-forgejo-pat-in-scripts
+    #   severity: blocking
+    #   description: >-
+    #     Forgejo PATs must never appear in committed scripts; use
+    #     FORGEJO_TOKEN env var or forgejo-curl --caller injection instead.
+    #   pattern: "(forgejo[_-]?token|FORGEJO_TOKEN)[\"']?\\s*[:=]\\s*[\"']?[A-Za-z0-9_-]{20,}"
+    #   applies_to:
+    #     - "**/*.py"
+    #     - "**/*.sh"
+
+    # ------------------------------------------------------------------
+    # EXAMPLE: nit rule — dependency hygiene advisory
+    # ------------------------------------------------------------------
+    # - id: <project>.pin-dependency-versions
+    #   severity: nit
+    #   description: >-
+    #     Dependencies in requirements.txt or go.sum should pin exact versions.
+    #     Nit because BOBBIE cannot always distinguish intentional flexibility.
+    #   applies_to:
+    #     - "requirements.txt"
+    #     - "go.sum"
+
+    # ------------------------------------------------------------------
+    # MINIMAL STARTER: no project rules — BOBBIE applies only the defaults
+    # ------------------------------------------------------------------
+    # Leave rules: [] (empty array) or remove the key entirely to get
+    # baseline-only behavior. Add rules above the closing bracket as needed.
+    []
+
+  # -----------------------------------------------------------------------
+  # scanners  (optional — per-project scanner override)
+  # -----------------------------------------------------------------------
+  # Override BOBBIE's default scanner selection for this project.
+  # Omit to use BOBBIE's defaults (gitleaks for secret, semgrep for sast,
+  # osv-scanner for dependency).
+  #
+  # scanners:
+  #   secret: gitleaks     # or: trufflehog | skip
+  #   sast: semgrep        # or: skip
+  #   dependency: osv-scanner  # or: skip

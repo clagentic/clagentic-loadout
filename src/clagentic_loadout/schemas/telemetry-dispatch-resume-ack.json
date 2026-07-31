@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/telemetry-dispatch-resume-ack.json",
+  "title": "Telemetry dispatch resume ack",
+  "description": "contract_revision: 1 (new schema — dispatch-liveness convention). An immediate acknowledgement a resumed dispatch may emit ('received, working on X') before starting a long task, giving a caller instant liveness confirmation on a resume path without waiting for the first heartbeat or the terminal write. References the SAME dispatch_id the original telemetry-dispatch-record.json in_flight write used — a resume is a continuation of an existing dispatch, not a new one, so this record does not mint its own dispatch identity. Schema + emitter only: this record describes WHAT a resumed agent may emit, never HOW or WHEN a resume is delivered to a running vs completed process — that delivery mechanism lives entirely in whatever harness/transport a deployment uses to resume a dispatch, outside loadout's tree (CLAUDE.md hard rule 2; see docs/integration.md's dispatch-liveness section for the explicit out-of-scope note). additionalProperties:false, mechanical whitelist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "dispatch_id", "ts"],
+  "properties": {
+    "schema": { "const": "telemetry-dispatch-resume-ack/v1" },
+    "dispatch_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The dispatch being resumed — matches the dispatch_id of the original telemetry-dispatch-record.json in_flight write. Shape is caller-defined, same convention as the dispatch-record schema."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the resumed dispatch emitted this ack."
+    },
+    "resuming": {
+      "type": "string",
+      "maxLength": 256,
+      "description": "Optional short, non-prose description of what the resumed dispatch is about to work on (e.g. \"continuing PR #332 fix\"). Purely descriptive — no schema-enforced vocabulary, a consumer treats it as opaque display text."
+    }
+  }
+}

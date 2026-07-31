@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clagentic.ai/schemas/loadout/loadout-note.schema.json",
+  "title": "loadout-note metadata block",
+  "description": "The JSON payload embedded in a fenced ```loadout-note``` block appended to a comment/PR body by clagentic_loadout.transport.note_compose.build_composed_body — the tool-owned, general-purpose counterpart to merge.verdict's review-result fence. Carries an OPTIONAL opaque caller-tracking-id (a work-item ref meaningful to the calling deployment, e.g. a task id) through to the posted comment's metadata without the caller ever having to hand-author a fence, a heredoc, or a $VAR-substituted redirect target in a shell command. Field set is deliberately minimal and additive: this block is not a merge-gate contract (see review-result.schema.json for that) and carries no enforcement semantics of its own.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["caller_tracking_id"],
+  "properties": {
+    "caller_tracking_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque work-item tracking id supplied by the caller (e.g. a lore task id for a LORE-integrated deployment, or any other deployment's own tracking-id shape). This schema does not constrain its format beyond non-empty -- the pattern is caller-owned, never baked into loadout product code (CLAUDE.md rule 6a)."
+    }
+  }
+}
