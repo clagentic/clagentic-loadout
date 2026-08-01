@@ -508,9 +508,46 @@ DEFAULT_GIT_HOST_BASE_URL_COMPAT_ALIAS = "FORGEJO_BASE_URL"
 #: `credentials:` section/DEFAULT_USER_CONFIG_ROOT/config_root convention
 #: exactly, REUSING that same loader rather than a second YAML parser or a
 #: different config path).
-GIT_HOST_CONFIG_SECTION = "git_host"
+#:
+#: RENAMED (lr-08b451, operator-decided shape): this key is consulted ONLY
+#: on the Forgejo path -- see `_resolve_git_host_base`'s call site in
+#: `main`/every verb that imports it, and the unconditional discard at the
+#: GitHub-platform branch (`if target_platform == PLATFORM_GITHUB:
+#: git_host_base = ""`) in each of those callers. The old name `git_host`
+#: reads as "the git host for this deployment" when it is really "the
+#: Forgejo base URL, nothing else" -- a documented trap (see docs/
+#: integration.md, "Forgejo-only plumbing") that once nearly caused an
+#: agent to repoint this SHARED, USER-LEVEL key at github.com for a
+#: GitHub-hosted repo, which would have done nothing on the GitHub path
+#: while breaking every OTHER Forgejo-hosted repo on the same box (this key
+#: has no per-repo tier -- see post_merge_config.py's "USER-LEVEL only"
+#: rationale for the identical trust-boundary argument applied to a
+#: different section). Renamed to `forgejo`, matching the `_forgejo`/
+#: `_github` split the credentials section (`token_provider_forgejo`/
+#: `token_provider_github`) already uses.
+#:
+#: The env var (`GIT_HOST_BASE_URL_ENV_VAR`), its compat alias
+#: (`DEFAULT_GIT_HOST_BASE_URL_COMPAT_ALIAS`), and the `--git-host-base-url`
+#: CLI flag are explicitly NOT renamed here -- see this module's own
+#: `_resolve_git_host_base` docstring, tier 2's cross-reference to the
+#: scorched-earth `FORGE_BASE_URL` removal this repo already regrets doing
+#: once. Renaming a RELEASED env var/flag a second time is a bigger blast
+#: radius than the naming mismatch it would fix.
+GIT_HOST_CONFIG_SECTION = "forgejo"
 
-#: Key within the `git_host:` section carrying the base URL.
+#: The PRE-rename section name (lr-08b451). `_resolve_git_host_base`'s
+#: config-file tier reads `GIT_HOST_CONFIG_SECTION` (`forgejo`) FIRST; when
+#: that section has no `base_url` value, it falls back to reading this
+#: legacy section name -- so an existing install that has only ever seeded
+#: `git_host:` (e.g. via a not-yet-upgraded `scripts/install.sh`, or a
+#: hand-edited config file predating this rename) keeps resolving exactly
+#: as before, with no forced re-seed. New name wins whenever BOTH sections
+#: carry a value (see `_resolve_git_host_base`'s config-file tier for the
+#: exact precedence and its own test coverage).
+LEGACY_GIT_HOST_CONFIG_SECTION = "git_host"
+
+#: Key within the config section carrying the base URL -- unchanged by the
+#: lr-08b451 section rename; only the top-level section name moved.
 GIT_HOST_CONFIG_KEY_BASE_URL = "base_url"
 
 
@@ -1451,8 +1488,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"named by ${GIT_HOST_BASE_URL_COMPAT_ALIAS_NAME_ENV_VAR} (default "
         f"alias name {DEFAULT_GIT_HOST_BASE_URL_COMPAT_ALIAS!r}) if unset, "
         f"then the {GIT_HOST_CONFIG_SECTION!r}.{GIT_HOST_CONFIG_KEY_BASE_URL!r} "
-        f"key in ~/.config/clagentic/loadout/config.yaml if unset, or "
-        f"{DEFAULT_GIT_HOST_BASE_URL!r} if none is set).",
+        f"key in ~/.config/clagentic/loadout/config.yaml if unset (falling "
+        f"back to the legacy {LEGACY_GIT_HOST_CONFIG_SECTION!r} section name "
+        f"there for an existing install that has not migrated), or "
+        f"{DEFAULT_GIT_HOST_BASE_URL!r} if none is set). This value is "
+        f"Forgejo-only plumbing: it is unused on a GitHub-targeted call.",
     )
     parser.add_argument(
         "method_or_path",
@@ -1538,7 +1578,7 @@ def _resolve_git_host_base(
          on that side.
       4. The USER-LEVEL config file, <config_root>/config.yaml (default
          transport.provider_config.DEFAULT_USER_CONFIG_ROOT --
-         ~/.config/clagentic/loadout/config.yaml), `git_host:` section,
+         ~/.config/clagentic/loadout/config.yaml), `forgejo:` section,
          `base_url` key -- read via provider_config.load_user_config_section,
          the SAME loader/config-root convention the credential-provider
          tier already uses (no second YAML parser, no second config path).
@@ -1547,6 +1587,15 @@ def _resolve_git_host_base(
          deployment has to hand-export an env var to point loadout at its
          git host. Consulted ONLY when every env-var tier above is
          unset/empty.
+
+         COMPAT SHIM (lr-08b451): the section was renamed from `git_host:`
+         to `forgejo:` to make its Forgejo-only scope honest (see
+         GIT_HOST_CONFIG_SECTION's own docstring for why). When `forgejo:`
+         has no `base_url` value, the LEGACY `git_host:` section
+         (LEGACY_GIT_HOST_CONFIG_SECTION) is read as a fallback, so an
+         existing install that has only ever seeded the old name keeps
+         resolving exactly as before -- no forced re-seed, no breakage. The
+         NEW name wins whenever both sections carry a value.
       5. DEFAULT_GIT_HOST_BASE_URL (the localhost placeholder) -- final
          fallback; never an operator host (CLAUDE.md rule 1).
 
@@ -1577,6 +1626,16 @@ def _resolve_git_host_base(
     config_value = config_section.get(GIT_HOST_CONFIG_KEY_BASE_URL)
     if isinstance(config_value, str) and config_value:
         return config_value.rstrip("/")
+
+    # COMPAT SHIM (lr-08b451): fall back to the pre-rename `git_host:`
+    # section when the new `forgejo:` section has no value, so an install
+    # that has only ever seeded the old name keeps working unchanged.
+    legacy_section = load_user_config_section(
+        LEGACY_GIT_HOST_CONFIG_SECTION, config_root=config_root
+    )
+    legacy_value = legacy_section.get(GIT_HOST_CONFIG_KEY_BASE_URL)
+    if isinstance(legacy_value, str) and legacy_value:
+        return legacy_value.rstrip("/")
 
     return DEFAULT_GIT_HOST_BASE_URL.rstrip("/")
 

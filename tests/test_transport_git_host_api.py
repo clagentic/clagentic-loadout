@@ -935,7 +935,7 @@ class TestResolveGitHostBase:
         config_root = tmp_path / "config-root"
         config_root.mkdir()
         (config_root / "config.yaml").write_text(
-            "git_host:\n  base_url: http://config-file.example:3000\n"
+            "forgejo:\n  base_url: http://config-file.example:3000\n"
         )
         result = git_host_api._resolve_git_host_base(None, env={}, config_root=config_root)
         assert result == "http://config-file.example:3000"
@@ -950,7 +950,7 @@ class TestResolveGitHostBase:
         config_root = tmp_path / "config-root"
         config_root.mkdir()
         (config_root / "config.yaml").write_text(
-            "git_host:\n  base_url: http://config-file.example:3000\n"
+            "forgejo:\n  base_url: http://config-file.example:3000\n"
         )
         env = {git_host_api.DEFAULT_GIT_HOST_BASE_URL_COMPAT_ALIAS: "http://alias.example:3000"}
         result = git_host_api._resolve_git_host_base(None, env=env, config_root=config_root)
@@ -960,10 +960,33 @@ class TestResolveGitHostBase:
         config_root = tmp_path / "config-root"
         config_root.mkdir()
         (config_root / "config.yaml").write_text(
-            "git_host:\n  base_url: http://config-file.example:3000/\n"
+            "forgejo:\n  base_url: http://config-file.example:3000/\n"
         )
         result = git_host_api._resolve_git_host_base(None, env={}, config_root=config_root)
         assert result == "http://config-file.example:3000"
+
+    def test_legacy_git_host_section_used_when_forgejo_section_absent(self, tmp_path):
+        """Compat shim (lr-08b451): an existing install that has only ever
+        seeded the pre-rename `git_host:` section keeps resolving from it
+        when the new `forgejo:` section carries no value."""
+        config_root = tmp_path / "config-root"
+        config_root.mkdir()
+        (config_root / "config.yaml").write_text(
+            "git_host:\n  base_url: http://legacy-config.example:3000\n"
+        )
+        result = git_host_api._resolve_git_host_base(None, env={}, config_root=config_root)
+        assert result == "http://legacy-config.example:3000"
+
+    def test_new_forgejo_section_wins_over_legacy_git_host_section(self, tmp_path):
+        """When both section names carry a value, the NEW name wins."""
+        config_root = tmp_path / "config-root"
+        config_root.mkdir()
+        (config_root / "config.yaml").write_text(
+            "forgejo:\n  base_url: http://new-config.example:3000\n"
+            "git_host:\n  base_url: http://legacy-config.example:3000\n"
+        )
+        result = git_host_api._resolve_git_host_base(None, env={}, config_root=config_root)
+        assert result == "http://new-config.example:3000"
 
     def test_localhost_placeholder_when_everything_unset(self, tmp_path):
         config_root = tmp_path / "config-root"

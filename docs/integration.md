@@ -53,11 +53,11 @@ Resolution precedence, highest first (`transport.git_host_api._resolve_git_host_
    (override the root via the `config_root` parameter in tests; there is no
    CLI/env override for the root in production — this is intentionally the
    SAME file and the SAME loader (`transport.provider_config.load_user_config_section`)
-   the credential-provider config tier below uses), `git_host:` section,
+   the credential-provider config tier below uses), `forgejo:` section,
    `base_url` key:
 
    ```yaml
-   git_host:
+   forgejo:
      base_url: https://git.example.com
    ```
 
@@ -74,6 +74,33 @@ Resolution precedence, highest first (`transport.git_host_api._resolve_git_host_
    vars (tiers 2-3) as the override layer for one-off invocations or CI,
    and this installer-written config file as the steady-state source of
    truth.
+
+   **This key is Forgejo-only plumbing — not "the git host for this
+   deployment."** The section was named `git_host:` until a rename made
+   this explicit (a compat shim still reads the old `git_host:` section
+   name when `forgejo:` has no value, so an existing install is never
+   broken by the rename — see `transport.git_host_api`'s
+   `GIT_HOST_CONFIG_SECTION` / `LEGACY_GIT_HOST_CONFIG_SECTION`). The value
+   is consulted ONLY on the Forgejo path; a GitHub-targeted call discards
+   it unconditionally before use (`if target_platform == PLATFORM_GITHUB:
+   git_host_base = ""`, `transport.git_host_api`). Repointing this key at
+   a GitHub host therefore does nothing for a GitHub-hosted repo's own
+   calls — GitHub already goes through its own hardcoded API host.
+
+   **Mixed-fleet foot-gun**: this file is deliberately USER-LEVEL only, not
+   per-repo (`transport.merge.post_merge_config`'s module docstring records
+   the identical trust-boundary reasoning for its own USER-LEVEL tier) —
+   there is no per-repo override for this key. One value backs EVERY repo
+   on the box. On a deployment running a mixed Forgejo+GitHub fleet, a
+   well-meant edit aimed at "fixing" this value for one GitHub-hosted repo
+   silently breaks every OTHER Forgejo-hosted repo's install/merge/push/
+   review flow on the same box, because they all share this one file and
+   this one key — while doing nothing at all for the GitHub-hosted repo it
+   was meant to fix (that repo's GitHub calls never read this key in the
+   first place). The env var (tier 2) and its compat alias (tier 3) already
+   provide a per-invocation override for a caller that genuinely needs to
+   point at a different Forgejo instance for one call, without touching
+   this shared file.
 
 5. **`http://127.0.0.1:3000`** — the final fallback. This is a
    placeholder-only default (never an operator host, per repo rule 1); it
@@ -354,9 +381,11 @@ For a role that only calls Forgejo-path verbs with the `static` credential
 provider and no namespace restriction, a harness needs to guarantee, before
 first invocation:
 
-- `~/.config/clagentic/loadout/config.yaml` exists with a `git_host:
-  base_url:` key. PREFERRED: run `scripts/install.sh --git-host-base-url
-  <url>` once at install time. Override/transition case:
+- `~/.config/clagentic/loadout/config.yaml` exists with a `forgejo:
+  base_url:` key (a pre-rename install may instead carry this under the
+  legacy `git_host:` section name — still honored, see tier 4 above).
+  PREFERRED: run `scripts/install.sh --git-host-base-url <url>` once at
+  install time. Override/transition case:
   `CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL` is exported in the spawn env
   instead.
 - `~/.config/clagentic/loadout/roles/<role>.env` exists, mode 600, with

@@ -819,19 +819,27 @@ _install_skills
 
 # ---------------------------------------------------------------------------
 # Git-host config seeding: write ~/.config/clagentic/loadout/
-# config.yaml's `git_host: base_url:` key -- the config-file tier
+# config.yaml's `forgejo: base_url:` key -- the config-file tier
 # transport.git_host_api._resolve_git_host_base reads (see docs/integration.md
 # and that module's GIT_HOST_CONFIG_SECTION/GIT_HOST_CONFIG_KEY_BASE_URL
-# constants, which this MUST stay in lockstep with).
+# constants, which this MUST stay in lockstep with). Section RENAMED from
+# `git_host:` to `forgejo:` (lr-08b451) -- this key is Forgejo-only
+# plumbing (discarded entirely on the GitHub path), and the old name read
+# as "the git host for this deployment" when it never was one. The read
+# side below also recognizes the pre-rename `git_host:` section name so an
+# existing install's idempotency check still finds a real prior value
+# there (matching _resolve_git_host_base's own legacy-section compat
+# shim); the WRITE side only ever emits the new `forgejo:` name.
 #
 # Idempotent, never clobbers a real existing value without --git-host-base-
 # url/CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL being supplied THIS run: if
-# config.yaml already has a git_host.base_url that is not the commented-out
-# template, and no explicit URL was given this run, the file is left
-# untouched. When GIT_HOST_BASE_URL is empty and there is no prior real
-# value, a clearly-commented TEMPLATE line is written (never a dead
-# localhost, never a baked operator host -- CLAUDE.md rule 1) so a
-# subsequent hand-edit is a one-line uncomment+fill, not archaeology.
+# config.yaml already has a forgejo.base_url (or, pre-migration, a legacy
+# git_host.base_url) that is not the commented-out template, and no
+# explicit URL was given this run, the file is left untouched. When
+# GIT_HOST_BASE_URL is empty and there is no prior real value, a
+# clearly-commented TEMPLATE line is written (never a dead localhost, never
+# a baked operator host -- CLAUDE.md rule 1) so a subsequent hand-edit is a
+# one-line uncomment+fill, not archaeology.
 #
 # Safety (write path is new; this is a NEW filesystem-write surface): the
 # config dir is created mode 700 and the file mode 600 (this file is not
@@ -898,14 +906,16 @@ _seed_git_host_config() {
 
     _existing_real_value=""
     if [ -f "$_CONFIG_FILE" ]; then
-        # A real (non-template, non-comment) base_url line under a git_host:
-        # section. Deliberately simple line-oriented parsing (no YAML
-        # library in plain sh) -- good enough to detect "does a real value
-        # already exist," which is all this idempotency check needs; the
-        # actual read at resolve time goes through the real YAML loader in
-        # provider_config.load_user_config_section.
+        # A real (non-template, non-comment) base_url line under a
+        # forgejo: section (or, pre-rename, a legacy git_host: section --
+        # lr-08b451 compat shim, matching _resolve_git_host_base's own
+        # read-side fallback). Deliberately simple line-oriented parsing (no
+        # YAML library in plain sh) -- good enough to detect "does a real
+        # value already exist," which is all this idempotency check needs;
+        # the actual read at resolve time goes through the real YAML loader
+        # in provider_config.load_user_config_section.
         _existing_real_value="$(awk '
-            /^git_host:[ \t]*$/ { in_section=1; next }
+            /^(forgejo|git_host):[ \t]*$/ { in_section=1; next }
             /^[A-Za-z_][A-Za-z0-9_]*:/ { in_section=0 }
             in_section && /^[ \t]+base_url:[ \t]*/ && !/^[ \t]*#/ {
                 sub(/^[ \t]+base_url:[ \t]*/, "");
@@ -915,7 +925,7 @@ _seed_git_host_config() {
     fi
 
     if [ -n "$_existing_real_value" ] && [ -z "$GIT_HOST_BASE_URL" ]; then
-        echo "$PROG: $_CONFIG_FILE already has a git_host.base_url set -- leaving it untouched (pass --git-host-base-url to replace it)." >&2
+        echo "$PROG: $_CONFIG_FILE already has a forgejo.base_url set -- leaving it untouched (pass --git-host-base-url to replace it)." >&2
         return 0
     fi
 
@@ -924,17 +934,20 @@ _seed_git_host_config() {
     if [ -n "$GIT_HOST_BASE_URL" ]; then
         _quoted="$(_yaml_single_quote "$GIT_HOST_BASE_URL")"
         _base_url_line="  base_url: '$_quoted'"
-        _seed_msg="seeded git_host.base_url"
+        _seed_msg="seeded forgejo.base_url"
     else
         _base_url_line="  $_GIT_HOST_TEMPLATE_MARKER
   # base_url: 'https://git.example.com'"
-        _seed_msg="wrote a commented git_host.base_url TEMPLATE (no value supplied -- pass --git-host-base-url or edit $_CONFIG_FILE directly)"
+        _seed_msg="wrote a commented forgejo.base_url TEMPLATE (no value supplied -- pass --git-host-base-url or edit $_CONFIG_FILE directly)"
     fi
 
     if [ -f "$_CONFIG_FILE" ]; then
         # Preserve any OTHER top-level section already in the file; only
-        # the git_host: section is rewritten. Simple line-oriented rewrite
-        # (drop the old git_host: section, append the new one) -- avoids a
+        # the forgejo:/git_host: section(s) are rewritten -- both the new
+        # and the legacy section name are stripped here so a not-yet-
+        # migrated file never ends up with a stale git_host: section left
+        # alongside the freshly-written forgejo: one. Simple line-oriented
+        # rewrite (drop the old section(s), append the new one) -- avoids a
         # YAML-parse-then-reserialize round trip that could reformat
         # unrelated sections' comments/ordering.
         _tmp_rewrite="$_CONFIG_ROOT/.config.yaml.rewrite.$$"
@@ -942,19 +955,19 @@ _seed_git_host_config() {
         : > "$_tmp_rewrite"
         chmod 600 "$_tmp_rewrite"
         awk '
-            /^git_host:[ \t]*$/ { in_section=1; next }
+            /^(forgejo|git_host):[ \t]*$/ { in_section=1; next }
             /^[A-Za-z_][A-Za-z0-9_]*:/ { in_section=0 }
             !in_section { print }
         ' "$_CONFIG_FILE" >> "$_tmp_rewrite"
         {
-            echo "git_host:"
+            echo "forgejo:"
             echo "$_base_url_line"
         } >> "$_tmp_rewrite"
     else
         _tmp_rewrite="$_CONFIG_ROOT/.config.yaml.rewrite.$$"
         rm -f "$_tmp_rewrite"
         {
-            echo "git_host:"
+            echo "forgejo:"
             echo "$_base_url_line"
         } > "$_tmp_rewrite"
         chmod 600 "$_tmp_rewrite"
