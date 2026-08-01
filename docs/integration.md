@@ -28,9 +28,16 @@ Neither requires a hardcoded host or a broker-specific client compiled into
 ## 1. Git-host base URL
 
 Consulted by: `git-host-api` (`transport.git_host_api`), `review-post` and
-`merge` when `--platform forgejo`, and `push` when targeting Forgejo. Not
-consulted at all for a GitHub-platform call — `github_backend` pins its own
-public API base.
+`merge` when `--platform forgejo`. Not consulted at all for a GitHub-platform
+call — `github_backend` pins its own public API base.
+
+`push` accepts a `--git-host-base-url` flag of the same name for parity, but
+does NOT currently consult this resolution: the Forgejo API base `push`
+actually calls is derived exclusively from the git remote URL
+(`push.git_coords.parse_forgejo_coords`), regardless of this flag, any of
+the env vars below, or the config file below — see `push.verb`'s own module
+docstring ("--GIT-HOST-BASE-URL IS CURRENTLY UNROUTED") for the full
+investigation that found this.
 
 Resolution precedence, highest first (`transport.git_host_api._resolve_git_host_base`):
 
@@ -93,11 +100,12 @@ Resolution precedence, highest first (`transport.git_host_api._resolve_git_host_
    there is no per-repo override for this key. One value backs EVERY repo
    on the box. On a deployment running a mixed Forgejo+GitHub fleet, a
    well-meant edit aimed at "fixing" this value for one GitHub-hosted repo
-   silently breaks every OTHER Forgejo-hosted repo's install/merge/push/
-   review flow on the same box, because they all share this one file and
-   this one key — while doing nothing at all for the GitHub-hosted repo it
-   was meant to fix (that repo's GitHub calls never read this key in the
-   first place). The env var (tier 2) and its compat alias (tier 3) already
+   silently breaks every OTHER Forgejo-hosted repo's install/merge/review
+   flow on the same box (push does NOT consult this file at all — see
+   above), because they all share this one file and this one key — while
+   doing nothing at all for the GitHub-hosted repo it was meant to fix
+   (that repo's GitHub calls never read this key in the first place). The
+   env var (tier 2) and its compat alias (tier 3) already
    provide a per-invocation override for a caller that genuinely needs to
    point at a different Forgejo instance for one call, without touching
    this shared file.
