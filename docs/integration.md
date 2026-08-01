@@ -849,6 +849,81 @@ sourced from a delivery mechanism that is not itself a Bash tool call
 subject to a static command-line analyzer (e.g. the body arriving
 already in-process rather than being echoed through a shell producer).
 
+## Channel parity — every write channel a harness grants needs the same containment
+
+This package's guard predicates (`clagentic_loadout.guard.shell_parsing`,
+`role_allowlist`, `scratch_policy`, `infra_ops` — see
+[docs/guard-policy.md](guard-policy.md)'s "Coverage boundary" section for
+the full enumeration) classify **shell-spelled** commands: recognized verb
+prefixes, redirects, heredocs, compound/pipe structure. Any write channel a
+harness grants an agent that is NOT a shell command string — most commonly
+a direct `Write`/`Edit`-shaped tool wired into the harness's own
+tool-dispatch layer, distinct from a `Bash` tool — produces file mutations
+none of those predicates ever see, because there is no command line for
+them to parse.
+
+**The invariant an agent-builder must hold:** any write channel your
+harness grants an agent must consult the SAME containment predicate set on
+every channel, not just the shell-facing one. A containment boundary
+enforced on one channel and silently absent on another is not a narrower
+policy — it is a hole. An agent that is denied a given write shape on its
+`Bash` channel but can produce the identical write unchecked through a
+`Write`/`Edit`-shaped tool has not actually been contained at all; it has
+had one door locked while an equivalent door next to it was left open.
+
+**The motivating failure shape (anonymized): stranded debris.** A deployed
+agent, operating correctly and without malicious intent, needed to write a
+small scratch file as part of ordinary, documented-correct setup. Its
+shell-facing channel had a scratch-containment guard wired in (the shape
+`guard.scratch_policy.is_scratch_contained` implements): a shell command
+targeting anywhere outside the sanctioned scratch root would have been
+denied. But the agent's harness also granted it a separate, non-shell
+file-write tool, and that tool's own admission path had never been wired to
+consult the same (or any) containment predicate. The agent used the
+unguarded channel and placed the scratch file inside a repository's own
+governance/config directory instead of the sanctioned scratch root — a
+write the shell-facing guard would have refused outright, admitted without
+question on the channel nobody had told to check. Worse, the deletion path
+(a later cleanup attempt, shell-spelled) WAS guarded, and correctly refused
+to remove a file sitting inside a protected governance directory. The net
+result: debris admitted through the unguarded channel, permanently
+unremovable through the guarded one — a write channel and a delete channel
+that disagreed about the same boundary, leaving stray state neither side
+could resolve. Nothing here required an adversarial agent; an ordinary,
+well-intentioned write through the one channel nobody had wired the check
+into was sufficient.
+
+**What this means in practice for an agent-builder wiring a new harness
+tool:**
+
+1. **Enumerate every write-capable tool granted to the agent** — not just
+   `Bash`. A `Write`/`Edit`-equivalent tool, a file-upload tool, any
+   harness capability that can create or modify a file on disk, all count.
+2. **For each one, apply the same two-part boundary this package already
+   enforces on its shell-facing channels**: scratch writes are
+   `$TMPDIR`-only (reuse `guard.scratch_policy`'s public predicates —
+   `is_scratch_contained` for a full command line,
+   `resolve_scratch_boundary`/`resolve_all_scratch_boundaries` for a single
+   already-resolved path — rather than re-deriving a second realpath/
+   symlink-escape check), and repo governance/config directories are
+   config-only (reuse `guard.write_scope.check_write_call` / its
+   `WriteScopeConfig` containment logic, the same boundary a `SCOPED`-role
+   Bash write is already checked against).
+3. **Never assume a channel is safe because a sibling channel is guarded.**
+   The stranded-debris failure above did not happen because the shell-side
+   guard was wrong — it was correct, on the channel it was actually wired
+   to. It happened because "guarded" was true of one channel and silently
+   false of another, and nothing forced them to agree.
+
+Whether this package should also OWN a harness-tool-facing containment
+primitive (a ready-made check a harness wires directly to its own
+`Write`/`Edit`-equivalent tool, rather than an integrator composing
+`scratch_policy`/`write_scope`'s existing predicates by hand per harness)
+is an open question, deliberately not decided here — see
+[docs/guard-policy.md](guard-policy.md) for the predicates that exist
+today; a future primitive, if built, would compose them rather than
+replace them.
+
 ## Authoritative post-push remote state
 
 **The defect this closes:** a caller can report a remote fact ("the push

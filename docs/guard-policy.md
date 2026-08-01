@@ -300,6 +300,89 @@ present** (CLAUDE.md rule 6a) — see `tests/test_guard_scratch_policy.py`,
 No agent name, task-tracking system, or specific harness is imported or
 hardcoded anywhere in `clagentic_loadout.guard`.
 
+## Coverage boundary — what the shipped predicates see, and what they don't
+
+Every guard predicate in this package classifies a **shell command string**
+(or a `Write`/`Edit` `file_path` string passed explicitly to
+`guard.write_scope.check_write_call`). Concretely, the channels the shipped
+predicates evaluate are:
+
+- **Shell redirects** — `>`, `>>`, `<` targets, recognized via
+  `shell_parsing.detect_tmp_redirect_target` /
+  `is_staging_redirect_target` / `bash_admission.
+  detect_project_tree_write_targets`, and the write-side containment check
+  in `scratch_policy.is_scratch_contained`.
+- **Heredocs** — `shell_parsing.cmd_head` strips heredoc body content so a
+  quoted pipeline or verb inside a heredoc's own text is never mistaken for
+  a live shell operator; the heredoc's *opening* command line is still
+  scanned normally.
+- **Recognized verb spellings** — a fixed, per-role set of admitted command
+  prefixes/whole-string shapes (`guard.role_allowlist.BashRole`'s
+  `check_builder_command` / `check_merger_command` / etc., and
+  `guard.infra_ops.check_infra_op_wrapper`'s five whole-string-anchored op
+  wrappers), plus the compound/pipe/background structural gate
+  (`shell_parsing.compound_check`) and the ANSI-C-quote-evasion hard-deny
+  (`role_allowlist.check_ansi_c_quote_denied`) that every bare-verb grant in
+  this package composes ahead of its own affirmative match.
+- **The one explicit non-shell channel this package DOES cover**:
+  `guard.write_scope.check_write_call`, when a caller's harness actually
+  routes its own `Write`/`Edit`-equivalent tool calls through it. This is
+  opt-in composition, not automatic interception — see below.
+
+**What is NOT covered, structurally, by any predicate in this package: any
+write channel that never becomes a shell command string or an explicit
+`check_write_call` argument at all.** A harness that grants an agent a
+direct file-write tool — a `Write`/`Edit`-shaped capability distinct from
+`Bash`, wired into the harness's own tool-dispatch layer rather than shelled
+out through `subprocess`/`bash -c` — produces file mutations this package's
+Bash-command classifiers never see, because there is no command string for
+`shell_parsing`/`role_allowlist`/`infra_ops` to parse in the first place.
+`guard.write_scope.check_write_call` CAN classify such a call correctly —
+its contract is an explicit `WriteRole` + `file_path`, not a shell string —
+but only if the harness's own tool-dispatch layer actually calls it before
+admitting the write. A harness that grants a file-write tool without wiring
+that tool's admission through `check_write_call` (or an equivalent
+containment predicate applied at the same boundary) has a write channel
+with no containment check on it at all, regardless of how tightly every
+shell-facing channel is guarded.
+
+**This is the integrator's responsibility, not something this package can
+discharge for a harness it does not own** (CLAUDE.md hard rule 2 — loadout
+does not own agent spawning or tool dispatch). Cover a granted file-write
+channel with the SAME boundary this package already enforces on the shell
+side:
+
+- **Scratch writes are TMPDIR-only.** Reuse
+  `guard.scratch_policy.is_scratch_contained` (or, for a single already-
+  resolved path rather than a full command line,
+  `guard.scratch_policy.resolve_scratch_boundary` /
+  `resolve_all_scratch_boundaries` directly) as the containment check a
+  harness applies to a file-write tool's target path before admitting the
+  call — the identical `$TMPDIR`-realpath-containment boundary this package
+  already applies to every `mkdir`/`touch`/`mv`/`cp`/`rm`/`mktemp`/`rmdir`/
+  `ln`/`chmod` shell invocation. These are the reusable, importable public
+  predicates; do not re-derive a second realpath/symlink-escape
+  implementation for the file-write-tool channel.
+- **Repo governance/config directories are config-only.** Reuse
+  `guard.write_scope.check_write_call` (or the underlying
+  `WriteScopeConfig`/`check_write_scope` containment logic it composes) as
+  the SAME scope boundary a repo's `allow_all`/`allowed_paths`/
+  `blocked_paths` declaration already applies to a `SCOPED`-role Bash-driven
+  write — a harness-granted file-write tool targeting a repo's own
+  governance or config directory (e.g. wherever a repo keeps its own
+  per-project agent policy file) must consult that same boundary, not a
+  channel-specific carve-out invented independently.
+
+**No channel is ambiguous once this boundary is applied consistently**: a
+harness integrator enumerates every write-capable tool it grants an agent,
+and for each one, either (a) it is a shell-spelled Bash invocation, already
+covered by the predicates above, or (b) it is a non-shell tool, and the
+integrator is responsible for calling the same containment predicate set
+against that tool's own admission path before the write is allowed to
+proceed. See [docs/integration.md](integration.md)'s "Channel parity"
+section for the concrete failure shape this boundary exists to prevent, and
+for the wiring pattern a harness integrator should follow.
+
 ### Coverage map — which modules are dual-sink
 
 | guard module | dual-sink? | settings_export function | source of truth |
