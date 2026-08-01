@@ -10,7 +10,11 @@
 #   - Controls whether NAOMI may autonomously merge PRs in this project
 #   - Declares what pre-checks must pass before NAOMI merges
 #   - Sets reviewer requirements (must PEACHES have reviewed first?)
-#   - Sets optional post-merge steps
+#
+# What this file does NOT set for clagentic-loadout specifically:
+#   - post_merge_steps: this repo's own merge executor (loadout-merge) never
+#     reads them from here -- see the "post_merge_steps" section below for
+#     why, and .clagentic/loadout/config.yaml for where they actually live.
 #
 # What this file does NOT do:
 #   - Grant NAOMI authority (that comes from clagentic-directory merge-authority label)
@@ -76,15 +80,28 @@ merge_requirements:
 # -----------------------------------------------------------------------
 # post_merge_steps  (optional — post-merge automation)
 # -----------------------------------------------------------------------
-# RETIRED on this repo's flow (lr-afba): an earlier internal merge tool is no
-# longer what executes NAOMI's merges here. loadout-merge (this package's own
-# merge/verb.py) is THE LIVE NAOMI merge path on the clagentic-loadout PR
-# flow (cutover ratified + landed: lr-c36be1, merge 071ad4a — loadout-merge
-# PRIMARY, the earlier tool demoted to a documented fallback, retained only
-# for its own separate flow, not this repo's path). See lr-afba comments
-# #11/#13 for the RETIRE evidence ledger (a sustained zero-fallback window of
-# loadout-merge PRIMARY merges on this repo, each self-identifying via a
-# forge-visible attestation comment).
+# REMOVED from this file (lr-db7db4): DEAD CONFIG, not a live second source
+# of truth. loadout-merge (this package's own merge/verb.py) is THE LIVE
+# NAOMI merge path on the clagentic-loadout PR flow (cutover ratified +
+# landed: lr-c36be1, merge 071ad4a) and reads post_merge_steps EXCLUSIVELY
+# from `.clagentic/loadout/config.yaml` via
+# merge.post_merge_config.load_post_merge_steps (repo_config.py's
+# DEFAULT_CONFIG_RELATIVE_PATH, with `.loadout/config.yaml` as its own
+# documented legacy fallback) -- confirmed by reading merge/verb.py,
+# merge/post_merge.py, and merge/post_merge_config.py directly: none of the
+# three references ".crew" or "naomi.yaml" anywhere. A `post_merge_steps`
+# key placed HERE was never executed by loadout-merge and was always inert
+# for this repo's own merge flow; keeping a placeholder-valued entry here
+# risked being mistaken for live config (see prior revision's own
+# `PLACEHOLDERS -- replace both with this deployment's real values before
+# use` note, which this repo's own real values never actually landed here
+# against, precisely because this file is published and a real value here
+# would ship -- the placeholder therefore could only ever be decorative).
+# This repo's REAL, per-deployment post_merge_steps now lives at
+# `.clagentic/loadout/config.yaml` -- gitignored, never committed, exactly
+# like every other deployment on the loadout fleet (see that file's own
+# header comment, and clagentic-gatekeeper's `.clagentic/loadout/
+# config.yaml` for the precedent this repo now matches).
 #
 # on_failure: warn  — log and continue; cleanup steps must never block a merge.
 # on_failure: fail  — exit EXIT_POST_MERGE_FAILED (blocks future steps).
@@ -94,45 +111,3 @@ merge_requirements:
 #   - cmd: "make deploy-staging"
 #     description: "Deploy to staging after merge"
 #     on_failure: warn
-#
-# Recommended: add working-state cleanup so NAOMI's clone stays tidy.
-# loadout-merge runs post_merge_steps with cwd=project_root, so repo-relative
-# paths work without hardcoding any absolute path. Pass '.' as the repo-root arg.
-# post_merge_steps:
-#   - cmd: "bash scripts/naomi-postmerge-clean.sh ."
-#     description: "Post-merge working-state cleanup: checkout main, ff-pull, safe-prune merged branches (lr-1ec1)"
-#     on_failure: warn
-#
-# self-install (lr-1ec9, retire-updated lr-afba): loadout-merge (the LIVE
-# NAOMI merge path on this repo's flow) reads post_merge_steps from THIS
-# file. The technical constraints below were established on an earlier
-# internal merge tool's own path and PORTED, unchanged, into loadout-merge's
-# own post_merge runner (merge.post_merge, lr-77d6) — they still apply
-# exactly as written. Without an entry here, a NAOMI-executed merge installs
-# nothing and the env is stuck on the pre-merge build (lr-52d7 exit-10
-# recurrence). on_failure: fail so a broken install is a loud
-# EXIT_POST_MERGE_FAILED, never a silent no-op that leaves the old binary on
-# PATH. cmd is repo-relative (cwd=project_root, per loadout-merge's own
-# run_post_merge_steps, which preserves the earlier tool's original
-# contract).
-#
-# lr-52d7 (comment #2): the post_merge env does NOT reliably carry HOME
-# (lr-e8cc) — this was first observed on that earlier merge tool's path (a
-# merge where install.sh correctly refused a root-relative fallback and the
-# step failed loud, EXIT_POST_MERGE_FAILED) and the same constraint was
-# ported into loadout-merge's own runner. Fix mirrors the precedent set in
-# clagentic-gatekeeper/.crew/naomi.yaml: supply the needed env INLINE in the
-# cmd string via the leading VAR=VALUE prefix that the post_merge runner's
-# argv resolver strips into the child env (shell=False, so this is NOT a
-# shell expression — no shell operators are introduced). HOME=<deployment
-# home dir> and --git-host-base-url <deployment git host base URL> below are
-# PLACEHOLDERS — replace both with this deployment's real values before use.
-# This file DOES ship when this repo is published (.crew/*.yaml ships by
-# design, as disaster-recovery deployment config, alongside every other
-# tracked file — publication has no exclusion mechanism, so real deployment
-# values entered here would ship too; keep this file's values as
-# placeholders and customize a local, untracked copy instead).
-post_merge_steps:
-  - cmd: "HOME=/path/to/deployment/home scripts/install.sh --git-host-base-url https://git.example.invalid"
-    description: "self-install the merged build so loadout-git-host-api and the seeded git_host config.yaml are live for the next NAOMI-triggered spawn; HOME and --git-host-base-url are supplied inline here because the post_merge env does not reliably carry HOME (lr-e8cc, a constraint ported unchanged from an earlier internal merge tool's path into loadout-merge's own runner) — replace the placeholder values above with this deployment's real values (rule 1: never shipped in product code)"
-    on_failure: fail
