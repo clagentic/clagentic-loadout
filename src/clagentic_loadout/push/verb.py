@@ -22,18 +22,55 @@ inventory):
      Wave B slices 1-2 already established — a TokenProvider resolves a
      token for a caller-supplied role, never a hardcoded broker client.
   3. An operator-specific API host and a broker config path under a
-     private dotfile directory are gone; the Forgejo API base is read from
-     the git remote (or --git-host-base-url / an env var, matching
-     transport.git_host_api's own resolution), and there is no built-in
-     broker-config reader — bot identity is CLI input (--bot-name/
-     --bot-email) or a caller-supplied resolver, not read from an
-     operator-specific config path this module knows about.
+     private dotfile directory are gone; the Forgejo API base this verb
+     actually calls (`api_base`) is derived from the git remote URL
+     (push.git_coords.parse_forgejo_coords) on every push-path call — see
+     "--GIT-HOST-BASE-URL IS CURRENTLY UNROUTED" below for why the flag of
+     the same name does not feed into that value — and there is no
+     built-in broker-config reader — bot identity is CLI input
+     (--bot-name/--bot-email) or a caller-supplied resolver, not read from
+     an operator-specific config path this module knows about.
   4. Bare acting-identity literals are gone — --caller is a role/name CLI
      input resolved through the credential provider, exactly like
      review.verb's --caller.
   5. A per-repo doc-body word-count pre-flight from the reference module is
      out of this package's task boundary (a different project's document
      format, not a loadout verb concern) and is not ported.
+
+--GIT-HOST-BASE-URL IS CURRENTLY UNROUTED (lr-cd3113, investigation
+finding, not a behavior change): this verb accepts --git-host-base-url and
+previously carried its OWN local _resolve_git_host_base(explicit) copy (a
+narrower 2-tier chain -- explicit flag, then
+CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL, then the localhost placeholder -- vs.
+transport.git_host_api's canonical 5-tier chain, which also consults a
+compat-alias env var and the user-level config file, plus the forgejo:/
+legacy git_host: config-section compat shim from PR #3, 41384e4). Traced
+end to end: NEITHER copy's return value ever reached `api_base` in this
+module -- api_base is derived exclusively from the git remote URL
+(push.git_coords.parse_forgejo_coords) at every push-path call site. The
+flag and both resolver copies were dead beyond this docstring and the
+--help text describing them. Investigation found no comment, docstring, or
+commit message anywhere arguing the narrower chain was a deliberate
+push-path credential-safety posture (git history for this module is a
+single squashed initial-release commit; the canonical transport copy
+documents its own precedence in detail but never mentions this module's
+copy at all) -- the divergence reads as copied-and-never-reconciled, not a
+considered decision. FIX: the local copy is removed rather than reconciled
+with transport.git_host_api's own _resolve_git_host_base (the import
+pattern review.verb/merge.verb/merge.close_verb/merge.post_merge_verb/
+acquire.verb use) -- a second, un-called implementation of the same-named
+function is pure drift with nothing behind it to reconcile. --git-host-
+base-url and the module-level GIT_HOST_BASE_URL_ENV_VAR/
+DEFAULT_GIT_HOST_BASE_URL constants stay (removing the flag would be its
+own behavior change -- an existing caller/test supplying it would newly
+hit an argparse "unrecognized arguments" error for a flag that was
+previously silently accepted) -- see the flag's own --help text, corrected
+in this same fix to say so explicitly rather than describing a resolution
+chain that never executes. Wiring a resolved value into an actual API call
+is NOT part of this fix -- that would be a behavior change (a config-file-
+sourced host would newly affect a push-path credentialed call) outside
+this investigation's scope; see this task's own PR body for why that is
+named rather than folded in silently.
 
 PRESERVED (load-bearing, not identity):
   - Bot-attributed commit re-authoring + HEAD-author verification
@@ -451,8 +488,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--git-host-base-url",
         default=None,
-        help=f"Forgejo API base URL (default: ${GIT_HOST_BASE_URL_ENV_VAR} env "
-        f"var, or {DEFAULT_GIT_HOST_BASE_URL!r} if unset). Ignored for GitHub.",
+        help="Accepted for parity with the other loadout verbs' flag of "
+        "the same name, but NOT currently consumed by any push-path API "
+        "call in this verb: the Forgejo API base this verb actually calls "
+        "is always derived from the git remote URL, regardless of this "
+        f"flag. Ignored for GitHub. (default env fallback if it were "
+        f"consumed: ${GIT_HOST_BASE_URL_ENV_VAR}, or "
+        f"{DEFAULT_GIT_HOST_BASE_URL!r} if unset.)",
     )
     parser.add_argument(
         "--issue",
@@ -562,14 +604,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "flag is logged to stderr for audit.",
     )
     return parser
-
-
-def _resolve_git_host_base(explicit: str | None) -> str:
-    if explicit:
-        return explicit.rstrip("/")
-    import os
-
-    return os.environ.get(GIT_HOST_BASE_URL_ENV_VAR, DEFAULT_GIT_HOST_BASE_URL).rstrip("/")
 
 
 #: Pointer text appended to every --body-stdin content-validation failure
