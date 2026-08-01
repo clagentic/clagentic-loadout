@@ -195,6 +195,24 @@ class TestArgumentValidation:
         code = _run_main(["--help"], token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch)
         assert code == verb.EXIT_OK
 
+    def test_git_host_base_url_help_does_not_claim_it_is_consulted(self, monkeypatch, capsys):
+        """Regression test (lr-cd3113): --git-host-base-url's --help text
+        previously implied its resolution chain (explicit flag, then
+        CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL, then the localhost placeholder)
+        was actually applied to a push-path API call. Traced end to end,
+        it is not -- api_base is always derived from the git remote URL
+        (push.git_coords.parse_forgejo_coords), regardless of this flag.
+        The corrected help text must say so plainly rather than describing
+        a resolution chain that never executes."""
+        code = _run_main(["--help"], token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch)
+        assert code == verb.EXIT_OK
+        # argparse rewraps help text across lines -- normalize whitespace
+        # before substring-matching so the assertion is not brittle against
+        # the exact column width the formatter chooses.
+        out = " ".join(capsys.readouterr().out.split())
+        assert "NOT currently consumed by any push-path API call" in out
+        assert "always derived from the git remote URL" in out
+
 
 class TestBodyStdin:
     def test_empty_stdin_fails_before_token_resolution(self, repo_with_remote, monkeypatch):
@@ -1230,6 +1248,36 @@ class TestUpdatePr:
 
         r = subprocess.run(["git", "branch", "-a"], cwd=str(remote), capture_output=True, text=True, check=True)
         assert "feature" not in r.stdout
+
+    def test_git_host_base_url_flag_does_not_affect_the_api_call_target(self, repo_with_remote, monkeypatch):
+        """Regression test (lr-cd3113): --git-host-base-url is accepted by
+        argparse but its value is never consumed by this verb -- api_base
+        for every Forgejo API call is derived exclusively from the git
+        remote URL (push.git_coords.parse_forgejo_coords). Passing a bogus
+        --git-host-base-url must have NO effect on the actual request
+        target; an opener that ever sees a request to the bogus host fails
+        the test via AssertionError."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+
+        def opener(req, timeout=15):
+            assert req.get_method() == "PATCH"
+            assert req.full_url == (
+                "http://git-host.example.com/api/v1/repos/some-owner/some-repo/pulls/42"
+            ), f"unexpected request target: {req.full_url!r}"
+            return _json_resp(200, {})
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "feat: updated title",
+                "--git-host-base-url", "http://bogus.invalid:9999",
+            ],
+            token_provider=provider,
+            opener=opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
 
     def test_update_pr_body_stdin_used_when_supplied(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
