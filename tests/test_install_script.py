@@ -614,11 +614,13 @@ def test_install_sh_bin_dir_flag_overrides_venv_symlink_target(tmp_path: Path) -
 
 # ---------------------------------------------------------------------------
 # lr-e570 (PEACHES/BOBBIE gate follow-up): the installer must WRITE
-# ~/.config/clagentic/loadout/config.yaml's git_host.base_url key -- the
+# ~/.config/clagentic/loadout/config.yaml's forgejo.base_url key -- the
 # exact section/key transport.git_host_api._resolve_git_host_base's config-file
 # tier reads (GIT_HOST_CONFIG_SECTION / GIT_HOST_CONFIG_KEY_BASE_URL). This
 # is what makes the config-file tier actually populated end to end for a
-# released install, per lr-e570 comment #3.
+# released install, per lr-e570 comment #3. Section renamed from
+# `git_host:` to `forgejo:` (lr-08b451) -- see that module's
+# GIT_HOST_CONFIG_SECTION docstring for why.
 # ---------------------------------------------------------------------------
 
 
@@ -655,9 +657,9 @@ def test_install_sh_seeds_git_host_base_url_when_supplied(tmp_path: Path) -> Non
     config_path = _config_yaml_path(fake_home)
     assert config_path.is_file()
     content = config_path.read_text()
-    assert "git_host:" in content
+    assert "forgejo:" in content
     assert "base_url: 'https://git.example.com'" in content
-    assert "seeded git_host.base_url" in result.stderr
+    assert "seeded forgejo.base_url" in result.stderr
 
 
 def test_install_sh_config_file_and_dir_have_safe_perms(tmp_path: Path) -> None:
@@ -684,7 +686,7 @@ def test_install_sh_writes_template_when_no_url_supplied(tmp_path: Path) -> None
     assert "# base_url:" in content
     # Never a dead localhost or a baked operator host as an ACTIVE value.
     assert "127.0.0.1" not in content
-    assert "wrote a commented git_host.base_url TEMPLATE" in result.stderr
+    assert "wrote a commented forgejo.base_url TEMPLATE" in result.stderr
 
 
 def test_install_sh_does_not_clobber_existing_real_value(tmp_path: Path) -> None:
@@ -698,7 +700,7 @@ def test_install_sh_does_not_clobber_existing_real_value(tmp_path: Path) -> None
 
     second = _run_venv_install(tmp_path, fake_home)
     assert second.returncode == 0, second.stderr
-    assert "already has a git_host.base_url set" in second.stderr
+    assert "already has a forgejo.base_url set" in second.stderr
 
     content = _config_yaml_path(fake_home).read_text()
     assert "https://first.example.com" in content
@@ -748,7 +750,7 @@ def test_install_sh_git_host_base_url_env_var_override(tmp_path: Path) -> None:
 
 
 def test_install_sh_preserves_other_config_sections(tmp_path: Path) -> None:
-    """Seeding git_host: must not clobber an unrelated pre-existing
+    """Seeding forgejo: must not clobber an unrelated pre-existing
     top-level section in the same config.yaml (e.g. credentials:)."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -764,8 +766,37 @@ def test_install_sh_preserves_other_config_sections(tmp_path: Path) -> None:
     content = _config_yaml_path(fake_home).read_text()
     assert "credentials:" in content
     assert "token_provider_forgejo: command" in content
-    assert "git_host:" in content
+    assert "forgejo:" in content
     assert "https://git.example.com" in content
+
+
+def test_install_sh_migrates_legacy_git_host_section_to_forgejo(tmp_path: Path) -> None:
+    """Compat shim (lr-08b451): a pre-existing legacy `git_host:` section is
+    recognized on the read side (idempotency check finds its real value and
+    refuses to clobber it without an explicit flag) and, once the installer
+    DOES write (an explicit --git-host-base-url is supplied), only the new
+    `forgejo:` section name is emitted -- no leftover stale `git_host:`
+    section survives the rewrite."""
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    config_dir = fake_home / ".config" / "clagentic" / "loadout"
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "git_host:\n  base_url: 'https://legacy.example.com'\n"
+    )
+
+    no_flag_result = _run_venv_install(tmp_path, fake_home)
+    assert no_flag_result.returncode == 0, no_flag_result.stderr
+    assert "already has a forgejo.base_url set" in no_flag_result.stderr
+    content = _config_yaml_path(fake_home).read_text()
+    assert "https://legacy.example.com" in content
+
+    migrate_result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://migrated.example.com")
+    assert migrate_result.returncode == 0, migrate_result.stderr
+    content = _config_yaml_path(fake_home).read_text()
+    assert "forgejo:" in content
+    assert "https://migrated.example.com" in content
+    assert "git_host:" not in content
 
 
 def test_install_sh_git_host_base_url_yaml_single_quote_escaped(tmp_path: Path) -> None:
