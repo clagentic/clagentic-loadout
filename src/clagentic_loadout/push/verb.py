@@ -227,6 +227,7 @@ from clagentic_loadout.push.errors import (
     AuthorMismatchError,
     BodyEmptyError,
     GitPushError,
+    HostDeniedError,
     MissingIssueLinkError,
     NamespaceDeniedError,
     PrOpenError,
@@ -242,6 +243,10 @@ from clagentic_loadout.push.crew_identity import (
     resolve_crew_bot_identity,
 )
 from clagentic_loadout.push.git_push import git_push_with_token
+from clagentic_loadout.push.host_guard import (
+    check_host_allowed,
+    resolve_allowed_hosts,
+)
 from clagentic_loadout.push.identity_config import (
     InvalidBuilderIdentityConfigError,
     load_builder_identity,
@@ -322,6 +327,16 @@ EXIT_BODY_ENV_UNAVAILABLE = 28
 #: review, and security audit have already run against it. See --merge-method
 #: / --skip-branch-commit-check.
 EXIT_STRAY_MERGE_COMMIT = 29
+#: The Forgejo API host derived from the live git remote (push.git_coords.
+#: parse_forgejo_coords) is not present in the caller-configured
+#: allowed-host set (push.host_guard, lr-0e39f9). Fires BEFORE any
+#: credential is resolved or git push is attempted -- see
+#: push.host_guard.check_host_allowed's own docstring for the full
+#: host-anchoring rationale (--allowed-host / CLAGENTIC_LOADOUT_PUSH_
+#: ALLOWED_HOSTS; permissive default when unconfigured, mirroring
+#: EXIT_NAMESPACE_DENIED's own posture for a different dimension of the
+#: same push target).
+EXIT_HOST_DENIED = 31
 
 
 class PushVerbError(Exception):
@@ -546,6 +561,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "When omitted, falls back to CLAGENTIC_LOADOUT_ALLOWED_NAMESPACES "
         "(comma-separated); when neither is set, no namespace restriction "
         "is enforced.",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        dest="allowed_hosts",
+        default=None,
+        help="Restrict the Forgejo API host this invocation will attach a "
+        "credential to (the host derived from the live git remote, NOT the "
+        "--git-host-base-url flag -- see that flag's own help). Repeatable; "
+        "each value is a bare 'host[:port]' or a full 'scheme://host[:port]' "
+        "URL. When omitted, falls back to "
+        "CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS (comma-separated); when "
+        f"neither is set, no host restriction is enforced. A mismatch exits "
+        f"{EXIT_HOST_DENIED} ({EXIT_HOST_DENIED}=EXIT_HOST_DENIED), before "
+        "any credential is resolved. Ignored on --platform github (GitHub "
+        "coordinate derivation from the git remote is not supported at all "
+        "-- see --repo).",
     )
     parser.add_argument(
         "--skip-title-check",
@@ -1306,6 +1338,9 @@ def _run(
     allowed_namespaces = resolve_allowed_namespaces(
         frozenset(args.allowed_namespaces) if args.allowed_namespaces else None
     )
+    allowed_hosts = resolve_allowed_hosts(
+        frozenset(args.allowed_hosts) if args.allowed_hosts else None
+    )
 
     # 4. Platform resolution.
     raw_remote_url = git_coords.read_remote_url_best_effort(project_root)
@@ -1322,12 +1357,14 @@ def _run(
     if args.update_pr:
         return _run_update_pr(
             args, body=body, caller=caller, project_root=project_root,
-            allowed_namespaces=allowed_namespaces, token_provider=token_provider, opener=opener,
+            allowed_namespaces=allowed_namespaces, allowed_hosts=allowed_hosts,
+            token_provider=token_provider, opener=opener,
         )
 
     return _run_create_pr(
         args, body=body, caller=caller, project_root=project_root,
-        allowed_namespaces=allowed_namespaces, token_provider=token_provider, opener=opener,
+        allowed_namespaces=allowed_namespaces, allowed_hosts=allowed_hosts,
+        token_provider=token_provider, opener=opener,
         builder_identity_config_root=builder_identity_config_root,
     )
 
@@ -1412,6 +1449,7 @@ def _run_update_pr(
     caller: str,
     project_root: Path,
     allowed_namespaces: frozenset[str],
+    allowed_hosts: frozenset[str],
     token_provider: TokenProvider | None,
     opener,
 ) -> int:
@@ -1424,6 +1462,18 @@ def _run_update_pr(
         check_namespace_allowed(owner, repo, allowed_namespaces=allowed_namespaces)
     except NamespaceDeniedError as exc:
         _fail(str(exc), code=EXIT_NAMESPACE_DENIED)
+
+    # Host anchoring (lr-0e39f9): api_base is "" on the GitHub path
+    # (github_backend hardcodes its own public API base, see
+    # _resolve_owner_repo_for_update's own docstring) -- an empty string
+    # never legitimately matches a configured allowed-host entry, so this
+    # check is skipped unconditionally for GitHub rather than requiring
+    # every deployment's allowlist to also carry an empty-string entry.
+    if args.platform != PLATFORM_GITHUB:
+        try:
+            check_host_allowed(api_base, allowed_hosts=allowed_hosts)
+        except HostDeniedError as exc:
+            _fail(str(exc), code=EXIT_HOST_DENIED)
 
     _check_title_gate(args, owner, repo)
 
@@ -1495,6 +1545,7 @@ def _run_create_pr(
     caller: str,
     project_root: Path,
     allowed_namespaces: frozenset[str],
+    allowed_hosts: frozenset[str],
     token_provider: TokenProvider | None,
     opener,
     builder_identity_config_root: str | Path | None = None,
@@ -1529,6 +1580,17 @@ def _run_create_pr(
         check_namespace_allowed(owner, repo, allowed_namespaces=allowed_namespaces)
     except NamespaceDeniedError as exc:
         _fail(str(exc), code=EXIT_NAMESPACE_DENIED)
+
+    # Host anchoring (lr-0e39f9): api_base is "" on the GitHub path (a fixed
+    # literal set two branches above, never derived from the git remote) --
+    # skipped unconditionally for GitHub, mirroring _run_update_pr's own
+    # identical guard (see that function's own comment for the full
+    # rationale).
+    if args.platform != PLATFORM_GITHUB:
+        try:
+            check_host_allowed(api_base, allowed_hosts=allowed_hosts)
+        except HostDeniedError as exc:
+            _fail(str(exc), code=EXIT_HOST_DENIED)
 
     _check_title_gate(args, owner, repo)
 

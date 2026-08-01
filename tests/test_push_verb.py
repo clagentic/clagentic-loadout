@@ -705,6 +705,151 @@ class TestNamespaceGuard:
         assert code == verb.EXIT_OK
 
 
+class TestHostGuard:
+    """lr-0e39f9: push.verb attaches a live credential to a Forgejo API host
+    derived exclusively from the live git remote
+    (push.git_coords.parse_forgejo_coords) -- unlike the owner/repo
+    namespace guard above, nothing previously anchored that HOST at all. A
+    --allowed-host allowlist (push.host_guard, permissive when unconfigured,
+    mirroring TestNamespaceGuard's own coverage shape for the sibling guard)
+    now fires BEFORE token resolution, on both the create and --update-pr
+    paths, and is skipped (never denies) on --platform github, where
+    api_base is "" (github_backend hardcodes its own public API base) rather
+    than git-remote-derived."""
+
+    def test_denied_host_fires_before_token_resolution(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--allowed-host", "https://attacker.example.net",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_HOST_DENIED
+
+    def test_allowed_host_permits_token_resolution(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--allowed-host", "http://git-host.example.com",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert provider.resolved_for == [verb.DEFAULT_ROLE]
+
+    def test_permissive_default_when_unconfigured(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        # No --allowed-host flag and no env var configured -- the permissive
+        # default (host_guard.resolve_allowed_hosts returning an empty set)
+        # must not block this push. This is the byte-for-byte-unchanged
+        # behavior for every deployment that has not opted into this guard.
+        monkeypatch.delenv("CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS", raising=False)
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_update_pr_host_denied(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "t",
+                "--allowed-host", "https://attacker.example.net",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_HOST_DENIED
+
+    def test_update_pr_allowed_host_permits_token_resolution(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+
+        def opener(req, timeout=15):
+            return _json_resp(200, {})
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "feat: updated title",
+                "--allowed-host", "http://git-host.example.com",
+            ],
+            token_provider=provider,
+            opener=opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_env_var_denied_host(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        monkeypatch.setenv("CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS", "https://attacker.example.net")
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_HOST_DENIED
+
+    def test_denial_error_names_the_offending_host(self, repo_with_remote, monkeypatch, capsys):
+        repo, _remote = repo_with_remote
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--allowed-host", "https://good-host.example.com",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_HOST_DENIED
+        stderr = capsys.readouterr().err
+        assert "git-host.example.com" in stderr
+
+    def test_github_platform_never_denied_by_host_guard(self, repo_with_remote, monkeypatch):
+        """api_base is "" on --platform github (github_backend hardcodes its
+        own public API base, never derived from the git remote) -- the host
+        guard must be a no-op there regardless of what --allowed-host names,
+        rather than requiring every GitHub deployment's allowlist to also
+        carry a spurious empty-string entry."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _github_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--title", "feat: t", "--body-stdin",
+                "--allowed-host", "https://some-completely-different-host.example.com",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+
 class TestRoleParameterization:
     def test_arbitrary_caller_flows_through_to_token_provider(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote

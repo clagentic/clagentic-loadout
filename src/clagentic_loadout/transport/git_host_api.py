@@ -260,6 +260,7 @@ from clagentic_loadout.transport.credential_provider import (
     TokenProvider,
     resolve_token as _resolve_token,
 )
+from clagentic_loadout.transport.host_match import host_matches
 from clagentic_loadout.transport.note_compose import build_composed_body
 from clagentic_loadout.transport.provider_config import (
     load_user_config_section,
@@ -1660,10 +1661,17 @@ def _absolute_url_host_matches_git_host_base(path_arg: str, git_host_base: str) 
     check urllib.parse.urlsplit(path_arg).scheme first, exactly as the
     existing path_arg_is_absolute_url check does) -- this function only
     answers "does its host:port match", not "is it absolute" a second time.
+
+    EXTRACTED (lr-0e39f9): the actual netloc-comparison logic now lives in
+    transport.host_match.host_matches, a shared predicate also used by
+    push.host_guard (which anchors push.verb's own git-remote-derived
+    api_base against an operator-configured allowlist -- the SAME defect
+    class this function closes here, on a second call site that had no
+    anchor at all, see that module's own docstring). This function is kept
+    as a thin, byte-for-byte-behavior alias so no existing call site or test
+    in this module needs to change name or signature.
     """
-    target_netloc = urllib.parse.urlsplit(path_arg).netloc.lower()
-    base_netloc = urllib.parse.urlsplit(git_host_base).netloc.lower()
-    return target_netloc == base_netloc
+    return host_matches(path_arg, git_host_base)
 
 
 def _check_cross_platform_url_shape_mistake(
