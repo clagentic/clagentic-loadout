@@ -24,6 +24,16 @@ class NamespaceDeniedError(Exception):
     namespace refusal is deterministic and must never partially execute."""
 
 
+class HostDeniedError(Exception):
+    """Raised when the Forgejo API host derived from the live git remote
+    (see push.git_coords.parse_forgejo_coords) is not present in the
+    caller-supplied allowed-host set (see push.host_guard, lr-0e39f9).
+    Fires BEFORE any credential is resolved or git operation attempted — a
+    host refusal is deterministic and must never partially execute, mirroring
+    NamespaceDeniedError's own posture for a different dimension of the same
+    target."""
+
+
 class AuthorMismatchError(Exception):
     """Raised when the HEAD commit author does not match the configured bot
     identity after re-authoring, or when re-authoring itself fails. A
@@ -72,6 +82,7 @@ __all__ = [
     "AuthorMismatchError",
     "BodyEmptyError",
     "GitPushError",
+    "HostDeniedError",
     "MissingIssueLinkError",
     "NamespaceDeniedError",
     "PrOpenError",

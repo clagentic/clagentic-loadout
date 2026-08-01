@@ -383,6 +383,21 @@ runtime requirements.
 restriction) — set this in the spawn env for any deployment that wants a
 hard namespace allowlist enforced at the verb level.
 
+### Host restriction (push)
+
+`push` derives the Forgejo API host it attaches a credential to
+exclusively from the live git remote (see "1. Git-host base URL" above —
+`--git-host-base-url` is NOT consulted on this path). That derived host
+optionally can be restricted via `CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS`
+(comma-separated) or an explicit `--allowed-host` flag (repeatable); each
+entry may be a bare `host[:port]` or a full `scheme://host[:port]` URL.
+Unset/empty is PERMISSIVE (no restriction), mirroring the namespace
+restriction above — set this in the spawn env for any deployment that wants
+push's credentialed calls anchored to a fixed set of known-good Forgejo
+hosts. A mismatch fails closed before any credential is resolved. Ignored
+on `--platform github` (GitHub coordinate derivation from the git remote is
+not supported at all — see `--repo`).
+
 ## Minimal spawn-env checklist
 
 For a role that only calls Forgejo-path verbs with the `static` credential
