@@ -248,6 +248,15 @@ all (rather than a role-gap that should be closed per
 where the delivering process is not itself a Bash tool call subject to the
 harness's own static analyzer.
 
+**Channel parity note:** the guard/allowlist wiring this section assumes is
+shell-command-scoped (`guard.scratch_policy`/`role_allowlist`, see
+[docs/guard-policy.md](guard-policy.md)'s "Coverage boundary" section) — a
+harness that also grants a non-shell `Write`/`Edit`-equivalent tool must
+consult the same containment predicate set on that channel too, or the
+staging path documented here is guarded while a sibling channel is not. See
+[docs/integration.md](integration.md)'s "Channel parity" section for the
+full requirement and its motivating failure shape.
+
 ### `loadout-stage-body` — the sanctioned WRITE side for `--body-env`
 
 `clagentic_loadout.transport.stage_body_verb`. Stages a caller-namespaced
