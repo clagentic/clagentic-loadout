@@ -827,3 +827,178 @@ def test_user_facing_ast_guard_derives_task_id_pattern_from_public_facing_table(
         USER_FACING_AST_PATTERNS["internal task id (lr-NNNNNN)"]
         is PUBLIC_FACING_EXTRA_PATTERNS["internal task id (lr-NNNNNN)"]
     )
+
+
+# ---------------------------------------------------------------------------
+# COMMIT-SUBJECT GUARD — a commit subject's trailing `(#123)` PR reference is
+# parsed and rendered as a structured link in the generated changelog (see
+# this repo's own CLAUDE.md "Commit convention" section); a bare internal
+# task id in a subject can therefore land in a PUBLISHED CHANGELOG on a
+# public product, where it resolves to nothing for an external reader — the
+# exact boundary CLAUDE.md hard rule 8 draws. PR #6 originally shipped with
+# internal task ids in commit SUBJECTS (caught and bounced by hand); this is
+# the mechanical guard against a recurrence.
+#
+# SUBJECTS ONLY, DELIBERATELY: a commit BODY is the sanctioned home for a
+# `Task: lr-XXXXXX` provenance trailer (this repo's own established
+# convention, followed throughout this branch's own commits) — the trailer
+# never reaches a changelog entry, only the subject line does. Widening this
+# guard to bodies would break the very convention it exists to protect.
+#
+# REUSES the task-id pattern already declared once in
+# PUBLIC_FACING_EXTRA_PATTERNS (the same object PRODUCT_CODE_PATTERNS/
+# USER_FACING_AST_PATTERNS above already reuse by reference) — no second,
+# independently-maintained pattern list.
+# ---------------------------------------------------------------------------
+
+_TASK_ID_SUBJECT_PATTERN: re.Pattern[str] = PUBLIC_FACING_EXTRA_PATTERNS["internal task id (lr-NNNNNN)"]
+
+
+def _commit_subjects_ahead_of_merge_base() -> tuple[list[str], str | None]:
+    """Return (subjects, skip_reason) for every commit strictly ahead of this
+    branch's merge-base with `origin/main`.
+
+    DEGRADES GRACEFULLY, never fails closed, on any condition that makes the
+    merge-base unresolvable: no git binary, not a git repository, no `origin`
+    remote configured, `origin/main` not present locally (a shallow clone or
+    a CI checkout without a full fetch), or HEAD detached with nothing to
+    diff against. Each such condition returns `([], "<reason>")` rather than
+    raising — CLAUDE.md hard rule 6 requires this suite to pass with
+    synthetic identity and no real deployment context, and a repo checked
+    out without full history is exactly such a context, not a violation to
+    fail on.
+
+    A resolvable-but-EMPTY range (HEAD already equals the merge-base, e.g.
+    running this suite directly on main) also returns `([], None)` — no
+    skip reason, since that is not a degraded-environment condition, just an
+    empty result the caller's own test correctly treats as vacuously
+    passing (there is nothing to check, not something the check failed to
+    check).
+    """
+    import subprocess
+
+    try:
+        head_check = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+        )
+    except OSError:
+        return [], "git binary unavailable"
+    if head_check.returncode != 0:
+        return [], "not a git repository, or HEAD unresolvable"
+
+    merge_base = subprocess.run(
+        ["git", "merge-base", "origin/main", "HEAD"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+    )
+    if merge_base.returncode != 0:
+        return [], (
+            "origin/main merge-base unresolvable (shallow clone, missing "
+            "origin remote, or a checkout without full history) -- "
+            "skipping rather than failing closed on a missing-history "
+            "condition"
+        )
+    base_sha = merge_base.stdout.strip()
+    if not base_sha:
+        return [], "merge-base returned no SHA"
+
+    log = subprocess.run(
+        ["git", "log", "--format=%s", f"{base_sha}..HEAD"],
+        cwd=str(REPO_ROOT), capture_output=True, text=True, check=False,
+    )
+    if log.returncode != 0:
+        return [], "git log over the merge-base range failed"
+    subjects = [line for line in log.stdout.splitlines() if line.strip()]
+    return subjects, None
+
+
+def test_commit_subjects_ahead_of_main_carry_no_internal_task_id() -> None:
+    """Commit SUBJECTS (not bodies — see section docstring above) on the
+    commits ahead of this branch's merge-base with `origin/main` must carry
+    no bare internal task id: a subject's trailing `(#123)` PR reference is
+    parsed into the generated changelog, so a task id there leaks into a
+    published release note that resolves to nothing for an external reader
+    (CLAUDE.md hard rule 8's exact boundary). SKIPS (never fails) when the
+    merge-base cannot be resolved -- see `_commit_subjects_ahead_of_merge_base`
+    for the full list of environments this degrades gracefully in."""
+    subjects, skip_reason = _commit_subjects_ahead_of_merge_base()
+    if skip_reason is not None:
+        pytest.skip(skip_reason)
+    violations = [
+        f"commit subject: [internal task id (lr-NNNNNN)] {subject}"
+        for subject in subjects
+        if _TASK_ID_SUBJECT_PATTERN.search(subject)
+    ]
+    assert not violations, "\n" + "\n".join(violations)
+
+
+def test_commit_subject_guard_reuses_public_facing_task_id_pattern_by_identity() -> None:
+    """Assert the commit-subject guard's pattern is the SAME object as
+    PUBLIC_FACING_EXTRA_PATTERNS's task-id entry, never a second,
+    independently-compiled copy -- mirrors
+    test_user_facing_ast_guard_derives_task_id_pattern_from_public_facing_table's
+    own identity assertion for the AST guard, applied to this guard too."""
+    assert _TASK_ID_SUBJECT_PATTERN is PUBLIC_FACING_EXTRA_PATTERNS["internal task id (lr-NNNNNN)"]
+
+
+def test_commit_subject_guard_catches_a_synthetic_bad_subject() -> None:
+    """Regression test for the guard itself: a synthetic subject carrying a
+    bare internal task id must be caught by the SAME pattern the real check
+    uses against real git history."""
+    bad_subject = "fix(push): resolve lr-abc123 (#42)"
+    assert _TASK_ID_SUBJECT_PATTERN.search(bad_subject), (
+        "expected the task-id pattern to catch a bare lr-NNNNNN in a "
+        "synthetic commit subject"
+    )
+
+
+def test_commit_subject_guard_does_not_flag_a_task_trailer_in_the_body() -> None:
+    """The convention this guard must NOT break: a `Task: lr-XXXXXX` trailer
+    lives in the commit BODY, never the subject, and this guard only ever
+    inspects subjects (`git log --format=%s`, which is the subject line
+    alone -- it does not include the body at all). A synthetic subject with
+    no task id, paired with a body that does carry one, must pass."""
+    clean_subject = "fix(push): resolve a real defect (#42)"
+    assert not _TASK_ID_SUBJECT_PATTERN.search(clean_subject), (
+        "a clean subject with no task id must not be flagged by the "
+        "commit-subject guard, regardless of what its (unchecked) body "
+        "contains"
+    )
+
+
+def test_commit_subject_guard_degrades_gracefully_when_merge_base_unresolvable(
+    monkeypatch, tmp_path
+) -> None:
+    """Regression test for the graceful-degradation contract: point this
+    guard's git invocation at an EMPTY, freshly-initialized repo (a git repo
+    that structurally cannot resolve `origin/main` -- no remote configured
+    at all) and assert it returns a skip reason rather than raising or
+    fabricating an empty-but-successful result. Proves the degrade path is
+    real code, not merely documented intent."""
+    import subprocess
+
+    empty_repo = tmp_path / "empty_repo"
+    empty_repo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(empty_repo), check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "a@example.invalid"], cwd=str(empty_repo), check=True,
+    )
+    subprocess.run(["git", "config", "user.name", "A"], cwd=str(empty_repo), check=True)
+    (empty_repo / "f.txt").write_text("x\n")
+    subprocess.run(["git", "add", "f.txt"], cwd=str(empty_repo), check=True)
+    subprocess.run(["git", "commit", "-q", "-m", "chore: seed"], cwd=str(empty_repo), check=True)
+
+    # REPO_ROOT is a module-level constant _commit_subjects_ahead_of_merge_base
+    # reads via the enclosing module's global -- monkeypatch it directly on
+    # this module's own globals (sys.modules[__name__]) rather than importing
+    # a package path, since this test file's own dotted import path is not
+    # stable across every collection mode pytest supports.
+    import sys
+
+    this_module = sys.modules[__name__]
+    monkeypatch.setattr(this_module, "REPO_ROOT", empty_repo)
+    subjects, skip_reason = _commit_subjects_ahead_of_merge_base()
+
+    assert subjects == []
+    assert skip_reason is not None
+    assert "origin" in skip_reason or "merge-base" in skip_reason
