@@ -690,6 +690,19 @@ substring classifier and the `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` opt-in verbose-t
 passthrough (undiscoverable from `--help` today — see that env var's own module docstring
 in `push.git_push` for the redaction guarantee that applies to its output).
 
+**Hermeticity pre-flight — fails closed, exit `EXIT_HERMETICITY_FAILED` (32):** before any
+credentialed git subprocess runs, this verb (via `push.git_hermeticity`) verifies the
+resolved `git` version meets a minimum floor and inspects the target repository's
+**local** `.git/config` for a hermeticity hazard (a repo-local `credential.*` entry, an
+`http.*.extraheader` entry, an `includeIf.*` directive, or a `url.*.insteadOf`/
+`pushInsteadOf` redirect rule) that ambient-credential neutralization cannot suppress by
+environment isolation alone. Either condition refuses the push before any credential is
+resolved or network call attempted, with no override flag — see
+[push-hermeticity.md](push-hermeticity.md) for the full security contract: what ambient
+credential machinery is neutralized on every credentialed call (including the
+`$XDG_CONFIG_HOME/git/config` fallback global-config path), what cannot be neutralized and
+is validated instead, and why.
+
 ### `loadout-merge` — the merge gate
 
 `clagentic_loadout.merge.verb`. **This is the load-bearing release gate**

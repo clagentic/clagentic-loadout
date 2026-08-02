@@ -133,6 +133,31 @@ package talks to a remote with a minted token," rather than a second,
 divergent copy for the pre-lease fetch to reinvent (and potentially get
 wrong) on its own.
 
+HERMETIC AGAINST AMBIENT CREDENTIAL MACHINERY, NOT MERELY HOME-ISOLATED
+(lr-a868d2): HOME isolation alone (the posture above, unchanged) removes
+~/.netrc / ~/.git-credentials / ~/.gitconfig as ambient sources but does NOT
+reach a `credential.helper` configured at SYSTEM scope (/etc/gitconfig) or
+at REPO-LOCAL scope (the target repo's own `.git/config`, which git reads
+unconditionally — no environment variable disables it). The operator
+constraint driving this fix: workspace credentials may ALWAYS exist and
+differ across environments, so the guarantee cannot depend on the host
+having been cleaned. `_credentialed_git_env` now additionally calls
+`push.git_hermeticity.neutralize_ambient_git_env` (GIT_CONFIG_GLOBAL/SYSTEM
+redirected to /dev/null, GIT_CONFIG_NOSYSTEM=1, any ambient GIT_ASKPASS/
+SSH_ASKPASS/GIT_SSH/GIT_SSH_COMMAND stripped before this module's own
+GIT_ASKPASS is set, and any GIT_CONFIG_COUNT/KEY_<n>/VALUE_<n> injection
+channel removed) and adds `-c credential.helper=""` as a command-scope
+override on the subprocess argv itself (see push.git_hermeticity's own
+module docstring for why the env-level recipe is required and the `-c`
+override alone is not sufficient). Repo-local config cannot be suppressed by
+any of the above — see `push.git_hermeticity.check_repo_local_config_hazards`
+and `git_push_with_token`/`git_fetch_with_token`'s own fail-closed
+validation of it before either ever spawns a subprocess. A minimum git
+version (`push.git_hermeticity.MIN_GIT_VERSION`, 2.20) is also enforced
+before any credentialed call, for git's own protected-configuration
+guarantee that a command-line `-c` override wins over repo-local config for
+security-sensitive keys.
+
 None of this ever surfaces the token: remote/hook text is the server's or
 the local repo's own message, never anything git-credential populates.
 """
@@ -148,6 +173,13 @@ import tempfile
 from pathlib import Path
 
 from clagentic_loadout.push.errors import GitPushError
+from clagentic_loadout.push.git_hermeticity import (
+    GitVersionTooOldError,
+    RepoLocalConfigHazardError,
+    check_git_version,
+    check_repo_local_config_hazards,
+    neutralize_ambient_git_env,
+)
 from clagentic_loadout.push.push_failure_labels import (
     SUB_CAUSE_BAD_REFSPEC,
     SUB_CAUSE_LOCAL_HOOK_REJECTED,
@@ -474,9 +506,22 @@ def make_askpass_script(token_path: str) -> str:
     )
 
 
+#: Command-scope override prepended to every credentialed git invocation
+#: (lr-a868d2): defense-in-depth alongside the env-level neutralization in
+#: `neutralize_ambient_git_env` -- NOT sufficient alone (see
+#: push.git_hermeticity's own module docstring for why an empty `-c`
+#: override cannot clear an inherited MULTI-VALUED credential.helper list by
+#: itself), but still worth applying once the env-level fix already makes
+#: the multi-valued-list problem moot: this override wins for THIS
+#: invocation specifically over anything that could otherwise re-enter via
+#: repo-local config precedence rules on a git version at or above the
+#: enforced minimum.
+_HERMETIC_ARGV_PREFIX = ["-c", "credential.helper="]
+
+
 @contextlib.contextmanager
 def _credentialed_git_env(token: str):
-    """Construct the isolated, token-injected environment every
+    """Construct the isolated, token-injected, HERMETIC environment every
     credentialed git subprocess in this module runs under, and yield it.
 
     SHARED PRIMITIVE (lr-f57f13, pre-merge security review finding): both
@@ -484,14 +529,32 @@ def _credentialed_git_env(token: str):
     call on top of this SAME construction — a token written to a mode-0600
     temp file, GIT_ASKPASS pointed at a generated script that reads it,
     HOME isolated to an empty temp dir (removing ~/.netrc/~/.git-credentials/
-    ~/.gitconfig as ambient credential sources), and the opt-in GIT_TRACE
-    passthrough — so a caller adding a THIRD credentialed git call to this
-    module in the future reuses this envelope rather than reinventing it
-    (and potentially getting the isolation wrong, exactly the defect class
-    the ORIGINAL pre-lease fetch fix introduced: it ran a bare ambient
-    `git fetch` with no credential envelope at all, authenticating via
-    whatever ambient credential helper happened to be configured for the
-    remote rather than the minted token this call actually resolved).
+    ~/.gitconfig as ambient credential sources), the opt-in GIT_TRACE
+    passthrough, and (lr-a868d2) full neutralization of the ambient
+    credential-machinery surface beyond HOME -- so a caller adding a THIRD
+    credentialed git call to this module in the future reuses this envelope
+    rather than reinventing it (and potentially getting the isolation wrong,
+    exactly the defect class the ORIGINAL pre-lease fetch fix introduced: it
+    ran a bare ambient `git fetch` with no credential envelope at all,
+    authenticating via whatever ambient credential helper happened to be
+    configured for the remote rather than the minted token this call
+    actually resolved).
+
+    HERMETICITY BEYOND HOME (lr-a868d2, see push.git_hermeticity's own module
+    docstring for the full rationale): HOME isolation alone does not reach a
+    `credential.helper` configured at system scope (/etc/gitconfig) or
+    repo-local scope (the target repo's own `.git/config`, always read,
+    never suppressible by environment alone). This function additionally
+    calls `push.git_hermeticity.neutralize_ambient_git_env`, which redirects
+    global/system config scope to /dev/null, independently disables system
+    config reading, strips any ambient GIT_ASKPASS/SSH_ASKPASS/GIT_SSH/
+    GIT_SSH_COMMAND the real environment happens to export (BEFORE this
+    function lays its own deliberate GIT_ASKPASS on top, immediately below),
+    and removes any GIT_CONFIG_COUNT/KEY_<n>/VALUE_<n> config-injection
+    channel. Repo-local config itself cannot be suppressed this way -- this
+    function does not attempt to; see `git_push_with_token`/
+    `git_fetch_with_token`'s own fail-closed repo-local hazard check, which
+    runs BEFORE this context manager is ever entered.
 
     The whole token-carrying temp dir is removed when the context exits,
     regardless of what the caller did inside it.
@@ -511,7 +574,12 @@ def _credentialed_git_env(token: str):
             f.write(make_askpass_script(token_file))
         os.chmod(askpass_file, 0o700)
 
-        env = os.environ.copy()
+        # Neutralize the ambient surface FIRST (global/system config scope,
+        # ambient askpass/SSH env vars, config-injection channel) -- this
+        # function's own deliberate GIT_ASKPASS/HOME assignments below are
+        # applied AFTER, so neither is shadowed or raced by anything the
+        # neutralization pass would otherwise have left behind.
+        env = neutralize_ambient_git_env(os.environ.copy())
         env["GIT_ASKPASS"] = askpass_file
         env["GIT_TERMINAL_PROMPT"] = "0"
         # Empty HOME: removes ~/.netrc / ~/.git-credentials / ~/.gitconfig
@@ -563,10 +631,34 @@ def git_fetch_with_token(
     Raises GitFetchError (never includes the token value; stderr is
     redacted via `push.push_redaction.redact_push_secrets` before it is
     ever attached to the exception) on any non-zero `git fetch` exit.
+
+    HERMETICITY PRE-FLIGHT (lr-a868d2): before any subprocess spawns, this
+    checks the resolved git version (GitVersionTooOldError if below
+    `push.git_hermeticity.MIN_GIT_VERSION`) and the target repo's LOCAL
+    config for the unsuppressable hazards (RepoLocalConfigHazardError
+    if any is found) — see `push.git_hermeticity`'s own module docstring for
+    why environment isolation alone cannot cover repo-local config. Both
+    checks fail closed; neither is optional or configurable, matching the
+    operator constraint this fix is built against (ambient credentials may
+    always exist and must never be allowed to silently win).
     """
+    check_git_version(git_cwd=git_cwd)
+    hazards = check_repo_local_config_hazards(git_cwd)
+    if hazards:
+        raise RepoLocalConfigHazardError(
+            f"refusing to fetch {remote!r} {branch!r}: the target repo's "
+            f"LOCAL .git/config carries a hermeticity hazard this package "
+            f"cannot neutralize via environment isolation alone -- "
+            f"{sorted(set(hazards))!r}. Repo-local config is always read by "
+            f"git; there is no environment variable that suppresses it. "
+            f"Remove the offending repo-local config entry (credential.*, "
+            f"http.*.extraheader, includeIf.*, or url.*.insteadOf/"
+            f"pushInsteadOf) before retrying -- this check fails closed "
+            f"with no override."
+        )
     with _credentialed_git_env(token) as env:
         result = subprocess.run(
-            ["git", "fetch", remote, branch],
+            ["git", *_HERMETIC_ARGV_PREFIX, "fetch", remote, branch],
             capture_output=True,
             text=True,
             env=env,
@@ -622,10 +714,34 @@ def git_push_with_token(
     structurally (see push.errors.GitPushError) — this function passes
     *known_secrets=(token,)* through rather than pre-redacting each
     argument itself.
+
+    HERMETICITY PRE-FLIGHT (lr-a868d2): before any subprocess spawns, this
+    checks the resolved git version (GitVersionTooOldError if below
+    `push.git_hermeticity.MIN_GIT_VERSION`) and the target repo's LOCAL
+    config for the unsuppressable hazards (RepoLocalConfigHazardError
+    if any is found) — see `push.git_hermeticity`'s own module docstring for
+    why environment isolation alone cannot cover repo-local config. Both
+    checks fail closed; neither is optional or configurable, matching the
+    operator constraint this fix is built against (ambient credentials may
+    always exist and must never be allowed to silently win).
     """
+    check_git_version(git_cwd=git_cwd)
+    hazards = check_repo_local_config_hazards(git_cwd)
+    if hazards:
+        raise RepoLocalConfigHazardError(
+            f"refusing to push {branch!r} to {remote!r}: the target repo's "
+            f"LOCAL .git/config carries a hermeticity hazard this package "
+            f"cannot neutralize via environment isolation alone -- "
+            f"{sorted(set(hazards))!r}. Repo-local config is always read by "
+            f"git; there is no environment variable that suppresses it. "
+            f"Remove the offending repo-local config entry (credential.*, "
+            f"http.*.extraheader, includeIf.*, or url.*.insteadOf/"
+            f"pushInsteadOf) before retrying -- this check fails closed "
+            f"with no override."
+        )
     with _credentialed_git_env(token) as env:
         refspec = f"{branch}:{branch}"
-        push_cmd = ["git", "push", remote, refspec, "--set-upstream"]
+        push_cmd = ["git", *_HERMETIC_ARGV_PREFIX, "push", remote, refspec, "--set-upstream"]
         if force_with_lease:
             push_cmd.append("--force-with-lease")
 
@@ -717,4 +833,11 @@ def git_push_with_token(
             )
 
 
-__all__ = ["GitFetchError", "git_fetch_with_token", "git_push_with_token", "make_askpass_script"]
+__all__ = [
+    "GitFetchError",
+    "GitVersionTooOldError",
+    "RepoLocalConfigHazardError",
+    "git_fetch_with_token",
+    "git_push_with_token",
+    "make_askpass_script",
+]

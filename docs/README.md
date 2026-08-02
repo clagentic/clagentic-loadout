@@ -33,6 +33,10 @@ reference lives.
 8. [push-failure-reporting.md](push-failure-reporting.md) — how `loadout-push`
    reports a failed `git push`: the always-carried-transcript guarantee, the
    `sub_cause` label set, and the redaction guarantee.
+9. [push-hermeticity.md](push-hermeticity.md) — the security contract for a
+   credentialed push/fetch: what ambient credential machinery is neutralized,
+   what cannot be suppressed and is validated instead, and the minimum git
+   version required.
 
 ## All docs
 
@@ -46,3 +50,4 @@ reference lives.
 | [guard-policy.md](guard-policy.md) | The `clagentic_loadout.guard` policy contract: every guard category, its API, its config shape. |
 | [integration.md](integration.md) | The runtime contract a harness spawning a loadout-driven agent must satisfy: env vars, config-file tiers, precedence. |
 | [push-failure-reporting.md](push-failure-reporting.md) | The `loadout-push` failure-reporting contract: transcript guarantee, `sub_cause` labels, redaction. |
+| [push-hermeticity.md](push-hermeticity.md) | The credentialed push/fetch hermeticity guarantee: ambient credential neutralization, the repo-local-config fail-closed check, and the minimum git version. |

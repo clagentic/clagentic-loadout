@@ -141,12 +141,18 @@ class TestGitPushWithToken:
         fake_bin.mkdir()
         real_git = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
         wrapper = fake_bin / "git"
+        # Match "push" ANYWHERE in argv, not just "$1" -- git_push_with_token
+        # now prepends a hermetic "-c credential.helper=" argv prefix
+        # (lr-a868d2) ahead of the "push" subcommand itself, so "$1" is "-c"
+        # rather than "push" on every real invocation this module makes.
         wrapper.write_text(
             "#!/bin/sh\n"
-            'if [ "$1" = "push" ]; then\n'
-            '  echo "remote: Invalid username or token." 1>&2\n'
-            "  exit 1\n"
-            "fi\n"
+            'for arg in "$@"; do\n'
+            '  if [ "$arg" = "push" ]; then\n'
+            '    echo "remote: Invalid username or token." 1>&2\n'
+            "    exit 1\n"
+            "  fi\n"
+            "done\n"
             f'exec "{real_git}" "$@"\n'
         )
         wrapper.chmod(0o755)
@@ -426,12 +432,21 @@ class TestGitFetchWithToken:
         fake_bin.mkdir()
         real_git = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
         wrapper = fake_bin / "git"
+        # Match "fetch" ANYWHERE in argv, not just "$1" -- git_fetch_with_token
+        # now prepends a hermetic "-c credential.helper=" argv prefix
+        # (lr-a868d2) ahead of the "fetch" subcommand itself, so "$1" is "-c"
+        # rather than "fetch" on every real invocation this module makes. A
+        # "$1"-only match here would silently fall through to real git and
+        # never actually exercise the sentinel secret -- a vacuous pass this
+        # task's own test-quality requirement calls out by name.
         wrapper.write_text(
             "#!/bin/sh\n"
-            'if [ "$1" = "fetch" ]; then\n'
-            '  echo "fatal: could not read Username for '"'"'https://x:sk-leaked-secret@host'"'"': terminal prompts disabled" 1>&2\n'
-            "  exit 1\n"
-            "fi\n"
+            'for arg in "$@"; do\n'
+            '  if [ "$arg" = "fetch" ]; then\n'
+            '    echo "fatal: could not read Username for '"'"'https://x:sk-leaked-secret@host'"'"': terminal prompts disabled" 1>&2\n'
+            "    exit 1\n"
+            "  fi\n"
+            "done\n"
             f'exec "{real_git}" "$@"\n'
         )
         wrapper.chmod(0o755)
@@ -441,6 +456,7 @@ class TestGitFetchWithToken:
         with pytest.raises(GitFetchError) as exc_info:
             git_fetch_with_token("origin", "feature", "sk-leaked-secret", repo)
         assert "sk-leaked-secret" not in str(exc_info.value)
+        assert "sk-leaked-secret" not in repr(exc_info.value)
 
     def test_fetch_token_never_appears_in_raised_message(self, tmp_path):
         repo, _remote = _make_repo_with_bare_remote(tmp_path)

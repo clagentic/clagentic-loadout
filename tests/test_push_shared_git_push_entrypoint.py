@@ -102,10 +102,18 @@ def repo_with_remote(tmp_path):
         ["remote", "set-url", "origin", "http://git-host.example.com/some-owner/some-repo.git"],
         repo,
     )
-    _git(
-        ["config", f"url.{remote}.pushInsteadOf", "http://git-host.example.com/some-owner/some-repo.git"],
-        repo,
-    )
+    # remote.origin.pushurl (not a repo-local url.<remote>.pushInsteadOf
+    # rule): the latter is now correctly refused by push.git_hermeticity.
+    # check_repo_local_config_hazards (pre-merge security review finding,
+    # repo-local-hazard-coverage-gap -- a wildcard insteadOf/pushInsteadOf
+    # rewrite is a credential-exposure hazard in a real deployment, so a
+    # fail-closed hazard check cannot special-case this fixture's own
+    # benign use of it). `pushurl` is a normal, single-remote push-target
+    # override that achieves the identical split this fixture needs (`git
+    # remote get-url origin` still returns the placeholder used for
+    # coordinate parsing; `git push origin` reaches the real local bare
+    # repo) without tripping any of the four unsuppressable hazard shapes.
+    _git(["config", "remote.origin.pushurl", str(remote)], repo)
 
     return repo, remote
 
