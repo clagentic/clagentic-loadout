@@ -29,6 +29,7 @@ under:
 | Mechanism | Neutralized by |
 |---|---|
 | `~/.netrc`, `~/.git-credentials`, `~/.gitconfig` (global scope) | `HOME` isolated to an empty, per-call temp directory |
+| `$XDG_CONFIG_HOME/git/config` — git's documented fallback global-config location, consulted when `~/.gitconfig` does not exist (which is exactly this package's own isolated-HOME posture) | `GIT_CONFIG_GLOBAL=/dev/null` — verified empirically to suppress this path too, not merely the `~/.gitconfig` one; see "Testing this guarantee" below |
 | System-scope `credential.helper` (`/etc/gitconfig`, or wherever `git config --system` resolves to) | `GIT_CONFIG_SYSTEM=/dev/null` **and** `GIT_CONFIG_NOSYSTEM=1` (belt-and-braces: either alone should suffice on a conforming git; both are set) |
 | Global-scope config as an environment override | `GIT_CONFIG_GLOBAL=/dev/null` |
 | An ambient `GIT_ASKPASS` / `SSH_ASKPASS` / `GIT_SSH` / `GIT_SSH_COMMAND` the real environment happens to export | Removed from the subprocess environment entirely, **before** this package sets its own `GIT_ASKPASS` (pointing at its generated token-reading script) |
@@ -49,7 +50,7 @@ guarantee by itself; the `-c` override is kept anyway as an additional, independ
 **Repo-local `.git/config` is always read.** Unlike global or system scope, there is no
 environment variable that disables reading a repository's own `.git/config` — command-line
 `-c` can override a single-valued key there, but the file itself cannot be switched off.
-Three specific repo-local hazards cannot be neutralized by environment isolation at all:
+Four specific repo-local hazards cannot be neutralized by environment isolation at all:
 
 - A repo-local `credential.helper` entry (also multi-valued).
 - `http.<url>.extraheader` — exactly where a CI runner (GitHub Actions, GitLab, etc.)
@@ -57,19 +58,32 @@ Three specific repo-local hazards cannot be neutralized by environment isolation
 - `includeIf.gitdir` / `includeIf.onbranch` / `includeIf.hasconfig` (git 2.13+) — can load
   arbitrary config from anywhere on the filesystem, making repo-local config a channel for
   indirection to a file that is not itself under `.git/`.
+- `url.<base>.insteadOf` / `url.<base>.pushInsteadOf` — a URL rewrite rule that can silently
+  **redirect** a push to a different host than the one the caller resolved and believes it is
+  pushing to. This directive carries no secret value itself, but it is a
+  credential-**exposure** hazard rather than a credential-**value** hazard: the minted token
+  this package presents via `GIT_ASKPASS` is presented to whatever host the push actually
+  reaches, and a redirect rule can make that an attacker-chosen host while every other visible
+  signal (the resolved remote name, the printed refspec) still shows the caller's originally
+  intended target. `pushInsteadOf` is the more directly relevant of the two (it rewrites only
+  the push destination); `insteadOf` is matched too since it is a strict superset (rewrites
+  push and fetch) and is therefore at least as broad a hazard.
 
 **Before either `git_push_with_token` or `git_fetch_with_token` spawns any subprocess**,
 `clagentic_loadout.push.git_hermeticity.check_repo_local_config_hazards` inspects the target
-repository's resolved local config (`git config --local --list`) for these three hazard
+repository's resolved local config (`git config --local --list`) for these four hazard
 classes. **This check fails closed, with no override flag**: if any hazard is found, the
 call raises `RepoLocalConfigHazardError` naming the offending config **key** (never the
 value — a credential.helper's configured command, or an extraheader's carried token, is
-never reproduced in a message) before any credential is resolved or any network call is
-attempted. A deployment that has a legitimate reason for repo-local `http.*.extraheader`
-(e.g. a CI runner's own unrelated token injection) must not route that repository through
-this package's credentialed push at all — there is deliberately no bypass, because the
-"ambient credentials may always exist and must never silently win" constraint applies
-exactly as much to a hazard a caller insists is benign as to one it does not recognize.
+never reproduced in a message; for `insteadOf`/`pushInsteadOf` specifically, the attacker
+host in the rule's *base URL* is part of the key and is therefore named — it is the rule's
+*rewrite target value* that is never reproduced) before any credential is resolved or any
+network call is attempted. A deployment that has a legitimate reason for repo-local
+`http.*.extraheader` or `url.*.insteadOf`/`pushInsteadOf` (e.g. a CI runner's own unrelated
+token injection or URL-rewrite convenience) must not route that repository through this
+package's credentialed push at all — there is deliberately no bypass, because the "ambient
+credentials may always exist and must never silently win" constraint applies exactly as much
+to a hazard a caller insists is benign as to one it does not recognize.
 
 ## Minimum git version
 
@@ -104,17 +118,24 @@ the sole credential-delivery mechanism. This is the correct tier and is preserve
 ## Testing this guarantee
 
 `tests/test_push_git_hermeticity.py` plants a genuinely hostile ambient mechanism — a
-system-scope `credential.helper` supplying a sentinel credential, a repo-local
-`credential.helper`/`http.*.extraheader` carrying a sentinel token, a `~/.netrc` with a
+system-scope `credential.helper` supplying a sentinel credential, a `credential.helper`
+planted at `$XDG_CONFIG_HOME/git/config` (git's own fallback global-config location), a
+repo-local `credential.helper`/`http.*.extraheader` carrying a sentinel token, a repo-local
+`url.*.pushInsteadOf` redirect rule naming a sentinel attacker host, a `~/.netrc` with a
 sentinel login/password, and an ambient `GIT_SSH`/`GIT_SSH_COMMAND` naming a wrapper that
 writes a sentinel file if ever invoked — and asserts the sentinel is never consulted,
-never sent, and never appears in any raised message. Each assertion in that suite was
-verified, during this guarantee's own development, to actually **fail** when the
-corresponding neutralization code is disabled — proving the tests exercise the fix itself
-and are not vacuously true regardless of it (a hazard this suite's own module docstring
-calls out explicitly, since an assertion that would pass either way is worse than no test at
-all). There is no published, widely-used standard hermetic-git-push test harness this suite
-follows; the pattern (synthetic ambient config, a sentinel side effect proving consultation,
-a real local HTTP stub server for the credential-resolution paths that only fire over
-HTTP(S)) is well-grounded in real git/libcurl semantics but is novel as a suite, and this
-document does not claim otherwise.
+never sent, and never appears in any raised message beyond the config *key* naming the
+hazard. Each assertion in that suite was verified, during this guarantee's own development,
+to actually **fail** when the corresponding neutralization or hazard-check code is disabled
+— proving the tests exercise the fix itself and are not vacuously true regardless of it (a
+hazard this suite's own module docstring calls out explicitly, since an assertion that would
+pass either way is worse than no test at all). Two of these assertions (the system-scope and
+`XDG_CONFIG_HOME` cases) required disabling **both** the environment-level neutralization
+*and* the `-c credential.helper=` argv override to prove non-vacuity — disabling either layer
+alone left the other still closing the gap, which is itself confirmation that both layers of
+defense-in-depth are load-bearing rather than one making the other redundant. There is no
+published, widely-used standard hermetic-git-push test harness this suite follows; the
+pattern (synthetic ambient config, a sentinel side effect proving consultation, a real local
+HTTP stub server for the credential-resolution paths that only fire over HTTP(S)) is
+well-grounded in real git/libcurl semantics but is novel as a suite, and this document does
+not claim otherwise.
