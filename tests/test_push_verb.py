@@ -143,12 +143,33 @@ def repo_with_remote(tmp_path):
         ["remote", "set-url", "origin", "http://git-host.example.com/some-owner/some-repo.git"],
         repo,
     )
-    # git push's actual network target must be the real local bare repo
-    # (no real network access anywhere in this test file); pushInsteadOf
-    # rewrites ONLY the push transport target -- `git remote get-url origin`
-    # (used for owner/repo/api_base coordinate parsing) keeps returning the
-    # neutral placeholder Forgejo-shaped URL above unchanged.
-    _git(["config", f"url.{remote}.pushInsteadOf", "http://git-host.example.com/some-owner/some-repo.git"], repo)
+    # git push's actual network target must be the real local bare repo (no
+    # real network access anywhere in this test file), while `git remote
+    # get-url origin` (used for owner/repo/api_base coordinate parsing) keeps
+    # returning the neutral placeholder Forgejo-shaped URL above unchanged.
+    #
+    # PREVIOUSLY: a repo-local `url.<remote>.pushInsteadOf` directive
+    # achieved this split. That directive is now correctly refused by
+    # push.git_hermeticity.check_repo_local_config_hazards (pre-merge
+    # security review finding, repo-local-hazard-coverage-gap): a
+    # url.*.insteadOf/pushInsteadOf rule can silently redirect a push to an
+    # attacker-chosen host in a REAL deployment, which would then receive
+    # the minted credential this package presents via GIT_ASKPASS -- fixing
+    # that gap correctly makes this exact directive shape unusable here too,
+    # since a fail-closed hazard check cannot distinguish this fixture's own
+    # benign use from a hostile one.
+    #
+    # THE FIX: `remote.origin.pushurl` -- a normal, first-class, single-
+    # remote push-URL override (distinct from a wildcard `url.*.insteadOf`
+    # rewrite rule, which can redirect ANY remote matching its base-URL
+    # prefix). It achieves the identical split this fixture needs (`git
+    # remote get-url origin` still returns the placeholder; `git push
+    # origin` reaches the real bare repo) without any of the four
+    # unsuppressable hazard shapes check_repo_local_config_hazards scans
+    # for (credential.*, http.*.extraheader, includeIf.*, url.*.insteadOf/
+    # pushInsteadOf) -- confirmed directly against that function during
+    # this fix.
+    _git(["config", "remote.origin.pushurl", str(remote)], repo)
 
     return repo, remote
 
@@ -1289,23 +1310,20 @@ class TestCreatePrForgejo:
         assert code == verb.EXIT_PUSH_FAILED
 
     def test_token_never_leaks_on_push_failure(self, repo_with_remote, monkeypatch, capsys):
-        """End-to-end no-token-in-logs guarantee: with the pushInsteadOf
-        rewrite removed, `git push` targets the neutral placeholder
-        Forgejo-shaped URL directly and fails (unresolvable host, no real
-        network access attempted) -- push.verb's own EXIT_PUSH_FAILED
-        stderr line must never contain the resolved token value."""
+        """End-to-end no-token-in-logs guarantee: with the pushurl override
+        removed, `git push` targets the neutral placeholder Forgejo-shaped
+        URL directly and fails (unresolvable host, no real network access
+        attempted) -- push.verb's own EXIT_PUSH_FAILED stderr line must
+        never contain the resolved token value."""
         repo, _remote = repo_with_remote
         secret_token = "sk-end-to-end-secret-should-never-leak-anywhere"
-        # Remove the pushInsteadOf rewrite that redirects the push target
-        # to the real local bare repo; git push now targets the neutral
-        # placeholder URL directly and fails fast (unresolvable host).
-        remote_get = subprocess.run(
-            ["git", "config", "--get-regexp", r"url\..*\.pushInsteadOf"],
-            cwd=str(repo), capture_output=True, text=True,
-        )
-        for line in remote_get.stdout.splitlines():
-            key = line.split()[0]
-            _git(["config", "--unset", key], repo)
+        # Remove the remote.origin.pushurl override that redirects the push
+        # target to the real local bare repo; git push now targets the
+        # neutral placeholder URL directly and fails fast (unresolvable
+        # host). See repo_with_remote's own comment for why this fixture
+        # uses pushurl rather than a repo-local url.*.pushInsteadOf rule
+        # (the latter is now a hazard push.git_hermeticity fails closed on).
+        _git(["config", "--unset", "remote.origin.pushurl"], repo)
 
         code = _run_main(
             ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],

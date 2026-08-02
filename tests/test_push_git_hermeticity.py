@@ -3,15 +3,19 @@
 
 SYNTHETIC HOSTILE ENVIRONMENT SUITE: every credentialed git subprocess this
 package spawns must ignore whatever ambient credential machinery the host
-happens to have configured -- a credential.helper at system or repo-local
-scope, an ambient GIT_CONFIG_SYSTEM/GIT_CONFIG_COUNT injection, a fake
-~/.netrc, or a fake SSH identity. Each test below PROVES non-vacuity per the
-task's own requirement, verified directly (not merely argued) by monkey-
-patching `neutralize_ambient_git_env` to a no-op during this task's own
-review and confirming every sentinel test that exercises the NEW
-neutralization logic then FAILS -- proving each assertion actually depends
-on the code this suite exists to cover, not on some other code path that
-would have produced the same observable result regardless.
+happens to have configured -- a credential.helper at system, XDG-fallback-
+global, or repo-local scope, an ambient GIT_CONFIG_SYSTEM/GIT_CONFIG_COUNT
+injection, a fake ~/.netrc, or a fake SSH identity. Each test below PROVES
+non-vacuity per the task's own requirement, verified directly (not merely
+argued) by monkeypatching `neutralize_ambient_git_env` to a no-op (and, for
+the system-scope and XDG-scope cases specifically, ALSO the `-c
+credential.helper=` argv prefix -- see those tests' own docstrings for why
+disabling the env layer alone is not enough to prove non-vacuity there)
+during this suite's own development, and confirming every sentinel test
+that exercises the NEW neutralization logic then FAILS -- proving each
+assertion actually depends on the code this suite exists to cover, not on
+some other code path that would have produced the same observable result
+regardless.
 
 WHY THESE TESTS ROUTE OVER REAL HTTP(S), NOT A BARE LOCAL PATH:
 `credential.helper` (at any scope) and `~/.netrc` are ONLY consulted by
@@ -233,6 +237,34 @@ class TestCheckRepoLocalConfigHazards:
         hazards = check_repo_local_config_hazards(repo)
         assert any(h.startswith("includeif.") for h in hazards)
 
+    def test_detects_url_insteadof(self, tmp_path):
+        """BOBBIE finding (bobbie.sast.repo-local-hazard-coverage-gap): a
+        url.<base>.insteadOf rewrite rule is a credential-EXPOSURE hazard
+        (it can silently redirect a push to an attacker-chosen host, which
+        then receives the minted token this package presents via
+        GIT_ASKPASS) even though the directive itself carries no secret."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        _git(
+            ["config", "--local", "url.https://attacker.invalid/.insteadOf",
+             "https://example.invalid/"],
+            repo,
+        )
+        hazards = check_repo_local_config_hazards(repo)
+        assert any(h.endswith(".insteadof") for h in hazards)
+
+    def test_detects_url_pushinsteadof(self, tmp_path):
+        """pushInsteadOf is the MORE directly relevant variant here: it
+        rewrites only the push destination, exactly the operation this
+        package's minted token is presented against."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        _git(
+            ["config", "--local", "url.https://attacker.invalid/.pushInsteadOf",
+             "https://example.invalid/"],
+            repo,
+        )
+        hazards = check_repo_local_config_hazards(repo)
+        assert any(h.endswith(".pushinsteadof") for h in hazards)
+
     def test_bare_repo_with_no_local_config_hazards_is_empty(self, tmp_path):
         bare = tmp_path / "bare.git"
         bare.mkdir()
@@ -299,6 +331,81 @@ class TestSyntheticHostileEnvironment:
             "was sent as Basic auth -- system-scope neutralization failed"
         )
 
+    def test_ambient_xdg_config_home_credential_helper_sentinel_never_created(self, tmp_path, monkeypatch):
+        """BOBBIE finding (bobbie.sast.xdg-config-home-untested): plant a
+        hostile credential.helper at $XDG_CONFIG_HOME/git/config -- git's
+        own documented fallback global-config location, consulted when
+        ~/.gitconfig does not exist (which is exactly the isolated-HOME
+        case this package's own credentialed subprocess always runs
+        under). Assert the sentinel file the hostile helper would write is
+        NEVER CREATED -- the strongest available signal: it proves the
+        helper was never consulted at all, not merely that some other
+        credential happened to win the race.
+
+        XDG_CONFIG_HOME is set here to a directory OUTSIDE the isolated
+        HOME _credentialed_git_env constructs, exactly matching an ambient
+        deployment shape (an operator's real XDG_CONFIG_HOME pointing
+        somewhere persistent, unrelated to any per-call temp directory this
+        package creates).
+
+        PROVEN NON-VACUOUS (task requirement, verified directly during this
+        fix's own review, not merely argued):
+          1. BASELINE (git's actual behavior, confirmed empirically): with
+             GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM/GIT_CONFIG_NOSYSTEM
+             UNSET and HOME pointed at a directory with no ~/.gitconfig,
+             `git config --get user.name` against a config planted at
+             $XDG_CONFIG_HOME/git/config successfully resolves it -- git
+             genuinely reads this path in this axis's absence, so this is
+             a real ambient surface, not a hypothetical one.
+          2. Disabling BOTH `neutralize_ambient_git_env` (patched to a
+             no-op) AND the `-c credential.helper=` argv prefix (this
+             module's OTHER defense-in-depth layer, which by itself is
+             enough to mask a config-file-scoped hostile helper via
+             command-line precedence and would make a test that disables
+             only the env layer pass vacuously -- the same trap this
+             suite's own system-scope test docstring records hitting
+             first) makes THIS test FAIL: the sentinel file is created,
+             confirming GIT_CONFIG_GLOBAL=/dev/null (which
+             neutralize_ambient_git_env sets) is what suppresses the XDG
+             fallback path specifically -- not HOME isolation alone, which
+             does not touch XDG_CONFIG_HOME at all, and not the `-c`
+             override alone either.
+        """
+        sentinel = tmp_path / "sentinel-xdg-config-home-helper-fired"
+        helper_script = tmp_path / "hostile-xdg-helper.sh"
+        helper_script.write_text(
+            "#!/bin/sh\n"
+            f'touch "{sentinel}"\n'
+            "exit 1\n"
+        )
+        helper_script.chmod(0o755)
+
+        xdg_config_home = tmp_path / "ambient-xdg-config-home"
+        xdg_git_dir = xdg_config_home / "git"
+        xdg_git_dir.mkdir(parents=True)
+        (xdg_git_dir / "config").write_text(f"[credential]\n\thelper = !{helper_script}\n")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config_home))
+
+        _RecordingAuthHandler.seen_auth_headers = []
+        server = http.server.HTTPServer(("127.0.0.1", 0), _RecordingAuthHandler)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            repo = _make_repo_only(tmp_path)
+            remote_url = f"http://127.0.0.1:{port}/synthetic-owner/synthetic-repo.git"
+            with pytest.raises(GitPushError):
+                git_push_with_token(remote_url, "widget", "loadout-minted-token", repo)
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+
+        assert not sentinel.exists(), (
+            "the ambient XDG_CONFIG_HOME credential.helper's sentinel file was "
+            "created -- the hostile helper WAS consulted, proving the XDG "
+            "global-config fallback path was not actually neutralized"
+        )
+
     def test_repo_local_credential_helper_and_extraheader_sentinel_never_appears(self, tmp_path):
         """Plant a repo-local credential.helper AND an http.<host>.extraheader
         carrying a sentinel token -- this package's own hazard check
@@ -324,6 +431,43 @@ class TestSyntheticHostileEnvironment:
         assert sentinel not in str(exc_info.value)
         assert "credential." in str(exc_info.value)
         assert "extraheader" in str(exc_info.value)
+
+    def test_repo_local_pushinsteadof_redirect_sentinel_never_appears(self, tmp_path):
+        """BOBBIE finding (bobbie.sast.repo-local-hazard-coverage-gap): a
+        repo-local url.<base>.pushInsteadOf rule can silently redirect a
+        push to an attacker-chosen host, which would then receive the
+        minted token this package presents via GIT_ASKPASS -- a
+        credential-EXPOSURE hazard even though the directive itself carries
+        no secret. This package's own fail-closed hazard check must refuse
+        the push BEFORE any subprocess spawns, so the redirect target
+        (a sentinel attacker hostname) can never even be dialed, let alone
+        receive a credential. Proven non-vacuous by asserting the refusal
+        is specifically RepoLocalConfigHazardError (not some other failure
+        that happened to also avoid the redirect), matching the pattern of
+        the existing repo-local credential.helper/extraheader test above."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        sentinel_host = "sentinel-attacker-redirect-host.invalid"
+        _git(
+            ["config", "--local", f"url.https://{sentinel_host}/.pushInsteadOf",
+             "https://example.invalid/"],
+            repo,
+        )
+
+        redirect_target = "https://example.invalid/"
+        with pytest.raises(RepoLocalConfigHazardError) as exc_info:
+            git_push_with_token("origin", "widget", "unused-token-value", repo)
+
+        assert "pushinsteadof" in str(exc_info.value)
+        # For url.*.pushInsteadOf the attacker-controlled host is itself
+        # part of the config KEY (the base URL is the section name), so it
+        # legitimately appears in the message per
+        # check_repo_local_config_hazards's own "key only, never the value"
+        # contract -- this asserts the KEY (naming the hazardous entry) is
+        # what surfaced, and the config VALUE (the rewrite target this
+        # rule maps onto, i.e. what the caller believed it was pushing to)
+        # is what does NOT appear, since a value is never reproduced.
+        assert sentinel_host in str(exc_info.value)
+        assert redirect_target not in str(exc_info.value)
 
     def test_ambient_netrc_sentinel_never_sent(self, tmp_path, monkeypatch):
         """Plant a fake ~/.netrc with a sentinel password under a real
