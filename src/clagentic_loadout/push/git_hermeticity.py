@@ -275,8 +275,10 @@ def check_repo_local_config_hazards(git_cwd: Path | None = None) -> tuple[str, .
     absent file as suspicious.
 
     This function INSPECTS ONLY -- it does not raise. Callers (see
-    push.git_push._credentialed_git_env) decide the fail-closed policy and
-    raise RepoLocalConfigHazardError with these descriptions folded in.
+    push.git_push.git_push_with_token / git_fetch_with_token, which call
+    this BEFORE entering `_credentialed_git_env` at all) decide the
+    fail-closed policy and raise RepoLocalConfigHazardError with these
+    descriptions folded in.
     """
     result = subprocess.run(
         ["git", "config", "--local", "--list"],
