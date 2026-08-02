@@ -242,6 +242,10 @@ from clagentic_loadout.push.crew_identity import (
     is_recognized_crew_caller,
     resolve_crew_bot_identity,
 )
+from clagentic_loadout.push.git_hermeticity import (
+    GitVersionTooOldError,
+    RepoLocalConfigHazardError,
+)
 from clagentic_loadout.push.git_push import git_push_with_token
 from clagentic_loadout.push.host_guard import (
     check_host_allowed,
@@ -338,6 +342,15 @@ EXIT_STRAY_MERGE_COMMIT = 29
 #: EXIT_NAMESPACE_DENIED's own posture for a different dimension of the
 #: same push target).
 EXIT_HOST_DENIED = 31
+#: The resolved git version on this host is below push.git_hermeticity.
+#: MIN_GIT_VERSION, or the target repo's LOCAL .git/config carries a
+#: hermeticity hazard (a repo-local credential.* entry, an
+#: http.*.extraheader entry, or an includeIf.* directive) that environment
+#: isolation alone cannot neutralize (push.git_hermeticity.
+#: GitVersionTooOldError / RepoLocalConfigHazardError, lr-a868d2). Fires
+#: BEFORE any credentialed git subprocess spawns -- fail-closed, no
+#: override flag; see push.git_hermeticity's own module docstring for why.
+EXIT_HERMETICITY_FAILED = 32
 
 
 class PushVerbError(Exception):
@@ -1751,14 +1764,30 @@ def _run_create_pr(
     # finding: the first shipped version fetched via an ambient credential
     # helper instead of the minted token) -- see push.lease_control's own
     # docstring, "CREDENTIALED FETCH, NOT AN AMBIENT ONE".
-    lease = resolve_lease(
-        cli_force_with_lease=args.cli_force_with_lease,
-        history_rewritten=history_rewritten,
-        remote=remote_name,
-        branch=branch,
-        project_root=project_root,
-        token=token,
-    )
+    # HERMETICITY PRE-FLIGHT (lr-a868d2): resolve_lease's own pre-lease fetch
+    # (when a lease is being forced) runs through the SAME credentialed,
+    # hermetic envelope git_push_with_token itself uses -- a
+    # GitVersionTooOldError/RepoLocalConfigHazardError raised there is a
+    # fail-closed hermeticity refusal, NOT an ordinary fetch failure (which
+    # resolve_lease already degrades to a printed warning on its own, via a
+    # narrower `except GitFetchError` that does not catch either of these) --
+    # so it must terminate this invocation rather than silently letting the
+    # push proceed. The push call below performs the SAME pre-flight
+    # independently (it does not skip this check just because resolve_lease
+    # already ran it -- see git_push_with_token's own docstring), so a
+    # no-lease-forced invocation (which never calls resolve_lease's fetch at
+    # all) is still covered.
+    try:
+        lease = resolve_lease(
+            cli_force_with_lease=args.cli_force_with_lease,
+            history_rewritten=history_rewritten,
+            remote=remote_name,
+            branch=branch,
+            project_root=project_root,
+            token=token,
+        )
+    except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
+        _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
     print(
         f"push: force-with-lease={lease.force_with_lease} "
         f"(origin={lease.origin!r}, pre-lease fetch attempted={lease.fetch_attempted})",
@@ -1776,6 +1805,8 @@ def _run_create_pr(
             platform=args.platform,
             other_platform_label=other_platform_label,
         )
+    except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
+        _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
     except GitPushError as exc:
         _fail(str(exc), code=EXIT_PUSH_FAILED)
 
