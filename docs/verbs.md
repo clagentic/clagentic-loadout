@@ -686,9 +686,40 @@ warning, never a hard refusal). The resolved `force_with_lease` value and its or
 before the push runs** — never inferred silently. See
 [push-failure-reporting.md](push-failure-reporting.md) for the full failure-reporting
 contract this pairs with, including the reject-reason parser that replaced the earlier
-substring classifier and the `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` opt-in verbose-trace
-passthrough (undiscoverable from `--help` today — see that env var's own module docstring
-in `push.git_push` for the redaction guarantee that applies to its output).
+substring classifier and the `--verbose`/`--trace` flag below (the discoverable form of the
+opt-in `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` passthrough).
+
+**`--dry-run` — a sanctioned diagnostic affordance, through the SAME minted credential
+path:** performs a read-only `git push --dry-run` through the identical minted per-caller
+credential resolution, the identical hermeticity pre-flight (`check_git_version`,
+`check_repo_local_config_hazards`), and the SAME single git-push call site
+(`push.git_push.git_push_with_token`, test-locked at
+`tests/test_push_shared_git_push_entrypoint.py`) a real push uses — a dry-run that used a
+second call site or skipped pre-flight could report success where a real push would refuse,
+which is a misleading affordance, worse than none. **No ref is updated on the remote.** The
+full transcript (stdout and stderr, including any `remote: `-prefixed sideband a real push
+would also receive) is printed to stderr under the caller's own identity — this is the
+sanctioned substitute for an agent shelling out to raw git under an ambient credential when
+a push fails opaquely and the classified failure message alone isn't enough. `--dry-run`
+skips PR creation/update and the post-push remote readback (nothing was actually pushed to
+read back) and exits `EXIT_OK` once the dry-run attempt itself completes; a dry-run push
+that would ITSELF be rejected still raises `GitPushError`/exits `EXIT_PUSH_FAILED` exactly
+like a real push would, after the transcript is printed — proving what a real push would do
+is the point. Ignored (has no effect) on `--update-pr`, which never pushes at all.
+
+**`--verbose` / `--trace` — the discoverable form of `GIT_TRACE`:** enables git's own
+verbose push output (`git push -v`) plus the GIT_TRACE packet/hook/transport trace, so a
+failed push's phase — local hook / transport / remote negotiation / server hook — is
+distinguishable without server-side log access. `--trace` is a synonym for `--verbose` (the
+same flag, same destination), not a second mechanism. The `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE`
+environment variable keeps working as a compat alias — either one enables the identical
+passthrough — but was, before this flag existed, absent from `--help` entirely, which was
+the actual usability defect: an agent with a failing push and no discoverable verbosity
+control had no sanctioned way to get phase-level detail short of reaching around this verb.
+Every byte either flag surfaces passes through the SAME redaction choke point
+(`push.push_redaction.redact_push_secrets`) every other push-failure field already uses —
+see [push-failure-reporting.md](push-failure-reporting.md#the-redaction-guarantee) for
+exactly what is and is not redacted.
 
 **Hermeticity pre-flight — fails closed, exit `EXIT_HERMETICITY_FAILED` (32):** before any
 credentialed git subprocess runs, this verb (via `push.git_hermeticity`) verifies the

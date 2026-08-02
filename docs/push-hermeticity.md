@@ -110,8 +110,13 @@ the sole credential-delivery mechanism. This is the correct tier and is preserve
 - `http.<url>.extraheader` is better (not in argv, not in `git remote -v`) but **still leaks
   into stderr on a 401/403** — one more reason the redaction guarantee documented in
   [push-failure-reporting.md](push-failure-reporting.md) is mandatory, not optional, given
-  this package's own `GIT_TRACE` passthrough deliberately widens what stderr an operator can
-  see.
+  this package's own `GIT_TRACE` passthrough (reachable via `loadout-push --verbose`/
+  `--trace`, or the `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` env var it keeps working as a compat
+  alias for) deliberately widens what stderr an operator can see. `--dry-run` widens it
+  further still (a read-only `git push --dry-run` through this SAME hermetic envelope,
+  transcript printed to stderr) — see
+  [verbs.md](verbs.md#loadout-push--bot-attributed-commit-push--pr-openupdate) for both
+  flags.
 - `GIT_ASKPASS` reading from a private temp file is the tier this package uses: no argv
   exposure, no `git remote -v` exposure, no stderr exposure under ordinary operation.
 
