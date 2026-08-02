@@ -344,6 +344,51 @@ class TestGitPushWithToken:
         assert "stale info" in exc.reject_reason
         assert "policy: rejected" in exc.remote_lines[0]
 
+    def test_git_push_error_strips_c1_control_characters(self):
+        """Second-pass security review finding: the module docstring
+        originally claimed C0/C1 control-character stripping, but the
+        regex only stripped C0 plus DEL -- the C1 range (0x80-0x9F) was
+        NOT actually stripped. This asserts the fixed regex genuinely
+        strips C1, closing the documented-but-undelivered gap (the same
+        defect shape this whole task exists to eliminate: a public claim
+        the code did not back). Built via chr() so the codepoints under
+        test are unambiguous."""
+        pad_char = chr(0x80)
+        nel_char = chr(0x85)
+        malicious_reason = "stale info" + pad_char + nel_char + " trailing"
+        exc = GitPushError(
+            "push failed",
+            exit_code=1,
+            sub_cause="non-fast-forward",
+            raw_stderr="irrelevant",
+            reject_reason=malicious_reason,
+        )
+        assert pad_char not in exc.reject_reason
+        assert nel_char not in exc.reject_reason
+        assert "stale info" in exc.reject_reason
+        assert "trailing" in exc.reject_reason
+
+    def test_control_char_stripping_preserves_legitimate_multibyte_utf8(self):
+        """Second-pass security review finding, safety condition: stripping
+        the C1 codepoint range is only safe because this module operates
+        on already-decoded str text, never raw bytes -- at the byte level,
+        0x80-0x9F are continuation bytes inside legitimate multi-byte UTF-8
+        sequences, and a naive byte-level strip would corrupt genuine
+        non-ASCII content. This asserts real multi-byte UTF-8 text (a
+        precomposed accented Latin letter and a non-Latin letter a remote
+        message might legitimately contain) survives redaction intact."""
+        e_acute = chr(0xE9)
+        cyrillic_a = chr(0x430)
+        legitimate_text = "pre-receive hook declined: caf" + e_acute + " ok " + cyrillic_a + "bc"
+        exc = GitPushError(
+            "push failed",
+            exit_code=1,
+            sub_cause="pre-receive-rejected",
+            raw_stderr="irrelevant",
+            remote_lines=(legitimate_text,),
+        )
+        assert exc.remote_lines[0] == legitimate_text
+
 
 class TestGitFetchWithToken:
     """git_fetch_with_token (lr-f57f13, pre-merge security review finding):

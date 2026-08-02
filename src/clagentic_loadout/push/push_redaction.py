@@ -31,18 +31,24 @@ WHAT THIS REDACTS:
     that do not necessarily match the exact known token string but have the
     same shape, as defense in depth for a credential-helper trace line this
     module's own known-token exact-match would miss.
-  - ANSI escape sequences and other C0/C1 control characters (pre-merge
-    security review finding): remote-controlled text (a "remote: "-prefixed line, a
-    parsed reject-reason string) reaches operator-visible stderr verbatim
-    otherwise, and a malicious remote can inject terminal escapes into it
-    (cursor movement, screen-clearing, title-bar manipulation, or a
+  - ANSI escape sequences and C0/C1 control characters, including DEL
+    (pre-merge security review finding, hardened per a second review pass
+    that caught the docstring initially overclaiming C1 coverage the regex
+    did not yet deliver): remote-controlled text (a "remote: "-prefixed
+    line, a parsed reject-reason string) reaches operator-visible stderr
+    verbatim otherwise, and a malicious remote can inject terminal escapes
+    into it (cursor movement, screen-clearing, title-bar manipulation, or a
     terminal-emulator-specific escape with its own side effects). Stripped
     unconditionally -- this is not a secret-shaped pattern, it is a
-    byte-class removal, and it runs regardless of whether any secret
-    pattern above also matched. `\\t`/`\\n` are preserved (ordinary
+    character-class removal, and it runs regardless of whether any secret
+    pattern above also matched. `\\t`/`\\n`/`\\r` are preserved (ordinary
     formatting whitespace this module's own multi-line messages rely on);
-    only ESC (0x1B) sequences and other non-printing control bytes are
-    stripped.
+    every other C0 control character, DEL (0x7F), and the full C1 range
+    (U+0080-U+009F) are stripped. This function operates on `str`
+    (already-decoded text), never raw bytes -- see `_CONTROL_CHAR_RE`'s own
+    comment for why stripping the C1 codepoint range is safe post-decode
+    but would NOT be safe at the byte level (0x80-0x9F are UTF-8
+    continuation bytes pre-decode).
 """
 
 from __future__ import annotations
@@ -87,19 +93,37 @@ _ANSI_ESCAPE_RE = re.compile(
     r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[@-Z\\-_])"
 )
 
-#: C0/C1 control characters other than the ones this module's own
-#: multi-line messages rely on (`\t`=0x09, `\n`=0x0a, `\r`=0x0d -- kept,
-#: since a message body legitimately uses these for formatting). Matches a
-#: single control byte at a time -- no quantifier at all, so there is
-#: nothing here for a regex engine to backtrack over.
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+#: C0 control characters and DEL, plus the C1 range, other than the ones
+#: this module's own multi-line messages rely on (`\t`=0x09, `\n`=0x0a,
+#: `\r`=0x0d -- kept, since a message body legitimately uses these for
+#: formatting). Matches a single control CODEPOINT at a time -- no
+#: quantifier at all, so there is nothing here for a regex engine to
+#: backtrack over.
+#:
+#: C1 (U+0080-U+009F) IS SAFE TO STRIP HERE because this function operates
+#: on `str` (already-decoded Unicode text), never on raw bytes -- every
+#: caller in this package passes a `str` obtained via `subprocess.run(...,
+#: text=True)`, which has already performed UTF-8 decoding. At the BYTE
+#: level, 0x80-0x9F are continuation bytes inside legitimate multi-byte
+#: UTF-8 sequences, and stripping them naively pre-decode would corrupt
+#: valid non-ASCII content in a remote message. Post-decode, each Python
+#: `str` character in this range is an unambiguous, individually-addressable
+#: C1 control codepoint (not a byte fragment) -- stripping it cannot split
+#: or corrupt a multi-byte sequence, because decoding has already resolved
+#: every sequence into whole codepoints by the time this regex ever runs.
+#: See `test_control_char_stripping_preserves_legitimate_multibyte_utf8`
+#: for a regression case asserting genuine non-ASCII text survives intact.
+_CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f]")
 
 
 def _strip_ansi_and_control_chars(text: str) -> str:
-    """Remove ANSI escape sequences and non-formatting control characters
-    from *text* (pre-merge security review finding): remote-controlled text reaching
-    operator-visible stderr must not be able to inject terminal escapes.
-    Unconditional -- not gated on any secret-shaped match."""
+    """Remove ANSI escape sequences and non-formatting C0/C1 control
+    characters (including DEL) from *text* (pre-merge security review
+    finding): remote-controlled text reaching operator-visible stderr must
+    not be able to inject terminal escapes. Unconditional -- not gated on
+    any secret-shaped match. *text* MUST be a `str` (already-decoded) --
+    see `_CONTROL_CHAR_RE`'s own comment for why the C1 range is only safe
+    to strip post-decode, never on raw bytes."""
     stripped = _ANSI_ESCAPE_RE.sub("", text)
     return _CONTROL_CHAR_RE.sub("", stripped)
 

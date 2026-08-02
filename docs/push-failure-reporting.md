@@ -87,12 +87,18 @@ same guarantee automatically rather than needing to reimplement it. This functio
 the minted token by exact value, URL userinfo (`scheme://user:secret@host`),
 `Authorization:`/`Credential:` header values, `Bearer`/`token=`-shaped literals as defense
 in depth, and (unconditionally, regardless of any secret-shaped match) ANSI escape
-sequences and other non-formatting control characters — remote-controlled text (a
-`remote: `-prefixed line, a parsed reject-reason string) reaches operator-visible stderr,
-and a malicious remote must not be able to inject terminal escapes into it. This matters
-especially for the opt-in `GIT_TRACE` passthrough (`CLAGENTIC_LOADOUT_PUSH_GIT_TRACE`),
-which dumps git's own packet/hook/transport trace — verbose output that can otherwise
-surface a credential-helper invocation's headers.
+sequences plus every C0 control character, `DEL` (0x7F), and the full C1 range
+(U+0080–U+009F) other than `\t`/`\n`/`\r` (kept, since this module's own multi-line
+messages rely on them for formatting) — remote-controlled text (a `remote: `-prefixed line,
+a parsed reject-reason string) reaches operator-visible stderr, and a malicious remote must
+not be able to inject terminal escapes or other control sequences into it. This operates on
+already-decoded `str` text, never raw bytes: stripping the C1 codepoint range is safe only
+post-decode (each `str` character in that range is an unambiguous control codepoint, never a
+byte fragment) — at the byte level, `0x80`–`0x9F` are continuation bytes inside legitimate
+multi-byte UTF-8 sequences, and a naive byte-level strip would corrupt genuine non-ASCII
+content in a remote message. This matters especially for the opt-in `GIT_TRACE` passthrough
+(`CLAGENTIC_LOADOUT_PUSH_GIT_TRACE`), which dumps git's own packet/hook/transport trace —
+verbose output that can otherwise surface a credential-helper invocation's headers.
 
 **The pre-lease fetch is credentialed, not ambient.** `push.lease_control.resolve_lease`
 fetches the target branch's remote-tracking ref (see below) via
