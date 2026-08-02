@@ -332,9 +332,9 @@ class TestSyntheticHostileEnvironment:
         )
 
     def test_ambient_xdg_config_home_credential_helper_sentinel_never_created(self, tmp_path, monkeypatch):
-        """BOBBIE finding (bobbie.sast.xdg-config-home-untested): plant a
-        hostile credential.helper at $XDG_CONFIG_HOME/git/config -- git's
-        own documented fallback global-config location, consulted when
+        """Pre-merge security review finding (xdg-config-home-untested):
+        plant a hostile credential.helper at $XDG_CONFIG_HOME/git/config --
+        git's own documented fallback global-config location, consulted when
         ~/.gitconfig does not exist (which is exactly the isolated-HOME
         case this package's own credentialed subprocess always runs
         under). Assert the sentinel file the hostile helper would write is
@@ -349,7 +349,9 @@ class TestSyntheticHostileEnvironment:
         package creates).
 
         PROVEN NON-VACUOUS (task requirement, verified directly during this
-        fix's own review, not merely argued):
+        fix's own review, not merely argued) -- AND THIS IS WHY THE ORIGINAL
+        "not a gap, GIT_CONFIG_GLOBAL already covers it" reasoning was
+        incomplete, not merely untested:
           1. BASELINE (git's actual behavior, confirmed empirically): with
              GIT_CONFIG_GLOBAL/GIT_CONFIG_SYSTEM/GIT_CONFIG_NOSYSTEM
              UNSET and HOME pointed at a directory with no ~/.gitconfig,
@@ -357,19 +359,33 @@ class TestSyntheticHostileEnvironment:
              $XDG_CONFIG_HOME/git/config successfully resolves it -- git
              genuinely reads this path in this axis's absence, so this is
              a real ambient surface, not a hypothetical one.
-          2. Disabling BOTH `neutralize_ambient_git_env` (patched to a
-             no-op) AND the `-c credential.helper=` argv prefix (this
-             module's OTHER defense-in-depth layer, which by itself is
-             enough to mask a config-file-scoped hostile helper via
-             command-line precedence and would make a test that disables
-             only the env layer pass vacuously -- the same trap this
-             suite's own system-scope test docstring records hitting
-             first) makes THIS test FAIL: the sentinel file is created,
-             confirming GIT_CONFIG_GLOBAL=/dev/null (which
-             neutralize_ambient_git_env sets) is what suppresses the XDG
-             fallback path specifically -- not HOME isolation alone, which
-             does not touch XDG_CONFIG_HOME at all, and not the `-c`
-             override alone either.
+          2. Disabling ONLY `neutralize_ambient_git_env` (patched to a
+             no-op) does NOT make this test fail -- the `-c
+             credential.helper=` argv override (this module's OTHER
+             defense-in-depth layer) silently covers the gap on its own,
+             because command-line precedence beats a config-file-scoped
+             helper regardless of which env vars are set. A test that
+             disabled only the env layer would therefore PASS VACUOUSLY,
+             proving nothing.
+          3. Only disabling BOTH `neutralize_ambient_git_env` AND the `-c
+             credential.helper=` argv prefix together makes THIS test FAIL:
+             the sentinel file is created, confirming GIT_CONFIG_GLOBAL=
+             /dev/null (which neutralize_ambient_git_env sets) is what
+             suppresses the XDG fallback path specifically -- not HOME
+             isolation alone, which does not touch XDG_CONFIG_HOME at all.
+          THE TAKEAWAY: TWO independent mechanisms cover this axis (env-level
+          GIT_CONFIG_GLOBAL neutralization, and the command-line -c
+          override), and prior to this test NEITHER had actually been shown
+          to close it -- the guarantee was asserted, not demonstrated. This
+          is why the original "not a gap" verdict was incomplete rather than
+          simply lacking a test: it happened to be correct, but only because
+          two independent, previously-unproven mechanisms both cover it. A
+          future author must not "simplify" away either mechanism (the env
+          neutralization or the argv override) on the assumption the other
+          alone is sufficient -- this test is what proves neither is
+          individually provable-sufficient without the other also being
+          disabled, so removing one without re-verifying reopens exactly
+          this axis.
         """
         sentinel = tmp_path / "sentinel-xdg-config-home-helper-fired"
         helper_script = tmp_path / "hostile-xdg-helper.sh"
