@@ -97,8 +97,21 @@ post-decode (each `str` character in that range is an unambiguous control codepo
 byte fragment) — at the byte level, `0x80`–`0x9F` are continuation bytes inside legitimate
 multi-byte UTF-8 sequences, and a naive byte-level strip would corrupt genuine non-ASCII
 content in a remote message. This matters especially for the opt-in `GIT_TRACE` passthrough
-(`CLAGENTIC_LOADOUT_PUSH_GIT_TRACE`), which dumps git's own packet/hook/transport trace —
-verbose output that can otherwise surface a credential-helper invocation's headers.
+— reachable via `loadout-push`'s discoverable `--verbose`/`--trace` flag, or via the
+`CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` env var it keeps working as a compat alias for (see
+[verbs.md](verbs.md#loadout-push--bot-attributed-commit-push--pr-openupdate)) — which dumps
+git's own packet/hook/transport trace: verbose output that can otherwise surface a
+credential-helper invocation's headers. The SAME redaction pass documented on this page
+applies to that output before it can reach a raised message, stdout, or stderr — there is no
+second, unredacted path for trace output to reach a caller.
+
+**`--dry-run`'s transcript is redacted through this SAME choke point, not a second one.** A
+`--dry-run` push (see [verbs.md](verbs.md#loadout-push--bot-attributed-commit-push--pr-openupdate))
+prints its stdout+stderr transcript via `push.push_redaction.redact_push_secrets` with the
+resolved token passed as a known secret — the identical function every other field on this
+page already goes through, called at the identical two sites (`GitPushError.__init__` for a
+failing push, and `git_push.git_push_with_token`'s own dry-run branch for a successful one)
+rather than a new, divergently-implemented redaction pass for this one surface.
 
 **The pre-lease fetch is credentialed, not ambient.** `push.lease_control.resolve_lease`
 fetches the target branch's remote-tracking ref (see below) via
@@ -120,6 +133,12 @@ with no second redaction step.
 - See [verbs.md](verbs.md#loadout-push--bot-attributed-commit-push--pr-openupdate) for the
   `--force-with-lease`/`--no-force-with-lease` CLI control and the printed
   resolved-lease-state contract, and the troubleshooting note on `(stale info)` below.
+- When a failure's classified message still isn't enough: re-run with `--dry-run` (a
+  read-only push attempt through the same minted credential path, no ref updated on the
+  remote) and/or `--verbose`/`--trace` (git's own verbose output plus a GIT_TRACE
+  passthrough) — see [verbs.md](verbs.md#loadout-push--bot-attributed-commit-push--pr-openupdate)
+  for both flags. This is the sanctioned substitute for shelling out to raw git under an
+  ambient credential.
 
 ## Troubleshooting: `(stale info)`
 

@@ -93,6 +93,26 @@ PRESERVED (load-bearing, not identity):
     token-in-logs (every raised message here is built from static labels,
     HTTP status codes, and caller-supplied non-secret values only).
 
+SANCTIONED DIAGNOSTIC AFFORDANCE -- --DRY-RUN / --VERBOSE (lr-68039e): a
+caller with a failing push previously had NO sanctioned way to see the
+full transcript beyond what this verb's own classified failure message
+already surfaces -- no --dry-run, no discoverable verbose flag, only an
+undiscoverable env var (CLAGENTIC_LOADOUT_PUSH_GIT_TRACE, never mentioned
+in --help). Prohibition without affordance guarantees a caller reaches
+around the minted-credential path entirely (raw git, an ambient
+credential) to get what it needs. --dry-run runs a read-only `git push
+--dry-run` through the SAME minted credential, SAME hermeticity
+pre-flight, and SAME single git-push call site (push.git_push.
+git_push_with_token, test-locked at
+tests/test_push_shared_git_push_entrypoint.py) a real push uses --
+skipping PR creation/update and the post-push remote readback, since
+nothing was actually pushed. --verbose/--trace is the discoverable form of
+that same env var: both enable the identical GIT_TRACE passthrough, plus
+`git push -v`. Every byte either flag surfaces passes through the same
+redaction choke point (push.push_redaction.redact_push_secrets) every
+other push-failure field already uses -- one choke point, never a second
+implementation.
+
 POST-PUSH HEAD SHA (lr-e36dec; CREATE PATH ONLY as of lr-2500b7 -- see
 below): the PR-open (create) success envelope carries "head_sha" -- the
 project root's `git rev-parse HEAD` value AFTER any bot-identity
@@ -398,7 +418,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "--force-with-lease/--no-force-with-lease explicitly control "
             "whether the push forces with a lease; the resolved value and "
             "its origin are always printed to stderr before the push runs "
-            "-- see those flags' own help."
+            "-- see those flags' own help. --dry-run performs a read-only "
+            "push attempt through the same minted credential path, "
+            "surfacing the full transcript with no ref updated on the "
+            "remote. --verbose/--trace enables git's own verbose push "
+            "output plus a GIT_TRACE passthrough (also reachable via the "
+            "CLAGENTIC_LOADOUT_PUSH_GIT_TRACE env var) for phase-level "
+            "diagnosis -- see those flags' own help."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -646,6 +672,43 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "when bot-identity re-authoring rewrote this branch's commits "
         "(the ordinary case for a re-authored push against its own "
         "previously-pushed history).",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=False,
+        dest="dry_run",
+        help="Read-only push attempt through the SAME minted per-caller "
+        "credential path, the SAME hermeticity pre-flight, and the SAME "
+        "single git-push call site a real push uses (`git push --dry-run`) "
+        "-- no ref is updated on the remote. Surfaces the full transcript "
+        "(including any `remote: `-prefixed sideband) on stderr under the "
+        "caller's own identity -- the sanctioned substitute for shelling "
+        "out to raw git when a push fails opaquely. Skips PR creation/"
+        "update and the post-push remote readback (nothing was pushed to "
+        "read back). Combine with --verbose/--trace for phase-level "
+        "detail. Ignored (has no effect) on --update-pr, which never "
+        "pushes.",
+    )
+    parser.add_argument(
+        "--verbose",
+        "--trace",
+        action="store_true",
+        default=False,
+        dest="verbose",
+        help="Enable git's own verbose push output (`git push -v`) plus "
+        "the GIT_TRACE passthrough (packet/hook/transport trace), so a "
+        "failed push's phase -- local hook / transport / remote "
+        "negotiation / server hook -- is distinguishable without server-"
+        "side log access. This is the discoverable form of the "
+        "CLAGENTIC_LOADOUT_PUSH_GIT_TRACE environment variable (still "
+        "honored as a compat alias -- either turns on the identical "
+        "passthrough). All trace output passes through the same "
+        "redaction choke point every other push-failure field uses "
+        "(push.push_redaction.redact_push_secrets) before it can reach "
+        "stdout, stderr, or any raised message -- see docs/"
+        "push-failure-reporting.md for exactly what is and is not "
+        "redacted.",
     )
     parser.add_argument(
         "--merge-method",
@@ -1804,11 +1867,30 @@ def _run_create_pr(
             lease_origin=lease.origin,
             platform=args.platform,
             other_platform_label=other_platform_label,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
         )
     except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
         _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
     except GitPushError as exc:
         _fail(str(exc), code=EXIT_PUSH_FAILED)
+
+    if args.dry_run:
+        # --DRY-RUN STOPS HERE (lr-68039e): nothing was pushed to the
+        # remote (git_push_with_token already printed the full transcript
+        # to stderr) -- a PR create/update call and the post-push remote
+        # readback below both assume a real push landed, which this
+        # invocation deliberately did not perform. EXIT_OK: a dry-run that
+        # completed its git-push --dry-run attempt (whether or not the
+        # attempt itself would have succeeded -- a non-zero dry-run exit
+        # already raised GitPushError above and exited EXIT_PUSH_FAILED)
+        # is a successful DIAGNOSTIC run.
+        print(
+            f"push: --dry-run complete for {owner}/{repo}#{branch} -- no ref "
+            f"was updated on the remote; see the transcript above.",
+            file=sys.stderr,
+        )
+        return EXIT_OK
 
     # Post-push authoritative remote readback (lr-4e8a43) -- performed BEFORE
     # the PR-open call so its result is available to enrich a PR-open

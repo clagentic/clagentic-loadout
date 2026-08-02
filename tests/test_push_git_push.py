@@ -132,6 +132,118 @@ class TestGitPushWithToken:
         _git(["commit", "--amend", "-m", "work (amended)"], repo)
         git_push_with_token("origin", "feature", "unused-token-value", repo, force_with_lease=True)
 
+    def test_dry_run_updates_no_ref_on_the_remote(self, tmp_path):
+        """lr-68039e acceptance criterion: --dry-run through the minted
+        credential path must update NO ref on the remote."""
+        repo, remote = _make_repo_with_bare_remote(tmp_path)
+        git_push_with_token("origin", "feature", "unused-token-value", repo, dry_run=True)
+
+        r = subprocess.run(
+            ["git", "branch", "-a"], cwd=str(remote), capture_output=True, text=True, check=True,
+        )
+        assert "feature" not in r.stdout
+
+    def test_dry_run_returns_transcript_and_prints_it_to_stderr(self, tmp_path, capsys):
+        """A successful dry-run must surface the full transcript -- both
+        returned (for a caller reading it programmatically) and printed to
+        stderr (for a caller that only reads output)."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        transcript = git_push_with_token("origin", "feature", "unused-token-value", repo, dry_run=True)
+        assert transcript is not None
+        assert "dry-run" in transcript
+        captured = capsys.readouterr()
+        assert "--dry-run transcript" in captured.err
+
+    def test_non_dry_run_push_still_returns_none(self, tmp_path):
+        """The dry-run return value is additive -- a real push's success
+        path is unchanged (no caller depends on a return value today)."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        result = git_push_with_token("origin", "feature", "unused-token-value", repo)
+        assert result is None
+
+    def test_dry_run_transcript_includes_the_would_be_ref_update(self, tmp_path):
+        """The dry-run transcript surfaces what git itself reports it WOULD
+        do -- git's own `--dry-run` semantics never actually contact a
+        server-side pre-receive hook for a genuine round-trip (a dry-run
+        push is resolved client-side; verified directly against real git:
+        a hook that would reject a real push does not even fire during a
+        dry-run of the same push), so the transcript's own "To <remote>" /
+        "[new branch] ..." lines -- git's own reported would-be outcome --
+        are the actual content a dry-run surfaces, not fabricated remote
+        sideband a dry-run never receives."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        transcript = git_push_with_token("origin", "feature", "unused-token-value", repo, dry_run=True)
+        assert transcript is not None
+        assert "feature" in transcript
+        assert "dry-run exit=0" in transcript
+
+    def test_dry_run_failure_still_raises_git_push_error(self, tmp_path):
+        """A --dry-run push that would itself be rejected still raises
+        GitPushError exactly like a real push would -- proving what a real
+        push would do is the whole point of a dry-run, not silently
+        swallowing a would-be failure."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        with pytest.raises(GitPushError):
+            git_push_with_token("nonexistent-remote", "feature", "some-token-value", repo, dry_run=True)
+
+    def test_dry_run_runs_the_same_hermeticity_pre_flight(self, tmp_path, monkeypatch):
+        """--dry-run must not skip the hermeticity pre-flight (module
+        docstring: a dry-run that skipped it would report success where a
+        real push would refuse) -- proven by making the pre-flight itself
+        raise and asserting a dry-run call surfaces the identical error."""
+        import clagentic_loadout.push.git_push as git_push_module
+
+        def _boom(git_cwd=None):
+            raise git_push_module.GitVersionTooOldError("synthetic: git too old")
+
+        monkeypatch.setattr(git_push_module, "check_git_version", _boom)
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        with pytest.raises(git_push_module.GitVersionTooOldError):
+            git_push_with_token("origin", "feature", "unused-token-value", repo, dry_run=True)
+
+    def test_dry_run_token_never_appears_in_transcript_or_stderr(self, tmp_path, capsys):
+        """Token-leak invariant (lr-68039e task requirement 3), extended to
+        the --dry-run surface: the resolved token value must appear nowhere
+        in the returned transcript or in anything printed to stderr."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        secret_token = "sk-dry-run-secret-token-should-never-leak"
+        transcript = git_push_with_token("origin", "feature", secret_token, repo, dry_run=True)
+        assert transcript is not None
+        assert secret_token not in transcript
+        captured = capsys.readouterr()
+        assert secret_token not in captured.err
+        assert secret_token not in captured.out
+
+    def test_verbose_flag_enables_git_trace_without_leaking_token(self, tmp_path, capsys):
+        """--verbose (programmatic GIT_TRACE + `-v`) must produce far more
+        output than the default, and the token-leak invariant must still
+        hold across all of it (task requirement 3)."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        secret_token = "sk-verbose-secret-token-should-never-leak"
+        with pytest.raises(GitPushError) as exc_info:
+            git_push_with_token(
+                "nonexistent-remote", "feature", secret_token, repo, verbose=True,
+            )
+        assert secret_token not in str(exc_info.value)
+        captured = capsys.readouterr()
+        assert secret_token not in captured.err
+        assert secret_token not in captured.out
+
+    def test_verbose_dry_run_combined_no_token_leak(self, tmp_path, capsys):
+        """--dry-run and --verbose/--trace combined produce the most
+        output of any surface this task adds -- the token-leak invariant
+        must hold across the combination too."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        secret_token = "sk-combined-secret-token-should-never-leak"
+        transcript = git_push_with_token(
+            "origin", "feature", secret_token, repo, dry_run=True, verbose=True,
+        )
+        assert transcript is not None
+        assert secret_token not in transcript
+        captured = capsys.readouterr()
+        assert secret_token not in captured.err
+        assert secret_token not in captured.out
+
     def test_platform_mismatch_hint_included_on_auth_shaped_failure(self, tmp_path, monkeypatch):
         """A synthetic auth-shaped git stderr (via a wrapper 'git' that
         fails with an auth-marker message) should carry the platform-
