@@ -3562,3 +3562,142 @@ class TestBranchCommitCheck:
         assert code == verb.EXIT_OK
         stderr = capsys.readouterr().err
         assert "branch commit-subject check could not run" in stderr
+
+
+class TestDryRunAndVerbose:
+    """--dry-run and --verbose/--trace (lr-68039e): a sanctioned diagnostic
+    affordance so a caller with a failing push never needs to shell out to
+    raw git under an ambient credential to see the full transcript."""
+
+    def test_dry_run_help_documents_both_flags_and_the_env_var(self, monkeypatch, capsys):
+        code = _run_main(["--help"], token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch)
+        assert code == verb.EXIT_OK
+        out = " ".join(capsys.readouterr().out.split())
+        assert "--dry-run" in out
+        assert "--verbose" in out
+        assert "--trace" in out
+        assert "CLAGENTIC_LOADOUT_PUSH_GIT_TRACE" in out
+
+    def test_dry_run_updates_no_ref_and_exits_ok_without_opening_a_pr(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, remote = repo_with_remote
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin", "--dry-run",
+            ],
+            # A PR-open call would be a hard failure if reached -- --dry-run
+            # must never call create_pr at all (nothing was pushed).
+            token_provider=_RecordingTokenProvider(),
+            opener=lambda req, timeout=15: (_ for _ in ()).throw(
+                AssertionError("PR-open must not be called on --dry-run")
+            ),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        refs = _git(["ls-remote", str(remote)], repo).stdout
+        assert "refs/heads/feature" not in refs
+
+    def test_dry_run_prints_transcript_to_stderr(self, repo_with_remote, monkeypatch, capsys):
+        repo, _remote = repo_with_remote
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin", "--dry-run",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "--dry-run transcript" in stderr
+        assert "--dry-run complete" in stderr
+
+    def test_dry_run_never_leaks_the_minted_token(self, repo_with_remote, monkeypatch, capsys):
+        repo, _remote = repo_with_remote
+        secret_token = "sk-verb-dry-run-secret-should-never-leak"
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin", "--dry-run",
+            ],
+            token_provider=_RecordingTokenProvider(token=secret_token),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        captured = capsys.readouterr()
+        assert secret_token not in captured.out
+        assert secret_token not in captured.err
+
+    def test_verbose_flag_never_leaks_the_minted_token_on_a_failed_push(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """--verbose triggers the GIT_TRACE passthrough, which dumps far
+        more subprocess detail than the default -- the token-leak
+        invariant must hold across it (task requirement 3)."""
+        repo, _remote = repo_with_remote
+        secret_token = "sk-verb-verbose-secret-should-never-leak"
+        # Break ONLY the push transport (pushurl, a real bare-repo path this
+        # fixture already relies on) while leaving `git remote get-url
+        # origin` (coordinate parsing) intact -- a bogus, guaranteed-
+        # unreachable pushurl fails the actual `git push` fast and
+        # deterministically, with no real network access, exercising the
+        # verbose/trace surface on the failure path.
+        _git(["config", "remote.origin.pushurl", "/nonexistent/push/target.git"], repo)
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin", "--verbose",
+            ],
+            token_provider=_RecordingTokenProvider(token=secret_token),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PUSH_FAILED
+        captured = capsys.readouterr()
+        assert secret_token not in captured.out
+        assert secret_token not in captured.err
+
+    def test_trace_alias_is_accepted_as_a_synonym_for_verbose(self, repo_with_remote, monkeypatch):
+        """--trace is documented as the SAME flag as --verbose (both set
+        the identical dest), not a second, divergent mechanism."""
+        repo, _remote = repo_with_remote
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin", "--trace", "--dry-run",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_dry_run_ignored_on_update_pr_which_never_pushes(self, tmp_path, monkeypatch):
+        """--dry-run has no effect on --update-pr -- that path never calls
+        git_push_with_token at all (metadata-only PATCH), so --dry-run is
+        simply unused there rather than raising a usage error."""
+        repo, _remote = _repo_with_directly_resolvable_remote(tmp_path)
+        provider = _RecordingTokenProvider()
+
+        def opener(req, timeout=30):
+            if req.get_method() == "PATCH":
+                return _json_resp(200, {"number": 42})
+            raise AssertionError(f"unexpected: {req.get_method()} {req.full_url}")
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--update-pr", "--pr", "42", "--title", "feat: new title",
+                "--dry-run",
+            ],
+            token_provider=provider,
+            opener=opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
