@@ -669,6 +669,27 @@ learned to distrust this verb's exit code (the documented origin of that
 distrust) can now read the message instead of falling back to its own
 local `git rev-parse` guess.
 
+**`--force-with-lease` / `--no-force-with-lease` — explicit lease control, always
+printed:** an explicit flag always wins over the auto-derived default (whether
+bot-identity re-authoring rewrote this branch's commits — see "Caller-derived commit
+identity" above). Before this control existed, `force_with_lease` was derived SOLELY from
+that re-authoring signal with no override, and this verb never fetched the remote-tracking
+ref first — silently forcing a lease evaluation against a **stale** local copy of the
+remote's state on essentially every re-authored push, which can surface as a `(stale
+info)` rejection classified `unknown` (see
+[push-failure-reporting.md](push-failure-reporting.md#troubleshooting-stale-info)).
+Whenever the resolved decision is to force, this verb now fetches the target branch from
+the remote immediately before the push (best-effort: a fetch failure degrades to a printed
+warning, never a hard refusal). The resolved `force_with_lease` value and its origin
+(`cli-flag(--force-with-lease)`, `cli-flag(--no-force-with-lease)`,
+`history-rewritten(auto)`, or `default-false(no-rewrite)`) are **always printed to stderr
+before the push runs** — never inferred silently. See
+[push-failure-reporting.md](push-failure-reporting.md) for the full failure-reporting
+contract this pairs with, including the reject-reason parser that replaced the earlier
+substring classifier and the `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` opt-in verbose-trace
+passthrough (undiscoverable from `--help` today — see that env var's own module docstring
+in `push.git_push` for the redaction guarantee that applies to its output).
+
 ### `loadout-merge` — the merge gate
 
 `clagentic_loadout.merge.verb`. **This is the load-bearing release gate**

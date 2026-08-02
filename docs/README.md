@@ -30,6 +30,9 @@ reference lives.
 7. [integration.md](integration.md) — the harness runtime contract: exactly
    what a spawn environment must supply (env vars, config-file tiers,
    precedence) for a `clagentic: loadout` verb to run unattended.
+8. [push-failure-reporting.md](push-failure-reporting.md) — how `loadout-push`
+   reports a failed `git push`: the always-carried-transcript guarantee, the
+   `sub_cause` label set, and the redaction guarantee.
 
 ## All docs
 
@@ -42,3 +45,4 @@ reference lives.
 | [merge-authority.md](merge-authority.md) | The `loadout-merge` identity-binding model, fail-closed guarantee, attestation-source configuration, and the git-host attestation mark. |
 | [guard-policy.md](guard-policy.md) | The `clagentic_loadout.guard` policy contract: every guard category, its API, its config shape. |
 | [integration.md](integration.md) | The runtime contract a harness spawning a loadout-driven agent must satisfy: env vars, config-file tiers, precedence. |
+| [push-failure-reporting.md](push-failure-reporting.md) | The `loadout-push` failure-reporting contract: transcript guarantee, `sub_cause` labels, redaction. |
