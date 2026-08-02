@@ -75,7 +75,7 @@ multi-valued-list problem specifically.
 REPO-LOCAL CONFIG CANNOT BE SUPPRESSED — THIS IS A DESIGN CONSTRAINT, NOT A
 GAP LEFT UNADDRESSED: `.git/config` is read unconditionally; no environment
 variable disables it (unlike global/system scope, which GIT_CONFIG_GLOBAL/
-SYSTEM/NOSYSTEM above can redirect to /dev/null). Three specific repo-local
+SYSTEM/NOSYSTEM above can redirect to /dev/null). Four specific repo-local
 hazards cannot be neutralized by environment isolation alone:
   - `credential.helper` at repo-local scope (also multi-valued).
   - `http.<url>.extraheader` — exactly where CI runners (GitHub Actions,
@@ -85,10 +85,27 @@ hazards cannot be neutralized by environment isolation alone:
     (git 2.13+) — can load arbitrary config from anywhere on the
     filesystem, making repo-local config a channel for indirection to a
     config file that is not itself under `.git/`.
+  - `url.<base>.insteadOf` / `url.<base>.pushInsteadOf` (pre-merge security
+    review finding, repo-local-hazard-coverage-gap): a URL rewrite rule that
+    silently REDIRECTS a push to a different host than the one the caller
+    resolved and believes it is pushing to. This is a credential-EXPOSURE
+    hazard even though the directive carries no secret value itself: the
+    minted token this package presents via GIT_ASKPASS is presented to
+    WHATEVER HOST THE PUSH ACTUALLY REACHES, and an `insteadOf`/
+    `pushInsteadOf` rule can make that host an attacker-chosen one while
+    every other signal (the resolved remote name, the printed refspec)
+    still shows the caller's originally intended target. Ruling this out of
+    scope as "not a credential source" is too narrow a reading: the hazard
+    this module exists to close is credential EXPOSURE, and redirection is
+    a delivery-target vector for exactly that, not a different category of
+    concern. `pushInsteadOf` is the more directly relevant of the two here
+    (it rewrites only the push destination); `insteadOf` is matched too
+    since it is a strict superset (rewrites push AND fetch) and therefore
+    at least as broad a hazard.
 `check_repo_local_config_hazards` below inspects the target repo's
 resolved, effective config (`git config --local --list`, which is populated
 exclusively from `.git/config` — the "resolved value observed," not a
-guess, per CLAUDE.md hard rule 4) for these three hazard classes BEFORE any
+guess, per CLAUDE.md hard rule 4) for these four hazard classes BEFORE any
 credentialed git subprocess runs, and this package's credentialed callers
 (`push.git_push.git_push_with_token` / `git_fetch_with_token`) FAIL CLOSED
 when any hazard is found — see `RepoLocalConfigHazardError`. A caller that
@@ -145,11 +162,30 @@ _GIT_CONFIG_INJECTION_RE = re.compile(r"^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$")
 #: the KEY half of each `git config --local --list` line (before the `=`).
 _HAZARD_KEY_PREFIXES = ("credential.", "includeif.")
 
-#: `http.<url>.extraheader` is a THIRD hazard shape, but its key is not a
-#: fixed prefix -- the URL segment varies per remote. Matched as "starts
-#: with http., ends with .extraheader", case-insensitively (git config keys
-#: are case-insensitive for the section/variable name).
+#: `http.<url>.extraheader` is a hazard shape whose key is not a fixed
+#: prefix -- the URL segment varies per remote. Matched as "starts with
+#: http., ends with .extraheader", case-insensitively (git config keys are
+#: case-insensitive for the section/variable name).
 _HTTP_EXTRAHEADER_RE = re.compile(r"^http\..*\.extraheader$", re.IGNORECASE)
+
+#: `url.<base>.insteadOf` / `url.<base>.pushInsteadOf` (pre-merge security
+#: review finding, repo-local-hazard-coverage-gap): a repo-local URL rewrite
+#: rule that silently REDIRECTS a push to an attacker-chosen host, which
+#: then harvests the minted credential this package's GIT_ASKPASS presents
+#: to it -- the directive itself carries no secret, but the REDIRECTION is
+#: a credential-exposure vector in its own right (the "not a credential
+#: source, therefore out of scope" framing is too narrow: it is a
+#: *delivery-target* hazard, not a *credential-value* hazard, and this
+#: module's fail-closed posture treats either as unsuppressable-by-
+#: environment and therefore in scope). `pushInsteadOf` is the more
+#: directly relevant of the two here -- it rewrites ONLY the push
+#: destination, exactly the operation this package's minted token is
+#: presented against; `insteadOf` is also matched because it rewrites BOTH
+#: push and fetch and is therefore at least as broad a hazard. Matched the
+#: same way as `_HTTP_EXTRAHEADER_RE` -- "starts with url., ends with
+#: .insteadof or .pushinsteadof", case-insensitively; the base-URL segment
+#: in between varies per rule.
+_URL_INSTEADOF_RE = re.compile(r"^url\..*\.(insteadof|pushinsteadof)$", re.IGNORECASE)
 
 
 class GitVersionTooOldError(Exception):
@@ -163,10 +199,11 @@ class GitVersionTooOldError(Exception):
 
 class RepoLocalConfigHazardError(Exception):
     """Raised when the target repo's LOCAL `.git/config` carries one of the
-    three unsuppressable hermeticity hazards (see module docstring):
-    a repo-local `credential.*` entry, an `http.<url>.extraheader` entry, or
-    an `includeIf.*` directive. Fail-closed by design -- see module
-    docstring for why there is no override flag."""
+    four unsuppressable hermeticity hazards (see module docstring):
+    a repo-local `credential.*` entry, an `http.<url>.extraheader` entry, an
+    `includeIf.*` directive, or a `url.<base>.insteadOf`/
+    `url.<base>.pushInsteadOf` redirect rule. Fail-closed by design -- see
+    module docstring for why there is no override flag."""
 
 
 def _parse_git_version(version_output: str) -> tuple[int, int, int] | None:
@@ -261,9 +298,14 @@ def neutralize_ambient_git_env(env: dict[str, str]) -> dict[str, str]:
 def check_repo_local_config_hazards(git_cwd: Path | None = None) -> tuple[str, ...]:
     """Inspect the target repo's LOCAL config (`git config --local --list`,
     populated exclusively from `.git/config` -- never global/system scope)
-    for the three unsuppressable hermeticity hazards (module docstring):
-    a repo-local `credential.*` entry, an `http.<url>.extraheader` entry, or
-    an `includeIf.*` directive.
+    for the unsuppressable hermeticity hazards (module docstring):
+    a repo-local `credential.*` entry, an `http.<url>.extraheader` entry, an
+    `includeIf.*` directive, or a `url.<base>.insteadOf` /
+    `url.<base>.pushInsteadOf` redirect rule (pre-merge security review
+    finding, repo-local-hazard-coverage-gap -- a redirect rule is a
+    credential-EXPOSURE hazard even though it carries no secret itself: it
+    can silently retarget a push to an attacker-chosen host, which then
+    receives the minted token this package's GIT_ASKPASS presents to it).
 
     Returns a tuple of hazard descriptions (KEY only, never the VALUE --
     a credential.helper's configured command, or an extraheader's carried
@@ -293,7 +335,11 @@ def check_repo_local_config_hazards(git_cwd: Path | None = None) -> tuple[str, .
         if "=" not in line:
             continue
         key = line.split("=", 1)[0].strip().lower()
-        if key.startswith(_HAZARD_KEY_PREFIXES) or _HTTP_EXTRAHEADER_RE.match(key):
+        if (
+            key.startswith(_HAZARD_KEY_PREFIXES)
+            or _HTTP_EXTRAHEADER_RE.match(key)
+            or _URL_INSTEADOF_RE.match(key)
+        ):
             hazards.append(key)
     return tuple(hazards)
 

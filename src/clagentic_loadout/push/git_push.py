@@ -635,7 +635,7 @@ def git_fetch_with_token(
     HERMETICITY PRE-FLIGHT (lr-a868d2): before any subprocess spawns, this
     checks the resolved git version (GitVersionTooOldError if below
     `push.git_hermeticity.MIN_GIT_VERSION`) and the target repo's LOCAL
-    config for the three unsuppressable hazards (RepoLocalConfigHazardError
+    config for the unsuppressable hazards (RepoLocalConfigHazardError
     if any is found) — see `push.git_hermeticity`'s own module docstring for
     why environment isolation alone cannot cover repo-local config. Both
     checks fail closed; neither is optional or configurable, matching the
@@ -652,8 +652,9 @@ def git_fetch_with_token(
             f"{sorted(set(hazards))!r}. Repo-local config is always read by "
             f"git; there is no environment variable that suppresses it. "
             f"Remove the offending repo-local config entry (credential.*, "
-            f"http.*.extraheader, or includeIf.*) before retrying -- this "
-            f"check fails closed with no override."
+            f"http.*.extraheader, includeIf.*, or url.*.insteadOf/"
+            f"pushInsteadOf) before retrying -- this check fails closed "
+            f"with no override."
         )
     with _credentialed_git_env(token) as env:
         result = subprocess.run(
@@ -717,7 +718,7 @@ def git_push_with_token(
     HERMETICITY PRE-FLIGHT (lr-a868d2): before any subprocess spawns, this
     checks the resolved git version (GitVersionTooOldError if below
     `push.git_hermeticity.MIN_GIT_VERSION`) and the target repo's LOCAL
-    config for the three unsuppressable hazards (RepoLocalConfigHazardError
+    config for the unsuppressable hazards (RepoLocalConfigHazardError
     if any is found) — see `push.git_hermeticity`'s own module docstring for
     why environment isolation alone cannot cover repo-local config. Both
     checks fail closed; neither is optional or configurable, matching the
@@ -734,8 +735,9 @@ def git_push_with_token(
             f"{sorted(set(hazards))!r}. Repo-local config is always read by "
             f"git; there is no environment variable that suppresses it. "
             f"Remove the offending repo-local config entry (credential.*, "
-            f"http.*.extraheader, or includeIf.*) before retrying -- this "
-            f"check fails closed with no override."
+            f"http.*.extraheader, includeIf.*, or url.*.insteadOf/"
+            f"pushInsteadOf) before retrying -- this check fails closed "
+            f"with no override."
         )
     with _credentialed_git_env(token) as env:
         refspec = f"{branch}:{branch}"
