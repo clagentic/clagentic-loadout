@@ -10,6 +10,8 @@ exception classes so main() never needs a transport-specific except clause.
 
 from __future__ import annotations
 
+from clagentic_loadout.push.push_redaction import redact_push_secrets
+
 
 class PushUsageError(Exception):
     """Raised for a caller-input-shape error (bad flags, bad owner/repo
@@ -42,7 +44,71 @@ class AuthorMismatchError(Exception):
 
 
 class GitPushError(Exception):
-    """Raised when the underlying `git push` subprocess exits non-zero."""
+    """Raised when the underlying `git push` subprocess exits non-zero.
+
+    lr-f57f13 TYPED FIELDS: previously a bare marker class with no `__init__`
+    and no fields — the raise-time locals (raw stderr, classification,
+    per-ref reject reason, etc.) were destroyed at the raise and survived
+    only inside a formatted f-string, with nothing to stop a future author
+    from reformatting that string and silently dropping one. Precedent in
+    this same module: `PrOpenError` carries `status_code` as a typed field
+    "without parsing the status back out of the formatted message string" —
+    this class was the odd one out, holding the richest diagnostic data with
+    no typed access to any of it.
+
+    `__str__` DERIVES the display string from these fields (never the other
+    way around) — see `push.git_push` for the single formatter both the
+    display string and any structured consumer share.
+
+    STRUCTURAL REDACTION (pre-merge security review): every string-bearing
+    field is redacted via `push.push_redaction.redact_push_secrets` INSIDE
+    `__init__` itself, not merely by convention at the sole current call
+    site (`push.git_push`). Before this fix, "redaction happens at
+    construction" was true only because the one caller that existed
+    happened to pre-redact every argument before calling this constructor —
+    a SECOND construction site anywhere in this package would have been
+    redacted by nothing, and nothing would have caught it (see
+    `tests/test_push_git_push.py::test_git_push_error_direct_construction_still_redacts`,
+    which constructs this class directly with unredacted sentinel values,
+    bypassing `push.git_push` entirely, to enforce this structurally).
+    *known_secrets*: literal values this call site holds (the minted token,
+    verbatim) masked BY EXACT VALUE before the generic pattern-based passes
+    — passed straight through to `redact_push_secrets`. A caller no longer
+    needs to pre-redact any argument before constructing.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        exit_code: int,
+        sub_cause: str,
+        raw_stderr: str,
+        reject_reason: str | None = None,
+        remote_lines: tuple[str, ...] = (),
+        local_hook_lines: tuple[str, ...] = (),
+        reached_transport: bool = False,
+        remote: str | None = None,
+        refspec: str | None = None,
+        lease_forced: bool = False,
+        lease_origin: str = "",
+        known_secrets: tuple[str, ...] = (),
+    ) -> None:
+        def _redact(value: str) -> str:
+            return redact_push_secrets(value, known_secrets=known_secrets)
+
+        super().__init__(_redact(message))
+        self.exit_code = exit_code
+        self.sub_cause = sub_cause
+        self.raw_stderr = _redact(raw_stderr)
+        self.reject_reason = _redact(reject_reason) if reject_reason is not None else None
+        self.remote_lines = tuple(_redact(line) for line in remote_lines)
+        self.local_hook_lines = tuple(_redact(line) for line in local_hook_lines)
+        self.reached_transport = reached_transport
+        self.remote = remote
+        self.refspec = refspec
+        self.lease_forced = lease_forced
+        self.lease_origin = lease_origin
 
 
 class PrOpenError(Exception):
