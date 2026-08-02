@@ -256,6 +256,7 @@ from clagentic_loadout.push.issue_link import (
     normalize_closes_trailer,
     normalize_task_trailer,
 )
+from clagentic_loadout.push.lease_control import resolve_lease
 from clagentic_loadout.push.namespace_guard import (
     check_namespace_allowed,
     resolve_allowed_namespaces,
@@ -380,7 +381,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "<fetched --base>..HEAD is also checked against the same "
             "Conventional Commits grammar; a non-conformant subject (e.g. a "
             "stray merge commit from another PR) fails closed, exit "
-            f"{EXIT_STRAY_MERGE_COMMIT} -- see --skip-branch-commit-check."
+            f"{EXIT_STRAY_MERGE_COMMIT} -- see --skip-branch-commit-check. "
+            "--force-with-lease/--no-force-with-lease explicitly control "
+            "whether the push forces with a lease; the resolved value and "
+            "its origin are always printed to stderr before the push runs "
+            "-- see those flags' own help."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -602,6 +607,32 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"before any push, exit {EXIT_SCRATCH_LITTER_FOUND} "
         f"({EXIT_SCRATCH_LITTER_FOUND}=EXIT_SCRATCH_LITTER_FOUND). Default: "
         "warn on stderr and continue.",
+    )
+    lease_group = parser.add_mutually_exclusive_group()
+    lease_group.add_argument(
+        "--force-with-lease",
+        action="store_true",
+        default=None,
+        dest="cli_force_with_lease",
+        help="Force the push with `git push --force-with-lease`, and "
+        "refresh the remote-tracking ref via `git fetch` immediately "
+        "before the lease is evaluated (push.lease_control). ALWAYS wins "
+        "over the auto-derived default (whether bot-identity re-authoring "
+        "rewrote this branch's commits) -- the resolved value and its "
+        "origin are always printed to stderr before the push runs, never "
+        "inferred silently. Mutually exclusive with --no-force-with-lease.",
+    )
+    lease_group.add_argument(
+        "--no-force-with-lease",
+        action="store_false",
+        default=None,
+        dest="cli_force_with_lease",
+        help="Push WITHOUT --force-with-lease, overriding the auto-derived "
+        "default. Mutually exclusive with --force-with-lease. Omitting "
+        "both flags falls back to the auto-derived default: forced only "
+        "when bot-identity re-authoring rewrote this branch's commits "
+        "(the ordinary case for a re-authored push against its own "
+        "previously-pushed history).",
     )
     parser.add_argument(
         "--merge-method",
@@ -1706,11 +1737,42 @@ def _run_create_pr(
         skip=args.skip_branch_commit_check,
     )
 
+    # LEASE CONTROL (lr-f57f13, D5 DECIDED): never derive force_with_lease
+    # silently from history_rewritten alone -- resolve_lease applies the
+    # explicit CLI override first, refreshes the remote-tracking ref before
+    # trusting a forced lease evaluation, and returns the origin label this
+    # call prints below BEFORE the push runs (see push.lease_control's own
+    # module docstring for the full defect this closes: loadout re-authoring
+    # commits on essentially every push silently forced a lease evaluation
+    # against a STALE remote-tracking ref, converting an ordinary conflict
+    # into git's least-explained rejection shape, "(stale info)"). `token`
+    # is passed through so the pre-lease fetch runs via the SAME
+    # credentialed envelope as the push itself (pre-merge security review
+    # finding: the first shipped version fetched via an ambient credential
+    # helper instead of the minted token) -- see push.lease_control's own
+    # docstring, "CREDENTIALED FETCH, NOT AN AMBIENT ONE".
+    lease = resolve_lease(
+        cli_force_with_lease=args.cli_force_with_lease,
+        history_rewritten=history_rewritten,
+        remote=remote_name,
+        branch=branch,
+        project_root=project_root,
+        token=token,
+    )
+    print(
+        f"push: force-with-lease={lease.force_with_lease} "
+        f"(origin={lease.origin!r}, pre-lease fetch attempted={lease.fetch_attempted})",
+        file=sys.stderr,
+    )
+    if lease.fetch_warning:
+        print(f"push: WARNING -- {lease.fetch_warning}", file=sys.stderr)
+
     other_platform_label = PLATFORM_FORGEJO if args.platform == PLATFORM_GITHUB else PLATFORM_GITHUB
     try:
         git_push_with_token(
             remote_name, branch, token, project_root,
-            force_with_lease=history_rewritten,
+            force_with_lease=lease.force_with_lease,
+            lease_origin=lease.origin,
             platform=args.platform,
             other_platform_label=other_platform_label,
         )
