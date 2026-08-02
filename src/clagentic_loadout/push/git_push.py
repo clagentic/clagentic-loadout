@@ -97,6 +97,30 @@ undiagnosable on its own. On failure this module additionally:
     transport vs. local-hook vs. remote-hook phase is distinguishable at
     the source when the coarse classification isn't enough.
 
+DISCOVERABLE --verbose/--trace, SAME PASSTHROUGH (lr-68039e): the
+GIT_TRACE passthrough above was, until this task, reachable ONLY via the
+undiscoverable CLAGENTIC_LOADOUT_PUSH_GIT_TRACE env var -- absent from
+`push --help` entirely. `push.verb`'s `--verbose`/`--trace` flag now sets
+this SAME env var's effect programmatically (see *verbose* below) rather
+than adding a second trace mechanism; the env var keeps working as a
+compat alias for a caller that already sets it. `git push -v` is also
+added to the argv on the same flag, for the ordinary (non-GIT_TRACE)
+verbose-porcelain output git itself defines.
+
+--DRY-RUN, THE SAME CALL SITE (lr-68039e): a read-only substitute for an
+agent shelling out to raw git when a push fails opaquely. *dry_run* below
+appends `--dry-run` to the SAME argv this function always builds -- through
+the SAME `_credentialed_git_env` envelope, the SAME single
+`subprocess.run` call, the SAME hermeticity pre-flight (`check_git_version`,
+`check_repo_local_config_hazards`) a real push runs. This is deliberate:
+a dry-run that used a second call site or skipped pre-flight would report
+success where a real push would refuse, which is a misleading affordance,
+worse than no affordance at all. On a dry-run, this function prints the
+full (redacted) stdout+stderr transcript to stderr UNCONDITIONALLY --
+including on the exit-0 case a real push's own success path never prints
+anything for, since a dry-run's only purpose is to surface that
+transcript to the caller.
+
 REPORTING RESOLVED FACTS, NOT GUESSES (CLAUDE.md hard rule 4; lr-f57f13
 REJECTED an alternative that would have violated it): even when
 classification lands on "unknown," this module reports what it OBSERVED --
@@ -169,6 +193,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -520,9 +545,16 @@ _HERMETIC_ARGV_PREFIX = ["-c", "credential.helper="]
 
 
 @contextlib.contextmanager
-def _credentialed_git_env(token: str):
+def _credentialed_git_env(token: str, *, force_trace: bool = False):
     """Construct the isolated, token-injected, HERMETIC environment every
     credentialed git subprocess in this module runs under, and yield it.
+
+    *force_trace* (lr-68039e): set True to enable GIT_TRACE the SAME way the
+    CLAGENTIC_LOADOUT_PUSH_GIT_TRACE env var already does below --
+    programmatically, for `git_push_with_token`'s `verbose` parameter (the
+    passthrough `push.verb`'s discoverable --verbose/--trace flag turns on).
+    Not a second trace mechanism: both this parameter and the env var set
+    the identical `env["GIT_TRACE"] = "1"` this function already applies.
 
     SHARED PRIMITIVE (lr-f57f13, pre-merge security review finding): both
     `git_push_with_token` and `git_fetch_with_token` build their subprocess
@@ -592,7 +624,11 @@ def _credentialed_git_env(token: str):
         # local-hook-vs-transport-vs-remote phase distinguishable at the
         # source. GIT_TRACE writes to stderr by default (no value needed);
         # setting it to "1" is git's own documented on-switch.
-        if os.environ.get(_GIT_TRACE_ENV_VAR, "").strip().lower() in ("1", "true", "yes"):
+        if force_trace or os.environ.get(_GIT_TRACE_ENV_VAR, "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
             env["GIT_TRACE"] = "1"
 
         yield env
@@ -682,7 +718,9 @@ def git_push_with_token(
     lease_origin: str = "",
     platform: str | None = None,
     other_platform_label: str | None = None,
-) -> None:
+    dry_run: bool = False,
+    verbose: bool = False,
+) -> str | None:
     """Push *branch* to *remote* using *token* for authentication, via
     GIT_ASKPASS (never the remote URL, never git config, never argv) — see
     `_credentialed_git_env` for the shared environment-construction
@@ -709,6 +747,28 @@ def git_push_with_token(
     lease-related failure never requires re-deriving why forcing was (or
     was not) in effect; see push.verb's own resolve-and-print contract.
 
+    *dry_run* (lr-68039e): pass True to append `--dry-run` to the SAME argv
+    this function always builds, through the SAME call site and hermeticity
+    pre-flight a real push runs (module docstring, "--DRY-RUN, THE SAME
+    CALL SITE") -- no ref is updated on the remote. This function then
+    RETURNS the full (redacted) transcript as a string, printing it to
+    stderr as well, instead of returning None -- a dry-run's only purpose
+    is to surface the transcript, including any `remote: `-prefixed
+    sideband, on the caller's own identity, regardless of whether git's own
+    dry-run exit code is 0 or non-zero. A non-zero dry-run exit still
+    raises GitPushError exactly like a real push would (proving what a real
+    push would do), but the transcript is ALSO printed before that raise so
+    a caller reading only stderr (not catching the exception) still sees it.
+
+    *verbose* (lr-68039e): pass True to enable the SAME opt-in GIT_TRACE
+    passthrough the CLAGENTIC_LOADOUT_PUSH_GIT_TRACE env var already
+    provides (see _GIT_TRACE_ENV_VAR) -- programmatically, so `push.verb`'s
+    --verbose/--trace flag needs no second trace mechanism -- plus `-v` on
+    the git push argv itself for git's own verbose-porcelain output. Redacted
+    exactly like every other field this module produces (see
+    push.push_redaction) before it can ever reach a raised message or
+    stdout/stderr.
+
     Raises GitPushError (never includes the token value) on any non-zero
     `git push` exit. `GitPushError.__init__` redacts every field
     structurally (see push.errors.GitPushError) — this function passes
@@ -723,7 +783,10 @@ def git_push_with_token(
     why environment isolation alone cannot cover repo-local config. Both
     checks fail closed; neither is optional or configurable, matching the
     operator constraint this fix is built against (ambient credentials may
-    always exist and must never be allowed to silently win).
+    always exist and must never be allowed to silently win). *dry_run* runs
+    the IDENTICAL pre-flight -- a dry-run that skipped it would report
+    success where a real push would refuse, a misleading affordance worse
+    than none (module docstring).
     """
     check_git_version(git_cwd=git_cwd)
     hazards = check_repo_local_config_hazards(git_cwd)
@@ -739,11 +802,15 @@ def git_push_with_token(
             f"pushInsteadOf) before retrying -- this check fails closed "
             f"with no override."
         )
-    with _credentialed_git_env(token) as env:
+    with _credentialed_git_env(token, force_trace=verbose) as env:
         refspec = f"{branch}:{branch}"
         push_cmd = ["git", *_HERMETIC_ARGV_PREFIX, "push", remote, refspec, "--set-upstream"]
         if force_with_lease:
             push_cmd.append("--force-with-lease")
+        if dry_run:
+            push_cmd.append("--dry-run")
+        if verbose:
+            push_cmd.append("-v")
 
         result = subprocess.run(
             push_cmd,
@@ -752,6 +819,22 @@ def git_push_with_token(
             env=env,
             cwd=str(git_cwd) if git_cwd is not None else None,
         )
+
+        if dry_run:
+            # DRY-RUN TRANSCRIPT (lr-68039e): surfaced UNCONDITIONALLY,
+            # regardless of exit code -- a dry-run's sole purpose is
+            # exposing the full transcript (including any "remote: "
+            # sideband) on the caller's own identity, whether or not git
+            # itself would have accepted the push. Redacted through the
+            # SAME choke point every other field in this module uses
+            # (push.push_redaction), never a second implementation.
+            dry_run_transcript = redact_push_secrets(
+                f"[dry-run exit={result.returncode}] stdout: {result.stdout}"
+                f" stderr: {result.stderr}",
+                known_secrets=(token,),
+            )
+            print(f"push: --dry-run transcript -- {dry_run_transcript}", file=sys.stderr)
+
         if result.returncode != 0:
             mismatch_hint = ""
             if (
@@ -831,6 +914,14 @@ def git_push_with_token(
                 lease_origin=lease_origin,
                 known_secrets=(token,),
             )
+
+        if dry_run:
+            # SUCCESSFUL dry-run: return the same redacted transcript this
+            # function already printed above, so a caller that wants the
+            # text programmatically (not just on stderr) has it -- never a
+            # bare None a real push's own success path still returns.
+            return dry_run_transcript
+    return None
 
 
 __all__ = [
