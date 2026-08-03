@@ -152,35 +152,44 @@ VERIFIED IDENTITY") for the full mechanism, and
 recognized crew caller" section for how `push`'s bot-commit-identity
 resolution consumes the resulting `app_slug`.
 
-**`--caller`/`--role` is an already-attested value, never a free CLI arg.**
-Every verb consumes this flag as an
-opaque config key — the string that selects a role-scoped credential/
-App-slug/authority entry — never as an identity claim it authenticates
-itself. The harness/guard-hook that spawns and invokes a `clagentic: loadout` verb owns
-verifying which role a given spawn is entitled to act as (e.g. by minting a
-credential scoped to that role in the first place) BEFORE placing that
-string on the invoking command line; `clagentic: loadout` has no visibility into how a
-harness made that decision and, being orchestration-agnostic (this
-package's CLAUDE.md rule 2), never reaches into a harness-specific identity
-sidecar/side-channel to re-derive one — that would point-to-point couple
-this seam to one orchestration layer's transport (the relay lesson). See
+**`--caller`/`--role` is an already-attested value at the credential/
+authority seam, never a free CLI arg there.** `transport.credential_provider`
+(`resolve_token`) and `merge.authority` (`check_authority`) each consume
+this flag as an opaque config key — the string that selects a role-scoped
+credential/App-slug/authority entry — never as an identity claim EITHER of
+those two seams itself authenticates; that has not changed. What HAS
+changed: **every mutating verb now ALSO binds an explicit
+`--caller`/`--role` to this process's own attested invoking identity,
+fail-closed, BEFORE either of those two seams is ever reached** — see the
+next paragraph. The harness/guard-hook that spawns and invokes a
+`clagentic: loadout` verb still independently owns verifying which role a
+given spawn is entitled to act as (e.g. by minting a credential scoped to
+that role in the first place) before placing that string on the invoking
+command line — that external obligation is unchanged and is not replaced by
+the in-package check — but it is no longer the ONLY check standing between
+an unattested process and a credential mint or merge authority. See
 [docs/merge-authority.md](merge-authority.md)'s "The built-in fallback"
 section for the full statement of this boundary on the merge-authority
 side, and `transport.credential_provider`'s module docstring for the
 parallel statement on token resolution.
 
-**`transport.git_host_api` additionally BINDS an explicit `--caller` to
-this process's own attested invoking identity, fail-closed.** This is
-layer (1)->(2) of the three-layer trust model — attested
-invoking identity -> crew role (`--caller`) -> credential grantor — and is
-native to `clagentic: loadout`'s transport, not delegated to an external wrapper. An
-EXPLICIT `--caller` value that does not equal the identity resolved by
-`transport.attestation.resolve_identity` is refused (`GitHostApiError`,
-`EXIT_CALLER_INVOKER_MISMATCH`) BEFORE any token mint or network I/O, with
-no override — even a role a downstream `TokenProvider`/`AuthorityProvider`
-allowlist would otherwise admit. An OMITTED `--caller` is never checked
-against the attested identity (it carries no identity claim); this is
-unchanged, pre-existing default-to-`DEFAULT_ROLE` behavior.
+**Every mutating verb BINDS an explicit `--caller`/`--role` to this
+process's own attested invoking identity, fail-closed** (`push`, `merge`,
+`merge close-pr`, `merge post-merge`, `review`, `acquire`,
+`git-host-api` — `transport.caller_binding.bind_caller`; this used to be
+wired into `transport.git_host_api` alone, and is now shared by every
+mutating verb). This is layer (1)->(2) of the three-layer trust
+model — attested invoking identity -> crew role (`--caller`/`--role`) ->
+credential grantor — and is native to `clagentic: loadout`'s transport, not
+delegated to an external wrapper. An EXPLICIT `--caller`/`--role` value
+that does not equal the identity resolved by
+`transport.attestation.resolve_identity` is refused (each verb's own
+`EXIT_CALLER_INVOKER_MISMATCH` exit code) BEFORE any token mint, authority
+check, or network I/O, with no override — even a role a downstream
+`TokenProvider`/`AuthorityProvider` allowlist would otherwise admit. An
+OMITTED `--caller`/`--role` is never checked against the attested identity
+(it carries no identity claim); this is unchanged, pre-existing
+default-to-`DEFAULT_ROLE` behavior.
 
 `transport.attestation.resolve_identity` resolves WHAT the identity is,
 via a fixed, config-selectable chain (mirrors clagentic-gatekeeper's
@@ -301,7 +310,8 @@ printf '%s\n' "builder" > "$sidecar_path"
 # CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_ENV is NOT set here:
 export CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_SIDECAR_PATH="$sidecar_path"
 
-# Spawn the sub-process. Inside it, any loadout verb invoked with an
+# Spawn the sub-process. Inside it, any bind_caller-enforcing loadout verb
+# (push, merge, review, acquire, git-host-api, ...) invoked with an
 # explicit --caller builder now resolves against the sidecar's "builder"
 # value (layer 2) rather than the parent's inherited identity or an
 # opaque spawn id (layer 1) -- bind_caller sees a match and proceeds.
