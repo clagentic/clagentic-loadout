@@ -290,11 +290,16 @@ from clagentic_loadout.push.remote_readback import (
     read_remote_head,
     verify_remote_authorship,
 )
+from clagentic_loadout.transport.attestation import (
+    AttestationError,
+    resolve_identity as _resolve_identity,
+)
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
     read_caller_body_bytes,
 )
+from clagentic_loadout.transport.caller_binding import CallerBindingError, bind_caller
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -371,6 +376,15 @@ EXIT_HOST_DENIED = 31
 #: BEFORE any credentialed git subprocess spawns -- fail-closed, no
 #: override flag; see push.git_hermeticity's own module docstring for why.
 EXIT_HERMETICITY_FAILED = 32
+#: An EXPLICIT --caller value does not match the ATTESTED invoking identity
+#: this process's own attestation-provider chain resolved
+#: (transport.caller_binding.bind_caller, lr-c75c9a -- the same fail-closed
+#: binding transport.git_host_api's EXIT_CALLER_INVOKER_MISMATCH already
+#: enforced; this verb now enforces it too). FAILS CLOSED BEFORE ANY I/O --
+#: no token mint, no push, no PR call is ever attempted. An OMITTED --caller
+#: never triggers this (see bind_caller's own docstring) -- it is unchanged,
+#: existing behavior.
+EXIT_CALLER_INVOKER_MISMATCH = 33
 
 
 class PushVerbError(Exception):
@@ -447,10 +461,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--caller",
         default=None,
         help=f"Role/name whose token is resolved via the credential provider "
-        f"(default: {DEFAULT_ROLE!r}). MUST be the value the invoking "
-        f"harness/guard-hook has already attested for this spawn -- this "
-        f"verb consumes it as an opaque config key, never re-authenticates "
-        f"it (see transport.credential_provider's module docstring).",
+        f"(default: {DEFAULT_ROLE!r}). Already-attested, opaque config key "
+        f"downstream (the credential provider never re-authenticates it "
+        f"itself -- see transport.credential_provider's module docstring). "
+        f"When EXPLICITLY supplied, it must ALSO match this process's own "
+        f"already attested invoking identity (transport.attestation."
+        f"resolve_identity) or the call is refused fail-closed before any "
+        f"I/O (transport.caller_binding.bind_caller); omitted, this check "
+        f"does not apply.",
     )
     parser.add_argument(
         "--title",
@@ -1278,6 +1296,7 @@ def main(
     token_provider: TokenProvider | None = None,
     opener=None,
     builder_identity_config_root: str | Path | None = None,
+    identity_provider=None,
 ) -> int:
     """CLI entrypoint. Returns the process exit code (does not call
     sys.exit itself so it stays testable).
@@ -1293,6 +1312,13 @@ def main(
     per-invocation choice (mirrors identity_config.load_builder_identity's
     own `config_root` parameter, which is documented there as
     primarily-for-tests too).
+
+    `identity_provider` (lr-c75c9a): a zero-arg callable returning a
+    `transport.attestation.Identity` (defaults to
+    `transport.attestation.resolve_identity`) -- the injection point for the
+    fail-closed --caller/attested-invoker binding (transport.caller_binding.
+    bind_caller), mirroring the identical parameter transport.git_host_api.main
+    already carries for the same purpose.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -1313,6 +1339,7 @@ def main(
             token_provider=token_provider,
             opener=opener,
             builder_identity_config_root=builder_identity_config_root,
+            identity_provider=identity_provider,
         )
     except PushVerbError as exc:
         print(f"push: {exc}", file=sys.stderr)
@@ -1332,6 +1359,9 @@ def main(
     except StrayMergeCommitError as exc:
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_STRAY_MERGE_COMMIT
+    except CallerBindingError as exc:
+        print(f"push: {exc}", file=sys.stderr)
+        return EXIT_CALLER_INVOKER_MISMATCH
 
 
 def _run(
@@ -1340,6 +1370,7 @@ def _run(
     token_provider: TokenProvider | None,
     opener,
     builder_identity_config_root: str | Path | None = None,
+    identity_provider=None,
 ) -> int:
     # 1. Argument-shape validation, before any I/O.
     if args.body_env and args.body_stdin:
@@ -1382,6 +1413,21 @@ def _run(
     # (push.git_coords.current_branch), which requires project_root to
     # compute -- so branch resolution must happen before the read, not after.
     caller = args.caller or DEFAULT_ROLE
+
+    # --caller/attested-invoker fail-closed binding (lr-c75c9a, mirrors
+    # transport.git_host_api's identical check): checked BEFORE any I/O --
+    # before project_root/branch resolution, before any body read, before
+    # any token mint. An OMITTED --caller (args.caller is None) is never
+    # checked here -- see transport.caller_binding.bind_caller's own
+    # docstring for why (this preserves the pre-existing "omitted --caller
+    # behaves exactly as before" contract unchanged).
+    resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
+    try:
+        attested_identity = resolve_identity_fn()
+    except AttestationError as exc:
+        _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
+    bind_caller(caller, caller_explicit=args.caller is not None, identity=attested_identity)
+
     project_root = _resolve_repo_root(args.repo_path)
 
     # 3. Body resolution + issue-link enforcement (create path, and update
