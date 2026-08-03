@@ -193,43 +193,57 @@ Read this carefully if you are pointing `loadout-merge` at this provider
   your role list includes `merger`, then any caller correctly presenting
   `merger` as its role is authorized to merge **any** PR in **any** repo
   this provider is wired to, not just the one your dispatch layer intended.
-- **There is no external verification of the role claim itself.** This
+- **`StaticRoleAuthorityProvider` itself does not verify the role claim —
+  but a separate, in-package binding now does, upstream of it.** This
   provider answers "is this role name in my configured set?" — it does not
   independently confirm that the caller invoking `loadout-merge` is who it
-  claims to be. Authenticating the caller's role claim (e.g. binding a
-  specific credential or spawn context to a specific role) is **outside
-  this provider's job entirely** — it is whatever mechanism resolves
-  `--caller`/`--role` before `merge.authority` is ever consulted. A
-  deployment relying on `StaticRoleAuthorityProvider` alone as its "real
-  attestation" is trusting its role-resolution layer to be correct, with no
-  independent second check.
+  claims to be; that has not changed. What HAS changed:
+  `clagentic_loadout.transport.caller_binding.bind_caller` now runs, inside
+  `loadout-merge` itself, BEFORE `merge.authority` is ever consulted — it
+  compares an EXPLICIT `--role` against this process's own attested invoking
+  identity (`transport.attestation.resolve_identity`: a configured provider,
+  a config-driven sidecar adapter, or the built-in OS-invoking-user
+  fallback, in that order) and refuses fail-closed on any mismatch, before
+  any token is minted or any authority check runs. Every mutating
+  `clagentic: loadout` verb (`push`, `merge`, `merge close-pr`,
+  `merge post-merge`, `review`, `acquire`, `git-host-api`) calls this same
+  binding now — it used to be wired into `git-host-api` alone, which is what
+  let an unattested process act as any role by typing its name on any of the
+  other verbs; that gap is closed.
 
-  **`--caller`/`--role` is consumed as an already-attested value, never a
-  free CLI arg.** Every `clagentic: loadout` verb
-  that takes `--caller`/`--role` treats it purely as an opaque config key —
-  the string that selects a role-scoped credential/App-slug/authority
-  entry — and never as a claim it re-authenticates itself. The invoking
-  harness/guard-hook (e.g. `forgejo-curl`, a PreToolUse hook, or any
-  wrapper that mints/passes credentials into a spawn) is responsible for
-  ensuring the value it places on that flag is the value IT has already
-  verified for the spawned process — `clagentic: loadout` has no visibility into how
-  that decision was made and, being orchestration-agnostic (see this
-  repo's CLAUDE.md rule 2), must not acquire it by reaching into a
-  harness-specific identity sidecar or side-channel; doing so would
-  point-to-point couple this package to one orchestration layer's
-  transport (the relay lesson) and give it a second, unverifiable notion of
-  "attested" alongside the value the caller already passed in. The actual
-  identity-to-role entitlement check belongs at MINT TIME, layered in
+  **`--caller`/`--role` is STILL consumed as an opaque config key by
+  `merge.authority`/`transport.credential_provider` themselves** — neither
+  of those two seams re-derives or re-verifies identity; they trust the
+  string exactly as far as their own config says to, exactly as before.
+  What changed is that, by the time a role string reaches either of them
+  from an EXPLICIT `--caller`/`--role`, it has already survived the
+  attested-identity binding above — so this provider (or your own
+  `AuthorityProvider`) is no longer the only thing standing between an
+  unattested process and merge authority; it is the SECOND of two
+  independent checks, not the only one. A role's deeper entitlement (which
+  attested identity may act as which role — as opposed to "is this really
+  the identity it claims to be") remains a MINT-TIME concern, layered in
   front of `merge.authority`/`transport.credential_provider` by whatever
   `AuthorityProvider`/`TokenProvider` a deployment wires in — an internal
-  predecessor deployment's own gatekeeper-style minting service verifies
-  the attested caller's entitlement to a role, and that a role's
-  configured GitHub App slug is the one the broker actually issued, BEFORE
-  minting a token for it, so a role string reaching `merge.authority` here
-  has already survived that check upstream in a correctly configured
-  deployment. `StaticRoleAuthorityProvider` and `resolve_token`'s
+  predecessor deployment's own gatekeeper-style minting service verifies the
+  attested caller's entitlement to a role, and that a role's configured
+  GitHub App slug is the one the broker actually issued, BEFORE minting a
+  token for it. `StaticRoleAuthorityProvider` and `resolve_token`'s
   `StaticTokenProvider`/`CommandTokenProvider` do not themselves perform
-  that upstream check — see the bullet above.
+  that entitlement check — see the bullet above — but they now always run
+  downstream of the identity-binding check, never in its absence for an
+  explicit `--caller`/`--role`.
+
+  **The built-in OS-user fallback layer of `transport.attestation` still
+  grants write capability** (a deliberate, named trade-off — see
+  `transport.caller_binding`'s own module docstring, "REQUIREMENT 5"):
+  a deployment that has not configured `attestation.identity_env` or a
+  sidecar adapter still gets a genuine attested identity (the OS-reported
+  invoking user), and an explicit `--caller`/`--role` is checked against
+  THAT value. A deployment whose threat model needs a stronger attested
+  source than the OS-invoking-user configures `transport.attestation`'s
+  `identity_env` or `sidecars` config accordingly; this package does not
+  make that call on a deployment's behalf.
 - **An empty `authorized_roles` set denies every role.** This is the
   fail-closed default described in §2 — a deployment that never configures
   a role here has correctly configured "nobody may merge," not "everyone

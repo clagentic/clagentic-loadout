@@ -29,34 +29,56 @@ for any one broker.
 
 THE `role` PARAMETER IS AN ALREADY-ATTESTED VALUE, NEVER A FREE ARG (tome
 #700 correction 3, lr-e5eeab): every verb's `--caller`/`--role` flag is
-consumed here as an OPAQUE CONFIG KEY — a string used to select which
-role-scoped credential/App-slug/authority entry applies — never as a claim
-this seam itself authenticates. loadout is orchestration-agnostic (this
-repo's CLAUDE.md rule 2): it has no spawn-side visibility into how a
-harness decided which role a given process is allowed to act as, and it
-MUST NOT try to acquire that visibility by reaching into a harness-specific
-identity sidecar/side-channel — doing so would coincidentally couple this
-package to one orchestration layer's transport (the relay lesson, CLAUDE.md
-rule 2) and would give loadout a second, unverifiable notion of "attested"
-alongside whatever already-attested value the caller passed in. The
-caller's own harness/guard-hook (e.g. a `forgejo-curl`-style wrapper, a
-PreToolUse hook) is responsible for ensuring the `--caller`/`--role` value
-reaching a verb's argv is the value THAT LAYER has already verified for
-this spawn — this seam and the seams downstream of it (`resolve_token`,
-`transport.github_app_config.resolve_github_app_slug`,
-`merge.authority.check_authority`) then trust that string exactly as far
-as their own config says to, and no further. The actual identity-vs-role
-entitlement check (which attested identity may act as which role) is a
-MINTING-TIME concern, layered in front of this seam by whatever
-`TokenProvider`/`AuthorityProvider` a deployment wires in — see
-`clagentic_loadout.merge.authority`'s module docstring for the parallel
-statement on the authority side, and this package's reference deployment
-(a gatekeeper-style minting service) for where that entitlement check
-actually lives. Passing an unvalidated, caller-chosen role string straight
-through to `CommandTokenProvider`'s argv is still guarded structurally at
-THIS seam (see `_SAFE_ROLE_RE` below) against argv-level option injection —
-that is a shell/argv-safety property, not an identity-authentication one,
-and the two must not be conflated.
+consumed HERE, at this seam, as an OPAQUE CONFIG KEY — a string used to
+select which role-scoped credential/App-slug/authority entry applies — this
+seam itself never re-authenticates it, and NEITHER does
+`transport.github_app_config.resolve_github_app_slug` or
+`merge.authority.check_authority`, the two other seams downstream of it.
+This module remains orchestration-agnostic (this repo's CLAUDE.md rule 2):
+it has no spawn-side visibility into how a harness decided which role a
+given process is allowed to act as, and it does not itself acquire that
+visibility.
+
+THIS IS NOT THE WHOLE STORY ANY MORE (lr-c75c9a correction — the doctrine
+above predates this fix and, read alone, is stale): the "some layer outside
+loadout attests --caller/--role before it reaches a verb's argv" story used
+to be an EXTERNAL, unenforced assumption for every verb except
+`transport.git_host_api` — the one call site lr-82c385 originally wired a
+real, in-package check into. lr-c75c9a closes that gap: EVERY mutating verb
+(`push`, `merge`, `merge close-pr`, `merge post-merge`, `review`, `acquire`,
+`git-host-api`) now calls `transport.caller_binding.bind_caller` — which
+compares an EXPLICIT `--caller`/`--role` against
+`transport.attestation.resolve_identity`'s result — BEFORE ever reaching
+this seam. That binding does NOT violate the "MUST NOT reach into a
+harness-specific identity sidecar" posture above: `transport.attestation`'s
+sidecar adapter is a config-driven seam (`dir`/`file_prefix`/
+`session_id_env` are all deployment-supplied, see that module's own
+docstring) with no hardcoded harness shape baked in, which is exactly what
+CLAUDE.md rule 2 requires — a capability agents act through (an attestation
+mechanism) is in scope for this package by default; the rule constrains WHO
+owns orchestration, not whether loadout may resolve identity via its own
+configurable seam. By the time `role`/`--caller` reaches THIS module's
+`resolve_token`, it has therefore already been checked, when explicit,
+against this process's own attested identity — this seam still treats it as
+opaque config (that has not changed and will not), but it is no longer true
+to say the check happens only outside this package. See
+`transport.caller_binding`'s own module docstring for the full binding
+contract, including the "omitted --caller/--role is never checked"
+carve-out this seam has always relied on and which is unchanged.
+
+The actual identity-vs-role entitlement check (which attested identity may
+act as which role) remains a MINTING-TIME concern, layered in front of this
+seam by whatever `TokenProvider`/`AuthorityProvider` a deployment wires in —
+see `clagentic_loadout.merge.authority`'s module docstring for the parallel
+statement on the authority side, and this package's reference deployment (a
+gatekeeper-style minting service) for where that entitlement check actually
+lives. That is a DIFFERENT question ("is this claimed role entitled to X")
+than `bind_caller`'s ("is this process who it claims to be") — the two are
+independent and `bind_caller` runs first. Passing an unvalidated,
+caller-chosen role string straight through to `CommandTokenProvider`'s argv
+is still guarded structurally at THIS seam (see `_SAFE_ROLE_RE` below)
+against argv-level option injection — that is a shell/argv-safety property,
+not an identity-authentication one, and the two must not be conflated.
 
 Optional repo context (lr-ea28): a repo-scoped minting provider (e.g. a
 GitHub App installation-token mint, which is scoped to one owner/repo and

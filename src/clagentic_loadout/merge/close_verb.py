@@ -81,6 +81,11 @@ from clagentic_loadout.push.namespace_guard import (
     check_namespace_allowed,
     resolve_allowed_namespaces,
 )
+from clagentic_loadout.transport.attestation import (
+    AttestationError,
+    resolve_identity as _resolve_identity,
+)
+from clagentic_loadout.transport.caller_binding import CallerBindingError, bind_caller
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -117,6 +122,15 @@ EXIT_CLOSE_FAILED = 26
 #: itself refused." FAIL-CLOSED: a caller MUST NOT report success when this
 #: fires.
 EXIT_CLOSE_READBACK_FAILED = 27
+#: An EXPLICIT --role value does not match the ATTESTED invoking identity
+#: this process's own attestation-provider chain resolved
+#: (transport.caller_binding.bind_caller, lr-c75c9a -- the same fail-closed
+#: binding transport.git_host_api's EXIT_CALLER_INVOKER_MISMATCH already
+#: enforced; this verb now enforces it too). FAILS CLOSED BEFORE ANY I/O --
+#: no token mint, no authority check, no close is ever attempted. An
+#: OMITTED --role never triggers this (see bind_caller's own docstring) --
+#: it is unchanged, existing behavior.
+EXIT_CALLER_INVOKER_MISMATCH = 28
 
 
 class CloseVerbError(Exception):
@@ -244,7 +258,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"Which role may authorize a close is config (see "
         f"--authorized-role / an AuthorityProvider), never a hardcoded "
         f"identity -- the SAME authority seam merge.verb consumes for a "
-        f"merge.",
+        f"merge. Already-attested, opaque config key downstream. When "
+        f"EXPLICITLY supplied, it must ALSO match this process's own "
+        f"already attested invoking identity (transport.attestation."
+        f"resolve_identity) or the call is refused fail-closed before any "
+        f"I/O (transport.caller_binding.bind_caller); omitted, this check "
+        f"does not apply.",
     )
     parser.add_argument(
         "--authorized-role",
@@ -290,6 +309,7 @@ def main(
     token_provider: TokenProvider | None = None,
     authority_provider: AuthorityProvider | None = None,
     opener=None,
+    identity_provider=None,
 ) -> int:
     """CLI entrypoint. Returns the process exit code (does not call
     sys.exit itself so it stays testable).
@@ -297,6 +317,13 @@ def main(
     `token_provider`, `authority_provider`, and `opener` are injection
     points for tests and for a deployment wiring its own reference
     providers; all default to the standalone/real path in production use.
+
+    `identity_provider` (lr-c75c9a): a zero-arg callable returning a
+    `transport.attestation.Identity` (defaults to
+    `transport.attestation.resolve_identity`) -- the injection point for the
+    fail-closed --role/attested-invoker binding (transport.caller_binding.
+    bind_caller), mirroring the identical parameter transport.git_host_api.main
+    already carries for the same purpose.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -317,6 +344,7 @@ def main(
             token_provider=token_provider,
             authority_provider=authority_provider,
             opener=opener,
+            identity_provider=identity_provider,
         )
     except CloseVerbError as exc:
         print(f"close-pr: {exc}", file=sys.stderr)
@@ -324,6 +352,9 @@ def main(
     except MergeUsageError as exc:
         print(f"close-pr: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    except CallerBindingError as exc:
+        print(f"close-pr: {exc}", file=sys.stderr)
+        return EXIT_CALLER_INVOKER_MISMATCH
 
 
 def _run(
@@ -332,6 +363,7 @@ def _run(
     token_provider: TokenProvider | None,
     authority_provider: AuthorityProvider | None,
     opener,
+    identity_provider=None,
 ) -> int:
     try:
         owner, repo = parse_owner_repo(args.repo)
@@ -339,6 +371,17 @@ def _run(
         raise MergeUsageError(str(exc)) from exc
 
     role = args.role or DEFAULT_ROLE
+
+    # --role/attested-invoker fail-closed binding (lr-c75c9a, mirrors
+    # transport.git_host_api's identical check): checked BEFORE any I/O --
+    # before the namespace guard (step 1), before any token mint.
+    resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
+    try:
+        attested_identity = resolve_identity_fn()
+    except AttestationError as exc:
+        _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
+    bind_caller(role, caller_explicit=args.role is not None, identity=attested_identity)
+
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
 
     # 1. Namespace guard -- runs FIRST, before any credential or network call.
