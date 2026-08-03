@@ -30,6 +30,7 @@ from clagentic_loadout.guard.shell_parsing import (
     quote_delimited_spans,
     split_glued_redirect_operators,
     split_segments,
+    strip_env_assignment_prefix,
     unquoted_spans,
 )
 
@@ -402,3 +403,54 @@ class TestIsStagingRedirectTarget:
         # $HOMEFOO is not $HOME or $HOME/... -- must not false-positive on
         # a bare prefix match.
         assert is_staging_redirect_target("$HOMEFOO/x") is False
+
+
+class TestStripEnvAssignmentPrefix:
+    """lr-dbc905: reference module docstring ll.97-102 -- a leading
+    NAME=value shell-assignment word must not defeat a verb-prefix matcher
+    anchored on ^<verb>\\b."""
+
+    def test_no_prefix_returned_unchanged(self):
+        cmd = "synthetic-git-host-api GET /repos/o/r --caller merger"
+        assert strip_env_assignment_prefix(cmd) == cmd
+
+    def test_single_env_assignment_stripped(self):
+        cmd = "FOO=bar synthetic-git-host-api GET /repos/o/r --caller merger"
+        assert strip_env_assignment_prefix(cmd) == (
+            "synthetic-git-host-api GET /repos/o/r --caller merger"
+        )
+
+    def test_multiple_env_assignments_stripped(self):
+        cmd = "FOO=bar BAZ=qux synthetic-git-host-api GET /repos/o/r"
+        assert strip_env_assignment_prefix(cmd) == "synthetic-git-host-api GET /repos/o/r"
+
+    def test_assignment_with_underscore_and_digits_in_name_stripped(self):
+        cmd = "MY_VAR_2=val cmd --caller merger"
+        assert strip_env_assignment_prefix(cmd) == "cmd --caller merger"
+
+    def test_trailing_assignment_with_no_following_word_left_as_is(self):
+        # The regex requires trailing whitespace before it strips a word --
+        # matching bash's own grammar, where "FOO=bar BAZ=qux" with nothing
+        # after it is not a valid simple command either (an assignment-only
+        # line has no command token to isolate). Only fully whitespace-
+        # separated leading assignments strip; the final word (with nothing
+        # after it) is left as the "command" this function returns.
+        assert strip_env_assignment_prefix("FOO=bar BAZ=qux") == "BAZ=qux"
+
+    def test_equals_sign_in_argument_not_treated_as_assignment(self):
+        # Not a LEADING assignment word -- must be left untouched.
+        cmd = "cmd --flag=value --caller merger"
+        assert strip_env_assignment_prefix(cmd) == cmd
+
+    def test_leading_digit_variable_name_not_stripped(self):
+        # Not a valid bash identifier (cannot start with a digit) -- bash
+        # itself would not treat this as an assignment word, so this
+        # function must not either.
+        cmd = "2FOO=bar cmd --caller merger"
+        assert strip_env_assignment_prefix(cmd) == cmd
+
+    def test_idempotent(self):
+        cmd = "FOO=bar cmd --caller merger"
+        once = strip_env_assignment_prefix(cmd)
+        twice = strip_env_assignment_prefix(once)
+        assert once == twice == "cmd --caller merger"

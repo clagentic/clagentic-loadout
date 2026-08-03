@@ -746,6 +746,54 @@ def detect_tmp_redirect_target(cmd: str) -> str | None:
     return match.group(1)
 
 
+# A leading `NAME=value` shell-assignment word (bash prefixes a simple
+# command with zero or more of these to scope an env var to that one
+# invocation, e.g. `FOO=bar cmd --caller x`) is not part of the invoked
+# command's own argv at all -- a verb-prefix matcher anchored on `^cmd\b`
+# never sees past it and silently fails to admit (or, worse, a
+# forbidden-pattern scanner anchored the same way never sees the real verb
+# either). Bash's own grammar: one or more `NAME=value` words, each token
+# a bare identifier (no shell metacharacters) followed by `=`, then the
+# assigned value with no separating whitespace before the `=`. This mirrors
+# `_ROLE_TOKEN_RE`'s own bare-identifier grammar for the NAME half; the
+# value half is deliberately permissive (bash accepts any word there) since
+# stripping the prefix, not validating its value, is this function's job.
+_ENV_ASSIGN_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=\S*\s+")
+
+
+def strip_env_assignment_prefix(cmd: str) -> str:
+    """Return `cmd` with every leading `NAME=value` shell-assignment word
+    removed, so a verb-prefix matcher anchored on `^<verb>\\b` sees the
+    actual invoked command rather than being defeated by an env-assignment
+    prefix (`FOO=bar cmd --caller x` -> `cmd --caller x`).
+
+    Quote-and-ANSI-C-agnostic by design: this only strips a LEADING glued
+    `NAME=value` word with no interior whitespace before its own trailing
+    separator, so it never mis-parses a quoted argument value elsewhere in
+    the command. Operates on the command AS GIVEN -- a caller wanting this
+    composed with `normalize_shell_words`'s ANSI-C/quote handling should
+    call that first and pass the normalized result in, exactly as every
+    other verb-prefix matcher in this module's caller (`guard.
+    role_allowlist`) already does for its own bare-verb grants.
+
+    Idempotent and total: a command with no leading assignment is returned
+    unchanged. The pattern requires TRAILING whitespace before it strips a
+    word, matching bash's own grammar (an assignment word is only an
+    assignment PREFIX when something follows it) -- so a string that is
+    entirely `NAME=value` words separated by whitespace strips down to just
+    its final word (which still looks like an assignment, but has nothing
+    after it to prefix), never to an empty string; no verb-prefix pattern
+    will match that residual word either, so the practical "nothing left to
+    admit" outcome still holds.
+    """
+    stripped = cmd
+    while True:
+        match = _ENV_ASSIGN_PREFIX_RE.match(stripped)
+        if match is None:
+            return stripped
+        stripped = stripped[match.end() :]
+
+
 def is_staging_redirect_target(target: str) -> bool:
     """Return True if `target` is `$TMPDIR` spawn-scoped staging — never a
     project-tree mutation. Matches the shell's own unexpanded variable
@@ -785,5 +833,6 @@ __all__ = [
     "quote_delimited_spans",
     "split_glued_redirect_operators",
     "split_segments",
+    "strip_env_assignment_prefix",
     "unquoted_spans",
 ]
