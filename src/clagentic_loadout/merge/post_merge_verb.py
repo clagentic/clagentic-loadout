@@ -271,11 +271,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"resolved via the credential provider (default: {DEFAULT_ROLE!r}). "
         f"The SAME authority seam merge.verb/merge.close_verb consume -- a "
         f"role authorized to merge/close a PR is authorized to re-run its "
-        f"post-merge deploy. When EXPLICITLY supplied, it must match this "
-        f"process's own attested invoking identity (transport.attestation."
-        f"resolve_identity) or the call is refused fail-closed before any "
-        f"I/O (transport.caller_binding.bind_caller); omitted, this check "
-        f"does not apply.",
+        f"post-merge deploy. Already-attested, opaque config key "
+        f"downstream. When EXPLICITLY supplied, it must ALSO match this "
+        f"process's own already attested invoking identity (transport."
+        f"attestation.resolve_identity) or the call is refused fail-closed "
+        f"before any I/O (transport.caller_binding.bind_caller); omitted, "
+        f"this check does not apply.",
     )
     parser.add_argument(
         "--authorized-role",

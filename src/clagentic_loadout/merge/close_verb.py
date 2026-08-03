@@ -258,8 +258,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"Which role may authorize a close is config (see "
         f"--authorized-role / an AuthorityProvider), never a hardcoded "
         f"identity -- the SAME authority seam merge.verb consumes for a "
-        f"merge. When EXPLICITLY supplied, it must match this process's "
-        f"own attested invoking identity (transport.attestation."
+        f"merge. Already-attested, opaque config key downstream. When "
+        f"EXPLICITLY supplied, it must ALSO match this process's own "
+        f"already attested invoking identity (transport.attestation."
         f"resolve_identity) or the call is refused fail-closed before any "
         f"I/O (transport.caller_binding.bind_caller); omitted, this check "
         f"does not apply.",
