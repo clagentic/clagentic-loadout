@@ -149,12 +149,17 @@ from clagentic_loadout.review.github_backend import (
     GithubReviewBackend,
     assert_platform_is_github,
 )
+from clagentic_loadout.transport.attestation import (
+    AttestationError,
+    resolve_identity as _resolve_identity,
+)
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
     read_body_bytes,
     resolve_caller_body_path,
 )
+from clagentic_loadout.transport.caller_binding import CallerBindingError, bind_caller
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -232,6 +237,15 @@ EXIT_BODY_ENV_UNREADABLE = 10
 #: delete-own-comment authorship/verdict contract was violated" apart from
 #: an ordinary transport failure.
 EXIT_DELETE_OWN_COMMENT_REFUSED = 11
+#: An EXPLICIT --caller value does not match the ATTESTED invoking identity
+#: this process's own attestation-provider chain resolved
+#: (transport.caller_binding.bind_caller, lr-c75c9a -- the same fail-closed
+#: binding transport.git_host_api's EXIT_CALLER_INVOKER_MISMATCH already
+#: enforced; this verb now enforces it too). FAILS CLOSED BEFORE ANY I/O --
+#: no token mint, no post, no verify readback is ever attempted. An OMITTED
+#: --caller never triggers this (see bind_caller's own docstring) -- it is
+#: unchanged, existing behavior.
+EXIT_CALLER_INVOKER_MISMATCH = 12
 
 
 class ReviewPostVerbError(Exception):
@@ -398,10 +412,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help=f"Role/name whose token is resolved via the credential provider "
         f"(default: {DEFAULT_ROLE!r}). A role/caller, never a hardcoded "
-        f"agent name. MUST be the value the invoking harness/guard-hook has "
-        f"already attested for this spawn -- this verb consumes it as an "
-        f"opaque config key, never re-authenticates it (see "
-        f"transport.credential_provider's module docstring).",
+        f"agent name. Already-attested, opaque config key downstream (the "
+        f"credential provider never re-authenticates it itself -- see "
+        f"transport.credential_provider's module docstring). When "
+        f"EXPLICITLY supplied, it must ALSO match this process's own "
+        f"already attested invoking identity (transport.attestation."
+        f"resolve_identity) or the call is refused fail-closed before any "
+        f"I/O (transport.caller_binding.bind_caller); omitted, this check "
+        f"does not apply.",
     )
     parser.add_argument(
         "--platform",
@@ -517,10 +535,18 @@ def main(
     *,
     token_provider: TokenProvider | None = None,
     opener=None,
+    identity_provider=None,
 ) -> int:
     """CLI entrypoint. Returns the process exit code (does not call
     sys.exit itself so it stays testable) -- the `if __name__` guard below
     is the one place that translates the return value into a real exit.
+
+    `identity_provider` (lr-c75c9a): a zero-arg callable returning a
+    `transport.attestation.Identity` (defaults to
+    `transport.attestation.resolve_identity`) -- the injection point for the
+    fail-closed --caller/attested-invoker binding (transport.caller_binding.
+    bind_caller), mirroring the identical parameter transport.git_host_api.main
+    already carries for the same purpose.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -536,10 +562,16 @@ def main(
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
 
     try:
-        return _run(args, token_provider=token_provider, opener=opener)
+        return _run(
+            args, token_provider=token_provider, opener=opener,
+            identity_provider=identity_provider,
+        )
     except ReviewPostVerbError as exc:
         print(f"review-post: {exc}", file=sys.stderr)
         return exc.code
+    except CallerBindingError as exc:
+        print(f"review-post: {exc}", file=sys.stderr)
+        return EXIT_CALLER_INVOKER_MISMATCH
 
 
 def _run_delete_own_comment(
@@ -607,8 +639,26 @@ def _run(
     *,
     token_provider: TokenProvider | None,
     opener,
+    identity_provider=None,
 ) -> int:
     owner, repo = _parse_owner_repo(args.owner_repo)
+
+    # --caller/attested-invoker fail-closed binding (lr-c75c9a, mirrors
+    # transport.git_host_api's identical check): checked BEFORE any I/O --
+    # before the --delete-own-comment short-circuit, before any body
+    # ingestion, before any token mint. An OMITTED --caller (args.caller is
+    # None) is never checked here -- see transport.caller_binding.bind_caller's
+    # own docstring for why (this preserves the pre-existing "omitted
+    # --caller behaves exactly as before" contract unchanged).
+    resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
+    try:
+        attested_identity = resolve_identity_fn()
+    except AttestationError as exc:
+        _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
+    bind_caller(
+        args.caller or DEFAULT_ROLE, caller_explicit=args.caller is not None,
+        identity=attested_identity,
+    )
 
     # --delete-own-comment (lr-f43c4b) short-circuits here, BEFORE pr_number
     # is parsed/required and BEFORE any body-ingestion/verdict-route
