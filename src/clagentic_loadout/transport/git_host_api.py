@@ -243,6 +243,7 @@ from clagentic_loadout.platform_detect import (
     PLATFORM_FORGEJO,
     PLATFORM_GITHUB,
 )
+from clagentic_loadout.transport import caller_binding as _caller_binding
 from clagentic_loadout.transport import redirect_guard
 from clagentic_loadout.transport.attestation import (
     AttestationError,
@@ -1751,52 +1752,24 @@ def bind_caller(
     """Enforce the layer (1)->(2) binding: an identity may act ONLY as
     ITS OWN attested value (lr-82c385, tome #700).
 
-    `identity` is whatever `transport.attestation.resolve_identity` (or an
-    injected equivalent) resolved for THIS process -- the configured
-    provider, the sidecar adapter, or the built-in OS-user fallback, in that
-    fixed order. `caller` is the value `--caller` resolved to (already
-    defaulted to DEFAULT_ROLE when omitted, by the call site).
-
-    FAIL-CLOSED, BEFORE ANY I/O: `caller != identity.subject` on an
-    EXPLICIT --caller raises GitHostApiError(code=
-    EXIT_CALLER_INVOKER_MISMATCH) -- no token mint is ever attempted, no
-    request is ever issued. There is no override, no allowlist that admits
-    a mismatch: even a role an operator-configured named-agent allowlist
-    would otherwise grant is refused here if it does not match this
-    process's own attested identity, because this check runs BEFORE (and
-    independently of) whatever role-entitlement decision a
-    TokenProvider/AuthorityProvider would make downstream -- it answers a
-    different question ("is this process who it claims to be") than those
-    seams do ("is this claimed role entitled to X").
-
-    `caller_explicit=False` (an OMITTED --caller, defaulted to
-    DEFAULT_ROLE by the call site) is NEVER checked against `identity` --
-    this preserves the pre-existing, unchanged "omitted --caller behaves
-    exactly as before" contract (this task's own test-matrix requirement).
-    An omitted --caller is not an identity CLAIM at all; there is nothing
-    to bind.
-
-    This is INDEPENDENT of, and runs strictly BEFORE,
-    `transport.credential_provider.resolve_token` and
-    `merge.authority.check_authority` -- neither of those seams is changed
-    by this function, and neither of them re-verifies what this function
-    already confirmed. See this module's own docstring and
-    `transport.attestation`'s module docstring for the full three-layer
-    trust-model statement this function is layer (1)->(2) of.
+    RE-EXPORTED FROM transport.caller_binding (lr-c75c9a): this used to be
+    THIS module's own implementation -- the only call site the fail-closed
+    --caller/attested-invoker binding was ever wired into, which is exactly
+    the P1 gap lr-c75c9a fixes (every other mutating verb took --caller/
+    --role straight to a credential mint or authority check with nothing in
+    between). The binding itself, its trade-offs, and its full docstring now
+    live in transport.caller_binding, alongside transport.attestation (which
+    resolves WHAT the identity is) -- shared by every verb that needs it,
+    not re-implemented per verb. This module re-raises
+    transport.caller_binding.CallerBindingError as GitHostApiError(code=
+    EXIT_CALLER_INVOKER_MISMATCH) so this verb's own existing exit-code
+    contract and every existing test importing `git_host_api.bind_caller`
+    keep working with no signature or behavior change.
     """
-    if not caller_explicit:
-        return
-    if caller != identity.subject:
-        _fail(
-            f"--caller {caller!r} does not match the ATTESTED invoking "
-            f"identity {identity.subject!r} (resolved via the "
-            f"{identity.source!r} attestation layer). An identity may act "
-            f"ONLY as its own attested value -- this is refused BEFORE any "
-            f"network I/O and before any credential is resolved, "
-            f"unconditionally, with no override (even a role a named-agent "
-            f"allowlist would otherwise admit is denied here).",
-            code=EXIT_CALLER_INVOKER_MISMATCH,
-        )
+    try:
+        _caller_binding.bind_caller(caller, caller_explicit=caller_explicit, identity=identity)
+    except _caller_binding.CallerBindingError as exc:
+        _fail(str(exc), code=EXIT_CALLER_INVOKER_MISMATCH)
 
 
 def main(
