@@ -325,6 +325,11 @@ from clagentic_loadout.push.namespace_guard import (
 from clagentic_loadout.review.errors import ReviewPostError, ReviewVerifyError
 from clagentic_loadout.review.forgejo_backend import post_and_verify_comment as _forgejo_post_and_verify_comment
 from clagentic_loadout.review.github_backend import post_and_verify_review as _github_post_and_verify_review
+from clagentic_loadout.transport.attestation import (
+    AttestationError,
+    resolve_identity as _resolve_identity,
+)
+from clagentic_loadout.transport.caller_binding import CallerBindingError, bind_caller
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -368,6 +373,15 @@ EXIT_MERGE_SHAPE_MISMATCH = 31
 #: --verify-comment's EXIT_VERIFY_FAILED precedent: a caller MUST NOT report
 #: success when this fires.
 EXIT_MERGE_READBACK_FAILED = 32
+#: An EXPLICIT --role value does not match the ATTESTED invoking identity
+#: this process's own attestation-provider chain resolved
+#: (transport.caller_binding.bind_caller, lr-c75c9a -- the same fail-closed
+#: binding transport.git_host_api's EXIT_CALLER_INVOKER_MISMATCH already
+#: enforced; this verb now enforces it too). FAILS CLOSED BEFORE ANY I/O --
+#: no token mint, no authority check, no merge is ever attempted. An
+#: OMITTED --role never triggers this (see bind_caller's own docstring) --
+#: it is unchanged, existing behavior.
+EXIT_CALLER_INVOKER_MISMATCH = 33
 
 #: Reviewers required to post a clean verdict before a merge is authorized.
 #: A caller wanting a different reviewer roster passes --required-reviewer
@@ -603,11 +617,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help=f"Role whose merge authority is checked and whose token is "
         f"resolved via the credential provider (default: {DEFAULT_ROLE!r}). "
         f"Which role may authorize a merge is config (see --authorized-role "
-        f"/ an AuthorityProvider), never a hardcoded identity. MUST be the "
-        f"value the invoking harness/guard-hook has already attested for "
-        f"this spawn -- this verb consumes it as an opaque config key, "
-        f"never re-authenticates it (see merge.authority's module "
-        f"docstring).",
+        f"/ an AuthorityProvider), never a hardcoded identity. "
+        f"Already-attested, opaque config key downstream (the credential "
+        f"provider, the authority check never re-authenticate it "
+        f"themselves -- see merge.authority's module docstring). When "
+        f"EXPLICITLY supplied, it must ALSO match this process's own "
+        f"already attested invoking identity (transport.attestation."
+        f"resolve_identity) or the call is refused fail-closed before any "
+        f"I/O (transport.caller_binding.bind_caller); omitted, this check "
+        f"does not apply.",
     )
     parser.add_argument(
         "--authorized-role",
@@ -843,6 +861,7 @@ def main(
     token_provider: TokenProvider | None = None,
     authority_provider: AuthorityProvider | None = None,
     opener=None,
+    identity_provider=None,
 ) -> int:
     """CLI entrypoint. Returns the process exit code (does not call
     sys.exit itself so it stays testable).
@@ -850,6 +869,13 @@ def main(
     `token_provider`, `authority_provider`, and `opener` are injection
     points for tests and for a deployment wiring its own reference
     providers; all default to the standalone/real path in production use.
+
+    `identity_provider` (lr-c75c9a): a zero-arg callable returning a
+    `transport.attestation.Identity` (defaults to
+    `transport.attestation.resolve_identity`) -- the injection point for the
+    fail-closed --role/attested-invoker binding (transport.caller_binding.
+    bind_caller), mirroring the identical parameter transport.git_host_api.main
+    already carries for the same purpose.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -870,6 +896,7 @@ def main(
             token_provider=token_provider,
             authority_provider=authority_provider,
             opener=opener,
+            identity_provider=identity_provider,
         )
     except MergeVerbError as exc:
         print(f"merge: {exc}", file=sys.stderr)
@@ -877,6 +904,9 @@ def main(
     except MergeUsageError as exc:
         print(f"merge: {exc}", file=sys.stderr)
         return EXIT_USAGE
+    except CallerBindingError as exc:
+        print(f"merge: {exc}", file=sys.stderr)
+        return EXIT_CALLER_INVOKER_MISMATCH
 
 
 def _run(
@@ -885,6 +915,7 @@ def _run(
     token_provider: TokenProvider | None,
     authority_provider: AuthorityProvider | None,
     opener,
+    identity_provider=None,
 ) -> int:
     try:
         owner, repo = parse_owner_repo(args.repo)
@@ -910,6 +941,21 @@ def _run(
         )
 
     role = args.role or DEFAULT_ROLE
+
+    # --role/attested-invoker fail-closed binding (lr-c75c9a, mirrors
+    # transport.git_host_api's identical check): checked BEFORE any I/O --
+    # before the namespace guard (step 1), before the merge-authority check
+    # (step 2), before any token mint. An OMITTED --role (args.role is None)
+    # is never checked here -- see transport.caller_binding.bind_caller's own
+    # docstring for why (this preserves the pre-existing "omitted --role
+    # behaves exactly as before" contract unchanged).
+    resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
+    try:
+        attested_identity = resolve_identity_fn()
+    except AttestationError as exc:
+        _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
+    bind_caller(role, caller_explicit=args.role is not None, identity=attested_identity)
+
     required_reviewers = _parse_required_reviewers(args.required_reviewers, args.platform)
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
 
