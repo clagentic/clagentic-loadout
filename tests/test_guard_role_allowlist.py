@@ -385,25 +385,42 @@ _READ_VERB_RE = re.compile(r"^synthetic-git-host-api(\s|$)")
 
 class TestMergerReadOnlyConfigValidation:
     def test_valid_caller_role_accepted(self):
-        MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="merger")
+        MergerReadOnlyConfig(
+            verb_pattern=_READ_VERB_RE, caller_role="merger", attested_caller_identity="merger"
+        )
 
     def test_leading_hyphen_caller_role_rejected(self):
         with pytest.raises(ValueError):
-            MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="-merger")
+            MergerReadOnlyConfig(
+                verb_pattern=_READ_VERB_RE, caller_role="-merger", attested_caller_identity="merger"
+            )
 
     def test_metacharacter_caller_role_rejected(self):
         with pytest.raises(ValueError):
             MergerReadOnlyConfig(
-                verb_pattern=_READ_VERB_RE, caller_role="merger; rm -rf /"
+                verb_pattern=_READ_VERB_RE,
+                caller_role="merger; rm -rf /",
+                attested_caller_identity="merger",
             )
 
     def test_empty_caller_role_rejected(self):
         with pytest.raises(ValueError):
-            MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="")
+            MergerReadOnlyConfig(
+                verb_pattern=_READ_VERB_RE, caller_role="", attested_caller_identity="merger"
+            )
+
+    def test_attested_caller_identity_is_required(self):
+        # lr-dbc905: no default -- an existing integrator must explicitly
+        # decide (even if that decision is the "" unattested sentinel)
+        # rather than the hole silently staying open by default.
+        with pytest.raises(TypeError):
+            MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="merger")  # type: ignore[call-arg]
 
 
 class TestIsAdmittedMergerReadOnly:
-    _CFG = MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="merger")
+    _CFG = MergerReadOnlyConfig(
+        verb_pattern=_READ_VERB_RE, caller_role="merger", attested_caller_identity="merger"
+    )
 
     def test_get_with_caller_flag_admitted(self):
         cmd = "synthetic-git-host-api GET /repos/o/r --caller merger"
@@ -430,11 +447,74 @@ class TestIsAdmittedMergerReadOnly:
         assert is_admitted_merger_read_only(cmd, config=self._CFG) is False
 
 
+class TestIsAdmittedMergerReadOnlyCallerMismatchAttestation:
+    """lr-dbc905 -- BOBBIE audit finding 3 from the lr-c75c9a audit: flag
+    PRESENCE alone must no longer be treated as proof of identity."""
+
+    def test_regression_bare_caller_flag_with_mismatched_attestation_now_refused(self):
+        # THE OLD BEHAVIOR: a bare --caller <role> flag, with no attested
+        # identity check at all, used to be admitted purely because the
+        # flag text matched -- regardless of who actually invoked the
+        # process. This now FAILS: an attested identity that names a
+        # DIFFERENT process must refuse admission.
+        cfg = MergerReadOnlyConfig(
+            verb_pattern=_READ_VERB_RE,
+            caller_role="merger",
+            attested_caller_identity="builder",
+        )
+        cmd = "synthetic-git-host-api GET /repos/o/r --caller merger"
+        assert is_admitted_merger_read_only(cmd, config=cfg) is False
+
+    def test_matching_attested_identity_still_admitted(self):
+        cfg = MergerReadOnlyConfig(
+            verb_pattern=_READ_VERB_RE,
+            caller_role="merger",
+            attested_caller_identity="merger",
+        )
+        cmd = "synthetic-git-host-api GET /repos/o/r --caller merger"
+        assert is_admitted_merger_read_only(cmd, config=cfg) is True
+
+    def test_empty_attested_identity_is_unattested_not_a_mismatch(self):
+        # "" means no attestation signal was available -- the ORDINARY
+        # case, not a forged claim -- and must not be denied on that basis
+        # alone (mirrors guard.director_mutation.ActingSubagentResolver's
+        # own "chain resolves nothing" non-mismatch rule).
+        cfg = MergerReadOnlyConfig(
+            verb_pattern=_READ_VERB_RE, caller_role="merger", attested_caller_identity=""
+        )
+        cmd = "synthetic-git-host-api GET /repos/o/r --caller merger"
+        assert is_admitted_merger_read_only(cmd, config=cfg) is True
+
+
+class TestIsAdmittedMergerReadOnlyEnvAssignmentPrefixStripping:
+    """lr-dbc905 -- port of the reference's env-assignment-prefix stripping
+    (module docstring ll.97-102): a leading NAME=value word must not defeat
+    config.verb_pattern's anchored match."""
+
+    _CFG = MergerReadOnlyConfig(
+        verb_pattern=_READ_VERB_RE, caller_role="merger", attested_caller_identity="merger"
+    )
+
+    def test_env_prefixed_command_still_admitted(self):
+        cmd = "FOO=bar synthetic-git-host-api GET /repos/o/r --caller merger"
+        assert is_admitted_merger_read_only(cmd, config=self._CFG) is True
+
+    def test_multiple_env_prefixes_still_admitted(self):
+        cmd = "FOO=bar BAZ=qux synthetic-git-host-api GET /repos/o/r --caller merger"
+        assert is_admitted_merger_read_only(cmd, config=self._CFG) is True
+
+    def test_env_prefixed_write_method_still_denied(self):
+        cmd = "FOO=bar synthetic-git-host-api POST /repos/o/r --caller merger"
+        assert is_admitted_merger_read_only(cmd, config=self._CFG) is False
+
+
 class TestIsAdmittedMergerReadOnlyAnsiCEvasion:
     """security-review NIT finding (PR #115): an ANSI-C-obscured write-method
     token must not defeat the read-only exclusion."""
 
-    _CFG = MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="merger")
+    _CFG = MergerReadOnlyConfig(
+        verb_pattern=_READ_VERB_RE, caller_role="merger", attested_caller_identity="merger"
+    )
 
     def test_ansi_c_obscured_post_denied_not_admitted(self):
         cmd = "synthetic-git-host-api $'POST' /repos/o/r --caller merger"
@@ -452,7 +532,9 @@ class TestIsAdmittedMergerReadOnlyAnsiCEvasion:
 
 
 class TestCheckMergerCommandReadOnlyPreCheckIntegration:
-    _CFG = MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="merger")
+    _CFG = MergerReadOnlyConfig(
+        verb_pattern=_READ_VERB_RE, caller_role="merger", attested_caller_identity="merger"
+    )
 
     def test_read_only_precheck_admitted_through_full_pipeline(self):
         cmd = "synthetic-git-host-api GET /repos/o/r --caller merger"
@@ -485,13 +567,17 @@ class TestCheckBashCallRoleDispatch:
         assert ok is True, reason
 
     def test_merger_dispatch_honors_read_only_config(self):
-        cfg = MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="merger")
+        cfg = MergerReadOnlyConfig(
+            verb_pattern=_READ_VERB_RE, caller_role="merger", attested_caller_identity="merger"
+        )
         cmd = "synthetic-git-host-api GET /repos/o/r --caller merger"
         ok, reason = check_bash_call(BashRole.MERGER, cmd, read_only_config=cfg)
         assert ok is True, reason
 
     def test_read_only_config_ignored_for_builder(self):
-        cfg = MergerReadOnlyConfig(verb_pattern=_READ_VERB_RE, caller_role="merger")
+        cfg = MergerReadOnlyConfig(
+            verb_pattern=_READ_VERB_RE, caller_role="merger", attested_caller_identity="merger"
+        )
         # Passing a MERGER-shaped read_only_config alongside BUILDER must not
         # raise -- it is simply unused for BUILDER's own checker.
         ok, reason = check_bash_call(BashRole.BUILDER, "git status", read_only_config=cfg)

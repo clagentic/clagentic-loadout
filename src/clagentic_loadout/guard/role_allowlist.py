@@ -94,15 +94,32 @@ instruction — "flag any place the collapse is lossy"):
     1). This is a faithful, non-lossy collapse: the reference never varied
     this behavior per identity, so extracting it once is a deduplication,
     not a policy change.
-  - The reference's env-assignment-prefix stripping and its caller-mismatch
-    attestation check run in the reference's `main()`, BEFORE either
-    per-identity checker is ever called — genuinely harness-adapter
-    plumbing (point 1 above), not part of either identity's own allowlist
-    logic, and correctly excluded from this slice's scope entirely (a
-    caller's own harness adapter is responsible for any such
-    pre-normalization before calling into this module, exactly as
-    `guard.bash_admission`'s docstring already establishes for the
-    `--body-stdin` pipe carve-out's own caller-composition contract).
+  - The reference's env-assignment-prefix stripping (`FOO=bar cmd --caller
+    x`) and its caller-mismatch attestation check originally ran in the
+    reference's `main()`, BEFORE either per-identity checker was ever
+    called. lr-dbc905 PORTS BOTH into this module rather than leaving them
+    excluded: `is_admitted_merger_read_only` now (1) strips a leading
+    env-assignment prefix via `shell_parsing.strip_env_assignment_prefix`
+    before matching `config.verb_pattern`/scanning for `--caller`/the
+    write-method exclusion, composing with (not bypassing) the existing
+    `normalize_shell_words` + deny-on-unresolved-ANSI-C posture below, and
+    (2) refuses when the regex-matched `--caller <value>` does not equal a
+    caller-supplied ATTESTED identity (`MergerReadOnlyConfig.
+    attested_caller_identity` / `PlanningReaderReadOnlyConfig.
+    attested_caller_identity`) — flag PRESENCE is no longer treated as
+    proof of identity, only EQUALITY against a value the integration
+    boundary itself resolved and attests to. This module still never calls
+    `transport.attestation.resolve_identity()` itself (module docstring
+    point 1: no I/O, no env access, no config-root dependency in this
+    module's pure predicates) — the caller resolves the attested identity
+    ONCE at its own harness-adapter boundary and passes the plain string
+    in, exactly the seam `check_lead_command`'s `identity_label` parameter
+    and `guard.director_mutation.ActingSubagentResolver.
+    resolve_attested_identity` already establish. See
+    `MergerReadOnlyConfig`'s own docstring for the sentinel contract
+    (empty string = unattested, not a mismatch) and the REQUIRED-vs-
+    OPTIONAL trade-off this module resolves the same way
+    `ActingSubagentResolver` already did.
   - The reference's test-command escape hatch in its repo-authoring-identity
     checker (an env var admitting one extra caller-named literal command)
     is a TEST-ONLY debugging seam with no analogue needed here — a caller
@@ -355,6 +372,7 @@ from clagentic_loadout.guard.shell_parsing import (
     compound_check,
     has_unresolved_ansi_c_quote,
     normalize_shell_words,
+    strip_env_assignment_prefix,
 )
 from clagentic_loadout.wait.config import DEFAULT_SCOPED_TEST_PATTERNS
 
@@ -835,10 +853,55 @@ class MergerReadOnlyConfig:
         against `_ROLE_TOKEN_RE` at construction time (raises ValueError
         immediately on a malformed value) rather than letting a
         metacharacter-bearing string ever reach a compiled regex.
+    attested_caller_identity: the ATTESTED identity of the process actually
+        invoking this Bash call (lr-dbc905 — caller-mismatch attestation
+        port; a pre-merge security-audit finding on the lr-c75c9a audit).
+        Required at construction — no default — so a caller integrating this dataclass
+        cannot silently forget to wire it; a caller genuinely unable to
+        resolve attestation (module docstring point 1: this predicate does
+        no I/O itself, so IT never resolves this) passes the empty string
+        `""` explicitly, the SAME "unattested" sentinel
+        `guard.director_mutation.ActingSubagentResolver.
+        resolve_attested_identity` already established for this exact
+        question. `""` is NOT treated as a mismatch — an unattested
+        invocation is the ordinary case in a context where no attestation
+        signal is available at all, not a proof of forgery — matching that
+        module's own documented fail-closed rule exactly ("chain resolves
+        nothing" and "chain resolves to the same name" are both
+        non-mismatches; only "chain resolves to a DIFFERENT non-empty name"
+        fails closed). This module never calls `transport.attestation.
+        resolve_identity()` itself; the caller's own harness adapter
+        resolves it once and passes the plain string in here, exactly as
+        `check_lead_command`'s `identity_label` parameter is caller-
+        supplied rather than self-resolved.
+
+        WHY REQUIRED, NOT OPTIONAL-DEFAULTING-TO-`""` (the trade-off this
+        task's dispatch required naming explicitly): an optional field
+        defaulting to `""` would make the caller-mismatch check silently
+        INERT for every existing integrator who upgrades without editing
+        their own config-construction call site — flag presence would
+        still be the de facto proof of identity for anyone who does not
+        notice the new field exists, which is exactly the vulnerability
+        this task exists to close. Making the field REQUIRED (no default)
+        instead means every existing integrator's construction call
+        breaks at upgrade time with a clear `TypeError: missing required
+        argument`, not a runtime security regression that ships silently —
+        and the fix remains a single, explicit `attested_caller_identity=""`
+        per call site for an integrator that has not yet wired attestation
+        through its own harness adapter, which is the SAME degenerate-but-
+        working posture `ActingSubagentResolver` already made available.
+        This is deliberately NOT the same trade-off as `ActingSubagentResolver`
+        itself (which is an optional `LeadMutationConfig` field defaulting
+        to `None`, meaning "no carve-out at all") — that seam only ever
+        WIDENS what a lead session may do, so its absence is safely
+        conservative; here the missing check is a straightforward flag-
+        presence-as-proof HOLE, so this module refuses to let its absence
+        default to the option that leaves the hole open.
     """
 
     verb_pattern: re.Pattern[str]
     caller_role: str
+    attested_caller_identity: str
 
     def __post_init__(self) -> None:
         if not _ROLE_TOKEN_RE.match(self.caller_role):
@@ -863,11 +926,49 @@ def is_admitted_merger_read_only(
     """Return True iff *command* is admitted as the merger role's narrow
     read-only pre-check shape (reference: the release-gate identity's narrow
     git-host-api read-only pre-check function): matches `config.verb_pattern`,
-    carries `--caller <config.caller_role>` as a genuine shell word, and
-    carries no write-method token (POST/PATCH/PUT/DELETE). GET is the
-    default when no method token is present at all (mirrors the reference's
-    own "METHOD defaults to GET" contract) and is also accepted when spelled
-    out explicitly.
+    carries `--caller <config.caller_role>` as a genuine shell word, that
+    claimed caller value is CONSISTENT with `config.attested_caller_identity`
+    (lr-dbc905, see below), and carries no write-method token
+    (POST/PATCH/PUT/DELETE). GET is the default when no method token is
+    present at all (mirrors the reference's own "METHOD defaults to GET"
+    contract) and is also accepted when spelled out explicitly.
+
+    ENV-ASSIGNMENT-PREFIX STRIPPING (lr-dbc905, reference module docstring
+    ll.97-102 — previously excluded from this slice's scope, now ported):
+    a leading `NAME=value` shell-assignment word (`FOO=bar synthetic-git-
+    host-api GET ... --caller merger`) is stripped via `shell_parsing.
+    strip_env_assignment_prefix` BEFORE `config.verb_pattern.match` — the
+    reference's own env-assignment-prefix stripping ran ahead of its
+    per-identity checker for exactly this reason: `config.verb_pattern` is
+    anchored `^verb(\\s|$)` and a caller composing this module can neither
+    predict every env-assignment shape a caller's own invocation might carry
+    nor require every such caller to pre-strip it themselves. Applied to
+    the RAW command, ahead of (and composing with, not bypassing) the
+    `normalize_shell_words` ANSI-C-aware normalization below — an
+    env-assignment prefix is always a plain, unquoted `NAME=value` word by
+    bash's own grammar (see `strip_env_assignment_prefix`'s own docstring),
+    so stripping it first and then normalizing the remainder for ANSI-C/
+    quoting is the correct composition order, never the reverse.
+
+    CALLER-MISMATCH ATTESTATION (lr-dbc905, a pre-merge security-audit
+    finding on the lr-c75c9a audit — the guard-layer half of the exposure
+    lr-c75c9a's verb-layer fix left independently untouched): flag PRESENCE alone was
+    previously treated as proof the invoking process IS `config.caller_role`
+    — any process that could type the literal string `--caller <role>`
+    cleared this admission path regardless of who actually invoked it. This
+    now additionally refuses when `config.attested_caller_identity` is a
+    NON-EMPTY string that DIFFERS from the regex-matched `--caller` value —
+    the SAME fail-closed mismatch rule, and the SAME empty-string-means-
+    unattested (not a mismatch) sentinel, `guard.director_mutation.
+    ActingSubagentResolver`'s own `resolve_attested_identity` seam already
+    established for this exact question (see that module's "FAIL-CLOSED
+    MISMATCH CHECK" docstring section). This module still performs NO I/O
+    to answer the attestation question itself (module docstring point 1
+    "pure predicate" — `(command, config) -> bool`, no filesystem read, no
+    config-root dependency): `config.attested_caller_identity` is resolved
+    ONCE by the caller's own harness-adapter integration boundary and
+    passed in as a plain string, exactly as `check_lead_command`'s
+    `identity_label` parameter is caller-resolved rather than self-resolved.
 
     ANSI-C evasion (security-review NIT finding, PR #115, same class and same
     two-part fix as `check_forbidden_git_patterns`/`check_ansi_c_quote_
@@ -885,23 +986,39 @@ def is_admitted_merger_read_only(
     exclusion check (mirrors `bash_admission.requires_admission_flag`'s own
     fail-closed-on-ambiguity posture for the same reason: resolving
     ambiguity permissively here could hide a smuggled write-method token).
-    `config.verb_pattern.match` and `_build_caller_flag_re` are unaffected —
-    only the write-method exclusion (the check the finding named) needed the
-    normalized scan target.
+    `_build_caller_flag_re` and the new caller-mismatch check both consult
+    the SAME normalized `scan_target` the write-method exclusion already
+    computes — only `config.verb_pattern.match` (which runs against the
+    env-assignment-stripped, but not ANSI-C-normalized, command) is
+    unaffected by this normalization pass.
     """
-    if not config.verb_pattern.match(command):
+    stripped_command = strip_env_assignment_prefix(command)
+    if not config.verb_pattern.match(stripped_command):
         return False
 
-    scan_target = normalize_shell_words(command)
+    scan_target = normalize_shell_words(stripped_command)
     if scan_target is None:
-        if has_unresolved_ansi_c_quote(command):
+        if has_unresolved_ansi_c_quote(stripped_command):
             return False  # deny-on-ambiguity: unresolved ANSI-C could hide a write method
-        scan_target = command  # non-ANSI-C ambiguity: fall back to raw, matching module posture
+        scan_target = stripped_command  # non-ANSI-C ambiguity: fall back to raw, matching module posture
 
     if _WRITE_METHOD_RE.search(scan_target):
         return False
-    if not _build_caller_flag_re(config.caller_role).search(scan_target):
+
+    caller_match = _build_caller_flag_re(config.caller_role).search(scan_target)
+    if not caller_match:
         return False
+
+    # Flag presence is no longer proof of identity: refuse when an attested
+    # identity was supplied and it does not match the claimed --caller
+    # value. An empty attested_caller_identity ("unattested") is not a
+    # mismatch -- see docstring "CALLER-MISMATCH ATTESTATION" above.
+    if (
+        config.attested_caller_identity
+        and config.attested_caller_identity != config.caller_role
+    ):
+        return False
+
     return True
 
 
@@ -1619,17 +1736,23 @@ class PlanningReaderReadOnlyConfig:
     `_planning_reader_loadout_git_host_api_get_read`, ll.3378-3430).
 
     Deliberately reuses `MergerReadOnlyConfig`'s exact shape (a
-    `verb_pattern` plus a validated `caller_role` token) rather than
-    inventing a parallel dataclass — module docstring point 5 ("reuse landed
-    primitives; never duplicate a boundary"). A caller composes a
-    `MergerReadOnlyConfig` instance directly (e.g.
-    `MergerReadOnlyConfig(verb_pattern=..., caller_role="planning-reader")`)
-    and passes it here; this type alias exists only to give the parameter a
-    role-appropriate name at PLANNING_READER's own call site.
+    `verb_pattern`, a validated `caller_role` token, and — lr-dbc905 — a
+    required `attested_caller_identity`) rather than inventing a parallel
+    dataclass — module docstring point 5 ("reuse landed primitives; never
+    duplicate a boundary"). A caller composes a `MergerReadOnlyConfig`
+    instance directly (e.g. `MergerReadOnlyConfig(verb_pattern=...,
+    caller_role="planning-reader", attested_caller_identity=...)`) and
+    passes it here; this type alias exists only to give the parameter a
+    role-appropriate name at PLANNING_READER's own call site. See
+    `MergerReadOnlyConfig.attested_caller_identity`'s own docstring for the
+    full caller-mismatch-attestation contract and the REQUIRED-vs-OPTIONAL
+    trade-off rationale — identical here, since `_planning_reader_read_only_
+    admitted` below composes `is_admitted_merger_read_only` unchanged.
     """
 
     verb_pattern: re.Pattern[str]
     caller_role: str
+    attested_caller_identity: str
 
     def __post_init__(self) -> None:
         if not _ROLE_TOKEN_RE.match(self.caller_role):
@@ -1652,7 +1775,9 @@ def _planning_reader_read_only_admitted(
     """
     for cfg in configs:
         merger_shaped = MergerReadOnlyConfig(
-            verb_pattern=cfg.verb_pattern, caller_role=cfg.caller_role
+            verb_pattern=cfg.verb_pattern,
+            caller_role=cfg.caller_role,
+            attested_caller_identity=cfg.attested_caller_identity,
         )
         if is_admitted_merger_read_only(command, config=merger_shaped):
             return True

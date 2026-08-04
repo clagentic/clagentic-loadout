@@ -573,7 +573,9 @@ class TestCheckPlanningReaderCommandBaseGrants:
 
 class TestCheckPlanningReaderCommandReadOnlyPrecheck:
     _CFG = PlanningReaderReadOnlyConfig(
-        verb_pattern=_PLANNING_READ_VERB_RE, caller_role="planning-reader"
+        verb_pattern=_PLANNING_READ_VERB_RE,
+        caller_role="planning-reader",
+        attested_caller_identity="planning-reader",
     )
 
     def test_get_with_caller_flag_admitted(self):
@@ -590,6 +592,31 @@ class TestCheckPlanningReaderCommandReadOnlyPrecheck:
         cmd = "synthetic-git-host-api GET /repos/o/r --caller planning-reader"
         ok, reason = check_planning_reader_command(cmd)
         assert ok is False
+
+
+class TestCheckPlanningReaderCommandReadOnlyPrecheckCallerMismatchAttestation:
+    """lr-dbc905 -- same caller-mismatch attestation fix as MergerReadOnlyConfig,
+    reused via PlanningReaderReadOnlyConfig's identical shape."""
+
+    def test_mismatched_attestation_refused(self):
+        cfg = PlanningReaderReadOnlyConfig(
+            verb_pattern=_PLANNING_READ_VERB_RE,
+            caller_role="planning-reader",
+            attested_caller_identity="builder",
+        )
+        cmd = "synthetic-git-host-api GET /repos/o/r --caller planning-reader"
+        ok, reason = check_planning_reader_command(cmd, read_only_configs=(cfg,))
+        assert ok is False
+
+    def test_unattested_empty_identity_not_a_mismatch(self):
+        cfg = PlanningReaderReadOnlyConfig(
+            verb_pattern=_PLANNING_READ_VERB_RE,
+            caller_role="planning-reader",
+            attested_caller_identity="",
+        )
+        cmd = "synthetic-git-host-api GET /repos/o/r --caller planning-reader"
+        ok, reason = check_planning_reader_command(cmd, read_only_configs=(cfg,))
+        assert ok is True, reason
 
 
 class TestCheckPlanningReaderCommandForbiddenAndCompound:
