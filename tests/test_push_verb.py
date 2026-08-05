@@ -1336,6 +1336,62 @@ class TestCreatePrForgejo:
         assert secret_token not in captured.out
         assert secret_token not in captured.err
 
+    def test_local_pre_push_hook_message_reaches_the_caller(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """lr-1fb18b acceptance criterion: a caller receiving a local-hook
+        rejection must see the HOOK'S OWN OUTPUT TEXT, not merely the
+        sub_cause classification -- proven at the CLI/main() boundary (what
+        an agent shelling out to `loadout-push` actually receives), not
+        merely on GitPushError.local_hook_lines (already proven populated
+        by test_push_git_push.py -- an assertion at that internal level
+        would pass even if the handoff into verb.py/main() dropped the text,
+        which is exactly the defect this task diagnoses).
+
+        Installs a REAL `.git/hooks/pre-push` script printing a distinctive,
+        unprefixed string (mirroring the lore repo's own local pre-push
+        hook, which prints unprefixed since it never runs on the remote --
+        see _extract_local_hook_lines's own docstring) and asserts that
+        exact string is present in BOTH caller-visible channels:
+          1. the human-readable stderr line (str(exc)); and
+          2. the structured JSON failure envelope on stderr (the "prime
+             candidate" the task named -- previously no JSON was emitted on
+             any push failure at all, success-only).
+        """
+        repo, _remote = repo_with_remote
+        distinctive_marker = "LR-1FB18B-DISTINCTIVE-HOOK-MARKER: docs-staleness gate failed"
+        hooks_dir = repo / ".git" / "hooks"
+        pre_push_hook = hooks_dir / "pre-push"
+        pre_push_hook.write_text(
+            "#!/bin/sh\n"
+            f'echo "{distinctive_marker}" 1>&2\n'
+            "exit 1\n"
+        )
+        pre_push_hook.chmod(0o755)
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PUSH_FAILED
+        captured = capsys.readouterr()
+
+        # Channel 1: human-readable stderr text.
+        assert distinctive_marker in captured.err
+        assert "local-hook-rejected" in captured.err
+
+        # Channel 2: the structured JSON failure envelope -- the LAST
+        # stderr line is the envelope (printed immediately after the
+        # human-readable "push: ..." line in main()'s except PushVerbError
+        # handler).
+        stderr_lines = [line for line in captured.err.splitlines() if line.strip()]
+        envelope = json.loads(stderr_lines[-1])
+        assert envelope["sub_cause"] == "local-hook-rejected"
+        assert envelope["reached_transport"] is False
+        assert any(distinctive_marker in line for line in envelope["local_hook_lines"])
+
 
 class TestCleanlinessCheck:
     """lr-d7a8: pre-push scratch-litter check on the create-PR path. Default

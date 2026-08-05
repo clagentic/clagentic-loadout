@@ -689,6 +689,19 @@ contract this pairs with, including the reject-reason parser that replaced the e
 substring classifier and the `--verbose`/`--trace` flag below (the discoverable form of the
 opt-in `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` passthrough).
 
+**On a `git push` failure (`EXIT_PUSH_FAILED`), a caller gets the same evidence on TWO
+channels, both on stderr — never only the coarse classification:** the
+human-readable `push: git push failed (exit N, <sub_cause>): ...` line (which already folds
+in the extracted `remote: `-prefixed / local-hook lines verbatim), immediately followed by a
+single JSON line — the SAME structured fields documented in
+[push-failure-reporting.md](push-failure-reporting.md) (`sub_cause`, `exit_code`,
+`reached_transport`, `reject_reason`, `remote_lines`, `local_hook_lines`) — for a caller that
+parses JSON instead of scraping text. Both channels are redacted through the identical
+choke point (see [push-failure-reporting.md](push-failure-reporting.md#the-redaction-guarantee)).
+This JSON line is stderr-only, never stdout — stdout carries JSON only on a successful push
+(the `_run_create_pr`/`_run_update_pr` envelopes below), so a caller reading stdout-as-JSON
+on success is never confused by a failure-path line appearing there too.
+
 **`--dry-run` — a sanctioned diagnostic affordance, through the SAME minted credential
 path:** performs a read-only `git push --dry-run` through the identical minted per-caller
 credential resolution, the identical hermeticity pre-flight (`check_git_version`,
