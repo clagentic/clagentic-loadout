@@ -123,6 +123,41 @@ on the host. A fetch failure's message is redacted before it is ever raised
 (`GitFetchError`), so the caller (`resolve_lease`) folds it directly into a printed warning
 with no second redaction step.
 
+## The CLI failure envelope
+
+Everything above documents `GitPushError`'s own fields for a caller that imports this
+package and catches the exception directly. A caller that instead shells out to the
+`loadout-push` CLI (`clagentic_loadout.push.verb`) receives the identical evidence over two
+stderr channels on `EXIT_PUSH_FAILED`, never only the coarse `sub_cause` label:
+
+1. The human-readable line `push: git push failed (exit N, <sub_cause>): ...` — this already
+   folds in the extracted `REMOTE MESSAGE`/`LOCAL PRE-PUSH HOOK MESSAGE` blocks verbatim (see
+   the label table above), so a caller reading plain stderr text sees the hook's or remote's
+   own message, not merely the classification.
+2. Immediately following it, one JSON line on stderr (never stdout — stdout carries JSON only
+   on a successful push) with these keys:
+
+   | Key | Meaning |
+   |---|---|
+   | `sub_cause` | Same value as `GitPushError.sub_cause`. |
+   | `exit_code` | Same value as `GitPushError.exit_code`. |
+   | `reached_transport` | Same value as `GitPushError.reached_transport`. |
+   | `reject_reason` | Same value as `GitPushError.reject_reason` (may be `null`). |
+   | `remote_lines` | Same content as `GitPushError.remote_lines`, as a JSON array. |
+   | `local_hook_lines` | Same content as `GitPushError.local_hook_lines`, as a JSON array. |
+
+   Every value here is already redacted through the same choke point described above
+   (`GitPushError.__init__` redacts before this envelope is ever built) — a caller consuming
+   this JSON gets no less redaction than a caller reading the plain-text line.
+
+**Why this exists:** prior to this fix, the CLI's structured output was success-only —
+`_run_create_pr`/`_run_update_pr` print a JSON envelope on `EXIT_OK`, but a push failure
+produced no JSON at all, only the plain-text line above. A caller that parsed stdout/stderr
+as JSON (rather than scraping text) received nothing on failure beyond the exit code — which
+is exactly the gap that sent one investigation into a wrong subsystem (see the module
+docstring in `push.git_push`, "REJECT-REASON PARSER, NOT A SUBSTRING CLASSIFIER", for the
+sibling defect class this belongs to).
+
 ## Integrator guidance
 
 - Read `raw_stderr` (or the formatted `str(exc)`, which always contains it) when a caller

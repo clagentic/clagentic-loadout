@@ -389,15 +389,24 @@ EXIT_CALLER_INVOKER_MISMATCH = 33
 
 class PushVerbError(Exception):
     """Raised for any push failure that should terminate the process with a
-    specific exit code. Carries the intended exit code as `.code`."""
+    specific exit code. Carries the intended exit code as `.code`.
 
-    def __init__(self, message: str, code: int) -> None:
+    *envelope* (lr-1fb18b): an OPTIONAL structured dict a caller that parses
+    stdout/stderr as JSON can consume instead of (or alongside) the
+    human-readable `str(exc)` text -- see `main`'s own `except PushVerbError`
+    handling, which prints this as a JSON line to stderr when present. None
+    for every failure class that has no structured data worth carrying
+    beyond the message text itself (the default -- most `_fail(...)` call
+    sites in this module never pass one)."""
+
+    def __init__(self, message: str, code: int, *, envelope: dict | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.envelope = envelope
 
 
-def _fail(message: str, code: int) -> None:
-    raise PushVerbError(message, code)
+def _fail(message: str, code: int, *, envelope: dict | None = None) -> None:
+    raise PushVerbError(message, code, envelope=envelope)
 
 
 # ---------------------------------------------------------------------------
@@ -1343,6 +1352,15 @@ def main(
         )
     except PushVerbError as exc:
         print(f"push: {exc}", file=sys.stderr)
+        if exc.envelope is not None:
+            # lr-1fb18b: a caller that parses JSON output (mirroring the
+            # success envelopes _run_create_pr/_run_update_pr already print
+            # to stdout) gets the SAME structured evidence a human reading
+            # stderr text gets -- printed to stderr, never stdout, so it
+            # never collides with a caller that expects stdout to carry
+            # JSON only on a successful push (see docs/push-failure-
+            # reporting.md, which documents this envelope's fields).
+            print(json.dumps(exc.envelope), file=sys.stderr)
         return exc.code
     except PushUsageError as exc:
         print(f"push: {exc}", file=sys.stderr)
@@ -1919,7 +1937,29 @@ def _run_create_pr(
     except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
         _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
     except GitPushError as exc:
-        _fail(str(exc), code=EXIT_PUSH_FAILED)
+        # lr-1fb18b: the human-readable str(exc) already folds the hook's
+        # own message text into the printed line (see push.git_push's
+        # message-building, which this exception's __str__ derives from
+        # verbatim) -- but a caller that reads the structured JSON envelope
+        # instead of scraping stderr text previously got NOTHING on a push
+        # failure (only the two success paths ever emitted JSON). Every
+        # field here is already redacted -- GitPushError.__init__ redacts
+        # message/raw_stderr/reject_reason/remote_lines/local_hook_lines
+        # structurally at construction (see push.errors.GitPushError) --
+        # so this envelope carries no unredacted text a plain-text stderr
+        # reader wasn't already going to see.
+        _fail(
+            str(exc),
+            code=EXIT_PUSH_FAILED,
+            envelope={
+                "sub_cause": exc.sub_cause,
+                "exit_code": exc.exit_code,
+                "reached_transport": exc.reached_transport,
+                "reject_reason": exc.reject_reason,
+                "remote_lines": list(exc.remote_lines),
+                "local_hook_lines": list(exc.local_hook_lines),
+            },
+        )
 
     if args.dry_run:
         # --DRY-RUN STOPS HERE (lr-68039e): nothing was pushed to the
