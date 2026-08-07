@@ -26,18 +26,26 @@ uses build_verdict_block() below and posts it via review.contract.
 
 Verdict enforcement (read_reviewer_verdict)
 --------------------------------------------
-1. Select the latest comment whose ``user.login`` matches the reviewer's
-   known bot/role login. AUTHORSHIP IS VERIFIED BY THE PLATFORM'S user.login
-   FIELD — never by a claim inside the comment body text. "Latest" is
-   determined DETERMINISTICALLY by each matching comment's own
-   ``created_at`` timestamp (tie-break: comment ``id``, both monotonic per
-   platform) — never by trusting the input list's order. The comments API
-   response is NOT guaranteed to arrive in chronological order (pagination,
-   platform-specific ordering); a resolver that just reverses the given list
-   can pick an OLDER 'blocking' comment over a NEWER 'clean' one at the same
-   SHA if the API happens to return them out of order (lr-c14a2d). A missing
-   or unparseable ``created_at`` on any candidate comment is a fail-closed
-   VerdictMalformedError — never silently treated as "oldest" or skipped.
+1. Among all comments whose ``user.login`` matches the reviewer's known
+   bot/role login, select the most recent one that itself CONTAINS a
+   parseable fenced ``review-result`` block — not merely the most recent
+   comment by that login. AUTHORSHIP IS VERIFIED BY THE PLATFORM'S
+   user.login FIELD — never by a claim inside the comment body text.
+   "Most recent" is determined DETERMINISTICALLY by each candidate
+   comment's own ``created_at`` timestamp (tie-break: comment ``id``, both
+   monotonic per platform) — never by trusting the input list's order. The
+   comments API response is NOT guaranteed to arrive in chronological order
+   (pagination, platform-specific ordering); a resolver that just reverses
+   the given list can pick an OLDER 'blocking' comment over a NEWER 'clean'
+   one at the same SHA if the API happens to return them out of order
+   (lr-c14a2d). A missing or unparseable ``created_at`` on any candidate
+   comment (fenced or not) is a fail-closed VerdictMalformedError — never
+   silently treated as "oldest" or skipped. A later comment from the same
+   login that carries NO fence (a retraction, a clarification, an answer to
+   a lead's question) is skipped over during selection rather than blanking
+   out an earlier fenced verdict — fence-presence, not raw recency, is the
+   selection key; only when NO comment from that login ever carried a fence
+   does this refuse as genuinely missing.
 1b. ``enforce_single_fence`` (lr-5260f9, default ON — see
    merge.post_merge_config.resolve_enforce_single_verdict_fence): refuse a
    selected comment body carrying MORE THAN ONE fenced ```review-result```
@@ -515,8 +523,13 @@ def read_reviewer_verdict(
 
     Raises:
         VerdictMissingError     — no comment with matching user.login found,
-                                   or the matching comment has no fenced
-                                   block.
+                                   or NONE of that login's comments contain a
+                                   fenced block (a later prose-only comment
+                                   from the same login, e.g. a retraction or
+                                   clarification, never triggers this on its
+                                   own as long as an earlier comment from
+                                   that login carries a fence — see the
+                                   selection step below).
         VerdictMalformedError   — block found but JSON malformed, not an
                                    object, missing required fields, invalid
                                    review_status, a head_sha that fails
@@ -549,12 +562,12 @@ def read_reviewer_verdict(
             f"block."
         )
 
-    # DETERMINISTIC "latest verdict supersedes" selection (lr-c14a2d): sort
+    # DETERMINISTIC "latest verdict supersedes" ORDERING (lr-c14a2d): sort
     # every same-reviewer comment by its own created_at, tie-broken by
     # comment id (both monotonic per platform) — never by trusting the
     # input list's position. The git-host comments API is not guaranteed to
     # return comments in chronological order; reversing the given list and
-    # taking the first match (the prior implementation) could land on an
+    # taking the first match (an earlier implementation) could land on an
     # OLDER 'blocking' comment instead of a NEWER 'clean' one at the same
     # SHA when the API returns them out of order. Multiple same-reviewer
     # comments are NORMAL supersede behavior here — a reviewer legitimately
@@ -562,6 +575,17 @@ def read_reviewer_verdict(
     # assert_single_own_verdict_block, which is about multiple verdict
     # BLOCKS inside one comment BODY, a different concern this loop does not
     # touch).
+    #
+    # SELECTION is a SEPARATE step from ordering: pick the most recent
+    # comment that itself CONTAINS a fenced block, not merely the most
+    # recent comment by this login. A reviewer's later PROSE-ONLY comment
+    # (a retraction, a clarification, an answer to a lead's question) does
+    # not blank out an earlier, still-valid fenced verdict — the fence is
+    # the gate's atomic unit of validation, not comment recency by itself.
+    # created_at validation still runs over EVERY matching comment
+    # (including fenceless ones) before selection, so a comment with an
+    # unparseable timestamp still fails closed rather than being silently
+    # skipped because it lacks a fence.
     parsed_timestamps: list[tuple[datetime, int, dict[str, Any]]] = []
     for comment in matching_comments:
         created_at = _parse_comment_timestamp(comment.get("created_at"))
@@ -578,7 +602,30 @@ def read_reviewer_verdict(
         parsed_timestamps.append((created_at, comment_id, comment))
 
     parsed_timestamps.sort(key=lambda entry: (entry[0], entry[1]))
-    matching_comment = parsed_timestamps[-1][2]
+    ordered_comments = [entry[2] for entry in reversed(parsed_timestamps)]
+
+    # Walk newest-first and select the first candidate whose body carries at
+    # least one fenced block. A candidate with ZERO fences (prose-only) is
+    # skipped over rather than selected — it is not "the verdict," it is
+    # silence, and silence does not supersede an earlier fenced verdict. A
+    # candidate with fences goes through the existing multi-fence backstop
+    # (lr-5260f9) and parse exactly as before; that per-comment enforcement
+    # is unchanged by this loop (see lr-cb8db9's double-fence handling).
+    matching_comment: dict[str, Any] | None = None
+    for candidate in ordered_comments:
+        candidate_body = candidate.get("body", "")
+        if _FENCE_RE.search(candidate_body) is None:
+            continue
+        matching_comment = candidate
+        break
+
+    if matching_comment is None:
+        raise VerdictMissingError(
+            f"No PR comment from reviewer login {expected_login!r} on PR "
+            f"#{pr_number} in {owner}/{repo} contains a fenced "
+            f"```{VERDICT_FENCE}``` verdict block. The reviewer must embed "
+            f"the verdict block in one of their PR comments."
+        )
 
     body = matching_comment.get("body", "")
     comment_id = matching_comment.get("id", 0)
@@ -593,16 +640,11 @@ def read_reviewer_verdict(
     if enforce_single_fence:
         assert_verdict_block_count_at_most_one(body)
 
+    # parse_verdict_block cannot return None here: matching_comment was
+    # selected above specifically because _FENCE_RE matched its body, and
+    # parse_verdict_block's own extraction uses the same regex.
     verdict_data = parse_verdict_block(body)
-    if verdict_data is None:
-        raise VerdictMissingError(
-            f"PR comment from {expected_login!r} on PR #{pr_number} in "
-            f"{owner}/{repo} does not contain a fenced "
-            f"```{VERDICT_FENCE}``` verdict block (or the fence language "
-            f"tag was not on the same line as the opening triple-"
-            f"backticks). The reviewer must embed the verdict block in "
-            f"their PR comment."
-        )
+    assert verdict_data is not None
 
     review_status = verdict_data.get("review_status", "")
     if review_status not in _VALID_STATUSES:

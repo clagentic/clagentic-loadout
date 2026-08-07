@@ -18,6 +18,13 @@ Coverage:
       * blocking review_status parses successfully (assert_clean_verdict is
         the separate enforcement step) and IS refused by assert_clean_verdict
       * clean, current-SHA, correct-author verdict -> success, fields correct
+      * fence-presence-first selection (lr-9ac683): an earlier fenced
+        verdict from the reviewer login survives a LATER prose-only
+        comment from that same login (a retraction/clarification does not
+        blank out an earlier valid verdict); a login with NO fenced
+        comment at all still refuses VerdictMissingError; multiple fenced
+        comments still pick the latest FENCED one; both GitHub and Forgejo
+        comment payload shapes exercised
       * role/content consistency (lr-23fe19, defense-in-depth ON TOP OF the
         user.login binding): expected_reviewer_name given + block's own
         'reviewer' field disagrees -> VerdictRoleMismatchError (replays the
@@ -329,6 +336,188 @@ class TestReadReviewerVerdictCreatedAtOrdering:
         # comments (tested above via read_reviewer_verdict).
         block = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
         assert_single_own_verdict_block(block, "expected-login")  # no raise
+
+
+class TestReadReviewerVerdictFencePresenceSelection:
+    """Selection must filter by reviewer login FIRST, then pick the most
+    recent comment among those that CONTAINS a parseable fenced
+    review-result block -- not simply the most recent comment by that
+    login. A reviewer's later prose-only correction (a retraction, a
+    clarification) must not blank out an earlier, still-valid fenced
+    verdict. Governing semantic: engram 7544511 -- fenced verdict blocks
+    are the gate's atomic unit of validation; old prose-only comments do
+    not invalidate a later fenced verdict, and (the mirror image fixed
+    here) a later prose-only comment does not invalidate an earlier
+    fenced one either."""
+
+    def test_earlier_fenced_then_later_prose_still_resolves_to_the_fence(self):
+        # THE REGRESSION SHAPE (PR #1797): the reviewer posts a valid,
+        # well-formed fenced 'clean' verdict, then LATER posts a prose-only
+        # correction to a false sub-observation in the original review --
+        # no re-verdict, by design (cf. lr-cb8db9: emitting a second fence
+        # for a non-verdict comment would itself be wrong). The earlier
+        # fenced verdict must still be found and used.
+        fenced = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [
+            _comment(1, "expected-login", fenced, created_at="2026-01-01T00:00:01Z"),
+            _comment(
+                2,
+                "expected-login",
+                "Retracting my earlier claim that the E2E test was absent "
+                "from the diff -- it was in fact present. No change to my "
+                "verdict.",
+                created_at="2026-01-01T00:00:02Z",
+            ),
+        ]
+        verdict = read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+        assert verdict.review_status == "clean"
+        assert verdict.comment_id == 1
+
+    def test_no_fence_at_all_still_refuses_missing(self):
+        # GENUINELY-ABSENT CASE (must be preserved exactly): the reviewer
+        # has never posted a fenced verdict at all -- every comment from
+        # that login is prose-only. This must still refuse with
+        # VerdictMissingError.
+        comments = [
+            _comment(1, "expected-login", "still reviewing", created_at="2026-01-01T00:00:01Z"),
+            _comment(
+                2, "expected-login", "looks good so far", created_at="2026-01-01T00:00:02Z"
+            ),
+        ]
+        with pytest.raises(VerdictMissingError):
+            read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+
+    def test_multiple_fenced_comments_picks_the_latest_fenced_one(self):
+        # Two separate fenced comments (a normal retry/supersede sequence,
+        # unaffected by the fence-presence-first fix): the most recent
+        # FENCED one wins, matching the pre-existing "latest verdict
+        # supersedes" contract (lr-c14a2d) -- fence-presence filtering does
+        # not change this ordinary case.
+        older_fenced = build_verdict_block("expected-login", "blocking", _FULL_SHA, 1)
+        newer_fenced = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [
+            _comment(1, "expected-login", older_fenced, created_at="2026-01-01T00:00:01Z"),
+            _comment(2, "expected-login", newer_fenced, created_at="2026-01-01T00:00:02Z"),
+        ]
+        verdict = read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+        assert verdict.review_status == "clean"
+        assert verdict.comment_id == 2
+
+    def test_fenced_then_prose_then_fenced_again_picks_the_latest_fenced(self):
+        # A fenced verdict, a prose-only correction, then a FRESH fenced
+        # re-verdict -- the freshest fenced comment must still win over
+        # both the older fence and the intervening prose-only comment.
+        first_fenced = build_verdict_block("expected-login", "blocking", _FULL_SHA, 1)
+        prose = "clarifying a point from my review, no re-verdict"
+        second_fenced = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [
+            _comment(1, "expected-login", first_fenced, created_at="2026-01-01T00:00:01Z"),
+            _comment(2, "expected-login", prose, created_at="2026-01-01T00:00:02Z"),
+            _comment(3, "expected-login", second_fenced, created_at="2026-01-01T00:00:03Z"),
+        ]
+        verdict = read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+        assert verdict.review_status == "clean"
+        assert verdict.comment_id == 3
+
+    def test_prose_between_two_fenced_comments_does_not_hide_the_older_one(self):
+        # Interleaved order sanity check: prose sandwiched between an
+        # earlier fenced verdict and later NON-fenced comments must not
+        # prevent the earlier fence from being found when it is the ONLY
+        # fenced comment in the thread.
+        fenced = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [
+            _comment(1, "expected-login", fenced, created_at="2026-01-01T00:00:01Z"),
+            _comment(2, "expected-login", "a question answered", created_at="2026-01-01T00:00:02Z"),
+            _comment(3, "expected-login", "one more clarification", created_at="2026-01-01T00:00:03Z"),
+        ]
+        verdict = read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+        assert verdict.review_status == "clean"
+        assert verdict.comment_id == 1
+
+    def test_double_fence_on_the_selected_comment_still_refuses(self):
+        # lr-cb8db9 double-fence handling must not regress: even though
+        # selection now filters by fence-presence first, a SELECTED
+        # comment carrying two fences (the PR #485 shape) is still refused
+        # by the existing multi-fence backstop, exactly as before.
+        blocking = build_verdict_block("expected-login", "blocking", _FULL_SHA, 1)
+        clean = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [
+            _comment(1, "expected-login", f"{blocking}\n{clean}", created_at="2026-01-01T00:00:01Z"),
+            _comment(
+                2,
+                "expected-login",
+                "prose-only follow-up, no fence",
+                created_at="2026-01-01T00:00:02Z",
+            ),
+        ]
+        with pytest.raises(VerdictMalformedError, match="2 fenced"):
+            read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+
+    def test_missing_created_at_on_a_prose_only_comment_still_fails_closed(self):
+        # created_at validation runs over EVERY matching comment, including
+        # fenceless ones -- a comment lacking a fence must not be silently
+        # exempted from the fail-closed created_at check just because it
+        # would have been skipped during fence-presence selection anyway.
+        fenced = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [
+            _comment(1, "expected-login", fenced, created_at="2026-01-01T00:00:01Z"),
+            {"id": 2, "user": {"login": "expected-login"}, "body": "prose, no timestamp"},
+        ]
+        with pytest.raises(VerdictMalformedError, match="created_at"):
+            read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+
+    def test_forgejo_payload_shape_earlier_fenced_then_later_prose(self):
+        # Both platforms' read paths converge on read_reviewer_verdict --
+        # merge.verb calls backend.fetch_comments (github_backend /
+        # forgejo_backend) and hands the raw list straight through with no
+        # per-platform transform, so this module's own parsing logic is the
+        # single shared read path. Exercised here against the Forgejo
+        # issue-comments payload shape explicitly, per the task's
+        # both-platforms coverage requirement.
+        fenced = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [
+            {
+                "id": 198,
+                "user": {"login": "expected-login"},
+                "body": fenced,
+                "created_at": "2026-07-15T13:05:00Z",
+                "html_url": "https://forgejo.example/owner/repo/issues/1#issuecomment-198",
+            },
+            {
+                "id": 205,
+                "user": {"login": "expected-login"},
+                "body": "retracting an earlier false sub-observation, no re-verdict",
+                "created_at": "2026-07-15T14:32:10Z",
+                "html_url": "https://forgejo.example/owner/repo/issues/1#issuecomment-205",
+            },
+        ]
+        verdict = read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+        assert verdict.review_status == "clean"
+        assert verdict.comment_id == 198
+
+    def test_github_payload_shape_earlier_fenced_then_later_prose(self):
+        # GitHub issue-comments payload shape counterpart to the Forgejo
+        # test above.
+        fenced = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [
+            {
+                "id": 4980366091,
+                "user": {"login": "expected-login"},
+                "body": fenced,
+                "created_at": "2026-07-15T13:05:00Z",
+                "html_url": "https://github.com/owner/repo/pull/1#issuecomment-4980366091",
+            },
+            {
+                "id": 4980399228,
+                "user": {"login": "expected-login"},
+                "body": "retracting an earlier false sub-observation, no re-verdict",
+                "created_at": "2026-07-15T14:32:10Z",
+                "html_url": "https://github.com/owner/repo/pull/1#issuecomment-4980399228",
+            },
+        ]
+        verdict = read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+        assert verdict.review_status == "clean"
+        assert verdict.comment_id == 4980366091
 
 
 class TestReadReviewerVerdictRoleConsistency:
