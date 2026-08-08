@@ -446,6 +446,7 @@ def merge_pr(
     *,
     token: str,
     merge_message: str = "",
+    merge_title: str = "",
     merge_method: str = DEFAULT_MERGE_METHOD,
     opener=None,
 ) -> str | None:
@@ -466,6 +467,16 @@ def merge_pr(
         field — that is the exact class of "trust the status code alone"
         bug this fail-closed gate chain refuses to reproduce.
 
+    `merge_title` (lr-1953a8) is GitHub's own `commit_title` field, DISTINCT
+    from `merge_message`/`commit_message` (the body): when omitted, GitHub
+    defaults the merge commit's SUBJECT to "Merge pull request #N from
+    <owner>/<branch>" — the source branch ref, not the PR title — which is
+    exactly why a `<type>/<task-id>-<slug>` branch name lands its task id in
+    the subject with nobody typing it. The caller (merge.verb) passes the
+    PR's own (already Conventional-Commits-gated) title here to produce a
+    readable changelog subject instead; an empty string is byte-identical to
+    this parameter never existing (GitHub's own default applies).
+
     Returns the merged commit SHA on success (GitHub's merge response body
     documents a "sha" field on a 200+merged:true response — lr-7c5540: this
     is the ONE piece of information `merge.tree_sync.advance_repo_to_merged_sha`
@@ -480,6 +491,8 @@ def merge_pr(
     payload: dict[str, Any] = {"merge_method": merge_method}
     if merge_message:
         payload["commit_message"] = merge_message
+    if merge_title:
+        payload["commit_title"] = merge_title
 
     url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}/merge"
     try:

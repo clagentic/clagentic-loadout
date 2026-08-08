@@ -243,6 +243,37 @@ class TestMergePr:
         payload = json.loads(captured["data"].decode())
         assert payload["merge_message_field"] == "custom note"
 
+    def test_merge_title_included_when_supplied(self):
+        # lr-1953a8: MergeTitleField composes the merge commit SUBJECT from
+        # the caller-supplied title (merge.verb passes the PR's own title)
+        # rather than Forgejo's own branch-ref-bearing default.
+        captured = {}
+
+        def opener(req, timeout=15):
+            captured["data"] = req.data
+            return _FakeResponse(200, b"{}")
+
+        forgejo_backend.merge_pr(
+            _API_BASE, "owner", "repo", 1, token="tok",
+            merge_title="fix(merge): correct stale-SHA check order", opener=opener,
+        )
+        payload = json.loads(captured["data"].decode())
+        assert payload["MergeTitleField"] == "fix(merge): correct stale-SHA check order"
+
+    def test_merge_title_omitted_when_not_supplied(self):
+        # Byte-identical to this parameter never existing: no MergeTitleField
+        # key at all when the caller does not pass one, so Forgejo's own
+        # default subject applies unchanged.
+        captured = {}
+
+        def opener(req, timeout=15):
+            captured["data"] = req.data
+            return _FakeResponse(200, b"{}")
+
+        forgejo_backend.merge_pr(_API_BASE, "owner", "repo", 1, token="tok", opener=opener)
+        payload = json.loads(captured["data"].decode())
+        assert "MergeTitleField" not in payload
+
     def test_default_merge_method_is_merge(self):
         # lr-14f704: the `Do` field default -- unchanged behavior for every
         # caller that never passes merge_method explicitly.

@@ -12,6 +12,16 @@ chain itself (steps 1-7 below) runs IDENTICALLY regardless of platform.
 
 THE GATE CHAIN (in enforcement order, mirroring the reference module's own
 documented step ordering):
+  0. Repo-path/slug consistency (merge.repo_path_consistency, lr-4522a3) —
+     when --repo-path points at a real, parseable git tree, its OWN origin
+     remote must name the same owner/repo as --repo, or the merge refuses
+     naming both values. Runs before step 1, so a caller-side argument
+     defect (the wrong local tree for the requested slug) never reaches a
+     credential mint and surfaces as a confusing platform-API rejection.
+     Compares against the tree's remote, never its directory name — see
+     that module's own docstring for why the '.github' org-profile shape
+     (directory basename diverges from slug by design) is correctly never
+     flagged.
   1. Namespace guard (merge.verb, reusing push.namespace_guard verbatim —
      the same config-driven allowed-namespace seam, no second
      implementation). Runs first: a refusal here must never mint a
@@ -302,6 +312,7 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_post_merge_step_timeout_seconds,
     resolve_sync_tree_after_merge,
 )
+from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     resolve_reviewer_login,
@@ -467,12 +478,13 @@ class _ForgejoMergeBackend:
         )
 
     def merge_pr(
-        self, owner: str, repo: str, pr_number: int, *, merge_message: str, merge_method: str
+        self, owner: str, repo: str, pr_number: int, *,
+        merge_message: str, merge_title: str, merge_method: str,
     ) -> str | None:
         return forgejo_backend.merge_pr(
             self._git_host_base, owner, repo, pr_number,
-            token=self._token, merge_message=merge_message, merge_method=merge_method,
-            opener=self._opener,
+            token=self._token, merge_message=merge_message, merge_title=merge_title,
+            merge_method=merge_method, opener=self._opener,
         )
 
 
@@ -520,11 +532,12 @@ class _GithubMergeBackend:
         )
 
     def merge_pr(
-        self, owner: str, repo: str, pr_number: int, *, merge_message: str, merge_method: str
+        self, owner: str, repo: str, pr_number: int, *,
+        merge_message: str, merge_title: str, merge_method: str,
     ) -> str | None:
         return github_backend.merge_pr(
             owner, repo, pr_number, token=self._token, merge_message=merge_message,
-            merge_method=merge_method, opener=self._opener,
+            merge_title=merge_title, merge_method=merge_method, opener=self._opener,
         )
 
 
@@ -940,6 +953,15 @@ def _run(
             "check), or --skip-post-merge (to skip regardless)."
         )
 
+    # lr-4522a3: when --repo-path points at a real, parseable git tree,
+    # refuse a --repo slug that does not match that tree's OWN origin
+    # remote -- before any credential mint, so a caller-side argument
+    # defect never becomes an opaque platform-API 422 that misleadingly
+    # blames the App installation. Compares against the remote, never the
+    # directory name (the '.github' org-profile shape is correct and never
+    # flagged) -- see merge.repo_path_consistency's module docstring.
+    assert_repo_path_consistent(args.repo, args.repo_path)
+
     role = args.role or DEFAULT_ROLE
 
     # --role/attested-invoker fail-closed binding (lr-c75c9a, mirrors
@@ -1180,10 +1202,20 @@ def _run(
         f"{owner}/{repo}",
         file=sys.stderr,
     )
+    # lr-1953a8: merge_title=pr_title composes the merge commit's SUBJECT
+    # from the PR's own (already step-7-gated Conventional Commits) title,
+    # rather than each backend's own default (GitHub: "Merge pull request
+    # #N from <owner>/<branch>"; Forgejo: an equivalent branch-ref-bearing
+    # default) -- a <type>/<task-id>-<slug> branch name would otherwise put
+    # the task id straight into the subject with nobody typing it. Pure
+    # readability: pr_title is passed through UNMODIFIED, no task-id
+    # stripping/matching of any kind -- see merge.github_backend.merge_pr /
+    # merge.forgejo_backend.merge_pr's own merge_title docstrings.
     try:
         merged_sha = backend.merge_pr(
             owner, repo, args.pr_number,
-            merge_message=args.merge_message, merge_method=args.merge_method,
+            merge_message=args.merge_message, merge_title=pr_title,
+            merge_method=args.merge_method,
         )
     except MergeExecutionError as exc:
         _fail(str(exc), code=EXIT_MERGE_FAILED)

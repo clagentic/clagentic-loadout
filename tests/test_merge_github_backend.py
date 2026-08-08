@@ -265,6 +265,39 @@ class TestMergePr:
         payload = json.loads(captured["data"].decode())
         assert payload["commit_message"] == "custom note"
 
+    def test_merge_title_included_when_supplied(self):
+        # lr-1953a8: commit_title composes the merge commit SUBJECT from the
+        # caller-supplied title (merge.verb passes the PR's own title)
+        # rather than GitHub's own "Merge pull request #N from owner/branch"
+        # default, which otherwise embeds the source branch ref (and any
+        # task id in it) into the subject with nobody typing it.
+        captured = {}
+
+        def opener(req, timeout=30):
+            captured["data"] = req.data
+            return _json_response(200, {"merged": True})
+
+        github_backend.merge_pr(
+            _OWNER, _REPO, 1, token="tok",
+            merge_title="fix(merge): correct stale-SHA check order", opener=opener,
+        )
+        payload = json.loads(captured["data"].decode())
+        assert payload["commit_title"] == "fix(merge): correct stale-SHA check order"
+
+    def test_merge_title_omitted_when_not_supplied(self):
+        # Byte-identical to this parameter never existing: no commit_title
+        # key at all when the caller does not pass one, so GitHub's own
+        # default subject applies unchanged.
+        captured = {}
+
+        def opener(req, timeout=30):
+            captured["data"] = req.data
+            return _json_response(200, {"merged": True})
+
+        github_backend.merge_pr(_OWNER, _REPO, 1, token="tok", opener=opener)
+        payload = json.loads(captured["data"].decode())
+        assert "commit_title" not in payload
+
     def test_default_merge_method_is_merge(self):
         captured = {}
 

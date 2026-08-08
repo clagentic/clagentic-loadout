@@ -826,3 +826,40 @@ class TestMergeMethodReachesApiPayload:
         )
         assert code == verb.EXIT_OK
         assert captured["payload"]["Do"] == "rebase"
+
+
+class TestMergeTitleFromPrTitleOnGithub:
+    """lr-1953a8: the GitHub-platform half of merge.verb._run's merge_title
+    threading -- see test_merge_verb.py's TestMergeTitleFromPrTitle for the
+    Forgejo-platform coverage using that file's own opener fixture."""
+
+    def test_pr_title_reaches_github_merge_post_body_as_commit_title(self):
+        captured: dict = {}
+        inner_opener = _github_opener()
+
+        def opener(req, timeout=30):
+            url = req.full_url
+            method = req.get_method()
+            if method == "PUT" and url.endswith("/merge"):
+                captured["payload"] = json.loads(req.data.decode("utf-8"))
+                return _json_resp(200, {"merged": True, "sha": "deadbeef"})
+            # lr-361de3: matched on the exact PR-resource suffix (not a bare
+            # "/pulls/" substring, which also matches /pulls/1/files) so this
+            # override answers ONLY the post-merge readback's own GET
+            # .../pulls/{n} call, never shadowing /files.
+            if method == "GET" and url.endswith("/1"):
+                return _json_resp(
+                    200, {"head": {"sha": _FULL_SHA}, "title": "fix(merge): improve the subject",
+                          "merged": True, "merge_commit_sha": "e" * 40},
+                )
+            return inner_opener(req, timeout=timeout)
+
+        argv = _base_args("github")
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=opener,
+        )
+        assert code == verb.EXIT_OK
+        assert captured["payload"]["commit_title"] == "fix(merge): improve the subject"
