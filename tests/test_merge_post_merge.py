@@ -534,6 +534,82 @@ class TestLivenessProbeValidation:
             )
 
 
+class TestLaunchFailureHandling:
+    """Launch-time failures (the process never starts at all) must be routed
+    through the same on_failure path as an ordinary non-zero exit, never
+    propagate as a raw, uncaught OSError/FileNotFoundError/PermissionError
+    traceback."""
+
+    def test_missing_binary_with_on_failure_warn_logs_and_continues(
+        self, tmp_path, capsys
+    ):
+        marker = tmp_path / "reached-after-missing.txt"
+        missing_binary = str(tmp_path / "definitely-not-a-real-binary")
+        steps = [
+            {"cmd": [missing_binary, "--flag"], "on_failure": "warn"},
+            _py_step(code=f"open(r'{marker}', 'w').write('reached')"),
+        ]
+        # Must not raise -- a launch failure is warn-eligible exactly like a
+        # non-zero exit.
+        run_post_merge_steps(steps, tmp_path)
+        assert marker.read_text() == "reached"
+
+        stderr = capsys.readouterr().err
+        assert "warning" in stderr
+        assert missing_binary in stderr
+        assert "step 1" in stderr
+
+    def test_missing_binary_with_on_failure_fail_raises_typed_error(self, tmp_path):
+        missing_binary = str(tmp_path / "definitely-not-a-real-binary")
+        steps = [{"cmd": [missing_binary], "on_failure": "fail"}]
+        with pytest.raises(PostMergeStepFailedError) as exc_info:
+            run_post_merge_steps(steps, tmp_path)
+        assert missing_binary in str(exc_info.value)
+
+    def test_non_executable_binary_handled_identically_to_missing(self, tmp_path):
+        # A binary that EXISTS but lacks the executable bit raises
+        # PermissionError at launch time (a distinct OSError subclass from
+        # FileNotFoundError) -- must be caught the same way.
+        non_executable = tmp_path / "not-executable"
+        non_executable.write_text("#!/bin/sh\necho hi\n")
+        non_executable.chmod(0o644)
+
+        steps = [{"cmd": [str(non_executable)], "on_failure": "fail"}]
+        with pytest.raises(PostMergeStepFailedError) as exc_info:
+            run_post_merge_steps(steps, tmp_path)
+        assert str(non_executable) in str(exc_info.value)
+
+    def test_non_executable_binary_with_on_failure_warn_continues(self, tmp_path, capsys):
+        non_executable = tmp_path / "not-executable-warn"
+        non_executable.write_text("#!/bin/sh\necho hi\n")
+        non_executable.chmod(0o644)
+        marker = tmp_path / "reached-after-non-executable.txt"
+
+        steps = [
+            {"cmd": [str(non_executable)], "on_failure": "warn"},
+            _py_step(code=f"open(r'{marker}', 'w').write('reached')"),
+        ]
+        run_post_merge_steps(steps, tmp_path)
+        assert marker.read_text() == "reached"
+
+        stderr = capsys.readouterr().err
+        assert "warning" in stderr
+        assert str(non_executable) in stderr
+
+    def test_launch_failure_never_raises_bare_oserror(self, tmp_path):
+        # Regression: previously FileNotFoundError/PermissionError propagated
+        # straight out of run_post_merge_steps, uncaught. Confirm the raised
+        # type is always the module's own typed error, never bubbled raw.
+        missing_binary = str(tmp_path / "still-not-a-real-binary")
+        steps = [{"cmd": [missing_binary], "on_failure": "fail"}]
+        try:
+            run_post_merge_steps(steps, tmp_path)
+        except PostMergeStepFailedError:
+            pass
+        else:
+            pytest.fail("expected PostMergeStepFailedError")
+
+
 class TestLivenessProbeExecution:
     """lr-d6e52b regression coverage: heartbeat-advance-across-one-poll-
     interval liveness verification for a detaches:true step -- the "third

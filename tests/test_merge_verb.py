@@ -787,6 +787,41 @@ class TestRepoContextReachesProvider:
         assert token_provider.calls == [("merger", "some-owner/some-repo")]
 
 
+class TestMergeTitleFromPrTitle:
+    """lr-1953a8: merge.verb._run passes the PR's own (step-7-gated) title
+    through to backend.merge_pr as merge_title, so the merge commit's
+    SUBJECT reads from the PR title rather than each backend's own
+    branch-ref-bearing default. Uses the SAME Forgejo opener fixture as
+    every other test in this file -- see test_merge_verb_platform_dispatch.py
+    for the equivalent GitHub-platform coverage (that file's own
+    _github_opener fixture is the right home for a GitHub-shaped assertion,
+    not a second opener reimplemented here)."""
+
+    def test_pr_title_reaches_merge_post_body_as_commit_title(self):
+        captured = {}
+        base_opener = _make_opener(
+            pr_info={"head": {"sha": _FULL_SHA}, "title": "fix(merge): improve the subject"},
+        )
+
+        def _capturing_opener(req, timeout=15):
+            if req.get_method() == "POST" and req.full_url.endswith("/merge"):
+                captured["data"] = req.data
+            return base_opener(req, timeout)
+
+        argv = _base_args()
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_capturing_opener,
+        )
+        assert code == verb.EXIT_OK
+        payload = json.loads(captured["data"].decode("utf-8"))
+        # Forgejo is the default --platform in _base_args -- its merge_title
+        # field is MergeTitleField (see merge.forgejo_backend.merge_pr).
+        assert payload["MergeTitleField"] == "fix(merge): improve the subject"
+
+
 class TestBranchCommitSubjectGate:
     """lr-835c57: end-to-end CLI wiring for the branch commit-subject
     backstop -- --merge-method resolves whether the gate fires at all, and

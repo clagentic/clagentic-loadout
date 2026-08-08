@@ -456,12 +456,22 @@ def merge_pr(
     *,
     token: str,
     merge_message: str = "",
+    merge_title: str = "",
     merge_method: str = DEFAULT_MERGE_METHOD,
     opener=None,
 ) -> str | None:
     """Merge a PR via the Forgejo API. Raises merge.errors.MergeExecutionError
     on any failure — never reports success unless the merge actually landed
     or is confirmed already-landed (idempotent re-run).
+
+    `merge_title` (lr-1953a8) is Forgejo's own `MergeTitleField`, DISTINCT
+    from `merge_message`/`merge_message_field` (the body): when omitted,
+    Forgejo defaults the merge commit's SUBJECT to its own "Merge pull
+    request '<PR title>' (#N) from <branch> into <base>" shape, which still
+    embeds the source branch ref — see merge.github_backend.merge_pr's
+    identical parameter for the full rationale. The caller (merge.verb)
+    passes the PR's own title here for a readable changelog subject; an
+    empty string is byte-identical to this parameter never existing.
 
     *merge_method* is passed straight through as the Forgejo merge API's own
     `Do` field (lr-14f704 — see this module's own history: before this fix,
@@ -506,6 +516,8 @@ def merge_pr(
     payload: dict[str, Any] = {"Do": merge_method}
     if merge_message:
         payload["merge_message_field"] = merge_message
+    if merge_title:
+        payload["MergeTitleField"] = merge_title
     body_bytes = json.dumps(payload).encode("utf-8")
 
     try:

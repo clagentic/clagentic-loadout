@@ -18,7 +18,11 @@ made and recorded. A full `loadout-merge --help` review (lr-2ce122) confirmed
 that no flag or sibling verb re-triggers post-merge standalone.
 
 THIS VERB: `loadout-post-merge --platform <p> --repo <owner/repo> --pr <n>
---repo-path <dir>` runs ONLY the two links that matter for a re-run —
+--repo-path <dir>` runs the repo-path/slug consistency check
+(merge.repo_path_consistency, lr-4522a3 — --repo-path is REQUIRED here, so
+this always has a tree to evaluate; refuses pre-mint on a mismatch, naming
+both values, without flagging a merely differently-named checkout like the
+'.github' org-profile shape), then the two links that matter for a re-run —
 namespace guard and merge-authority (a re-deploy is still a PR-terminal-
 adjacent action reserved to the SAME merge-authority role a merge/close
 already requires — mirrors `merge.close_verb`'s own scope-narrowing
@@ -100,6 +104,7 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_git_working_tree,
     resolve_post_merge_step_timeout_seconds,
 )
+from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
     advance_repo_to_merged_sha,
@@ -398,6 +403,14 @@ def _run(
         owner, repo = parse_owner_repo(args.repo)
     except RemoteResolutionError as exc:
         raise MergeUsageError(str(exc)) from exc
+
+    # lr-4522a3: --repo-path is REQUIRED on this verb (unlike merge.verb's
+    # optional override), so this check always has a tree to evaluate.
+    # Refuse BEFORE any credential mint when that tree's own origin remote
+    # names a different owner/repo than --repo -- see
+    # merge.repo_path_consistency's module docstring for the full
+    # rationale and the '.github' org-profile shape this never flags.
+    assert_repo_path_consistent(args.repo, args.repo_path)
 
     role = args.role or DEFAULT_ROLE
 

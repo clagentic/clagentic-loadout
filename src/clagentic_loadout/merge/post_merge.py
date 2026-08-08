@@ -556,6 +556,15 @@ def run_post_merge_steps(
         caller translates this to EXIT_POST_MERGE_FAILED. No further steps
         run.
 
+    A step whose process never launches at all (its binary is missing from
+    PATH, or present but not executable — `FileNotFoundError`/
+    `PermissionError`, both `OSError` subclasses) is treated identically to
+    a step that launched and exited non-zero: `on_failure="warn"` logs and
+    continues, `on_failure="fail"` raises `PostMergeStepFailedError`. A
+    launch failure is never allowed to propagate as a raw, uncaught
+    exception — from the caller's perspective it is indistinguishable from
+    an ordinary non-zero exit.
+
     detaches=true (lr-53556a — see module docstring, "THE lr-53556a HANG"):
         the step is launched fire-and-forget via `subprocess.Popen` with
         `stdin`/`stdout`/`stderr` all redirected to `DEVNULL` and
@@ -692,6 +701,23 @@ def run_post_merge_steps(
                 f"liveness_probe to verify the daemon actually came up) or "
                 f"raise its timeout_seconds."
             ) from exc
+        except OSError as exc:
+            # The process never launched at all -- e.g. the binary is not on
+            # PATH (FileNotFoundError) or is present but not executable
+            # (PermissionError). Both are OSError subclasses. Without this
+            # branch, either propagates straight out of run_post_merge_steps
+            # as a raw traceback, bypassing on_failure entirely -- a launch
+            # failure must be indistinguishable, from the caller's
+            # perspective, from the step exiting non-zero (see module
+            # docstring / the on_failure contract above).
+            msg = f"post-merge {label} failed to launch ({exc}): {argv[0]!r}"
+            if on_failure == ON_FAILURE_FAIL:
+                raise PostMergeStepFailedError(msg) from exc
+            print(
+                f"merge: post-merge {label}: warning: {msg}, continuing",
+                file=sys.stderr,
+            )
+            continue
 
         if result.stdout.strip():
             print(f"merge: post-merge {label}: stdout: {result.stdout.strip()}", file=sys.stderr)
