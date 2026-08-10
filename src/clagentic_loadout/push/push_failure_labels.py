@@ -22,6 +22,18 @@ remote/local system actually say."
 
 from __future__ import annotations
 
+#: A transport-level authentication failure (dead/expired/revoked
+#: credential, wrong token scope) -- git prints its own host-independent
+#: "fatal: Authentication failed for '<url>'" line for this shape
+#: regardless of platform. Forgejo (and other hosts) ALSO prefix their HTTP
+#: 401 response body with "remote: " -- structurally indistinguishable from
+#: a genuine pre-receive/policy rejection by the remote-line-presence check
+#: alone. Checked BEFORE the remote-lines branch in _classify_push_failure
+#: so an auth failure is never mislabeled as a branch-protection gate: the
+#: two labels have disjoint remediations (rotate the credential vs. edit
+#: the branch/policy) and disjoint bounce targets.
+SUB_CAUSE_AUTH_FAILED = "auth-failed"
+
 #: Remote sent lines back (server-side hook/policy output, "remote: "
 #: prefixed) — includes a pre-receive hook decline AND a "cannot lock ref"
 #: race, both of which the remote reports via sideband.
@@ -75,6 +87,7 @@ SUB_CAUSE_UNKNOWN = "unknown"
 #: this frozenset and fails if any label lacks a covering fixture case.
 SUB_CAUSE_LABELS: frozenset[str] = frozenset(
     {
+        SUB_CAUSE_AUTH_FAILED,
         SUB_CAUSE_PRE_RECEIVE_REJECTED,
         SUB_CAUSE_LOCAL_HOOK_REJECTED,
         SUB_CAUSE_NON_FAST_FORWARD,
@@ -86,6 +99,7 @@ SUB_CAUSE_LABELS: frozenset[str] = frozenset(
 )
 
 __all__ = [
+    "SUB_CAUSE_AUTH_FAILED",
     "SUB_CAUSE_BAD_REFSPEC",
     "SUB_CAUSE_LABELS",
     "SUB_CAUSE_LOCAL_HOOK_REJECTED",

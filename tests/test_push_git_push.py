@@ -61,6 +61,7 @@ from clagentic_loadout.push.git_push import (
     git_push_with_token,
 )
 from clagentic_loadout.push.push_failure_labels import (
+    SUB_CAUSE_AUTH_FAILED,
     SUB_CAUSE_BAD_REFSPEC,
     SUB_CAUSE_LABELS,
     SUB_CAUSE_LOCAL_HOOK_REJECTED,
@@ -303,6 +304,46 @@ class TestGitPushWithToken:
         assert "pre-receive-rejected" in message
         assert "policy: direct pushes to protected branches are rejected" in message
         assert "REMOTE MESSAGE" in message
+
+    def test_forgejo_401_auth_failure_classifies_as_auth_failed_not_pre_receive(self):
+        """lr-91bac6 acceptance criterion: a Forgejo 401 credential-failure
+        stderr must classify as an auth/credential class, never
+        pre-receive-rejected, even though Forgejo prefixes the body with
+        "remote: " exactly as it prefixes genuine pre-receive/policy text."""
+        stderr = (
+            "remote: Credentials are incorrect or have expired.\n"
+            "fatal: Authentication failed for "
+            "'http://forgejo.example.invalid:3000/synthetic-owner/synthetic-repo.git/'\n"
+        )
+        sub_cause = _classify_push_failure(stderr)
+        assert sub_cause == SUB_CAUSE_AUTH_FAILED
+        assert sub_cause != SUB_CAUSE_PRE_RECEIVE_REJECTED
+
+    def test_github_401_auth_failure_classifies_as_auth_failed(self):
+        """lr-91bac6 acceptance criterion (GitHub-shaped case): the
+        classifier must be anchored on git's own host-independent
+        "Authentication failed" transport-auth shape, not on any
+        Forgejo-specific vendor wording -- a GitHub-shaped auth rejection
+        must classify the same way."""
+        stderr = (
+            "remote: Invalid username or token. Password authentication is "
+            "not supported for Git operations.\n"
+            "fatal: Authentication failed for "
+            "'https://github.example.invalid/synthetic-owner/synthetic-repo.git/'\n"
+        )
+        assert _classify_push_failure(stderr) == SUB_CAUSE_AUTH_FAILED
+
+    def test_genuine_pre_receive_rejection_still_classifies_pre_receive_rejected(self):
+        """lr-91bac6 acceptance criterion (no regression): a genuine
+        pre-receive policy rejection -- "remote: "-prefixed lines with no
+        "Authentication failed" transport-auth marker anywhere in stderr --
+        must still classify as pre-receive-rejected."""
+        stderr = (
+            "remote: policy: direct pushes to protected branches are rejected\n"
+            "error: failed to push some refs to "
+            "'http://forgejo.example.invalid:3000/synthetic-owner/synthetic-repo.git/'\n"
+        )
+        assert _classify_push_failure(stderr) == SUB_CAUSE_PRE_RECEIVE_REJECTED
 
     def test_local_pre_push_hook_abort_classifies_local_hook_rejected(self, tmp_path):
         """A LOCAL .git/hooks/pre-push abort exits non-zero BEFORE any
@@ -845,6 +886,38 @@ def _fixture_transport_unreachable(tmp_path: Path) -> str:
     return result.stderr
 
 
+def _fixture_forgejo_auth_failure(_tmp_path: Path) -> str:
+    """lr-91bac6: the exact observed shape a Forgejo 401 (expired/revoked
+    credential) produces. Forgejo prefixes its HTTP response body with
+    "remote: " exactly as it prefixes genuine pre-receive/policy text --
+    structurally indistinguishable from SUB_CAUSE_PRE_RECEIVE_REJECTED by
+    remote-line presence alone. Not reproducible via a real local bare-repo
+    git invocation (there is no real HTTP credential negotiation to fail
+    against a filesystem remote) -- this is the literal transcript from the
+    originating incident (task lr-91bac6 evidence)."""
+    return (
+        "remote: Credentials are incorrect or have expired.\n"
+        "fatal: Authentication failed for "
+        "'http://forgejo.example.invalid:3000/synthetic-owner/synthetic-repo.git/'\n"
+    )
+
+
+def _fixture_github_auth_failure(_tmp_path: Path) -> str:
+    """GitHub's own auth-failure shape: no "remote: "-prefixed sideband at
+    all (GitHub's HTTP 401 does not send a pre-receive-style body the way
+    Forgejo's does), just git's own host-independent transport-auth summary
+    line. Included per this task's acceptance criteria (unit tests cover
+    both stderr shapes plus a GitHub-shaped auth failure) to prove the
+    _is_auth_failure anchor holds across hosts, not merely for the specific
+    Forgejo vendor wording that motivated the fix."""
+    return (
+        "remote: Invalid username or token. Password authentication is not "
+        "supported for Git operations.\n"
+        "fatal: Authentication failed for "
+        "'https://github.example.invalid/synthetic-owner/synthetic-repo.git/'\n"
+    )
+
+
 #: The full classification-correctness corpus: sub_cause label -> a fixture
 #: function that REPRODUCES that shape via a real git invocation (task
 #: requirement 6). Used both to assert per-case correctness and, via
@@ -856,6 +929,7 @@ _CLASSIFIER_CORPUS: dict[str, Callable[[Path], str]] = {
     SUB_CAUSE_BAD_REFSPEC: _fixture_bad_refspec,
     SUB_CAUSE_TRANSPORT: _fixture_transport_unreachable,
     SUB_CAUSE_OTHER_REJECT_REASON: _fixture_other_reject_reason,
+    SUB_CAUSE_AUTH_FAILED: _fixture_forgejo_auth_failure,
 }
 
 

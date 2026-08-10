@@ -206,6 +206,7 @@ from clagentic_loadout.push.git_hermeticity import (
     neutralize_ambient_git_env,
 )
 from clagentic_loadout.push.push_failure_labels import (
+    SUB_CAUSE_AUTH_FAILED,
     SUB_CAUSE_BAD_REFSPEC,
     SUB_CAUSE_LOCAL_HOOK_REJECTED,
     SUB_CAUSE_NON_FAST_FORWARD,
@@ -307,6 +308,27 @@ _REJECT_REASON_RE = re.compile(
 #: verbatim in `GitPushError.reject_reason` for anyone who needs the
 #: distinction.
 _NON_FAST_FORWARD_REASONS = frozenset({"non-fast-forward", "fetch first", "stale info"})
+
+
+#: git's own client-side transport-auth failure line, e.g.:
+#:   fatal: Authentication failed for 'http://host/owner/repo.git/'
+#: This is HOST-INDEPENDENT: git itself emits this literal (not a vendor
+#: message) whenever libcurl's credential negotiation is rejected, regardless
+#: of which platform is on the other end. lr-91bac6: a Forgejo 401 response
+#: body is ALSO prefixed "remote: " -- exactly like genuine pre-receive/
+#: policy text -- so remote-line presence alone cannot distinguish a dead
+#: credential from a branch-protection gate. This marker is checked BEFORE
+#: the remote-lines branch in _classify_push_failure for that reason.
+_AUTH_FAILED_MARKER = "authentication failed"
+
+
+def _is_auth_failure(stderr: str) -> bool:
+    """True when *stderr* carries git's own host-independent transport-auth
+    failure shape ("fatal: Authentication failed for '<url>'") -- see
+    _AUTH_FAILED_MARKER. Anchored on git's own literal, never on
+    platform-specific vendor wording (e.g. Forgejo's "Credentials are
+    incorrect or have expired" body text), so this holds across hosts."""
+    return _AUTH_FAILED_MARKER in stderr.lower()
 
 
 def _extract_remote_lines(stderr: str) -> list[str]:
@@ -449,20 +471,30 @@ def _classify_push_failure(stderr: str) -> str:
          or any network call could happen, and previously fell into
          local-hook-rejected purely because it has no "To "/"! [" line to
          exclude it (lr-f57f13 bug 3).
-      2. Remote lines present -> pre-receive-rejected (a "cannot lock ref"
-         server race also arrives this way when it carries a "remote: "
-         line — lr-f57f13 bug 2's proven repro).
-      3. Local hook lines present (and no remote lines, no bad-refspec) ->
+      2. git's own host-independent transport-auth failure shape
+         ("fatal: Authentication failed for '<url>'", see _is_auth_failure)
+         -> auth-failed. Checked BEFORE the remote-lines branch below
+         (lr-91bac6): Forgejo (and other hosts) prefix their HTTP 401
+         response body with "remote: " exactly as they prefix genuine
+         pre-receive/policy text, so remote-line presence alone cannot tell
+         a dead credential from a branch-protection gate. Anchoring on
+         git's own literal instead of any vendor wording keeps this correct
+         across hosts.
+      3. Remote lines present (and not an auth failure) -> pre-receive-
+         rejected (a "cannot lock ref" server race also arrives this way
+         when it carries a "remote: " line — lr-f57f13 bug 2's proven
+         repro).
+      4. Local hook lines present (and no remote lines, no bad-refspec) ->
          local-hook-rejected.
-      4. A parsed reject reason matching a known non-fast-forward-shaped
+      5. A parsed reject reason matching a known non-fast-forward-shaped
          literal (non-fast-forward / fetch first / stale info) ->
          non-fast-forward.
-      5. A parsed reject reason that does not match any known shape ->
+      6. A parsed reject reason that does not match any known shape ->
          other-reject-reason (classification found A reason, just not one
          this taxonomy names yet — never silently relabeled "unknown").
-      6. No reject reason, but a recognized transport-failure substring ->
+      7. No reject reason, but a recognized transport-failure substring ->
          transport.
-      7. None of the above -> unknown. ALWAYS carries the full raw
+      8. None of the above -> unknown. ALWAYS carries the full raw
          transcript on the raised GitPushError regardless (see that class's
          own docstring) — this label states "the classifier could not name
          a cause," never "the remote said nothing" (see module docstring,
@@ -477,6 +509,8 @@ def _classify_push_failure(stderr: str) -> str:
     """
     if _has_bad_refspec_line(stderr):
         return SUB_CAUSE_BAD_REFSPEC
+    if _is_auth_failure(stderr):
+        return SUB_CAUSE_AUTH_FAILED
     if _extract_remote_lines(stderr):
         return SUB_CAUSE_PRE_RECEIVE_REJECTED
     if _extract_local_hook_lines(stderr):
