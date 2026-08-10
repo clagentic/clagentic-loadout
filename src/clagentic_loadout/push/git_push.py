@@ -206,8 +206,10 @@ from clagentic_loadout.push.git_hermeticity import (
     neutralize_ambient_git_env,
 )
 from clagentic_loadout.push.push_failure_labels import (
+    SUB_CAUSE_AUTH_FAILED,
     SUB_CAUSE_BAD_REFSPEC,
     SUB_CAUSE_LOCAL_HOOK_REJECTED,
+    SUB_CAUSE_MALFORMED_TOKEN,
     SUB_CAUSE_NON_FAST_FORWARD,
     SUB_CAUSE_OTHER_REJECT_REASON,
     SUB_CAUSE_PRE_RECEIVE_REJECTED,
@@ -307,6 +309,67 @@ _REJECT_REASON_RE = re.compile(
 #: verbatim in `GitPushError.reject_reason` for anyone who needs the
 #: distinction.
 _NON_FAST_FORWARD_REASONS = frozenset({"non-fast-forward", "fetch first", "stale info"})
+
+
+#: git's own client-side transport-auth failure line, e.g.:
+#:   fatal: Authentication failed for 'http://host/owner/repo.git/'
+#: This is HOST-INDEPENDENT: git itself emits this literal (not a vendor
+#: message) whenever libcurl's credential negotiation is rejected, regardless
+#: of which platform is on the other end. lr-91bac6: a Forgejo 401 response
+#: body is ALSO prefixed "remote: " -- exactly like genuine pre-receive/
+#: policy text -- so remote-line presence alone cannot distinguish a dead
+#: credential from a branch-protection gate. This marker is checked BEFORE
+#: the remote-lines branch in _classify_push_failure for that reason.
+_AUTH_FAILED_MARKER = "authentication failed"
+
+
+def _is_auth_failure(stderr: str) -> bool:
+    """True when *stderr* carries git's own host-independent transport-auth
+    failure shape ("fatal: Authentication failed for '<url>'") -- see
+    _AUTH_FAILED_MARKER. Anchored on git's own literal, never on
+    platform-specific vendor wording (e.g. Forgejo's "Credentials are
+    incorrect or have expired" body text), so this holds across hosts."""
+    return _AUTH_FAILED_MARKER in stderr.lower()
+
+
+#: Generic (non-vendor-specific) malformed-credential-SHAPE vocabulary
+#: (lr-91bac6, comment #1 case (c)): a server-side credential validator
+#: repudiating the SHAPE of a token (wrong number of segments, a parse
+#: failure) rather than an expiry/revocation/scope denial of an otherwise
+#: well-formed one. NAMED TRADE-OFF (see SUB_CAUSE_MALFORMED_TOKEN's own
+#: docstring in push_failure_labels): git's own transport layer does not
+#: distinguish "malformed" from "expired" -- both arrive as the identical
+#: HTTP-401 -> "fatal: Authentication failed" shape (verified against a
+#: real Gitea/Forgejo-shaped server), so there is no purely git-transport-
+#: level anchor available for this case the way _AUTH_FAILED_MARKER is for
+#: auth-failed in general. This vocabulary is anchored on RFC 7519's own
+#: JSON Web Token structural-validation term of art ("malformed" / "invalid
+#: ... segment(s)" / "invalid ... token"), the industry-standard way a
+#: credential-shape validation failure is described, not a single vendor's
+#: exact phrasing -- but it is still, unavoidably, a body-text signal
+#: rather than a git-emitted one. A host that names this failure some other
+#: way falls through to SUB_CAUSE_AUTH_FAILED instead (same "go fix your
+#: credential" family, never a false pre-receive-rejected).
+_MALFORMED_TOKEN_MARKERS = (
+    "malformed",
+    "invalid number of segments",
+    "invalid token",
+)
+
+
+def _is_malformed_token_failure(stderr: str) -> bool:
+    """True when *stderr* carries generic malformed-credential-SHAPE
+    vocabulary (see _MALFORMED_TOKEN_MARKERS) alongside git's own
+    "Authentication failed" transport marker -- i.e. the server answered
+    (git reached the point of reporting an auth failure at all) and its own
+    response body describes a credential-SHAPE rejection, not a bare
+    connection failure that merely happens to mention one of these words in
+    an unrelated context. Requiring _is_auth_failure to also hold keeps
+    this scoped to the actual transport-auth-failure shape, matching
+    _AUTH_MISMATCH_MARKERS' own existing convention of only firing within
+    an auth-shaped failure."""
+    lower = stderr.lower()
+    return _is_auth_failure(stderr) and any(marker in lower for marker in _MALFORMED_TOKEN_MARKERS)
 
 
 def _extract_remote_lines(stderr: str) -> list[str]:
@@ -449,20 +512,44 @@ def _classify_push_failure(stderr: str) -> str:
          or any network call could happen, and previously fell into
          local-hook-rejected purely because it has no "To "/"! [" line to
          exclude it (lr-f57f13 bug 3).
-      2. Remote lines present -> pre-receive-rejected (a "cannot lock ref"
-         server race also arrives this way when it carries a "remote: "
-         line — lr-f57f13 bug 2's proven repro).
-      3. Local hook lines present (and no remote lines, no bad-refspec) ->
+      2. git's own host-independent transport-auth failure shape
+         ("fatal: Authentication failed for '<url>'", see _is_auth_failure)
+         -> auth-failed OR malformed-token. Checked BEFORE the remote-lines
+         branch below (lr-91bac6): Forgejo (and other hosts) prefix their
+         HTTP 401 response body with "remote: " exactly as they prefix
+         genuine pre-receive/policy text, so remote-line presence alone
+         cannot tell a rejected credential from a branch-protection gate.
+         Anchoring on git's own literal instead of any vendor wording keeps
+         this correct across hosts. WITHIN this auth-failure shape, a
+         SECOND distinction (lr-91bac6 comment #1, case (c)) further splits
+         it: _is_malformed_token_failure is checked FIRST -- a server-side
+         credential-SHAPE repudiation (malformed/garbled token, a JWT
+         parse failure) is a DIFFERENT remediation (fix the credential-
+         minting/broker path) from a well-formed-but-rejected credential
+         (auth-failed's own case: rotate a dead/expired/revoked one). Git's
+         transport layer does not distinguish these two causes (both are
+         the identical HTTP-401 shape, verified empirically -- see
+         push_failure_labels.SUB_CAUSE_MALFORMED_TOKEN's own docstring for
+         the full trade-off this necessarily body-text-anchored check
+         accepts), so malformed-token is checked first specifically so it
+         is never absorbed into the auth-failed bucket, and falls back to
+         auth-failed (never to pre-receive-rejected) when the body text
+         does not use recognizable malformed-credential vocabulary.
+      3. Remote lines present (and not an auth failure of either kind) ->
+         pre-receive-rejected (a "cannot lock ref" server race also arrives
+         this way when it carries a "remote: " line — lr-f57f13 bug 2's
+         proven repro).
+      4. Local hook lines present (and no remote lines, no bad-refspec) ->
          local-hook-rejected.
-      4. A parsed reject reason matching a known non-fast-forward-shaped
+      5. A parsed reject reason matching a known non-fast-forward-shaped
          literal (non-fast-forward / fetch first / stale info) ->
          non-fast-forward.
-      5. A parsed reject reason that does not match any known shape ->
+      6. A parsed reject reason that does not match any known shape ->
          other-reject-reason (classification found A reason, just not one
          this taxonomy names yet — never silently relabeled "unknown").
-      6. No reject reason, but a recognized transport-failure substring ->
+      7. No reject reason, but a recognized transport-failure substring ->
          transport.
-      7. None of the above -> unknown. ALWAYS carries the full raw
+      8. None of the above -> unknown. ALWAYS carries the full raw
          transcript on the raised GitPushError regardless (see that class's
          own docstring) — this label states "the classifier could not name
          a cause," never "the remote said nothing" (see module docstring,
@@ -477,6 +564,10 @@ def _classify_push_failure(stderr: str) -> str:
     """
     if _has_bad_refspec_line(stderr):
         return SUB_CAUSE_BAD_REFSPEC
+    if _is_malformed_token_failure(stderr):
+        return SUB_CAUSE_MALFORMED_TOKEN
+    if _is_auth_failure(stderr):
+        return SUB_CAUSE_AUTH_FAILED
     if _extract_remote_lines(stderr):
         return SUB_CAUSE_PRE_RECEIVE_REJECTED
     if _extract_local_hook_lines(stderr):

@@ -22,6 +22,54 @@ remote/local system actually say."
 
 from __future__ import annotations
 
+#: A transport-level authentication failure where the credential is
+#: WELL-FORMED but rejected -- dead/expired/revoked, wrong scope, wrong
+#: password. git prints its own host-independent "fatal: Authentication
+#: failed for '<url>'" line for this shape regardless of platform. Forgejo
+#: (and other hosts) ALSO prefix their HTTP 401 response body with
+#: "remote: " -- structurally indistinguishable from a genuine pre-receive/
+#: policy rejection by the remote-line-presence check alone. Checked BEFORE
+#: the remote-lines branch in _classify_push_failure so an auth failure is
+#: never mislabeled as a branch-protection gate: the two labels have
+#: disjoint remediations (rotate the credential vs. edit the branch/policy)
+#: and disjoint bounce targets. Distinct from SUB_CAUSE_MALFORMED_TOKEN
+#: below: both arrive via git's identical "Authentication failed" transport
+#: shape (git does not distinguish WHY a 401 fired), but "the credential
+#: itself is well-formed and just needs replacing" and "the credential-
+#: minting/broker path is producing a structurally broken token" have
+#: different remediations and different bounce targets (rotate a live
+#: credential vs. fix the minting path that produced this one) --
+#: _is_malformed_token_failure is checked FIRST specifically so a malformed
+#: shape is never absorbed into this bucket.
+SUB_CAUSE_AUTH_FAILED = "auth-failed"
+
+#: A transport-level authentication failure where the SERVER-SIDE credential
+#: validator repudiates the credential's SHAPE (malformed/garbled token,
+#: wrong number of JWT segments, a parse failure) rather than a scope/
+#: expiry/revocation denial of an otherwise well-formed credential. Arrives
+#: via the SAME git-transport "fatal: Authentication failed for '<url>'"
+#: shape as SUB_CAUSE_AUTH_FAILED (lr-91bac6, comment #1: git's own HTTP-401
+#: handling does not distinguish WHY the server returned 401 -- confirmed
+#: against a real Gitea/Forgejo-shaped server: malformed-token and
+#: expired-token responses are BYTE-IDENTICAL at the git-transport level,
+#: both HTTP 401 -> "fatal: Authentication failed"). No git-transport-level
+#: or HTTP-status-level marker distinguishes the two causes; RFC 7235/9110
+#: do not mandate a distinguishing status code either (both are 401). The
+#: only observable signal is the server's OWN body text (relayed via
+#: "remote: " lines), which is unavoidably vendor-specific in its EXACT
+#: wording -- but "malformed"/"invalid" credential-shape vocabulary is
+#: itself the RFC 7519 JSON Web Token structural-validation term of art
+#: (three dot-separated segments), not a Forgejo-only coinage, so this is
+#: anchored on that generic vocabulary rather than any single vendor's
+#: literal phrasing. This is a NAMED TRADE-OFF, not a silent Forgejo
+#: hardcode: a host whose malformed-token body text uses neither
+#: "malformed" nor "invalid ... segment"/"invalid ... token" wording will
+#: fall through to SUB_CAUSE_AUTH_FAILED rather than this label -- a
+#: same-family miss (both still name "your credential is the problem, go
+#: fix the credential"), never a false pre-receive-rejected/branch-
+#: protection label, which is the harm this task exists to eliminate.
+SUB_CAUSE_MALFORMED_TOKEN = "malformed-token"
+
 #: Remote sent lines back (server-side hook/policy output, "remote: "
 #: prefixed) — includes a pre-receive hook decline AND a "cannot lock ref"
 #: race, both of which the remote reports via sideband.
@@ -75,6 +123,8 @@ SUB_CAUSE_UNKNOWN = "unknown"
 #: this frozenset and fails if any label lacks a covering fixture case.
 SUB_CAUSE_LABELS: frozenset[str] = frozenset(
     {
+        SUB_CAUSE_AUTH_FAILED,
+        SUB_CAUSE_MALFORMED_TOKEN,
         SUB_CAUSE_PRE_RECEIVE_REJECTED,
         SUB_CAUSE_LOCAL_HOOK_REJECTED,
         SUB_CAUSE_NON_FAST_FORWARD,
@@ -86,9 +136,11 @@ SUB_CAUSE_LABELS: frozenset[str] = frozenset(
 )
 
 __all__ = [
+    "SUB_CAUSE_AUTH_FAILED",
     "SUB_CAUSE_BAD_REFSPEC",
     "SUB_CAUSE_LABELS",
     "SUB_CAUSE_LOCAL_HOOK_REJECTED",
+    "SUB_CAUSE_MALFORMED_TOKEN",
     "SUB_CAUSE_NON_FAST_FORWARD",
     "SUB_CAUSE_OTHER_REJECT_REASON",
     "SUB_CAUSE_PRE_RECEIVE_REJECTED",
