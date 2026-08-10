@@ -65,6 +65,7 @@ from clagentic_loadout.push.push_failure_labels import (
     SUB_CAUSE_BAD_REFSPEC,
     SUB_CAUSE_LABELS,
     SUB_CAUSE_LOCAL_HOOK_REJECTED,
+    SUB_CAUSE_MALFORMED_TOKEN,
     SUB_CAUSE_NON_FAST_FORWARD,
     SUB_CAUSE_OTHER_REJECT_REASON,
     SUB_CAUSE_PRE_RECEIVE_REJECTED,
@@ -332,6 +333,39 @@ class TestGitPushWithToken:
             "'https://github.example.invalid/synthetic-owner/synthetic-repo.git/'\n"
         )
         assert _classify_push_failure(stderr) == SUB_CAUSE_AUTH_FAILED
+
+    def test_forgejo_malformed_token_classifies_as_malformed_token_not_pre_receive(self):
+        """lr-91bac6 comment #1 acceptance amendment, case (c): a Forgejo
+        malformed-token-shape rejection (server answers, but repudiates the
+        credential's SHAPE -- wrong JWT segment count -- not an expiry/
+        revocation/scope denial) must classify as malformed-token, never
+        pre-receive-rejected. Uses a synthetic token SHA, never the real
+        incident artifact."""
+        stderr = (
+            "remote: token is malformed: token contains an invalid number of segments\n"
+            "remote: access token does not exist [sha: aaaa1111bbbb2222cccc3333dddd4444eeee5555]\n"
+            "remote: authorized integration: parse JWT error: token is malformed\n"
+            "fatal: Authentication failed for "
+            "'http://forgejo.example.invalid:3000/synthetic-owner/synthetic-repo.git/'\n"
+        )
+        sub_cause = _classify_push_failure(stderr)
+        assert sub_cause == SUB_CAUSE_MALFORMED_TOKEN
+        assert sub_cause != SUB_CAUSE_PRE_RECEIVE_REJECTED
+
+    def test_malformed_token_never_collapses_into_auth_failed(self):
+        """lr-91bac6 comment #1: malformed-token and auth-failed both arrive
+        via git's identical "Authentication failed" transport shape (git
+        does not distinguish WHY the 401 fired), but they have different
+        remediations (fix the credential-minting/broker path vs. rotate a
+        well-formed-but-dead credential) and must not collapse into the
+        same label."""
+        stderr = (
+            "remote: token is malformed: token contains an invalid number of segments\n"
+            "fatal: Authentication failed for "
+            "'http://forgejo.example.invalid:3000/synthetic-owner/synthetic-repo.git/'\n"
+        )
+        assert _classify_push_failure(stderr) == SUB_CAUSE_MALFORMED_TOKEN
+        assert _classify_push_failure(stderr) != SUB_CAUSE_AUTH_FAILED
 
     def test_genuine_pre_receive_rejection_still_classifies_pre_receive_rejected(self):
         """lr-91bac6 acceptance criterion (no regression): a genuine
@@ -918,6 +952,26 @@ def _fixture_github_auth_failure(_tmp_path: Path) -> str:
     )
 
 
+def _fixture_forgejo_malformed_token(_tmp_path: Path) -> str:
+    """lr-91bac6 comment #1, case (c): the observed shape a Forgejo
+    malformed/garbled-token rejection produces -- the server answers (git
+    reaches the point of reporting a transport-auth failure, same as the
+    expired-credential case above) but its own body repudiates the
+    credential's SHAPE rather than its expiry/scope. Not reproducible via a
+    real local bare-repo git invocation for the same reason as the
+    expired-credential fixture above (no real HTTP credential negotiation
+    against a filesystem remote) -- this mirrors the originating incident's
+    observed transcript shape with a SYNTHETIC token SHA, never the real
+    incident artifact identifier."""
+    return (
+        "remote: token is malformed: token contains an invalid number of segments\n"
+        "remote: access token does not exist [sha: aaaa1111bbbb2222cccc3333dddd4444eeee5555]\n"
+        "remote: authorized integration: parse JWT error: token is malformed\n"
+        "fatal: Authentication failed for "
+        "'http://forgejo.example.invalid:3000/synthetic-owner/synthetic-repo.git/'\n"
+    )
+
+
 #: The full classification-correctness corpus: sub_cause label -> a fixture
 #: function that REPRODUCES that shape via a real git invocation (task
 #: requirement 6). Used both to assert per-case correctness and, via
@@ -930,6 +984,7 @@ _CLASSIFIER_CORPUS: dict[str, Callable[[Path], str]] = {
     SUB_CAUSE_TRANSPORT: _fixture_transport_unreachable,
     SUB_CAUSE_OTHER_REJECT_REASON: _fixture_other_reject_reason,
     SUB_CAUSE_AUTH_FAILED: _fixture_forgejo_auth_failure,
+    SUB_CAUSE_MALFORMED_TOKEN: _fixture_forgejo_malformed_token,
 }
 
 
