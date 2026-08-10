@@ -406,6 +406,86 @@ class TestGitPushWithToken:
         assert "LOCAL PRE-PUSH HOOK MESSAGE" in message
         assert "REMOTE MESSAGE" not in message
 
+    def test_local_pre_push_hook_stdout_only_message_is_not_dropped(self, tmp_path):
+        """lr-91bac6 comment #2, case (d): a local pre-push hook that writes
+        its diagnostic to STDOUT (a bare `echo`, no `1>&2` -- an extremely
+        common "friendly install/version-check message" pattern, and the
+        exact observed shape from the originating incident: a real
+        install/pre-push hook refusing a push because VERSION was not
+        bumped for newly shipped files) must NOT be dropped. Before this
+        fix, git does not fold hook stdout into its own stderr stream, so
+        this shape produced local_hook_lines=(), remote_lines=(),
+        reached_transport=False, and sub_cause fell all the way through to
+        "unknown" -- discarding a message that WAS captured (on stdout)
+        but never read by any extractor."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        local_hook = repo / ".git" / "hooks" / "pre-push"
+        local_hook.write_text(
+            "#!/bin/sh\n"
+            "echo 'VERSION was not bumped for newly shipped files'\n"
+            "exit 1\n"
+        )
+        local_hook.chmod(0o755)
+
+        with pytest.raises(GitPushError) as exc_info:
+            git_push_with_token("origin", "feature", "unused-token-value", repo)
+
+        exc = exc_info.value
+        message = str(exc)
+        assert exc.sub_cause == SUB_CAUSE_LOCAL_HOOK_REJECTED
+        assert exc.sub_cause != SUB_CAUSE_UNKNOWN
+        assert exc.reached_transport is False
+        assert "VERSION was not bumped for newly shipped files" in exc.local_hook_lines
+        assert "VERSION was not bumped for newly shipped files" in message
+        assert "LOCAL PRE-PUSH HOOK MESSAGE" in message
+        assert "unknown" not in message
+        assert "REMOTE MESSAGE" not in message
+
+    def test_local_pre_push_hook_mixed_stdout_and_stderr_both_surface(self, tmp_path):
+        """A local pre-push hook writing SOME lines to stdout and SOME to
+        stderr must have BOTH surface in local_hook_lines -- neither stream
+        is authoritative on its own (lr-91bac6 comment #2, case (d))."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        local_hook = repo / ".git" / "hooks" / "pre-push"
+        local_hook.write_text(
+            "#!/bin/sh\n"
+            "echo 'stdout diagnostic line'\n"
+            "echo 'stderr diagnostic line' 1>&2\n"
+            "exit 1\n"
+        )
+        local_hook.chmod(0o755)
+
+        with pytest.raises(GitPushError) as exc_info:
+            git_push_with_token("origin", "feature", "unused-token-value", repo)
+
+        exc = exc_info.value
+        assert exc.sub_cause == SUB_CAUSE_LOCAL_HOOK_REJECTED
+        assert "stdout diagnostic line" in exc.local_hook_lines
+        assert "stderr diagnostic line" in exc.local_hook_lines
+
+    def test_local_hook_stdout_message_sentinel_token_still_redacted(self, tmp_path):
+        """The redaction invariant (GitPushError.__init__ -> redact_push_
+        secrets) must hold for hook text surfaced from STDOUT exactly as it
+        already holds for stderr-sourced hook text -- verbatim surfacing of
+        a new source must not become a second, unredacted credential-leak
+        path (lr-91bac6 comment #2 explicit constraint)."""
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        sentinel = "sk-stdout-hook-sentinel-should-never-leak-abc123"
+        local_hook = repo / ".git" / "hooks" / "pre-push"
+        local_hook.write_text(
+            "#!/bin/sh\n"
+            f"echo 'hook token in transit: {sentinel}'\n"
+            "exit 1\n"
+        )
+        local_hook.chmod(0o755)
+
+        with pytest.raises(GitPushError) as exc_info:
+            git_push_with_token("origin", "feature", sentinel, repo)
+
+        exc = exc_info.value
+        assert sentinel not in str(exc)
+        assert all(sentinel not in line for line in exc.local_hook_lines)
+
     def test_transport_failure_fabricates_no_remote_or_hook_block(self, tmp_path):
         """A transport-only failure (no such remote configured) never
         reaches the server and has no local pre-push hook installed --

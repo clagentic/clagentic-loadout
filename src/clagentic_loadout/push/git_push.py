@@ -440,62 +440,75 @@ def _parse_reject_reason(stderr: str) -> str | None:
     return None
 
 
-def _extract_local_hook_lines(stderr: str) -> list[str]:
-    """Extract a local pre-push hook's own stdout/stderr lines from git
-    push stderr.
+def _extract_local_hook_lines(stderr: str, stdout: str = "") -> list[str]:
+    """Extract a local pre-push hook's own stdout/stderr lines from a git
+    push subprocess's captured output.
 
     A client-side ``.git/hooks/pre-push`` script runs BEFORE any network
-    negotiation. When it exits non-zero, git aborts the push and prints:
-      1. the hook's own stdout/stderr, completely unprefixed (git does not
-         add "remote: " or any other marker to hook output — that prefix
-         is reserved for text the REMOTE sends back over the wire, e.g. a
-         server-side pre-receive hook).
-      2. git's own generic summary line, always the same regardless of
-         cause: "error: failed to push some refs to '<url>'".
+    negotiation. When it exits non-zero, git aborts the push. Critically,
+    git does NOT fold the hook's stdout into its own stderr stream — the
+    hook inherits the parent git process's stdout and stderr file
+    descriptors DIRECTLY (lr-91bac6 comment #2, case (d), confirmed against
+    a real git 2.43.0 pre-push hook): whichever stream the hook's own
+    script writes to is where that text lands when a caller captures the
+    two streams separately (as `subprocess.run(capture_output=True)` does).
+    A hook that writes its diagnostic via a bare `echo` (no `1>&2`) — an
+    extremely common pattern for a "friendly" install/version-check message
+    — puts its entire text on stdout, invisible to a stderr-only extractor.
+    Before this fix, that shape produced `local_hook_lines=()`,
+    `remote_lines=()`, `reached_transport=False`, and fell all the way
+    through to `sub_cause="unknown"` — indistinguishable from a genuine
+    unexplained failure, discarding a hook message that WAS captured (on
+    result.stdout) but never read by any extractor.
 
-    A PLAIN non-fast-forward (or other client-side-only) rejection ALSO has
-    no "remote: " lines and ALSO ends in that same generic summary line —
-    but its preceding lines are git's own fixed status-line shapes ("To
-    <url>", " ! [rejected] ..."), never arbitrary hook text. Those lines
-    are excluded via _is_git_own_status_line so a plain non-fast-forward is
-    not misclassified as a hook rejection.
+    *stdout* is OPTIONAL (defaults to "") so classification call sites that
+    only have stderr available (e.g. the classifier corpus, which works
+    from real git stderr text with no stdout counterpart) keep working
+    unchanged.
 
-    A "src refspec ... does not match any" failure (lr-f57f13 bug 3) is ALSO
-    excluded here: it is git's own fixed error-line shape, produced before
-    any hook could possibly run (refspec resolution happens before the
-    pre-push hook fires), not a local hook's own text — see
-    _is_bad_refspec_line.
+    Combines two sources, in order:
+      1. stdout content verbatim, line by line — on a local-hook rejection
+         (no "remote: " lines), stdout can ONLY be the hook's own text; git
+         itself never writes anything of its own to stdout on this path
+         (its status/summary lines are always stderr).
+      2. the stderr lines preceding git's own generic summary line
+         ("error: failed to push some refs to '<url>'"), EXCLUDING git's own
+         fixed status-line shapes ("To <url>", " ! [rejected] ...") and a
+         "src refspec ... does not match any" line (lr-f57f13 bug 3) — same
+         exclusion logic as before this fix, unchanged.
 
-    Returns the hook's own content (in order), or an empty list when:
+    Returns the combined content (stdout lines first, then stderr lines, in
+    order), or an empty list when:
       - stderr contains "remote: " lines (this is a remote-side rejection,
-        not a local one — see _extract_remote_lines);
-      - the summary marker itself is absent (e.g. a "fatal: unable to
-        access..." transport error that never even reaches the point of
-        printing git's generic summary line — there is no summary line to
-        anchor against, so nothing is attributable to a hook); or
-      - every line before the summary is one of git's own fixed status
-        lines (or a bad-refspec line), or there is no content at all before
-        the summary (a bare transport or non-fast-forward failure with
-        nothing to attribute to a hook).
+        not a local one — see _extract_remote_lines) — stdout is ALSO
+        ignored in that case, since a remote-side rejection has no local
+        hook involved at all;
+      - stdout is empty AND (the stderr summary marker is absent, e.g. a
+        "fatal: unable to access..." transport error that never reaches the
+        point of printing git's generic summary line, OR every stderr line
+        before the summary is one of git's own fixed status lines / a
+        bad-refspec line) — a bare transport or non-fast-forward failure
+        with nothing on either stream to attribute to a hook.
     """
     if _extract_remote_lines(stderr):
         return []
+    hook_lines: list[str] = [stripped for line in stdout.splitlines() if (stripped := line.strip())]
     lines = stderr.splitlines()
-    hook_lines: list[str] = []
     saw_summary = False
+    stderr_hook_lines: list[str] = []
     for line in lines:
         stripped = line.strip()
         if stripped.startswith(_PUSH_FAILURE_SUMMARY_MARKER):
             saw_summary = True
             break
         if stripped and not _is_git_own_status_line(stripped) and not _is_bad_refspec_line(stripped):
-            hook_lines.append(stripped)
-    if not saw_summary:
-        return []
+            stderr_hook_lines.append(stripped)
+    if saw_summary:
+        hook_lines.extend(stderr_hook_lines)
     return hook_lines
 
 
-def _classify_push_failure(stderr: str) -> str:
+def _classify_push_failure(stderr: str, stdout: str = "") -> str:
     """Classify a failed git push into a coarse sub-cause (see
     push.push_failure_labels for the full enumerable label set).
 
@@ -504,6 +517,18 @@ def _classify_push_failure(stderr: str) -> str:
     module docstring for the three proven bugs this replaces
     (stale-info-as-unknown, cannot-lock-ref-as-unknown,
     src-refspec-as-local-hook-rejected).
+
+    *stdout* (lr-91bac6 comment #2, case (d)): OPTIONAL, defaults to "" for
+    a call site that only has stderr (e.g. the classifier corpus below).
+    Passed through unchanged to `_extract_local_hook_lines` — a local
+    pre-push hook's diagnostic can land on EITHER stream depending on
+    whether the hook script itself redirects to stderr (see that function's
+    own docstring for why git does not fold hook stdout into its stderr).
+    Without this, a stdout-only hook message produces empty
+    `local_hook_lines`, and this classifier falls all the way through to
+    `unknown` even though `reached_transport` is correctly `False` and the
+    hook's own diagnostic WAS captured, just on the stream this classifier
+    used to ignore.
 
     Ordering:
       1. A "src refspec ... does not match any" line (bad-refspec) is
@@ -540,7 +565,14 @@ def _classify_push_failure(stderr: str) -> str:
          this way when it carries a "remote: " line — lr-f57f13 bug 2's
          proven repro).
       4. Local hook lines present (and no remote lines, no bad-refspec) ->
-         local-hook-rejected.
+         local-hook-rejected. Checked against BOTH streams (lr-91bac6
+         comment #2, case (d)) — a hook's diagnostic on stdout alone
+         (common for a bare `echo` with no `1>&2`) is a first-class
+         local-gate outcome here, exactly like a hook's diagnostic on
+         stderr, and this branch fires for it BEFORE any fallthrough to
+         unknown can occur. `reached_transport=False` combined with
+         non-empty hook output on either stream is never reported as
+         unknown.
       5. A parsed reject reason matching a known non-fast-forward-shaped
          literal (non-fast-forward / fetch first / stale info) ->
          non-fast-forward.
@@ -570,7 +602,7 @@ def _classify_push_failure(stderr: str) -> str:
         return SUB_CAUSE_AUTH_FAILED
     if _extract_remote_lines(stderr):
         return SUB_CAUSE_PRE_RECEIVE_REJECTED
-    if _extract_local_hook_lines(stderr):
+    if _extract_local_hook_lines(stderr, stdout):
         return SUB_CAUSE_LOCAL_HOOK_REJECTED
 
     reason = _parse_reject_reason(stderr)
@@ -943,15 +975,18 @@ def git_push_with_token(
                     f"match."
                 )
 
-            # Classification runs against the RAW stderr: a redacted-token
-            # substring could otherwise mask a substring a classifier or
-            # extractor keys on. GitPushError.__init__ (not this function)
-            # is what redacts every field before it is ever stored on the
-            # raised object -- see that class's own docstring.
-            sub_cause = _classify_push_failure(result.stderr)
+            # Classification runs against the RAW stderr (and, for local-hook
+            # detection, RAW stdout -- lr-91bac6 comment #2, case (d): a
+            # local pre-push hook's diagnostic can land on either stream,
+            # and git does not fold hook stdout into its own stderr): a
+            # redacted-token substring could otherwise mask a substring a
+            # classifier or extractor keys on. GitPushError.__init__ (not
+            # this function) is what redacts every field before it is ever
+            # stored on the raised object -- see that class's own docstring.
+            sub_cause = _classify_push_failure(result.stderr, result.stdout)
             reject_reason = _parse_reject_reason(result.stderr)
             remote_lines = tuple(_extract_remote_lines(result.stderr))
-            local_hook_lines = tuple(_extract_local_hook_lines(result.stderr))
+            local_hook_lines = tuple(_extract_local_hook_lines(result.stderr, result.stdout))
             reached_transport = _has_to_line(result.stderr)
 
             remote_block = ""
