@@ -23,6 +23,7 @@ from clagentic_loadout.push.branch_commit_check import (
     CommitCheckUnavailableError,
     StrayMergeCommitError,
     check_branch_for_stray_merge_commits,
+    fetch_branch_commit_subjects,
     find_non_conformant_branch_commits,
 )
 
@@ -210,3 +211,64 @@ class TestCheckBranchForStrayMergeCommits:
         _git(["remote", "set-url", "origin", "https://127.0.0.1:1/nonexistent.git"], clone)
         with pytest.raises(CommitCheckUnavailableError):
             check_branch_for_stray_merge_commits(clone, "main", merge_method=REAL_MERGE_METHOD)
+
+
+class TestFetchBranchCommitSubjects:
+    """fetch_branch_commit_subjects (lr-4005f5) -- the raw, UNFILTERED
+    fetch+log primitive find_non_conformant_branch_commits is now a thin
+    filter over, and the task-id guard's own push-time check
+    (push.verb._run_task_id_guard_commit_check) reuses directly rather than
+    duplicating the fetch+log round-trip."""
+
+    def test_returns_every_commit_conformant_or_not(self, remote_and_clone):
+        _origin, clone = remote_and_clone
+        _checkout_feature_branch(clone)
+        (clone / "a.txt").write_text("a\n")
+        _git(["add", "a.txt"], clone)
+        _git(["commit", "-m", "feat: add a"], clone)
+        _git(
+            ["commit", "--allow-empty", "-m",
+             "Merge pull request #377 from clagentic/fix/lr-f22787-x"],
+            clone,
+        )
+
+        subjects = fetch_branch_commit_subjects(clone, "main")
+        assert len(subjects) == 2
+        recorded_subjects = [subject for _sha, subject in subjects]
+        assert "feat: add a" in recorded_subjects
+        assert (
+            "Merge pull request #377 from clagentic/fix/lr-f22787-x"
+            in recorded_subjects
+        )
+
+    def test_find_non_conformant_is_a_filter_over_this_primitive(self, remote_and_clone):
+        """The two functions must never disagree: every offender
+        find_non_conformant_branch_commits reports must also appear
+        verbatim in fetch_branch_commit_subjects' own unfiltered output."""
+        _origin, clone = remote_and_clone
+        _checkout_feature_branch(clone)
+        _git(
+            ["commit", "--allow-empty", "-m",
+             "Merge pull request #1 from x/y"],
+            clone,
+        )
+        (clone / "a.txt").write_text("a\n")
+        _git(["add", "a.txt"], clone)
+        _git(["commit", "-m", "feat: add a"], clone)
+
+        all_subjects = fetch_branch_commit_subjects(clone, "main")
+        offenders = find_non_conformant_branch_commits(clone, "main")
+        assert set(offenders).issubset(set(all_subjects))
+        assert len(offenders) == 1
+
+    def test_empty_branch_returns_empty_list(self, remote_and_clone):
+        _origin, clone = remote_and_clone
+        _checkout_feature_branch(clone)
+        assert fetch_branch_commit_subjects(clone, "main") == []
+
+    def test_unreachable_remote_raises_check_unavailable(self, remote_and_clone):
+        _origin, clone = remote_and_clone
+        _checkout_feature_branch(clone)
+        _git(["remote", "set-url", "origin", "https://127.0.0.1:1/nonexistent.git"], clone)
+        with pytest.raises(CommitCheckUnavailableError):
+            fetch_branch_commit_subjects(clone, "main")

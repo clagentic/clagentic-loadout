@@ -133,16 +133,19 @@ def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
 
 
-def find_non_conformant_branch_commits(
+def fetch_branch_commit_subjects(
     repo_root: str | Path,
     base_branch: str,
     *,
     remote: str = "origin",
 ) -> list[tuple[str, str]]:
-    """Return [(sha, subject), ...] for every commit in
-    `<fetched remote/base_branch>..HEAD` whose subject (first line only)
-    does not conform to Conventional Commits grammar
-    (merge.title_gate.is_conventional_title, reused unchanged).
+    """Return [(sha, subject), ...] for EVERY commit in `<fetched
+    remote/base_branch>..HEAD`, unfiltered (first line only) -- the raw
+    fetch+log primitive both `find_non_conformant_branch_commits` below and
+    the task-id guard's own push-time check
+    (push.verb._run_task_id_guard_commit_check, lr-4005f5) share, so the one
+    `git fetch` + `git log` round-trip is never duplicated for two
+    independent per-commit checks over the same range.
 
     Fetches *base_branch* from *remote* into FETCH_HEAD for the comparison
     ONLY -- never reads, fast-forwards, or checks out any local branch named
@@ -182,7 +185,7 @@ def find_non_conformant_branch_commits(
             f"{log.stderr.strip()[:400]}"
         )
 
-    offenders: list[tuple[str, str]] = []
+    subjects: list[tuple[str, str]] = []
     for line in log.stdout.splitlines():
         if not line.strip():
             continue
@@ -191,9 +194,31 @@ def find_non_conformant_branch_commits(
             # Malformed line (separator absent) -- skip rather than guess;
             # this can only under-report, never falsely refuse a clean push.
             continue
-        if not is_conventional_title(subject):
-            offenders.append((sha, subject))
-    return offenders
+        subjects.append((sha, subject))
+    return subjects
+
+
+def find_non_conformant_branch_commits(
+    repo_root: str | Path,
+    base_branch: str,
+    *,
+    remote: str = "origin",
+) -> list[tuple[str, str]]:
+    """Return [(sha, subject), ...] for every commit in
+    `<fetched remote/base_branch>..HEAD` whose subject (first line only)
+    does not conform to Conventional Commits grammar
+    (merge.title_gate.is_conventional_title, reused unchanged).
+
+    Thin filter over `fetch_branch_commit_subjects` (the shared fetch+log
+    primitive) -- see that function's own docstring for the fetch/ordering
+    contract this inherits unchanged.
+
+    Raises:
+        CommitCheckUnavailableError: the fetch or log command itself fails
+            (unreachable remote, no such base branch, not a git repo).
+    """
+    subjects = fetch_branch_commit_subjects(repo_root, base_branch, remote=remote)
+    return [(sha, subject) for sha, subject in subjects if not is_conventional_title(subject)]
 
 
 def _format_stray_merge_commit_error(
@@ -277,5 +302,6 @@ __all__ = [
     "CommitCheckUnavailableError",
     "StrayMergeCommitError",
     "check_branch_for_stray_merge_commits",
+    "fetch_branch_commit_subjects",
     "find_non_conformant_branch_commits",
 ]
