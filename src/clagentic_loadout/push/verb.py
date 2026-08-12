@@ -243,6 +243,11 @@ from clagentic_loadout.push.cleanliness_check import (
     check_cleanliness,
 )
 from clagentic_loadout.push.cleanliness_config import load_scratch_patterns
+from clagentic_loadout.push.contention_check import (
+    WorkingTreeContentionError,
+    check_working_tree_contention,
+)
+from clagentic_loadout.push.contention_config import load_contention_config
 from clagentic_loadout.push.errors import (
     AuthorMismatchError,
     BodyEmptyError,
@@ -385,6 +390,13 @@ EXIT_HERMETICITY_FAILED = 32
 #: never triggers this (see bind_caller's own docstring) -- it is unchanged,
 #: existing behavior.
 EXIT_CALLER_INVOKER_MISMATCH = 33
+#: Another unit of work is judged to be in flight in the same checkout
+#: (push.contention_check.WorkingTreeContentionError) -- ONLY reachable when
+#: `push: contention_check: true` is configured (default off, byte-identical
+#: behavior when unset) and no --override-contention-check was supplied. See
+#: --override-contention-check's own --help for the operator escape hatch,
+#: documented alongside the enable switch per lr-78a584 comment #1.
+EXIT_WORKING_TREE_CONTENTION = 34
 
 
 class PushVerbError(Exception):
@@ -447,7 +459,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "remote. --verbose/--trace enables git's own verbose push "
             "output plus a GIT_TRACE passthrough (also reachable via the "
             "CLAGENTIC_LOADOUT_PUSH_GIT_TRACE env var) for phase-level "
-            "diagnosis -- see those flags' own help."
+            "diagnosis -- see those flags' own help. Before pushing "
+            "(create-PR path only), an OPTIONAL, DEFAULT-OFF pre-flight "
+            "check (.clagentic/loadout/config.yaml push.contention_check) "
+            "refuses when the checked-out branch looks like another unit of "
+            "work already in flight in this checkout; a real refusal exits "
+            f"{EXIT_WORKING_TREE_CONTENTION} -- see "
+            "--override-contention-check's own help for the required "
+            "escape hatch."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -673,6 +692,26 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"before any push, exit {EXIT_SCRATCH_LITTER_FOUND} "
         f"({EXIT_SCRATCH_LITTER_FOUND}=EXIT_SCRATCH_LITTER_FOUND). Default: "
         "warn on stderr and continue.",
+    )
+    parser.add_argument(
+        "--override-contention-check",
+        action="store_true",
+        default=False,
+        dest="override_contention_check",
+        help="OPERATOR ESCAPE HATCH for the working-tree contention "
+        "pre-flight check (create-PR path only; a no-op unless "
+        ".clagentic/loadout/config.yaml push.contention_check: true is set "
+        "-- the check itself is default OFF). Proceed even though another "
+        "unit of work appears to be in flight in this checkout (a checked-"
+        "out branch matching push.in_flight_branch_pattern), and print that "
+        "the refusal was overridden. Use this when you know the refusal is "
+        "wrong -- e.g. a stale feature branch nobody is actively working "
+        "from. See docs/verbs.md's `loadout-push` section for the full "
+        "contract, including the accepted bounded gap (a build agent that "
+        "has not yet created its own feature branch is invisible to this "
+        f"check) this flag does not change. On a real refusal (no override), "
+        f"exits {EXIT_WORKING_TREE_CONTENTION} "
+        f"({EXIT_WORKING_TREE_CONTENTION}=EXIT_WORKING_TREE_CONTENTION).",
     )
     lease_group = parser.add_mutually_exclusive_group()
     lease_group.add_argument(
@@ -919,6 +958,53 @@ def _check_title_gate(args: argparse.Namespace, owner: str, repo: str) -> None:
         )
     pr_number = args.pr_number if args.update_pr else None
     check_pr_title(args.title, pr_number, owner, repo, skip=args.skip_title_check)
+
+
+def _run_contention_check(project_root: Path, *, override: bool) -> None:
+    """Optional, config-gated pre-flight working-tree contention check
+    (lr-78a584, push.contention_check) -- refuses when another unit of work
+    already appears to be in flight in this checkout.
+
+    DEFAULT OFF: `push.contention_config.load_contention_config` returns
+    `enabled=False` unless a repo has explicitly set
+    `.clagentic/loadout/config.yaml` `push: contention_check: true` --
+    `check_working_tree_contention` itself short-circuits before reading any
+    git state when disabled, so an unconfigured repo's behavior is
+    byte-identical to before this check existed.
+
+    Runs BEFORE token resolution and BEFORE
+    `push.identity.pin_commits_to_bot_identity` (the actual working-tree
+    mutation this check exists to gate -- a `git filter-branch` rewrite of
+    HEAD) -- a refusal here must never spend a token mint or touch history
+    first.
+
+    Raises push.contention_check.WorkingTreeContentionError when contention
+    is found and *override* is False; caught at the CLI boundary in main()
+    and mapped to EXIT_WORKING_TREE_CONTENTION. When *override* is True and
+    contention WAS found, this prints an explicit "overridden" line to
+    stderr rather than proceeding silently -- an override that leaves no
+    trace of having fired is not meaningfully different from no override
+    existing at all (see push.contention_check's own module docstring,
+    defect (2) of the crew-side predecessor this check replaces).
+    """
+    config = load_contention_config(project_root)
+    try:
+        verdict = check_working_tree_contention(
+            project_root,
+            enabled=config.enabled,
+            branch_pattern=config.branch_pattern,
+            override=override,
+        )
+    except WorkingTreeContentionError as exc:
+        _fail(str(exc), code=EXIT_WORKING_TREE_CONTENTION)
+        return  # pragma: no cover -- _fail always raises
+    if verdict.overridden:
+        print(
+            f"push: WARNING -- working-tree contention check OVERRIDDEN via "
+            f"--override-contention-check ({verdict.reason}) -- proceeding "
+            f"anyway.",
+            file=sys.stderr,
+        )
 
 
 def _run_cleanliness_check(project_root: Path, *, strict: bool) -> None:
@@ -1724,6 +1810,10 @@ def _run_create_pr(
     branch = git_coords.current_branch(project_root)
     if branch in git_coords.PROTECTED_BRANCHES:
         _fail(f"refusing to push from detached HEAD or protected branch: {branch!r}", code=EXIT_PUSH_FAILED)
+
+    _run_contention_check(
+        project_root, override=args.override_contention_check,
+    )
 
     if args.platform == PLATFORM_GITHUB:
         if not args.repo:
