@@ -325,6 +325,10 @@ from clagentic_loadout.merge.tree_sync import (
     resolve_base_branch,
 )
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
+from clagentic_loadout.task_id_guard import (
+    TaskIdGuardViolation,
+    load_task_id_guard_config,
+)
 from clagentic_loadout.push.errors import NamespaceDeniedError, RemoteResolutionError
 from clagentic_loadout.push.git_coords import parse_owner_repo
 from clagentic_loadout.push.issue_link import parse_closes_issue_number
@@ -393,6 +397,16 @@ EXIT_MERGE_READBACK_FAILED = 32
 #: OMITTED --role never triggers this (see bind_caller's own docstring) --
 #: it is unchanged, existing behavior.
 EXIT_CALLER_INVOKER_MISMATCH = 33
+#: A branch commit subject introduced by the PR matched the deployment's own
+#: configured task_id_guard_pattern in mode="block"
+#: (task_id_guard.TaskIdGuardViolation, lr-4005f5) -- ONLY reachable on a
+#: RESOLVED --merge-method='merge' repo (mirrors EXIT_COMMIT_SUBJECT_INVALID's
+#: own merge_method scoping exactly -- see merge.commit_subjects' own
+#: docstring) AND only once a repo has configured
+#: `push: task_id_guard_pattern:` (no configured pattern is a strict no-op;
+#: default mode once a pattern IS set is "block"). See docs/verbs.md's
+#: `loadout-merge` section for the full contract.
+EXIT_TASK_ID_GUARD_VIOLATION = 36
 
 #: Reviewers required to post a clean verdict before a merge is authorized.
 #: A caller wanting a different reviewer roster passes --required-reviewer
@@ -719,7 +733,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"squash/rebase merge rewrites the resulting commit subject FROM the "
         f"PR title, which the PR-title gate already validated. A "
         f"requested-vs-actual shape mismatch is detected and reported when "
-        f"--repo-path is given (see EXIT_MERGE_SHAPE_MISMATCH / merge.merge_shape).",
+        f"--repo-path is given (see EXIT_MERGE_SHAPE_MISMATCH / merge.merge_shape). "
+        f"On the SAME merge_method='merge' condition, an OPTIONAL, "
+        f"deployment-configured task-id guard "
+        f"(.clagentic/loadout/config.yaml push.task_id_guard_pattern) is also "
+        f"checked against each branch commit subject -- a strict no-op with "
+        f"no pattern configured; once configured, default mode is BLOCK, "
+        f"exit {EXIT_TASK_ID_GUARD_VIOLATION}. See docs/verbs.md's "
+        f"`loadout-merge` section for the full contract.",
     )
     parser.add_argument(
         "--skip-commit-check",
@@ -1158,13 +1179,30 @@ def _run(
         )
     else:
         branch_commit_subjects = []
+    # TASK-ID GUARD (lr-4005f5, task_id_guard) -- an independent,
+    # deployment-config-gated check layered on the SAME branch commit
+    # subjects step 7b already fetched: no configured
+    # `push: task_id_guard_pattern:` is a strict no-op (see
+    # task_id_guard's own module docstring, "NO-OP BY DEFAULT"); once
+    # configured, the default mode is "block" (operator-pinned, see that
+    # module's own docstring "DEFAULT MODE IS BLOCK"). --repo-path is the
+    # SAME config root every other repo-tier gate key here resolves
+    # through; None when absent (--no-post-merge-tree/--skip-post-merge
+    # paths), which resolves to the disabled default (no file lookup).
+    task_id_guard_config = load_task_id_guard_config(args.repo_path)
     try:
-        commit_subjects.check_branch_commit_subjects(
+        guard_warnings = commit_subjects.check_branch_commit_subjects(
             branch_commit_subjects, args.pr_number, owner, repo,
             merge_method=args.merge_method, skip=args.skip_commit_check,
+            task_id_guard_pattern=task_id_guard_config.pattern,
+            task_id_guard_mode=task_id_guard_config.mode,
         )
     except CommitSubjectInvalidError as exc:
         _fail(str(exc), code=EXIT_COMMIT_SUBJECT_INVALID)
+    except TaskIdGuardViolation as exc:
+        _fail(str(exc), code=EXIT_TASK_ID_GUARD_VIOLATION)
+    for warning in guard_warnings:
+        print(f"merge: WARNING -- {warning}", file=sys.stderr)
 
     # 8. CI-status gate. An empty result (zero HEAD-scoped commit-status
     # entries) is an EXPLICIT PASS -- no-runner-by-design is a legitimate
