@@ -153,3 +153,26 @@ push:
   # feat/fix/chore/etc. prefix, matching this repo's own branch
   # conventions).
   # in_flight_branch_pattern: "^(feat|fix|chore|build|ci|docs|perf|refactor|style|test)/"
+
+  # task_id_guard_pattern: OPTIONAL, ABSENT BY DEFAULT -- with no pattern
+  # configured, this guard is a strict no-op on BOTH loadout-push (PR title +
+  # branch commit subjects) and loadout-merge (branch commit subjects on a
+  # real, non-squash merge) -- nothing is inspected, nothing is blocked,
+  # behavior is byte-identical to before this feature existed. Set this to
+  # YOUR OWN internal work-item-tracker shape (this package assumes none) to
+  # catch an internal identifier before it reaches a PR title or a
+  # non-squash branch commit subject -- both become PERMANENT public history
+  # the moment they land. See docs/verbs.md's `loadout-push` section
+  # ("Task-id guard") for the full contract, including what is exempt (the
+  # PR body's `Task: <id>` trailer, and the `(#NN)` PR-reference form).
+  #
+  # task_id_guard_pattern: "\\bJIRA-\\d+\\b"   # example only -- no pattern ships by default
+  #
+  # task_id_guard_mode: OPTIONAL. off | warn | block. Consulted ONLY once
+  # task_id_guard_pattern above is set. THE DEFAULT ONCE A PATTERN IS
+  # CONFIGURED IS "block" (an operator-pinned decision, defensible
+  # specifically because the guard is otherwise inert -- block-by-default
+  # only ever affects a repo that has already opted in). Set this key
+  # alongside the pattern to weaken it to "warn" or turn it "off" for this
+  # repo.
+  # task_id_guard_mode: block
