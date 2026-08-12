@@ -811,6 +811,63 @@ it to protect there. `loadout-merge`'s own working-tree mutation (`merge.tree_sy
 advancing a `--repo-path` checkout to the merged SHA) is a **separate** contention source,
 tracked independently and out of scope for this check.
 
+**Task-id guard — `push.task_id_guard_pattern`, DEFAULT BLOCK once configured:** an
+OPTIONAL, deployment-configured regex checked against `--title` and every branch commit
+subject before push, to keep an internal work-item identifier from reaching a PR title or
+a non-squash branch commit subject — both become **permanent public history** the moment
+they land, and neither is a Python string this package's own `src/`-scoped anonymization
+guard (`tests/test_anonymization_guard.py`) can see (a PR title lives on the git host, a
+commit subject lives in git metadata). **On a fresh install, with no pattern configured,
+this guard is a strict no-op** — nothing is inspected, nothing is blocked, behavior is
+byte-identical to before this feature existed. **The moment a repo configures a pattern,
+the default enforcement mode is `block`** — this is a deliberate, operator-pinned default,
+defensible specifically *because* the guard is otherwise inert: block-by-default only ever
+affects a deployment that has already opted in by supplying a pattern of its own. **To turn
+it off (or weaken it to a warning) for a repo that already configured a pattern, set
+`push.task_id_guard_mode` right alongside the pattern** — see the example below.
+
+```yaml
+push:
+  task_id_guard_pattern: "\\bJIRA-\\d+\\b"   # example only -- no pattern ships by default
+  # task_id_guard_mode: block   # off | warn | block -- default once a pattern is set: block
+```
+
+- `task_id_guard_pattern` (regex string, optional, **absent by default — no pattern ships
+  with this package**) — the deployment's own internal work-item-identifier shape. Reuses
+  the SAME configurable "opaque `task_id`" concept this package already uses elsewhere
+  (never a fixed prefix, or any other single tracker's convention, baked into product
+  code) — a deployment on Jira, Linear, or any other tracker supplies its own pattern.
+  **Absent: the guard never runs at all**, on either surface, regardless of
+  `task_id_guard_mode`.
+- `task_id_guard_mode` (`off` | `warn` | `block`, optional) — enforcement mode, consulted
+  ONLY once `task_id_guard_pattern` is set. `off`: pattern recorded but this surface stays
+  inert (a legitimate configuration for a deployment that wants the pattern available for
+  a future surface without enforcing it here yet). `warn`: a match prints a warning naming
+  the offending field, the matched value, and this config key, and the push proceeds.
+  `block` (**the default once a pattern is configured**): the same match refuses the push,
+  exit `EXIT_TASK_ID_GUARD_VIOLATION` (35).
+
+**What is checked, and what is deliberately exempt:** `--title` (both PR-open and
+`--update-pr`), and every commit subject (first line only) in `<fetched --base>..HEAD` —
+regardless of `--merge-method`, since a squash/rebase-merge repo still carries the branch
+commit in its own history even though the final merge commit's subject is rewritten from
+the title. The PR body's `Task: <id>` trailer (`--task-id`) is **never** inspected by this
+guard — it is the sanctioned, provenance-carrying home for a work-item reference and is out
+of scope by construction (this guard never reads a PR body at all). The trailing
+`(#NN)` Conventional Commits PR-reference form is unaffected — this guard only ever
+matches the caller-configured pattern verbatim, with no additional stripping.
+
+**The refusal names the config key that enabled it**, so the message itself is a pointer
+back to this section — no need to already know this doc exists to find your way here from
+a live refusal.
+
+**Dependency this default relies on, recorded so a future change surfaces it:**
+block-by-default is defensible *only* because the guard is inert with no pattern
+configured. If a built-in default pattern is ever shipped, or the guard is ever made active
+without explicit configuration, this default must be revisited — see
+`clagentic_loadout.task_id_guard`'s own module docstring for the same note colocated with
+the code.
+
 ### `loadout-merge` — the merge gate
 
 `clagentic_loadout.merge.verb`. **This is the load-bearing release gate**
@@ -874,6 +931,21 @@ that check's no-op-on-non-merge logic depends on the SHAPE that was actually
 requested, so both the merge-method forwarding and the commit-subject gate's
 own condition are derived from the same resolved value, never allowed to
 silently diverge from one another.
+
+**Task-id guard on branch commit subjects — `push.task_id_guard_pattern`, DEFAULT BLOCK
+once configured:** on the SAME `--merge-method='merge'` (real, non-squash) condition as the
+commit-subject grammar gate above, `loadout-merge` also checks each branch commit subject
+against the deployment's own configured `push.task_id_guard_pattern` — the identical
+config key and shared enforcement module (`clagentic_loadout.task_id_guard`)
+`loadout-push`'s own pre-push check already applies (see that verb's own "Task-id guard"
+section above for the full key reference, the no-op-on-fresh-install behavior, and the
+adjacent opt-out). **With no pattern configured, this is a strict no-op**, identical to the
+push-time surface; once configured, the default mode is `block`, exit
+`EXIT_TASK_ID_GUARD_VIOLATION` (36). Read from the SAME `--repo-path` config root every
+other repo-tier gate key in this section resolves through. This is the merge-time backstop
+for the same defect the push-time check catches earlier and more cheaply — a task-id-bearing
+subject on a real merge lands on the base branch **verbatim**, so this gate exists even
+though the push-time check should normally have caught it first.
 
 Forgejo's `Do` field accepts `merge` / `squash` / `rebase` (the same three
 caller-facing tokens GitHub's `merge_method` accepts — requesting the same

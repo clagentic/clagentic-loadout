@@ -3781,6 +3781,221 @@ class TestBranchCommitCheck:
         assert "branch commit-subject check could not run" in stderr
 
 
+#: Synthetic pattern, per CLAUDE.md rule 6 conformance -- no test in this
+#: class depends on the real internal lr-XXXXXX task-id shape.
+_SYNTHETIC_GUARD_PATTERN = r"\bWIDGET-\d+\b"
+
+
+def _write_task_id_guard_config(repo, *, pattern: str, mode: str | None = None) -> None:
+    import yaml
+
+    config_dir = repo / ".clagentic" / "loadout"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    push_section: dict = {"task_id_guard_pattern": pattern}
+    if mode is not None:
+        push_section["task_id_guard_mode"] = mode
+    (config_dir / "config.yaml").write_text(
+        yaml.safe_dump({"push": push_section}), encoding="utf-8"
+    )
+
+
+class TestTaskIdGuard:
+    """Config-driven refusal of an internal work-item identifier reaching a
+    PR title or a branch commit subject (lr-4005f5, task_id_guard) -- CLI
+    wiring over clagentic_loadout.task_id_guard.
+
+    NO-OP BY DEFAULT (hard acceptance criterion): with no
+    `push.task_id_guard_pattern` configured, this guard must never affect
+    behavior -- proven directly by every OTHER test in this module (none of
+    them configure the pattern, and all pass or fail exactly as they did
+    before this guard existed)."""
+
+    def test_no_pattern_configured_title_with_matching_shape_is_unaffected(
+        self, repo_with_remote, monkeypatch
+    ):
+        """A title that WOULD match the synthetic pattern, on a repo with NO
+        task_id_guard_pattern configured at all, must pass -- byte-identical
+        behavior to before this guard existed."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: fix WIDGET-42 leak", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_configured_pattern_matching_title_blocks_by_default(
+        self, repo_with_remote, monkeypatch
+    ):
+        """Operator-pinned default: once a pattern IS configured, mode
+        defaults to block -- no explicit task_id_guard_mode needed."""
+        repo, _remote = repo_with_remote
+        _write_task_id_guard_config(repo, pattern=_SYNTHETIC_GUARD_PATTERN)
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: fix WIDGET-42 leak", "--body-stdin",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_TASK_ID_GUARD_VIOLATION
+
+    def test_violation_message_names_field_value_and_config_key(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _write_task_id_guard_config(repo, pattern=_SYNTHETIC_GUARD_PATTERN)
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: fix WIDGET-42 leak", "--body-stdin",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_TASK_ID_GUARD_VIOLATION
+        stderr = capsys.readouterr().err
+        assert "WIDGET-42" in stderr
+        assert "PR title" in stderr
+        assert "task_id_guard_pattern" in stderr
+        assert "task_id_guard_mode" in stderr
+
+    def test_configured_pattern_non_matching_title_passes(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        _write_task_id_guard_config(repo, pattern=_SYNTHETIC_GUARD_PATTERN)
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: add a thing", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_warn_mode_proceeds_and_prints_warning(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _write_task_id_guard_config(repo, pattern=_SYNTHETIC_GUARD_PATTERN, mode="warn")
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: fix WIDGET-42 leak", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "WIDGET-42" in stderr
+
+    def test_off_mode_proceeds_silently_despite_configured_pattern(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _write_task_id_guard_config(repo, pattern=_SYNTHETIC_GUARD_PATTERN, mode="off")
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: fix WIDGET-42 leak", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "WIDGET-42" not in stderr
+
+    def test_matching_branch_commit_subject_blocks_by_default(self, tmp_path, monkeypatch):
+        """Acceptance criteria: a branch commit subject matching the
+        configured pattern refuses the push -- exercised on a fetch-reachable
+        repo (branch commit subjects are read via a real `git fetch`+`git
+        log`, mirroring TestBranchCommitCheck's own fixture choice)."""
+        repo, remote = _repo_with_directly_resolvable_remote(tmp_path)
+        _write_task_id_guard_config(repo, pattern=_SYNTHETIC_GUARD_PATTERN)
+        _git(
+            ["commit", "--allow-empty", "-m", "fix: address WIDGET-42 leak"],
+            repo,
+        )
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_TASK_ID_GUARD_VIOLATION
+        # Nothing was pushed.
+        refs = _git(["ls-remote", str(remote)], repo).stdout
+        assert "refs/heads/feature" not in refs
+
+    def test_non_matching_branch_commit_subjects_pass(self, tmp_path, monkeypatch):
+        repo, _remote = _repo_with_directly_resolvable_remote(tmp_path)
+        _write_task_id_guard_config(repo, pattern=_SYNTHETIC_GUARD_PATTERN)
+        provider = _RecordingTokenProvider()
+        opener = _github_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_task_trailer_in_body_is_never_inspected(self, repo_with_remote, monkeypatch):
+        """The PR body's `Task: <id>` trailer is out of scope for this guard
+        by construction -- it never inspects a PR body at all, only a title
+        or a commit subject."""
+        repo, _remote = repo_with_remote
+        _write_task_id_guard_config(repo, pattern=_SYNTHETIC_GUARD_PATTERN)
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: add a thing", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "Task: WIDGET-42\n"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+
 class TestDryRunAndVerbose:
     """--dry-run and --verbose/--trace (lr-68039e): a sanctioned diagnostic
     affordance so a caller with a failing push never needs to shell out to

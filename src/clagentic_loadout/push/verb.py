@@ -236,6 +236,7 @@ from clagentic_loadout.push.branch_commit_check import (
     CommitCheckUnavailableError,
     StrayMergeCommitError,
     check_branch_for_stray_merge_commits,
+    fetch_branch_commit_subjects,
 )
 from clagentic_loadout.push.cleanliness_check import (
     CleanlinessCheckError,
@@ -322,6 +323,11 @@ from clagentic_loadout.transport.readback_envelope import (
     READBACK_SOURCE_READ_UNAVAILABLE,
     Readback,
 )
+from clagentic_loadout.task_id_guard import (
+    TaskIdGuardViolation,
+    check_task_id_guard,
+    load_task_id_guard_config,
+)
 
 # ---------------------------------------------------------------------------
 # Exit codes — one reserved range for the push verb.
@@ -397,6 +403,15 @@ EXIT_CALLER_INVOKER_MISMATCH = 33
 #: --override-contention-check's own --help for the operator escape hatch,
 #: documented alongside the enable switch per lr-78a584 comment #1.
 EXIT_WORKING_TREE_CONTENTION = 34
+#: A PR title or a branch commit subject matched the configured
+#: task_id_guard_pattern in mode="block" (task_id_guard.TaskIdGuardViolation,
+#: lr-4005f5) -- ONLY reachable once a repo has configured
+#: `push: task_id_guard_pattern:` (no configured pattern is a strict no-op;
+#: default mode once a pattern IS set is "block" -- see task_id_guard's own
+#: module docstring for the full no-op-by-default/block-by-default
+#: reasoning). See docs/verbs.md's `loadout-push` section for the full
+#: contract, including how to change the pattern or turn this check off.
+EXIT_TASK_ID_GUARD_VIOLATION = 35
 
 
 class PushVerbError(Exception):
@@ -466,7 +481,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "work already in flight in this checkout; a real refusal exits "
             f"{EXIT_WORKING_TREE_CONTENTION} -- see "
             "--override-contention-check's own help for the required "
-            "escape hatch."
+            "escape hatch. TASK-ID GUARD (.clagentic/loadout/config.yaml "
+            "push.task_id_guard_pattern): an OPTIONAL, deployment-configured "
+            "regex checked against --title and every branch commit subject. "
+            "NO PATTERN CONFIGURED -> this check is a strict NO-OP (nothing "
+            "inspected, nothing blocked) -- byte-identical to today's "
+            "behavior. Once a pattern IS configured, the default mode is "
+            "BLOCK (push.task_id_guard_mode: off|warn|block overrides it); a "
+            f"match in block mode exits {EXIT_TASK_ID_GUARD_VIOLATION}. See "
+            "docs/verbs.md's `loadout-push` section for the full contract."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
@@ -931,7 +954,9 @@ def _read_body_env(
     return _unwrap_body_json(raw, source_label="--body-env")
 
 
-def _check_title_gate(args: argparse.Namespace, owner: str, repo: str) -> None:
+def _check_title_gate(
+    args: argparse.Namespace, owner: str, repo: str, *, project_root: Path
+) -> None:
     """Run the shared Conventional Commits title gate (merge.title_gate,
     reused verbatim — lr-6067) against --title when one is supplied, on
     BOTH the PR-open and --update-pr paths: a retitle via --update-pr can
@@ -947,6 +972,11 @@ def _check_title_gate(args: argparse.Namespace, owner: str, repo: str) -> None:
     main() and mapped to EXIT_PR_TITLE_INVALID; a no-op when
     --skip-title-check was passed (logged here for audit, mirroring
     merge.verb's own bypass logging).
+
+    ALSO runs the task-id guard (lr-4005f5, task_id_guard) against the SAME
+    --title string, after the grammar check above — an unrelated,
+    independent, deployment-config-gated check over the same value, ordered
+    so the more commonly hit grammar failure surfaces first.
     """
     if args.title is None:
         return
@@ -958,6 +988,31 @@ def _check_title_gate(args: argparse.Namespace, owner: str, repo: str) -> None:
         )
     pr_number = args.pr_number if args.update_pr else None
     check_pr_title(args.title, pr_number, owner, repo, skip=args.skip_title_check)
+
+    _run_task_id_guard_title_check(args, project_root=project_root)
+
+
+def _run_task_id_guard_title_check(args: argparse.Namespace, *, project_root: Path) -> None:
+    """Task-id guard, PR-title surface (lr-4005f5, task_id_guard) — refuses
+    (mode="block") or warns (mode="warn") when --title matches the
+    deployment's own configured `push.task_id_guard_pattern`. A strict no-op
+    with no pattern configured (see task_id_guard's own module docstring,
+    "NO-OP BY DEFAULT") — byte-identical to today's behavior on every repo
+    that has not opted in.
+
+    Runs AFTER the Conventional Commits title gate above: unrelated,
+    independent checks over the SAME string, ordered so a caller sees the
+    grammar failure first (the more commonly hit check) before this
+    deployment-specific one.
+    """
+    if args.title is None:
+        return
+    config = load_task_id_guard_config(project_root)
+    warning = check_task_id_guard(
+        args.title, field="PR title", pattern=config.pattern, mode=config.mode
+    )
+    if warning:
+        print(f"push: WARNING -- {warning}", file=sys.stderr)
 
 
 def _run_contention_check(project_root: Path, *, override: bool) -> None:
@@ -1088,6 +1143,65 @@ def _run_branch_commit_check(
             f"push: branch commit-subject check could not run -- {exc}",
             file=sys.stderr,
         )
+
+
+def _run_task_id_guard_commit_check(
+    project_root: Path, *, base_branch: str, remote: str
+) -> None:
+    """Task-id guard, branch-commit-subject surface (lr-4005f5,
+    task_id_guard) -- refuses (mode="block") or warns (mode="warn") when any
+    commit in `<fetched base>..HEAD` carries a subject (first line only)
+    matching the deployment's own configured `push.task_id_guard_pattern`.
+
+    UNCONDITIONAL ON merge_method (unlike `_run_branch_commit_check`
+    above): this is a push-time backstop against a task id reaching PERMANENT
+    history at all -- it fires regardless of how this repo eventually merges,
+    since a squash/rebase-merge repo still carries the branch commit in its
+    own reflog/PR-diff history even though the resulting merge commit's own
+    subject is rewritten from the PR title. The merge-time gate
+    (merge.commit_subjects, extended lr-4005f5) is the one that stays
+    merge_method='merge'-scoped -- see that module's own docstring for why
+    ONLY a real, non-squash merge lands a branch subject on the base branch
+    verbatim.
+
+    A strict no-op with no pattern configured (task_id_guard's own
+    "NO-OP BY DEFAULT") -- reuses `push.branch_commit_check.
+    fetch_branch_commit_subjects`, the SAME fetch+log primitive
+    `_run_branch_commit_check` already uses, rather than a second `git
+    fetch`/`git log` round-trip over the same range.
+
+    A CommitCheckUnavailableError (the underlying git fetch/log failing) is
+    a SOFT-FAIL: warned on stderr, never blocks the push -- mirrors
+    `_run_branch_commit_check`'s own posture exactly (this check's own
+    inability to run must never refuse a push that would otherwise be
+    clean).
+
+    Raises task_id_guard.TaskIdGuardViolation on the first matching commit
+    subject (mode="block"); caught at the CLI boundary in main() and mapped
+    to EXIT_TASK_ID_GUARD_VIOLATION.
+    """
+    config = load_task_id_guard_config(project_root)
+    if config.pattern is None:
+        return
+
+    try:
+        subjects = fetch_branch_commit_subjects(project_root, base_branch, remote=remote)
+    except CommitCheckUnavailableError as exc:
+        print(
+            f"push: task-id guard commit-subject check could not run -- {exc}",
+            file=sys.stderr,
+        )
+        return
+
+    for sha, subject in subjects:
+        warning = check_task_id_guard(
+            subject,
+            field=f"branch commit subject ({sha})",
+            pattern=config.pattern,
+            mode=config.mode,
+        )
+        if warning:
+            print(f"push: WARNING -- {warning}", file=sys.stderr)
 
 
 def _resolve_repo_root(repo_path_override: str) -> Path:
@@ -1463,6 +1577,9 @@ def main(
     except StrayMergeCommitError as exc:
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_STRAY_MERGE_COMMIT
+    except TaskIdGuardViolation as exc:
+        print(f"push: {exc}", file=sys.stderr)
+        return EXIT_TASK_ID_GUARD_VIOLATION
     except CallerBindingError as exc:
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_CALLER_INVOKER_MISMATCH
@@ -1732,7 +1849,7 @@ def _run_update_pr(
         except HostDeniedError as exc:
             _fail(str(exc), code=EXIT_HOST_DENIED)
 
-    _check_title_gate(args, owner, repo)
+    _check_title_gate(args, owner, repo, project_root=project_root)
 
     print(f"push: resolving token for caller={caller!r} (PR update)", file=sys.stderr)
     active_provider = (
@@ -1853,7 +1970,7 @@ def _run_create_pr(
         except HostDeniedError as exc:
             _fail(str(exc), code=EXIT_HOST_DENIED)
 
-    _check_title_gate(args, owner, repo)
+    _check_title_gate(args, owner, repo, project_root=project_root)
 
     # Builder-identity resolution happens BEFORE token resolution -- UNCHANGED
     # ordering from lr-4e8a43 (cheap, purely local YAML validation +
@@ -1965,6 +2082,10 @@ def _run_create_pr(
         remote=remote_name,
         merge_method=args.merge_method,
         skip=args.skip_branch_commit_check,
+    )
+
+    _run_task_id_guard_commit_check(
+        project_root, base_branch=args.base, remote=remote_name,
     )
 
     # LEASE CONTROL (lr-f57f13, D5 DECIDED): never derive force_with_lease

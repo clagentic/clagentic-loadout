@@ -913,6 +913,197 @@ class TestBranchCommitSubjectGate:
         assert code == verb.EXIT_OK
 
 
+#: Synthetic pattern, per CLAUDE.md rule 6 conformance -- no test in this
+#: class depends on the real internal lr-XXXXXX task-id shape.
+_SYNTHETIC_GUARD_PATTERN = r"\bWIDGET-\d+\b"
+
+
+def _write_task_id_guard_config(repo_path, *, pattern: str, mode: str | None = None) -> None:
+    import yaml
+
+    config_dir = repo_path / ".clagentic" / "loadout"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    push_section: dict = {"task_id_guard_pattern": pattern}
+    if mode is not None:
+        push_section["task_id_guard_mode"] = mode
+    # sync_tree_after_merge: false -- these tests point --repo-path at a
+    # plain tmp_path directory (no .git at all, deliberately -- see this
+    # class's own docstring), so step 10's working-tree sync would ALWAYS
+    # fail regardless of this guard's own outcome; --skip-post-merge alone
+    # does not suppress the sync (only the configured STEPS -- see
+    # merge.verb's own "AFTER post_merge_steps run" docstring section), so
+    # this key is required for a passing-path test in this class to reach
+    # EXIT_OK at all.
+    (config_dir / "config.yaml").write_text(
+        yaml.safe_dump({
+            "push": push_section,
+            "merge": {"sync_tree_after_merge": False},
+        }),
+        encoding="utf-8",
+    )
+
+
+class TestTaskIdGuardCommitSubjectGate:
+    """lr-4005f5: end-to-end CLI wiring for the merge-time task-id guard on
+    branch commit subjects -- shares the SAME merge_method='merge' scoping
+    as TestBranchCommitSubjectGate above, layered as an INDEPENDENT check
+    over the same already-fetched branch_commits. Config is read from
+    --repo-path (the same repo-tier config root every other gate key in
+    this module resolves through) -- these tests write a REAL
+    `.clagentic/loadout/config.yaml` under tmp_path and point --repo-path at
+    it (a plain directory, not a git working tree: step 0's repo-path/slug
+    consistency check tolerates an unconfirmable tree, see
+    merge.repo_path_consistency's own docstring)."""
+
+    def test_no_pattern_configured_matching_shape_subject_is_unaffected(self, tmp_path):
+        """Hard acceptance criterion: no configured pattern -> the guard is
+        a strict no-op, even with a subject that WOULD match the synthetic
+        pattern."""
+        import yaml
+
+        config_dir = tmp_path / ".clagentic" / "loadout"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text(
+            yaml.safe_dump({"merge": {"sync_tree_after_merge": False}}), encoding="utf-8"
+        )
+        argv = _base_args(**{"--merge-method": "merge", "--repo-path": str(tmp_path)})
+        argv.append("--skip-post-merge")
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
+                ],
+            ),
+        )
+        assert code == verb.EXIT_OK
+
+    def test_configured_pattern_matching_subject_blocks_by_default(self, tmp_path):
+        """Operator-pinned default: once a pattern IS configured, mode
+        defaults to block."""
+        _write_task_id_guard_config(tmp_path, pattern=_SYNTHETIC_GUARD_PATTERN)
+        argv = _base_args(**{"--merge-method": "merge", "--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
+                ],
+            ),
+        )
+        assert code == verb.EXIT_TASK_ID_GUARD_VIOLATION
+
+    def test_configured_pattern_non_matching_subject_merges(self, tmp_path):
+        _write_task_id_guard_config(tmp_path, pattern=_SYNTHETIC_GUARD_PATTERN)
+        argv = _base_args(**{"--merge-method": "merge", "--repo-path": str(tmp_path)})
+        argv.append("--skip-post-merge")
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "feat(auth): add the gate"}},
+                ],
+            ),
+        )
+        assert code == verb.EXIT_OK
+
+    def test_squash_repo_is_a_no_op_even_with_configured_pattern(self, tmp_path):
+        """Shares the SAME merge_method scoping as the grammar gate -- a
+        squash repo never fires the task-id guard either, even in block
+        mode with a matching subject."""
+        _write_task_id_guard_config(tmp_path, pattern=_SYNTHETIC_GUARD_PATTERN)
+        argv = _base_args(**{"--merge-method": "squash", "--repo-path": str(tmp_path)})
+        argv.append("--skip-post-merge")
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
+                ],
+            ),
+        )
+        assert code == verb.EXIT_OK
+
+    def test_skip_commit_check_bypasses_task_id_guard_too(self, tmp_path):
+        _write_task_id_guard_config(tmp_path, pattern=_SYNTHETIC_GUARD_PATTERN)
+        argv = _base_args(**{"--merge-method": "merge", "--repo-path": str(tmp_path)})
+        argv.append("--skip-commit-check")
+        argv.append("--skip-post-merge")
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
+                ],
+            ),
+        )
+        assert code == verb.EXIT_OK
+
+    def test_warn_mode_merges_and_prints_warning(self, tmp_path, capsys):
+        _write_task_id_guard_config(tmp_path, pattern=_SYNTHETIC_GUARD_PATTERN, mode="warn")
+        argv = _base_args(**{"--merge-method": "merge", "--repo-path": str(tmp_path)})
+        argv.append("--skip-post-merge")
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
+                ],
+            ),
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "WIDGET-42" in stderr
+
+    def test_violation_message_names_field_value_and_config_key(self, tmp_path, capsys):
+        _write_task_id_guard_config(tmp_path, pattern=_SYNTHETIC_GUARD_PATTERN)
+        argv = _base_args(**{"--merge-method": "merge", "--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
+                ],
+            ),
+        )
+        assert code == verb.EXIT_TASK_ID_GUARD_VIOLATION
+        stderr = capsys.readouterr().err
+        assert "WIDGET-42" in stderr
+        assert "task_id_guard_pattern" in stderr
+        assert "task_id_guard_mode" in stderr
+
+    def test_grammar_gate_runs_before_task_id_guard(self, tmp_path):
+        """A subject that is BOTH non-conventional AND task-id-matching
+        refuses on the grammar gate first (EXIT_COMMIT_SUBJECT_INVALID)."""
+        _write_task_id_guard_config(tmp_path, pattern=_SYNTHETIC_GUARD_PATTERN)
+        argv = _base_args(**{"--merge-method": "merge", "--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "WIDGET-42: id-leading, no type"}},
+                ],
+            ),
+        )
+        assert code == verb.EXIT_COMMIT_SUBJECT_INVALID
+
+
 class TestPostMergeReadback:
     """lr-361de3: merge.verb performs a FRESH post-merge GET .../pulls/{n}
     readback (merge.merge_readback.verify_merge_landed) AFTER merge_pr's own

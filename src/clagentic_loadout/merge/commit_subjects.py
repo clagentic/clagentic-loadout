@@ -70,6 +70,7 @@ from __future__ import annotations
 
 from clagentic_loadout.merge.errors import CommitSubjectInvalidError
 from clagentic_loadout.merge.title_gate import is_conventional_title
+from clagentic_loadout.task_id_guard import TaskIdGuardViolation, check_task_id_guard
 
 #: The one merge_method value this backstop actually gates on. Any other
 #: value (squash, rebase, or an integrator's own custom label) is a no-op --
@@ -116,7 +117,9 @@ def check_branch_commit_subjects(
     *,
     merge_method: str,
     skip: bool = False,
-) -> None:
+    task_id_guard_pattern: str | None = None,
+    task_id_guard_mode: str = "off",
+) -> list[str]:
     """Assert every branch commit subject introduced by the PR (base..head)
     conforms to Conventional Commits grammar -- the SAME predicate
     merge.title_gate.is_conventional_title already enforces on the PR title.
@@ -145,11 +148,35 @@ def check_branch_commit_subjects(
     SHA, the offending subject, and the required grammar. Never rewrites or
     normalizes any commit — see this module's docstring, "BLOCK, NEVER
     REWRITE".
+
+    TASK-ID GUARD (lr-4005f5, clagentic_loadout.task_id_guard, reused not
+    forked): after the Conventional Commits grammar check above passes for
+    a given subject, ALSO check it against *task_id_guard_pattern* (the
+    deployment's own configured `push.task_id_guard_pattern` -- read by the
+    caller, merge.verb, from the SAME repo config every other gate key here
+    reads; never re-derived in this module). A strict no-op when
+    *task_id_guard_pattern* is None (see task_id_guard's own module
+    docstring, "NO-OP BY DEFAULT"). Gated by the SAME `merge_method ==
+    REAL_MERGE_METHOD` condition as the grammar check above -- a
+    task-id-bearing subject only lands verbatim on a real (non-squash)
+    merge; on any other merge method the resulting commit subject is
+    rewritten from the PR title (already covered by merge.title_gate at the
+    title surface).
+
+    Raises task_id_guard.TaskIdGuardViolation when *task_id_guard_mode* ==
+    "block" (the operator-pinned default once a pattern is configured) and a
+    subject matches. Returns the list of formatted warning strings produced
+    when *task_id_guard_mode* == "warn" instead (this module has no stderr
+    of its own -- printing is the CALLER's job, mirroring every other
+    skip-able gate in this package; see merge.verb's own wiring for where
+    these are surfaced). Empty list when nothing warned (including the
+    common case: no pattern configured at all).
     """
     if skip:
-        return
+        return []
     if merge_method != REAL_MERGE_METHOD:
-        return
+        return []
+    warnings: list[str] = []
     for sha, subject in commit_subjects:
         if not is_conventional_title(subject):
             raise CommitSubjectInvalidError(
@@ -157,6 +184,15 @@ def check_branch_commit_subjects(
                     sha, subject, pr_number=pr_number, owner=owner, repo=repo
                 )
             )
+        warning = check_task_id_guard(
+            subject,
+            field=f"branch commit subject ({sha})",
+            pattern=task_id_guard_pattern,
+            mode=task_id_guard_mode,
+        )
+        if warning:
+            warnings.append(warning)
+    return warnings
 
 
 __all__ = ["REAL_MERGE_METHOD", "check_branch_commit_subjects"]

@@ -27,6 +27,11 @@ from clagentic_loadout.merge.commit_subjects import (
 )
 from clagentic_loadout.merge.errors import CommitSubjectInvalidError
 from clagentic_loadout.merge.title_gate import is_conventional_title
+from clagentic_loadout.task_id_guard import MODE_BLOCK, MODE_WARN, TaskIdGuardViolation
+
+#: Synthetic pattern, per CLAUDE.md rule 6 conformance -- no test in this
+#: module depends on the real internal lr-XXXXXX task-id shape.
+_SYNTHETIC_GUARD_PATTERN = r"\bWIDGET-\d+\b"
 
 _SHA_A = "a" * 40
 _SHA_B = "b" * 40
@@ -160,3 +165,101 @@ class TestMultiLineCommitMessageFirstLineOnly:
             [(_SHA_A, "feat(lr-835c57): add the gate\n\nlr-835c57: body detail")],
             1, "owner", "repo", merge_method=REAL_MERGE_METHOD,
         )  # no raise -- only the first line is checked
+
+
+class TestTaskIdGuardNoPatternIsNoOp:
+    """Hard acceptance criterion: no configured pattern -> the guard is a
+    strict no-op, even on a real merge with a conformant-but-matching-shaped
+    subject."""
+
+    def test_default_arguments_never_invoke_the_guard(self):
+        check_branch_commit_subjects(
+            [(_SHA_A, "feat(auth): mentions WIDGET-42 in passing")],
+            1, "owner", "repo", merge_method=REAL_MERGE_METHOD,
+        )  # no raise -- task_id_guard_pattern defaults to None
+
+    def test_explicit_none_pattern_is_a_no_op(self):
+        warnings = check_branch_commit_subjects(
+            [(_SHA_A, "feat(auth): mentions WIDGET-42 in passing")],
+            1, "owner", "repo", merge_method=REAL_MERGE_METHOD,
+            task_id_guard_pattern=None, task_id_guard_mode=MODE_BLOCK,
+        )
+        assert warnings == []
+
+
+class TestTaskIdGuardBlockModeOnRealMerge:
+    """Acceptance criteria: task-id-bearing commit subject + real
+    (non-squash) merge -> the guard blocks."""
+
+    def test_matching_subject_raises_task_id_guard_violation(self):
+        with pytest.raises(TaskIdGuardViolation) as exc_info:
+            check_branch_commit_subjects(
+                [(_SHA_A, "feat(auth): fix WIDGET-42 leak")],
+                7, "some-owner", "some-repo", merge_method=REAL_MERGE_METHOD,
+                task_id_guard_pattern=_SYNTHETIC_GUARD_PATTERN,
+                task_id_guard_mode=MODE_BLOCK,
+            )
+        message = str(exc_info.value)
+        assert "WIDGET-42" in message
+        assert _SHA_A in message
+
+    def test_non_matching_conformant_subject_passes(self):
+        warnings = check_branch_commit_subjects(
+            [(_SHA_A, "feat(auth): add the gate")],
+            7, "some-owner", "some-repo", merge_method=REAL_MERGE_METHOD,
+            task_id_guard_pattern=_SYNTHETIC_GUARD_PATTERN,
+            task_id_guard_mode=MODE_BLOCK,
+        )
+        assert warnings == []
+
+    def test_grammar_gate_runs_before_task_id_guard_on_the_same_subject(self):
+        """A subject that is BOTH non-conventional AND task-id-matching
+        raises the grammar error first (CommitSubjectInvalidError) -- the
+        two checks are independent but ordered, matching this module's own
+        docstring ("after the grammar check above passes...")."""
+        with pytest.raises(CommitSubjectInvalidError):
+            check_branch_commit_subjects(
+                [(_SHA_A, "WIDGET-42: id-leading, no type")],
+                7, "some-owner", "some-repo", merge_method=REAL_MERGE_METHOD,
+                task_id_guard_pattern=_SYNTHETIC_GUARD_PATTERN,
+                task_id_guard_mode=MODE_BLOCK,
+            )
+
+
+class TestTaskIdGuardWarnModeOnRealMerge:
+    def test_matching_subject_returns_warning_never_raises(self):
+        warnings = check_branch_commit_subjects(
+            [(_SHA_A, "feat(auth): fix WIDGET-42 leak")],
+            7, "some-owner", "some-repo", merge_method=REAL_MERGE_METHOD,
+            task_id_guard_pattern=_SYNTHETIC_GUARD_PATTERN,
+            task_id_guard_mode=MODE_WARN,
+        )
+        assert len(warnings) == 1
+        assert "WIDGET-42" in warnings[0]
+
+
+class TestTaskIdGuardSquashRepoIsNoOp:
+    """Acceptance criteria: the task-id guard shares the SAME
+    merge_method='merge' scoping as the grammar gate -- a squash/rebase
+    repo never fires it, even in block mode with a matching subject."""
+
+    @pytest.mark.parametrize("merge_method", ["squash", "rebase", "anything-else"])
+    def test_matching_subject_never_raises_off_real_merge(self, merge_method):
+        warnings = check_branch_commit_subjects(
+            [(_SHA_A, "feat(auth): fix WIDGET-42 leak")],
+            1, "owner", "repo", merge_method=merge_method,
+            task_id_guard_pattern=_SYNTHETIC_GUARD_PATTERN,
+            task_id_guard_mode=MODE_BLOCK,
+        )
+        assert warnings == []
+
+
+class TestTaskIdGuardSkipBypass:
+    def test_skip_bypasses_task_id_guard_too(self):
+        warnings = check_branch_commit_subjects(
+            [(_SHA_A, "feat(auth): fix WIDGET-42 leak")],
+            1, "owner", "repo", merge_method=REAL_MERGE_METHOD, skip=True,
+            task_id_guard_pattern=_SYNTHETIC_GUARD_PATTERN,
+            task_id_guard_mode=MODE_BLOCK,
+        )
+        assert warnings == []
