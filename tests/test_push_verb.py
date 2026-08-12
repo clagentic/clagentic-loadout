@@ -871,6 +871,167 @@ class TestHostGuard:
         assert code == verb.EXIT_OK
 
 
+class TestContentionCheck:
+    """lr-78a584: optional, config-gated, default-OFF pre-flight read that
+    refuses a create-PR push when the checked-out branch looks like another
+    unit of work is already in flight in this checkout. Mirrors
+    TestNamespaceGuard/TestHostGuard's own coverage shape for a sibling
+    fail-closed-before-token-resolution guard, but DEFAULT-OFF (the other
+    two guards are permissive-when-unconfigured but still consult their env
+    var; this check does not run at all unless explicitly enabled)."""
+
+    @staticmethod
+    def _write_config(repo, *, enabled: bool, pattern: str | None = None) -> None:
+        config_dir = repo / ".clagentic" / "loadout"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        push_section = f"contention_check: {str(enabled).lower()}\n"
+        if pattern is not None:
+            push_section += f'  in_flight_branch_pattern: "{pattern}"\n'
+        (config_dir / "config.yaml").write_text(f"push:\n  {push_section}", encoding="utf-8")
+
+    def test_disabled_by_default_matching_branch_still_proceeds(
+        self, repo_with_remote, monkeypatch
+    ):
+        """Hard acceptance criterion: absent config, behavior is
+        byte-identical to today -- even the fixture's own 'feature' branch
+        (not in-flight-shaped) proceeds unchanged, and this is true with NO
+        config file present at all."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_enabled_matching_branch_refuses_before_token_resolution(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        self._write_config(repo, enabled=True, pattern=r"^feature")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_WORKING_TREE_CONTENTION
+
+    def test_refusal_names_the_branch(self, repo_with_remote, monkeypatch, capsys):
+        repo, _remote = repo_with_remote
+        self._write_config(repo, enabled=True, pattern=r"^feature")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_WORKING_TREE_CONTENTION
+        stderr = capsys.readouterr().err
+        assert "feature" in stderr
+
+    def test_enabled_non_matching_branch_proceeds(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        # Enabled, but the default in_flight_branch_pattern
+        # (feat|fix|chore|...) does not match the fixture's own 'feature'
+        # branch name (no trailing '/').
+        self._write_config(repo, enabled=True)
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_override_flag_permits_the_push_and_warns(self, repo_with_remote, monkeypatch, capsys):
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        self._write_config(repo, enabled=True, pattern=r"^feature")
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--override-contention-check",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "OVERRIDDEN" in stderr
+
+    def test_update_pr_path_is_never_gated(self, repo_with_remote, monkeypatch):
+        """--update-pr never mutates the working tree (metadata-only PATCH;
+        see push.verb's own module docstring) -- there is nothing for this
+        check to protect there, so it must never fire on that path even
+        when enabled and the branch matches."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        self._write_config(repo, enabled=True, pattern=r"^feature")
+
+        def opener(req, timeout=15):
+            return _json_resp(200, {})
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "feat: updated title",
+            ],
+            token_provider=provider,
+            opener=opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_default_branch_dirty_proceeds_even_when_enabled(
+        self, repo_with_remote, monkeypatch
+    ):
+        """The task's own verified counter-example: a tree on a branch that
+        does not match the in-flight pattern, carrying uncommitted changes,
+        must proceed -- dirtiness is never an independent signal. The
+        fixture's own 'feature' branch stands in for "not in-flight-shaped"
+        here (see test_enabled_non_matching_branch_proceeds above for why it
+        does not match the default pattern)."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        self._write_config(repo, enabled=True)
+        (repo / "README.md").write_text("stale post-merge residue\n")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_help_documents_the_override_flag(self, monkeypatch, capsys):
+        """The override flag must be discoverable via --help, not only in
+        docs -- lr-78a584 comment #1: an operator must be able to find it
+        WHILE BLOCKED."""
+        code = _run_main(["--help"], token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch)
+        assert code == verb.EXIT_OK
+        out = " ".join(capsys.readouterr().out.split())
+        assert "--override-contention-check" in out
+
+
 class TestRoleParameterization:
     def test_arbitrary_caller_flows_through_to_token_provider(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
