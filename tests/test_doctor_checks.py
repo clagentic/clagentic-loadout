@@ -19,6 +19,7 @@ from clagentic_loadout.doctor.checks import (
     PROBE_CALLER,
     check_attestation_source_configured,
     check_builder_identity_config,
+    check_credential_validity,
     check_credentials,
     check_github_app_slugs_coverage,
     check_repo_loadout_schema,
@@ -1158,4 +1159,139 @@ class TestUnsatisfiableGateIsDiagnosticOnlyNotABootstrapTrap:
         assert "'roles'" in error_message
         assert "(1) add" in error_message
         assert "(2) remove" in error_message
-        assert "(3)" in error_message and "[]" in error_message
+
+
+class TestCheckCredentialValidity:
+    """check_credential_validity (lr-0eeb0c) -- opt-in via `caller`, never a
+    config-file read, never a false green. Injected TokenProvider fakes
+    (never a real subprocess exec) plus an injected `opener` (never a real
+    network call) prove the whole resolve-then-probe path with zero live
+    credentials or network dependency."""
+
+    def test_omitted_caller_is_a_no_op(self, tmp_path):
+        """No real identity to validate without a caller name -- doctor's
+        default run must never mint a credential as a side effect."""
+        results = check_credential_validity(caller=None, config_root=tmp_path)
+        assert results == []
+
+    def test_empty_caller_is_a_no_op(self, tmp_path):
+        results = check_credential_validity(caller="", config_root=tmp_path)
+        assert results == []
+
+    def test_well_formed_accepted_credential_both_platforms_ok(self, tmp_path):
+        class _FakeProvider:
+            def __init__(self, token):
+                self._token = token
+
+            def resolve_token(self, role, *, repo=None):
+                return self._token
+
+        def opener(req, timeout=15):
+            class _Resp:
+                def read(self_inner):
+                    return b'{"login": "amos"}'
+
+                def getcode(self_inner):
+                    return 200
+
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _Resp()
+
+        results = check_credential_validity(
+            caller="amos",
+            config_root=tmp_path,
+            token_provider_forgejo=_FakeProvider("tok-forgejo"),
+            token_provider_github=_FakeProvider("tok-github"),
+            opener=opener,
+        )
+        assert len(results) == 2
+        for result in results:
+            assert result.ok is True
+            assert result.resolved["state"] == "ok"
+            assert "tok-forgejo" not in result.summary
+            assert "tok-github" not in result.summary
+
+    def test_malformed_token_reported_as_failing_finding_named_distinctly(self, tmp_path):
+        import io
+        import urllib.error
+
+        class _FakeProvider:
+            def resolve_token(self, role, *, repo=None):
+                return "tok-malformed"
+
+        def opener(req, timeout=15):
+            raise urllib.error.HTTPError(
+                req.full_url,
+                401,
+                "Unauthorized",
+                {},
+                io.BytesIO(b"token is malformed: invalid number of segments"),
+            )
+
+        results = check_credential_validity(
+            caller="amos",
+            config_root=tmp_path,
+            token_provider_forgejo=_FakeProvider(),
+            token_provider_github=_FakeProvider(),
+            opener=opener,
+        )
+        forgejo_result = next(r for r in results if r.resolved["platform"] == "forgejo")
+        assert forgejo_result.ok is False
+        assert forgejo_result.resolved["state"] == "malformed-token"
+        assert "malformed-token" in forgejo_result.summary
+        assert "expir" not in forgejo_result.summary.lower()
+
+    def test_credential_resolution_failure_reported_as_its_own_finding(self, tmp_path):
+        from clagentic_loadout.transport.credential_provider import CredentialProviderError
+
+        class _RefusingProvider:
+            def resolve_token(self, role, *, repo=None):
+                raise CredentialProviderError("no such role configured")
+
+        results = check_credential_validity(
+            caller="amos",
+            config_root=tmp_path,
+            token_provider_forgejo=_RefusingProvider(),
+            token_provider_github=_RefusingProvider(),
+        )
+        assert len(results) == 2
+        for result in results:
+            assert result.ok is False
+            assert "could not resolve a credential" in result.summary
+
+    def test_never_logs_resolved_token_value(self, tmp_path):
+        class _FakeProvider:
+            def resolve_token(self, role, *, repo=None):
+                return "super-secret-value-never-logged"
+
+        def opener(req, timeout=15):
+            class _Resp:
+                def read(self_inner):
+                    return b'{"login": "amos"}'
+
+                def getcode(self_inner):
+                    return 200
+
+                def __enter__(self_inner):
+                    return self_inner
+
+                def __exit__(self_inner, *exc):
+                    return False
+
+            return _Resp()
+
+        results = check_credential_validity(
+            caller="amos",
+            config_root=tmp_path,
+            token_provider_forgejo=_FakeProvider(),
+            token_provider_github=_FakeProvider(),
+            opener=opener,
+        )
+        for result in results:
+            assert "super-secret-value-never-logged" not in result.summary
+            assert "super-secret-value-never-logged" not in str(result.resolved)

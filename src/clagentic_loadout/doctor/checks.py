@@ -107,6 +107,12 @@ from typing import Callable
 
 import yaml
 
+from clagentic_loadout.doctor.credential_validity import (
+    CREDENTIAL_STATE_OK,
+    CredentialProbeResult,
+    probe_forgejo_credential,
+    probe_github_credential,
+)
 from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_AUTHORIZED_ROLES,
     CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
@@ -147,6 +153,12 @@ from clagentic_loadout.transport.attestation import (
     ATTESTED_IDENTITY_ENV_VAR,
     ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR,
 )
+from clagentic_loadout.transport.credential_provider import (
+    CredentialProviderError,
+    TokenProvider,
+    resolve_token,
+)
+from clagentic_loadout.transport.git_host_api import _resolve_git_host_base
 from clagentic_loadout.transport.github_app_config import (
     CONFIG_KEY_SLUGS,
     CONFIG_SECTION_GITHUB_APP,
@@ -159,6 +171,7 @@ from clagentic_loadout.transport.provider_config import (
     PROVIDER_KIND_COMMAND,
     has_repo_local_credentials_section,
     load_user_config_section,
+    resolve_platform_provider,
     resolve_provider_kind_and_command,
 )
 from clagentic_loadout.wait.config import (
@@ -403,6 +416,146 @@ def check_credentials(
                 },
             )
         )
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# 1b. Credential VALIDITY: what does the HOST say about a real, already-
+#     resolved credential (lr-0eeb0c) -- distinct from check_credentials
+#     above, which only validates the token_command HELPER's own
+#     existence/permissions via a deliberately-fake PROBE_CALLER that is
+#     EXPECTED to be refused. This check mints/resolves a REAL credential for
+#     a REAL caller (opt-in via *caller* -- omitted, this check is a no-op,
+#     since there is no real identity to validate without one) and asks the
+#     host itself what it thinks of it, distinguishing five states never
+#     collapsed into each other -- see doctor.credential_validity's own
+#     module docstring for the full state taxonomy and the malformed-token
+#     evidence this check exists to catch.
+# ---------------------------------------------------------------------------
+
+
+def _credential_probe_check_result(platform: str, probe: CredentialProbeResult) -> CheckResult:
+    """Translate one CredentialProbeResult into a CheckResult. Only
+    CREDENTIAL_STATE_OK is `ok=True` -- every other state (including
+    UNREACHABLE, an infrastructure fault rather than a credential fault) is
+    reported as a FINDING (`ok=False`) here, because doctor's job is to
+    surface "this identity's credential is not currently usable" regardless
+    of WHY; a caller wanting to distinguish infrastructure from credential
+    faults reads `resolved['state']`, which always carries the full,
+    un-collapsed classification."""
+    ok = probe.state == CREDENTIAL_STATE_OK
+    summary = f"{platform}: credential-validity={probe.state} -- {probe.detail}"
+    if probe.remaining_lifetime_seconds is not None:
+        summary += f" (remaining_lifetime_seconds={probe.remaining_lifetime_seconds})"
+    return CheckResult(
+        name=f"credential_validity:{platform}",
+        ok=ok,
+        summary=summary,
+        resolved={
+            "platform": platform,
+            "state": probe.state,
+            "token_sha256": probe.token_sha256,
+            "remaining_lifetime_seconds": probe.remaining_lifetime_seconds,
+            **probe.resolved,
+        },
+    )
+
+
+def check_credential_validity(
+    *,
+    caller: str | None,
+    config_root: str | Path | None = None,
+    env: dict[str, str] | None = None,
+    repo_root: str | Path | None = None,
+    token_provider_forgejo: TokenProvider | None = None,
+    token_provider_github: TokenProvider | None = None,
+    opener=None,
+) -> list[CheckResult]:
+    """One CheckResult per platform confirming what the HOST says about
+    *caller*'s currently-resolved credential -- never a config-file read
+    (see doctor.credential_validity's own module docstring, NEVER READ
+    CONFIG).
+
+    *caller* is REQUIRED to be non-None/non-empty for this check to run at
+    all: unlike check_credentials' deliberately-fake PROBE_CALLER (which
+    validates the HELPER, not a real identity), this check resolves a REAL
+    credential through the SAME `transport.credential_provider`/
+    `transport.provider_config` seam every mutating verb in this package
+    already uses -- there is no real identity to validate without a real
+    caller name, so an omitted/empty *caller* returns an EMPTY list (a
+    no-op, not a failure): doctor's default run never mints a credential as
+    a side effect of a health check unless the operator explicitly asked it
+    to, by naming who to check.
+
+    *token_provider_forgejo* / *token_provider_github* are injectable
+    (mainly for tests, and for a caller that already holds a concrete
+    TokenProvider) -- defaults to whatever `resolve_platform_provider`
+    resolves from *config_root*/*env*, the identical provider-selection rule
+    `check_credentials` and every push/review/merge verb already use.
+
+    Each platform's credential resolution failure (CredentialProviderError --
+    e.g. the configured command helper itself refused, or is misconfigured)
+    is reported as its own FINDING here (`ok=False`), distinct from any of
+    the five CREDENTIAL_STATES: a check that cannot even RESOLVE a
+    credential to probe is a different, earlier-stage gap than one that
+    resolved a credential the host then rejected.
+
+    Never pushes, never mutates, never logs the resolved token (see
+    doctor.credential_validity's own module docstring).
+    """
+    if not caller:
+        return []
+
+    active_env = env if env is not None else dict(os.environ)
+    results: list[CheckResult] = []
+
+    for platform, injected_provider in (
+        (PLATFORM_FORGEJO, token_provider_forgejo),
+        (PLATFORM_GITHUB, token_provider_github),
+    ):
+        provider = injected_provider
+        if provider is None:
+            try:
+                provider = resolve_platform_provider(
+                    platform,
+                    repo_root=repo_root,
+                    config_root=config_root,
+                    env=active_env,
+                )
+            except InvalidProviderConfigError as exc:
+                results.append(
+                    CheckResult(
+                        name=f"credential_validity:{platform}",
+                        ok=False,
+                        summary=f"{platform}: invalid provider config -- {exc}",
+                        resolved={"platform": platform, "error": str(exc)},
+                    )
+                )
+                continue
+
+        try:
+            token = resolve_token(caller, provider)
+        except CredentialProviderError as exc:
+            results.append(
+                CheckResult(
+                    name=f"credential_validity:{platform}",
+                    ok=False,
+                    summary=f"{platform}: could not resolve a credential for caller {caller!r} -- {exc}",
+                    resolved={"platform": platform, "caller": caller, "error": str(exc)},
+                )
+            )
+            continue
+
+        if platform == PLATFORM_FORGEJO:
+            git_host_base = _resolve_git_host_base(
+                None, env=active_env, config_root=config_root
+            )
+            probe = probe_forgejo_credential(git_host_base, token, opener=opener)
+        else:
+            probe = probe_github_credential(token, opener=opener)
+
+        results.append(_credential_probe_check_result(platform, probe))
 
     return results
 
@@ -963,6 +1116,7 @@ __all__ = [
     "CheckResult",
     "check_attestation_source_configured",
     "check_builder_identity_config",
+    "check_credential_validity",
     "check_credentials",
     "check_github_app_slugs_coverage",
     "check_repo_loadout_schema",

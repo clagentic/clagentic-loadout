@@ -3,9 +3,15 @@
 Runs the deployment-conformance check suite (doctor.checks) and prints a
 per-check report to stdout, one line per CheckResult, plus a summary line.
 Exits EXIT_OK only when every check passed; EXIT_CHECKS_FAILED when at least
-one check's `ok` is False. This is a READ-ONLY verb: no check in this
-package mutates config, mints a real credential, or writes to the repo —
-running `loadout-doctor` is always safe to run repeatedly, including in CI.
+one check's `ok` is False. This is a READ-ONLY verb by default: no check in
+the DEFAULT set mutates config, mints a real credential, or writes to the
+repo — running `loadout-doctor` with no flags is always safe to run
+repeatedly, including in CI. Passing `--caller <role>` opts into ONE
+additional check (`check_credential_validity`, lr-0eeb0c) that resolves and
+probes a REAL credential for that caller — still never a write, never a
+push, only a single cheap authenticated GET per configured git host — but
+this is a deliberate, explicit opt-in a caller must request by name, never
+part of the default no-argument run.
 
 Reserved exit-code range for this verb (CLI-NAMING-STANDARD.md convention —
 see push.verb / provisioning.cli for the same shape):
@@ -26,6 +32,7 @@ from clagentic_loadout.doctor.checks import (
     CheckResult,
     check_attestation_source_configured,
     check_builder_identity_config,
+    check_credential_validity,
     check_credentials,
     check_github_app_slugs_coverage,
     check_repo_loadout_schema,
@@ -59,8 +66,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "the repo declares no roles: section at all, since that check "
             "falls back to a reference role taxonomy rather than this "
             "repo's own declaration). "
-            "Read-only: never "
-            "mutates config, never mints a real credential. Exits "
+            "Read-only for the default check set: never mutates config, "
+            "never mints a real credential. Passing --caller additionally "
+            "resolves and probes a REAL credential for that caller against "
+            "each configured git host (a cheap authenticated read only -- "
+            "never a push), reporting whether the host accepts it, and, if "
+            "not, whether the rejection is a malformed-token shape, an "
+            "expired/revoked credential, an insufficient-scope refusal, or "
+            "the host being unreachable. Exits "
             f"{EXIT_CHECKS_FAILED} if any check fails."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -69,6 +82,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "  doctor\n"
             "  doctor --repo-root .\n"
             "  doctor --config-root ~/.config/clagentic/loadout\n"
+            "  doctor --caller some-role\n"
         ),
     )
     parser.add_argument(
@@ -92,6 +106,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         dest="config_root",
         help="Override the USER-LEVEL loadout config root (default: "
         "~/.config/clagentic/loadout). Mainly for tests/synthetic runs.",
+    )
+    parser.add_argument(
+        "--caller",
+        default=None,
+        dest="caller",
+        help="Role/caller name whose REAL credential is resolved and probed "
+        "against each configured git host (a cheap authenticated read, "
+        "never a push). Omit to skip this check entirely -- doctor's "
+        "default run mints no credential.",
     )
     return parser
 
@@ -122,9 +145,15 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root: str | None = args.repo_root
     config_root: str | None = args.config_root
+    caller: str | None = args.caller
 
     results: list[CheckResult] = []
     results.extend(check_credentials(config_root=config_root))
+    results.extend(
+        check_credential_validity(
+            caller=caller, config_root=config_root, repo_root=repo_root
+        )
+    )
     results.append(
         check_github_app_slugs_coverage(repo_root=repo_root, config_root=config_root)
     )

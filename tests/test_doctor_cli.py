@@ -116,3 +116,28 @@ def test_summary_line_reports_pass_count_on_stderr(tmp_path, monkeypatch, capsys
     assert rc == doctor_cli.EXIT_OK
     err = capsys.readouterr().err
     assert "checks passed" in err
+
+
+def test_no_caller_skips_credential_validity_check(tmp_path, monkeypatch, capsys):
+    """The default (no --caller) run never mints a credential -- the
+    credential_validity check does not even appear in the report."""
+    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "user-config")
+    rc = doctor_cli.main(["--config-root", str(tmp_path / "user-config")])
+    assert rc == doctor_cli.EXIT_OK
+    out = capsys.readouterr().out
+    assert "credential_validity" not in out
+
+
+def test_caller_flag_runs_credential_validity_check(tmp_path, monkeypatch, capsys):
+    """--caller opts into the credential_validity check; with the default
+    static provider and no on-disk role .env file, resolution itself fails
+    (no credential to probe) -- reported as its own failing finding, never
+    silently skipped."""
+    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "user-config")
+    rc = doctor_cli.main(
+        ["--config-root", str(tmp_path / "user-config"), "--caller", "some-role"]
+    )
+    assert rc == doctor_cli.EXIT_CHECKS_FAILED
+    out = capsys.readouterr().out
+    assert "credential_validity:forgejo" in out
+    assert "credential_validity:github" in out
