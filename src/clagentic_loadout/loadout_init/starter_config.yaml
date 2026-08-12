@@ -118,3 +118,38 @@ merge:
   # HEAD). Set to false to opt this repo out entirely and leave --repo-path
   # exactly where the caller last checked it out.
   # sync_tree_after_merge: true
+
+# ---------------------------------------------------------------------------
+# push: -- push-verb declarations (docs/verbs.md "loadout-push"). Shares this
+# one top-level key with the (also optional) scratch_patterns cleanliness
+# check -- see that key's own precedent for the config-loading pattern.
+# ---------------------------------------------------------------------------
+push:
+  # scratch_patterns: glob patterns (fnmatch, basename-only) an untracked,
+  # unignored file is warned about (or, with --strict, refused for) before a
+  # push. Optional -- omit to keep the shipped default pattern set
+  # (pr-body-*, *scratch*, .homecheck-*, *.diff-check*, HANDOFF.md).
+  # scratch_patterns:
+  #   - pr-body-*
+  #   - "*scratch*"
+
+  # contention_check: OPTIONAL, DEFAULT OFF pre-flight read that refuses a
+  # push when the checked-out branch looks like another unit of work is
+  # already in flight in THIS checkout (docs/verbs.md "loadout-push" --
+  # working-tree contention check). Absent/false: today's behavior,
+  # unchanged. This is a stateless git-status read, never a lock -- no TTL,
+  # no release step, no janitor. --override-contention-check on the CLI is
+  # the REQUIRED operator escape hatch when this refuses and you know the
+  # refusal is wrong (e.g. a stale branch nobody is actively working from) --
+  # see that flag's own --help. KNOWN BOUNDED GAP: a build agent that has
+  # not yet created its own feature branch is invisible to this check (it
+  # keys on the checked-out branch name) -- this is accepted, not a defect;
+  # see docs/verbs.md for the full writeup.
+  # contention_check: true
+
+  # in_flight_branch_pattern: the regex a checked-out branch name must match
+  # to count as "in-flight work" for contention_check above. Optional --
+  # omit to keep the shipped default (a Conventional-Commits-style
+  # feat/fix/chore/etc. prefix, matching this repo's own branch
+  # conventions).
+  # in_flight_branch_pattern: "^(feat|fix|chore|build|ci|docs|perf|refactor|style|test)/"

@@ -747,6 +747,70 @@ credential machinery is neutralized on every credentialed call (including the
 `$XDG_CONFIG_HOME/git/config` fallback global-config path), what cannot be neutralized and
 is validated instead, and why.
 
+**Working-tree contention check — OPTIONAL, DEFAULT OFF, `push.contention_check`:** a
+pre-flight READ, on the create-PR path only, that refuses when the checked-out branch
+looks like another unit of work is already in flight in **this** checkout. Absent config,
+or `push: contention_check: false` (the default): behavior is byte-identical to today —
+the check never reads any git state at all.
+
+Enable per-repo in `.clagentic/loadout/config.yaml`:
+
+```yaml
+push:
+  contention_check: true
+  # in_flight_branch_pattern: "^(feat|fix|chore|build|ci|docs|perf|refactor|style|test)/"
+```
+
+- `contention_check` (bool, default `false`) — the explicit opt-in switch.
+- `in_flight_branch_pattern` (regex string, optional) — the pattern a checked-out branch
+  name must match to count as in-flight work. Defaults to a Conventional-Commits-style
+  `feat/`, `fix/`, `chore/`, etc. prefix.
+
+**Why this exists, and why it looks like a stateless read instead of a lock:** a
+stateful advisory lock built for this same problem in a prior design failed in
+production within a day, in three specific ways this design avoids: (1) it acquired on one hook and released on another; the release did not always
+fire, so a NORMAL successful dispatch could self-block until a 2-hour TTL expired — this
+check holds **no state between invocations**, no lock file, no TTL, no release step, no
+janitor; every invocation recomputes its verdict fresh from live git state. (2) it had no
+operator-reachable override, which produced a circular dead end an entire follow-up task
+failed to escape — `--override-contention-check` (below) is the **required** escape
+hatch this design guarantees exists. (3) it only ever saw crew-dispatched callers (a
+dispatch-hook enforcement point is blind to direct operator use) — this check is wired
+into the verb itself, so every caller goes through it.
+
+**The dirtiness rule (adjudicated explicitly, per an operator directive that this
+decision be stated plainly rather than left implicit):** the checked-out **branch name**
+is the primary signal. Working-tree **dirtiness is a weaker, secondary signal, and is
+never consulted independently** — it is only ever consulted (to add detail to a refusal,
+never to trigger one on its own) once the branch name has already matched
+`in_flight_branch_pattern`. On the default/protected branch, or any branch that does not
+match the pattern, this check proceeds regardless of how dirty the tree is. This closes a
+verified counter-example: a tree sitting on the default branch with several files still
+showing modified — stale residue from a PR that had already merged hours earlier — is
+correctly **not** treated as contention. A naive "dirty implies busy" rule would have
+refused a legitimate write in exactly that state.
+
+**`--override-contention-check` — the required operator escape hatch:** when this check
+refuses (`EXIT_WORKING_TREE_CONTENTION`, 34), pass `--override-contention-check` to
+proceed anyway. The refusal and the override are both printed to stderr — an override
+that fired leaves a visible trace, never a silent bypass. Use this when you know the
+refusal is wrong: e.g. a stale feature branch nobody is actively working from.
+
+**Known bounded gap — accepted, not closed:** a build agent that has not yet created its
+own feature branch (still sitting on the default branch, about to start work) is
+invisible to this check, because it keys entirely on the checked-out branch name. A
+stateful lock covered exactly this window; a stateless read structurally cannot, without
+reintroducing the state this check exists to avoid (see "Why this exists" above). This is
+an accepted limitation, not a defect — a deployment that needs tighter coverage of that
+specific window should not expect this check to provide it.
+
+**Scope — `push.verb`'s create-PR path only:** `--update-pr` performs no working-tree
+mutation at all (a metadata-only PATCH; see this section's own "`--update-pr` never
+carries a `head_sha`" note above) and is never gated by this check — there is nothing for
+it to protect there. `loadout-merge`'s own working-tree mutation (`merge.tree_sync`,
+advancing a `--repo-path` checkout to the merged SHA) is a **separate** contention source,
+tracked independently and out of scope for this check.
+
 ### `loadout-merge` — the merge gate
 
 `clagentic_loadout.merge.verb`. **This is the load-bearing release gate**
