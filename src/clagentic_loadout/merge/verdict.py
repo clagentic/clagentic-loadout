@@ -161,25 +161,37 @@ def build_verdict_block(
     review_status: str,
     head_sha: str,
     pr_number: int,
+    model_attested: str | None = None,
 ) -> str:
     """Build the fenced verdict block to append to a reviewer's PR comment.
 
     Returns a multi-line string starting with a blank line (visual
     separation from human prose above), then the fenced block.
 
+    *model_attested* (lr-95543d, OPTIONAL): a caller-supplied string naming
+    the model backend the reviewer reports having run as, rendered on the
+    'model_attested' field when given, OMITTED from the payload entirely
+    when None (the pre-existing, model-attestation-unaware fence shape is
+    unchanged for a caller that never passes this). THIS IS STILL A
+    SELF-REPORTED CLAIM — building the fence through this tool constructs
+    the JSON/markdown correctly and closes the additionalProperties:false
+    rejection, but does not itself verify the string names the model that
+    actually ran; see merge.model_attestation's module docstring for what
+    downstream enforcement can and cannot prove about this value.
+
     Raises ValueError if review_status is not 'clean' or 'blocking'.
     """
     if review_status not in _VALID_STATUSES:
         raise ValueError(f"review_status must be 'clean' or 'blocking', got {review_status!r}")
-    payload = json.dumps(
-        {
-            "reviewer": reviewer,
-            "review_status": review_status,
-            "head_sha": head_sha,
-            "pr_number": pr_number,
-        },
-        separators=(", ", ": "),
-    )
+    payload_fields = {
+        "reviewer": reviewer,
+        "review_status": review_status,
+        "head_sha": head_sha,
+        "pr_number": pr_number,
+    }
+    if model_attested is not None:
+        payload_fields["model_attested"] = model_attested
+    payload = json.dumps(payload_fields, separators=(", ", ": "))
     return f"\n```{VERDICT_FENCE}\n{payload}\n```\n"
 
 
@@ -189,6 +201,7 @@ def build_findings_verdict_body(
     head_sha: str,
     pr_number: int,
     findings: list[dict[str, Any]],
+    model_attested: str | None = None,
 ) -> str:
     """PRIMARY structured-body-construction mechanism (lr-c26110, operator
     reframe: 'enforce good behavior over blocking bad behavior'). Builds the
@@ -219,6 +232,8 @@ def build_findings_verdict_body(
                      'rule_id', and 'message' string keys. An empty list is
                      valid (a clean review with zero findings) and produces
                      a header-only body (plus the fence) with no bullets.
+    model_attested: OPTIONAL — see build_verdict_block's own docstring for
+                     the full contract; passed through unchanged.
 
     Returns the constructed body string: a header line, one bullet per
     finding (in the order given), then build_verdict_block's fence.
@@ -252,7 +267,7 @@ def build_findings_verdict_body(
             f"{finding['message']}"
         )
     prose = "\n".join(lines)
-    fence = build_verdict_block(reviewer, review_status, head_sha, pr_number)
+    fence = build_verdict_block(reviewer, review_status, head_sha, pr_number, model_attested)
     return f"{prose}\n{fence}"
 
 
@@ -425,7 +440,18 @@ def assert_single_own_verdict_block(body: str, expected_reviewer: str) -> None:
 
 @dataclass(frozen=True)
 class ReviewerVerdict:
-    """Parsed, enforced verdict from a reviewer's PR comment."""
+    """Parsed, enforced verdict from a reviewer's PR comment.
+
+    model_attested (lr-95543d): the verdict block's OPTIONAL, caller-supplied
+    'model_attested' field, passed through verbatim — None when the field was
+    absent from the fence (an older producer, or a reviewer that has not
+    adopted the field yet). This dataclass does NOT enforce anything about
+    the value; enforcement (a reviewer requiring genuine attestation before a
+    'clean' verdict counts) is merge.model_attestation.assert_model_attested,
+    a SEPARATE, opt-in step merge.verb calls after assert_clean_verdict — see
+    that module's docstring for the full trust model and its own explicit
+    statement of what this field can and cannot prove.
+    """
 
     reviewer: str
     review_status: str
@@ -433,6 +459,7 @@ class ReviewerVerdict:
     pr_number: int
     comment_id: int
     comment_author_login: str
+    model_attested: str | None = None
 
 
 def parse_verdict_block(comment_body: str) -> dict[str, Any] | None:
@@ -714,6 +741,7 @@ def read_reviewer_verdict(
         pr_number=int(verdict_data.get("pr_number", 0)),
         comment_id=comment_id,
         comment_author_login=author_login,
+        model_attested=verdict_data.get("model_attested"),
     )
 
 

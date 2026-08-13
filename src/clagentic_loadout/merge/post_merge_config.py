@@ -329,6 +329,41 @@ CONFIG_KEY_ENFORCE_SINGLE_VERDICT_FENCE = "enforce_single_verdict_fence"
 #: caller left who could regress -- see this key's own docstring above.
 DEFAULT_ENFORCE_SINGLE_VERDICT_FENCE = True
 
+#: Key within the `merge:` section controlling whether a required
+#: reviewer's `clean` verdict must ALSO carry a genuine `model_attested`
+#: declaration (lr-95543d -- see merge.model_attestation's module
+#: docstring for the full trust model, and merge.verb's reviewer-verdict
+#: step for the call site). OPT-IN, DEFAULTS OFF -- deliberately the SAME
+#: shape as CONFIG_KEY_ENFORCE_MERGE_SHAPE, NOT
+#: CONFIG_KEY_ENFORCE_SINGLE_VERDICT_FENCE's enforce-by-default posture:
+#: unlike the multi-fence check (where every known-good producer already
+#: refuses to construct the bad shape, so nothing legitimate could regress),
+#: `model_attested` is a BRAND NEW field essentially no reviewer producer
+#: emits yet at the time this key is introduced -- defaulting to ON would
+#: refuse every existing 'clean' verdict from every reviewer that has not
+#: yet adopted the field, the exact "a currently-passing gate starts
+#: failing for a value the caller never chose" hazard this package's own
+#: CLAUDE.md non-negotiable (see merge.post_merge_config's own
+#: POST_MERGE_STEP_TIMEOUT_SECONDS precedent) warns against. A deployment
+#: opts in explicitly once its reviewer producers are updated to emit the
+#: field.
+CONFIG_KEY_REQUIRE_MODEL_ATTESTATION = "require_model_attestation"
+
+#: Built-in default for CONFIG_KEY_REQUIRE_MODEL_ATTESTATION when the
+#: repo's own config never mentions it: False (no-op) -- see that key's own
+#: docstring for the rollout-hazard rationale.
+DEFAULT_REQUIRE_MODEL_ATTESTATION = False
+
+#: Key within the `merge:` section giving `merge.model_attestation.
+#: assert_model_attested` an OPTIONAL, deployment-specific list of
+#: additional case-insensitive denylist terms (e.g. a known degraded-
+#: fallback model name) to reject a `model_attested` value against, ON TOP
+#: of the built-in bare-tier-alias/no-digit-shape check that key's own
+#: resolver always applies regardless of this list's contents. Absent or
+#: empty by default -- a repo that never declares this key gets ONLY the
+#: built-in shape check, never a silent extra-strict default.
+CONFIG_KEY_MODEL_ATTESTATION_DENYLIST = "model_attestation_denylist"
+
 #: Top-level section this module owns within the USER-LEVEL
 #: <config_root>/config.yaml (lr-52d7) — the deployment env-override tier,
 #: read through the SAME `load_user_config_section` loader/config-root
@@ -695,6 +730,123 @@ def resolve_enforce_single_verdict_fence(
     return value
 
 
+def resolve_require_model_attestation(
+    repo_root: str | Path | None,
+    *,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+) -> bool:
+    """Resolve whether `merge.verb._run`'s reviewer-verdict step should
+    additionally require a genuine `model_attested` declaration on every
+    required reviewer's `clean` verdict for this repo (lr-95543d -- see
+    this module's own `CONFIG_KEY_REQUIRE_MODEL_ATTESTATION`, and
+    `merge.model_attestation`'s module docstring, for the full trust model
+    and the OPT-IN/rollout-hazard rationale for this key's default).
+
+    Reads the SAME `<repo_root>/<config_relative_path>` file/section every
+    other loader in this module reads (no second YAML-reading path) for an
+    OPTIONAL `require_model_attestation` key inside the `merge:` section.
+
+    Returns `DEFAULT_REQUIRE_MODEL_ATTESTATION` (`False`, no-op) when
+    *repo_root* is None, the config file is absent, the `merge:` section is
+    absent, or the key is absent within it -- replace-not-merge, matching
+    `resolve_enforce_merge_shape`'s own convention: a repo that never
+    mentions this key gets the permissive default, never a silent
+    strict-by-surprise switch that could refuse every pre-existing clean
+    verdict from a reviewer producer that has not adopted the field yet.
+
+    Raises:
+        PostMergeConfigError: the config file exists but is unreadable/
+            malformed YAML, the `merge:` section is present but not a
+            mapping, or `require_model_attestation` is present but not a
+            bool -- always at LOAD time, mirroring this module's other
+            loaders' own fail-fast contract.
+    """
+    if repo_root is None:
+        return DEFAULT_REQUIRE_MODEL_ATTESTATION
+
+    config_path = resolve_repo_config_path(
+        repo_root, config_relative_path=config_relative_path
+    )
+    raw = _read_yaml_mapping(config_path)
+
+    merge_section = raw.get(CONFIG_SECTION_MERGE)
+    if merge_section is None:
+        return DEFAULT_REQUIRE_MODEL_ATTESTATION
+    if not isinstance(merge_section, dict):
+        raise PostMergeConfigError(
+            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
+            f"got {type(merge_section).__name__}."
+        )
+
+    value = merge_section.get(CONFIG_KEY_REQUIRE_MODEL_ATTESTATION)
+    if value is None:
+        return DEFAULT_REQUIRE_MODEL_ATTESTATION
+    if not isinstance(value, bool):
+        raise PostMergeConfigError(
+            f"{config_path}: {CONFIG_KEY_REQUIRE_MODEL_ATTESTATION!r} must "
+            f"be a bool, got {type(value).__name__}."
+        )
+    return value
+
+
+def resolve_model_attestation_denylist(
+    repo_root: str | Path | None,
+    *,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+) -> frozenset[str]:
+    """Resolve the OPTIONAL deployment-specific denylist term set for
+    `merge.model_attestation.assert_model_attested` (lr-95543d -- see this
+    module's own `CONFIG_KEY_MODEL_ATTESTATION_DENYLIST` for the key
+    contract).
+
+    Reads the SAME `<repo_root>/<config_relative_path>` file/section every
+    other loader in this module reads (no second YAML-reading path) for an
+    OPTIONAL `model_attestation_denylist` key inside the `merge:` section:
+    a list of non-empty strings.
+
+    Returns `frozenset()` (no additional denylist terms -- ONLY the
+    built-in bare-tier-alias/no-digit-shape check applies) when
+    *repo_root* is None, the config file is absent, the `merge:` section is
+    absent, or the key is absent within it.
+
+    Raises:
+        PostMergeConfigError: the config file exists but is unreadable/
+            malformed YAML, the `merge:` section is present but not a
+            mapping, `model_attestation_denylist` is present but not a
+            list, or any entry is not a non-empty string -- always at LOAD
+            time, mirroring this module's other loaders' own fail-fast
+            contract.
+    """
+    if repo_root is None:
+        return frozenset()
+
+    config_path = resolve_repo_config_path(
+        repo_root, config_relative_path=config_relative_path
+    )
+    raw = _read_yaml_mapping(config_path)
+
+    merge_section = raw.get(CONFIG_SECTION_MERGE)
+    if merge_section is None:
+        return frozenset()
+    if not isinstance(merge_section, dict):
+        raise PostMergeConfigError(
+            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
+            f"got {type(merge_section).__name__}."
+        )
+
+    value = merge_section.get(CONFIG_KEY_MODEL_ATTESTATION_DENYLIST)
+    if value is None:
+        return frozenset()
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise PostMergeConfigError(
+            f"{config_path}: {CONFIG_KEY_MODEL_ATTESTATION_DENYLIST!r} must "
+            f"be a list of non-empty strings, got {value!r}."
+        )
+    return frozenset(value)
+
+
 def resolve_post_merge_step_timeout_seconds(
     repo_root: str | Path | None,
     *,
@@ -821,8 +973,10 @@ __all__ = [
     "CONFIG_KEY_ENFORCE_MERGE_SHAPE",
     "CONFIG_KEY_ENFORCE_SINGLE_VERDICT_FENCE",
     "CONFIG_KEY_GIT_WORKING_TREE",
+    "CONFIG_KEY_MODEL_ATTESTATION_DENYLIST",
     "CONFIG_KEY_POST_MERGE_STEP_TIMEOUT_SECONDS",
     "CONFIG_KEY_POST_MERGE_STEPS",
+    "CONFIG_KEY_REQUIRE_MODEL_ATTESTATION",
     "CONFIG_KEY_SYNC_TREE_AFTER_MERGE",
     "CONFIG_SECTION_MERGE",
     "CONFIG_SECTION_POST_MERGE_ENV",
@@ -830,6 +984,7 @@ __all__ = [
     "DEFAULT_ENFORCE_MERGE_SHAPE",
     "DEFAULT_ENFORCE_SINGLE_VERDICT_FENCE",
     "DEFAULT_POST_MERGE_STEP_TIMEOUT_SECONDS",
+    "DEFAULT_REQUIRE_MODEL_ATTESTATION",
     "DEFAULT_SYNC_TREE_AFTER_MERGE",
     "ENV_OVERRIDE_PREFIX",
     "load_post_merge_steps",
@@ -837,6 +992,8 @@ __all__ = [
     "resolve_enforce_single_verdict_fence",
     "resolve_env_overrides",
     "resolve_git_working_tree",
+    "resolve_model_attestation_denylist",
     "resolve_post_merge_step_timeout_seconds",
+    "resolve_require_model_attestation",
     "resolve_sync_tree_after_merge",
 ]

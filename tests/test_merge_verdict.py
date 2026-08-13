@@ -93,6 +93,55 @@ class TestBuildVerdictBlock:
             build_verdict_block("some-reviewer", "not-a-status", _FULL_SHA, 42)
 
 
+class TestModelAttestedField:
+    """lr-95543d Part A/B acceptance criteria: a fence carrying
+    model_attested validates cleanly against the packaged schema (no
+    VerdictMalformedError from additionalProperties), round-trips through
+    parse_verdict_block, and is passed through by read_reviewer_verdict
+    onto ReviewerVerdict.model_attested -- proving the schema fix actually
+    unblocks the field rather than merely looking additive."""
+
+    def test_omitted_produces_byte_identical_fence_to_pre_existing_shape(self):
+        # model_attested=None (the default) must not add the key at all --
+        # a caller that never passes it keeps the EXACT pre-existing fence
+        # shape, never a null-valued key.
+        block = build_verdict_block("some-reviewer", "clean", _FULL_SHA, 42)
+        assert "model_attested" not in block
+        parsed = parse_verdict_block(block)
+        assert "model_attested" not in parsed
+
+    def test_present_field_validates_against_packaged_schema(self):
+        # Regression lock for Part A: additionalProperties:false previously
+        # rejected this field outright with VerdictMalformedError -- if the
+        # schema fix is reverted, this raises.
+        block = build_verdict_block(
+            "some-reviewer", "clean", _FULL_SHA, 42, "claude-opus-4-1-20250805"
+        )
+        parsed = parse_verdict_block(block)
+        assert parsed["model_attested"] == "claude-opus-4-1-20250805"
+
+    def test_read_reviewer_verdict_passes_field_through(self):
+        block = build_verdict_block(
+            "expected-login", "clean", _FULL_SHA, 1, "claude-opus-4-1-20250805"
+        )
+        comments = [_comment(1, "expected-login", block)]
+        verdict = read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+        assert verdict.model_attested == "claude-opus-4-1-20250805"
+
+    def test_read_reviewer_verdict_omitted_field_is_none(self):
+        block = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
+        comments = [_comment(1, "expected-login", block)]
+        verdict = read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
+        assert verdict.model_attested is None
+
+    def test_build_findings_verdict_body_threads_field_through(self):
+        body = build_findings_verdict_body(
+            "some-reviewer", "clean", _FULL_SHA, 42, [], "claude-opus-4-1-20250805"
+        )
+        parsed = parse_verdict_block(body)
+        assert parsed["model_attested"] == "claude-opus-4-1-20250805"
+
+
 class TestParseVerdictBlock:
     def test_no_fence_returns_none(self):
         assert parse_verdict_block("just prose, no fence at all") is None

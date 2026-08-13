@@ -22,20 +22,25 @@ from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_ENFORCE_MERGE_SHAPE,
     CONFIG_KEY_ENFORCE_SINGLE_VERDICT_FENCE,
     CONFIG_KEY_GIT_WORKING_TREE,
+    CONFIG_KEY_MODEL_ATTESTATION_DENYLIST,
     CONFIG_KEY_POST_MERGE_STEP_TIMEOUT_SECONDS,
     CONFIG_KEY_POST_MERGE_STEPS,
+    CONFIG_KEY_REQUIRE_MODEL_ATTESTATION,
     CONFIG_KEY_SYNC_TREE_AFTER_MERGE,
     CONFIG_SECTION_MERGE,
     DEFAULT_CONFIG_RELATIVE_PATH,
     DEFAULT_ENFORCE_MERGE_SHAPE,
     DEFAULT_ENFORCE_SINGLE_VERDICT_FENCE,
     DEFAULT_POST_MERGE_STEP_TIMEOUT_SECONDS,
+    DEFAULT_REQUIRE_MODEL_ATTESTATION,
     DEFAULT_SYNC_TREE_AFTER_MERGE,
     load_post_merge_steps,
     resolve_enforce_merge_shape,
     resolve_enforce_single_verdict_fence,
     resolve_git_working_tree,
+    resolve_model_attestation_denylist,
     resolve_post_merge_step_timeout_seconds,
+    resolve_require_model_attestation,
     resolve_sync_tree_after_merge,
 )
 
@@ -531,6 +536,121 @@ class TestResolvePostMergeStepTimeoutSeconds:
         (config_dir / "config.yaml").write_text("merge: [unterminated", encoding="utf-8")
         with pytest.raises(PostMergeConfigError):
             resolve_enforce_merge_shape(tmp_path)
+
+
+class TestResolveRequireModelAttestation:
+    """lr-95543d: `merge: require_model_attestation:` -- OPT-IN, default
+    False. Mirrors TestResolveEnforceMergeShape's own absence/explicit/
+    malformed coverage shape (same `merge:` section, same replace-not-merge
+    convention, same warn-by-default-direction rationale)."""
+
+    def test_default_is_false(self):
+        assert DEFAULT_REQUIRE_MODEL_ATTESTATION is False
+
+    def test_key_name(self):
+        assert CONFIG_KEY_REQUIRE_MODEL_ATTESTATION == "require_model_attestation"
+
+    def test_no_repo_root_defaults_false(self):
+        assert resolve_require_model_attestation(None) is False
+
+    def test_no_config_file_defaults_false(self, tmp_path):
+        assert resolve_require_model_attestation(tmp_path) is False
+
+    def test_no_merge_section_defaults_false(self, tmp_path):
+        _write_config(tmp_path, {"wait": {"scoped_test_patterns": ["^go test"]}})
+        assert resolve_require_model_attestation(tmp_path) is False
+
+    def test_merge_section_without_the_key_defaults_false(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        assert resolve_require_model_attestation(tmp_path) is False
+
+    def test_explicit_true_is_honored(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"require_model_attestation": True}})
+        assert resolve_require_model_attestation(tmp_path) is True
+
+    def test_explicit_false_is_honored(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"require_model_attestation": False}})
+        assert resolve_require_model_attestation(tmp_path) is False
+
+    def test_merge_section_not_a_mapping_raises(self, tmp_path):
+        _write_config(tmp_path, {"merge": "not-a-mapping"})
+        with pytest.raises(PostMergeConfigError, match="must be a mapping"):
+            resolve_require_model_attestation(tmp_path)
+
+    def test_non_bool_value_raises(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"require_model_attestation": "yes"}})
+        with pytest.raises(PostMergeConfigError, match="must be a bool"):
+            resolve_require_model_attestation(tmp_path)
+
+    def test_key_present_alongside_every_other_merge_key(self, tmp_path):
+        _write_config(
+            tmp_path,
+            {
+                "merge": {
+                    "enforce_merge_shape": True,
+                    "require_model_attestation": True,
+                    "sync_tree_after_merge": False,
+                    "post_merge_steps": [{"cmd": "true"}],
+                }
+            },
+        )
+        assert resolve_enforce_merge_shape(tmp_path) is True
+        assert resolve_require_model_attestation(tmp_path) is True
+        assert resolve_sync_tree_after_merge(tmp_path) is False
+        assert len(load_post_merge_steps(tmp_path)) == 1
+
+
+class TestResolveModelAttestationDenylist:
+    """lr-95543d: `merge: model_attestation_denylist:` -- OPTIONAL,
+    additional case-insensitive denylist terms for
+    merge.model_attestation.assert_model_attested, ON TOP of that
+    function's own built-in bare-tier-alias/no-digit-shape check."""
+
+    def test_key_name(self):
+        assert CONFIG_KEY_MODEL_ATTESTATION_DENYLIST == "model_attestation_denylist"
+
+    def test_no_repo_root_defaults_empty(self):
+        assert resolve_model_attestation_denylist(None) == frozenset()
+
+    def test_no_config_file_defaults_empty(self, tmp_path):
+        assert resolve_model_attestation_denylist(tmp_path) == frozenset()
+
+    def test_no_merge_section_defaults_empty(self, tmp_path):
+        _write_config(tmp_path, {"wait": {"scoped_test_patterns": ["^go test"]}})
+        assert resolve_model_attestation_denylist(tmp_path) == frozenset()
+
+    def test_merge_section_without_the_key_defaults_empty(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        assert resolve_model_attestation_denylist(tmp_path) == frozenset()
+
+    def test_explicit_list_is_honored(self, tmp_path):
+        _write_config(
+            tmp_path,
+            {"merge": {"model_attestation_denylist": ["deprecated-model-v1", "old-fallback"]}},
+        )
+        assert resolve_model_attestation_denylist(tmp_path) == frozenset(
+            {"deprecated-model-v1", "old-fallback"}
+        )
+
+    def test_merge_section_not_a_mapping_raises(self, tmp_path):
+        _write_config(tmp_path, {"merge": "not-a-mapping"})
+        with pytest.raises(PostMergeConfigError, match="must be a mapping"):
+            resolve_model_attestation_denylist(tmp_path)
+
+    def test_non_list_value_raises(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"model_attestation_denylist": "not-a-list"}})
+        with pytest.raises(PostMergeConfigError, match="model_attestation_denylist"):
+            resolve_model_attestation_denylist(tmp_path)
+
+    def test_non_string_entry_raises(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"model_attestation_denylist": [1, 2]}})
+        with pytest.raises(PostMergeConfigError, match="model_attestation_denylist"):
+            resolve_model_attestation_denylist(tmp_path)
+
+    def test_empty_string_entry_raises(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"model_attestation_denylist": [""]}})
+        with pytest.raises(PostMergeConfigError, match="model_attestation_denylist"):
+            resolve_model_attestation_denylist(tmp_path)
 
 
 class TestLegacyPathFallback:

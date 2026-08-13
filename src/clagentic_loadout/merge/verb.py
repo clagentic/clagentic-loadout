@@ -55,6 +55,14 @@ documented step ordering):
      one. A repo with legacy multi-fence comments opts OUT explicitly via
      `merge: enforce_single_verdict_fence: false` — see that resolver's own
      docstring for the full trade-off.
+  5b. Model attestation (merge.model_attestation, lr-95543d) — OPT-IN
+     (`merge: require_model_attestation: true`, default off): when enabled,
+     a required reviewer's `clean` verdict must ALSO carry a genuine
+     `model_attested` declaration, refused with the SAME disposition as a
+     blocking verdict otherwise. THIS IS A SELF-REPORTED FIELD, NOT A
+     TOOL-VERIFIED FACT — see merge.model_attestation's module docstring
+     for the full trust model this check does and does not provide before
+     relying on it.
   6. Diff-scope cap (merge.diff_scope) — refuse a PR whose changed-file
      count exceeds the configured limit.
   7. PR-title gate (merge.title_gate) — Conventional Commits grammar, with a
@@ -308,6 +316,11 @@ from clagentic_loadout.merge.errors import (
     VerdictStaleError,
 )
 from clagentic_loadout.merge.merge_readback import verify_merge_landed
+from clagentic_loadout.merge.model_attestation import (
+    ModelAttestationInvalidError,
+    ModelAttestationMissingError,
+    assert_model_attested,
+)
 from clagentic_loadout.merge.merge_shape import (
     MergeShapeCheckError,
     check_merge_shape,
@@ -328,7 +341,9 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_enforce_single_verdict_fence,
     resolve_env_overrides,
     resolve_git_working_tree,
+    resolve_model_attestation_denylist,
     resolve_post_merge_step_timeout_seconds,
+    resolve_require_model_attestation,
     resolve_sync_tree_after_merge,
 )
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
@@ -1101,6 +1116,14 @@ def _run(
             enforce_single_verdict_fence = resolve_enforce_single_verdict_fence(
                 args.repo_path
             )
+            # lr-95543d: OPT-IN, defaults False -- see
+            # merge.post_merge_config.resolve_require_model_attestation's
+            # own docstring for the rollout-hazard rationale, and
+            # merge.model_attestation's module docstring for what this
+            # check does and does not prove. Resolved once per invocation,
+            # same config root as every other repo-tier gate key here.
+            require_model_attestation = resolve_require_model_attestation(args.repo_path)
+            model_attestation_denylist = resolve_model_attestation_denylist(args.repo_path)
         except PostMergeConfigError as exc:
             _fail(
                 f"post-merge config FAILED to load -- {exc}",
@@ -1120,12 +1143,23 @@ def _run(
                     enforce_single_fence=enforce_single_verdict_fence,
                 )
                 verdict.assert_clean_verdict(verdict_obj, reviewer_name)
+                # lr-95543d: mirrors assert_clean_verdict's disposition --
+                # a clean verdict lacking genuine attestation refuses the
+                # merge exactly like a blocking one. No-op when
+                # require_model_attestation is False (the default) or the
+                # verdict itself is 'blocking' (already refused above).
+                if require_model_attestation:
+                    assert_model_attested(
+                        verdict_obj, reviewer_name, denylist=model_attestation_denylist
+                    )
             except (
                 VerdictMissingError,
                 VerdictMalformedError,
                 VerdictRoleMismatchError,
                 VerdictStaleError,
                 VerdictBlockingError,
+                ModelAttestationMissingError,
+                ModelAttestationInvalidError,
             ) as exc:
                 _fail(str(exc), code=EXIT_GATE_RESULT_BLOCKED)
             print(
