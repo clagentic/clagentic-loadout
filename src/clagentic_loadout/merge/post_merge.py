@@ -117,6 +117,20 @@ either sees byte-identical behavior to before this feature:
      all -- this is an OPT-IN, additive verification layer, never a new
      requirement imposed on an existing `detaches: true` step that never
      configured one.
+
+THE lr-4d5ef9 CADENCE FIX (see `_verify_liveness`'s own docstring for the
+full write-up): the original lr-d6e52b implementation captured its baseline
+sample EAGERLY, immediately after `Popen` returned, racing the daemon it
+was trying to observe -- under load, or whenever the daemon's own
+transition completes faster than one `poll_interval` (e.g. a
+300ms-heartbeat-write racing a 500ms poll), that race
+could make a live, already-advanced daemon look dead. The fix moves the
+baseline sample to BEFORE the detached step's `Popen` call, establishing a
+genuine happens-before relationship via program order rather than any
+timing assumption about how fast the daemon transitions relative to
+`poll_interval` -- `_capture_liveness_baseline` runs first, then `Popen`,
+then `_verify_liveness` polls forward from that race-free baseline at the
+unchanged `poll_interval`/`max_polls` budget.
 """
 
 from __future__ import annotations
@@ -463,25 +477,66 @@ def _run_liveness_probe_once(argv: list[str], *, cwd: str) -> str:
     return result.stdout.strip()
 
 
+def _capture_liveness_baseline(probe_config: dict, *, cwd: str, label: str) -> str:
+    """Sample `probe_config['cmd']` ONCE and return its value, to be used as
+    the pre-launch baseline `_verify_liveness` compares later samples
+    against (see that function's docstring for why this must happen BEFORE
+    the detached step's own `Popen` call, not after -- lr-4d5ef9).
+    """
+    probe_argv, _probe_env_overrides = _resolve_argv(
+        probe_config[LIVENESS_PROBE_KEY_CMD], step_label=f"{label}.{STEP_KEY_LIVENESS_PROBE}"
+    )
+    return _run_liveness_probe_once(probe_argv, cwd=cwd)
+
+
 def _verify_liveness(
     probe_config: dict,
     *,
     cwd: str,
     label: str,
     cmd_repr: str,
+    baseline_sample: str,
 ) -> None:
     """Poll `probe_config['cmd']` and assert its reported value ADVANCES
-    across at least one consecutive pair of samples, within `max_polls`
-    samples total (see module docstring, "THE lr-d6e52b HARDENING", part 2,
-    and `_validate_liveness_probe` for the config shape/defaults).
+    away from *baseline_sample*, within `max_polls` samples total (see
+    module docstring, "THE lr-d6e52b HARDENING", part 2, and
+    `_validate_liveness_probe` for the config shape/defaults).
 
-    "Advances" means: two consecutive samples are BOTH non-empty AND
-    DIFFER. An empty sample (probe not yet reporting -- e.g. a heartbeat
-    file that does not exist until the daemon finishes starting) never
-    counts as a match to compare against; a daemon that is merely slow to
-    start still gets the full `max_polls` budget to begin reporting.
+    "Advances" means: a polled sample is non-empty, *baseline_sample* is
+    non-empty, and they DIFFER. An empty polled sample (probe not yet
+    reporting -- e.g. a heartbeat file that does not exist until the daemon
+    finishes starting) never counts as a match to compare against; a daemon
+    that is merely slow to start still gets the full `max_polls` budget to
+    begin reporting. An empty *baseline_sample* (the probe's target did not
+    exist yet even before the daemon was launched -- e.g. a heartbeat file
+    first created by the daemon itself) means ANY non-empty polled sample
+    counts as an advance, since there is no earlier state to have missed.
 
-    Raises PostMergeLivenessError if no advancing pair is observed within
+    THE lr-4d5ef9 CADENCE FIX: the original lr-d6e52b formulation captured
+    its baseline sample ITSELF, eagerly, immediately after the caller's
+    `Popen` call returned -- racing the very daemon it was trying to
+    observe. Under load, or whenever the daemon's own transition completes
+    faster than one `poll_interval` (e.g. a 300ms heartbeat write racing a
+    500ms poll interval), that eager sample can land AFTER the daemon has
+    already reached its final state, collapsing every later
+    sample to the same value with nothing earlier to compare against -- a
+    live, already-advanced daemon reported dead. There is no poll cadence
+    that can fix this by adjusting WHEN the baseline is taken relative to
+    `Popen`, because there is no assumption this module is allowed to make
+    about how fast the daemon's own transition is relative to
+    `poll_interval` (that assumption -- "the daemon is slower than the
+    probe polls" -- IS the defect). The correct synchronization fix is
+    instead to never race the baseline against the daemon AT ALL: the
+    caller (`run_post_merge_steps`) captures *baseline_sample* via
+    `_capture_liveness_baseline` BEFORE the detached step's `Popen` call is
+    even made, establishing a genuine happens-before relationship (program
+    order, not wall-clock racing) between "the baseline was read" and "the
+    daemon could have done anything." This function then only ever POLLS
+    forward from there, at the caller's own `poll_interval`/`max_polls`
+    budget -- unchanged from before -- comparing each new sample against
+    that race-free baseline.
+
+    Raises PostMergeLivenessError if no advancing sample is observed within
     the budget -- the caller (`run_post_merge_steps`) treats this as ALWAYS
     terminal, regardless of the step's own `on_failure` (see
     PostMergeLivenessError's own docstring).
@@ -494,26 +549,24 @@ def _verify_liveness(
     )
     max_polls = probe_config.get(LIVENESS_PROBE_KEY_MAX_POLLS, DEFAULT_LIVENESS_MAX_POLLS)
 
-    previous_sample = _run_liveness_probe_once(probe_argv, cwd=cwd)
     for poll_index in range(1, max_polls):
         time.sleep(poll_interval)
         current_sample = _run_liveness_probe_once(probe_argv, cwd=cwd)
-        if previous_sample and current_sample and current_sample != previous_sample:
+        if baseline_sample and current_sample and current_sample != baseline_sample:
             print(
                 f"merge: post-merge {label}: liveness CONFIRMED for {cmd_repr} "
-                f"-- probe {probe_argv!r} advanced ({previous_sample!r} -> "
+                f"-- probe {probe_argv!r} advanced ({baseline_sample!r} -> "
                 f"{current_sample!r}) after {poll_index} poll interval(s)",
                 file=sys.stderr,
             )
             return
-        previous_sample = current_sample
 
     raise PostMergeLivenessError(
         f"post-merge {label} liveness check FAILED for {cmd_repr} -- probe "
-        f"{probe_argv!r} never reported an advancing value across "
-        f"{max_polls} sample(s) ({poll_interval}s apart). The detached "
-        f"process was launched, but nothing confirms the daemon it was "
-        f"meant to (re)start is actually alive."
+        f"{probe_argv!r} never reported an advancing value (baseline "
+        f"{baseline_sample!r}) across {max_polls} sample(s) ({poll_interval}s "
+        f"apart). The detached process was launched, but nothing confirms "
+        f"the daemon it was meant to (re)start is actually alive."
     )
 
 
@@ -648,6 +701,19 @@ def run_post_merge_steps(
         step_env = {**os.environ, **combined_overrides} if combined_overrides else None
 
         if detaches:
+            liveness_probe = step.get(STEP_KEY_LIVENESS_PROBE)
+            baseline_sample = None
+            if liveness_probe is not None:
+                # lr-4d5ef9: capture the liveness baseline BEFORE launching
+                # the detached step -- see _verify_liveness's own docstring,
+                # "THE lr-4d5ef9 CADENCE FIX", for why this ordering (a
+                # genuine happens-before via program order) is what removes
+                # the race, rather than any adjustment to poll timing after
+                # the fact.
+                baseline_sample = _capture_liveness_baseline(
+                    liveness_probe, cwd=root, label=label
+                )
+
             # lr-53556a: fire-and-forget. No PIPE is ever created for this
             # child, so there is no fd for an inherited-open grandchild
             # daemon to hold open against us -- and start_new_session=True
@@ -668,14 +734,19 @@ def run_post_merge_steps(
                 f"merge: post-merge {label}: detached (not awaited): {cmd!r}",
                 file=sys.stderr,
             )
-            liveness_probe = step.get(STEP_KEY_LIVENESS_PROBE)
             if liveness_probe is not None:
                 # lr-d6e52b: independent liveness verification -- ALWAYS
                 # terminal on failure (see PostMergeLivenessError), never
                 # gated by this step's own on_failure (which validate_
                 # post_merge_steps already forbids being "fail" for a
                 # detached step in the first place).
-                _verify_liveness(liveness_probe, cwd=root, label=label, cmd_repr=repr(cmd))
+                _verify_liveness(
+                    liveness_probe,
+                    cwd=root,
+                    label=label,
+                    cmd_repr=repr(cmd),
+                    baseline_sample=baseline_sample,
+                )
             continue
 
         resolved_timeout = step.get(STEP_KEY_TIMEOUT_SECONDS, default_timeout_seconds)
