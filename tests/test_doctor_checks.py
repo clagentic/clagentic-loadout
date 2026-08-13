@@ -900,6 +900,22 @@ class TestCheckDeadCrewPostMergeConfig:
         assert result.ok is True
         assert result.resolved["live_steps_count"] == 1
 
+    def test_explicit_empty_live_steps_list_passes_not_a_dead_deploy(self, tmp_path):
+        """lr-f9a01b followup (PEACHES finding): a repo that explicitly
+        wrote post_merge_steps: [] in its OWN live config has made an
+        informed choice at the correct file -- an unrelated stale
+        .crew/*.yaml mention must not be flagged as a dead deploy just
+        because bool([]) is falsy, same as the missing-key case would be."""
+        _write_crew_config(
+            tmp_path,
+            "amos.yaml",
+            "post_merge_steps:\n  - cmd: 'make install'\n",
+        )
+        _write_loadout_config(tmp_path, "merge:\n  post_merge_steps: []\n")
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is True
+        assert result.resolved["live_steps_count"] == 0
+
     def test_multiple_offending_crew_files_all_named(self, tmp_path):
         _write_crew_config(
             tmp_path,

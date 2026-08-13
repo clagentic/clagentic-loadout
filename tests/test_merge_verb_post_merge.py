@@ -1057,3 +1057,134 @@ class TestMergeShapeMismatchSurfacing:
             opener=_make_opener(),
         )
         assert code == verb.EXIT_OK
+
+
+def _write_crew_yaml(repo_root, filename: str, text: str) -> None:
+    crew_dir = repo_root / ".crew"
+    crew_dir.mkdir(parents=True, exist_ok=True)
+    (crew_dir / filename).write_text(text, encoding="utf-8")
+
+
+class TestDeadCrewPostMergeConfigWarning:
+    """lr-f9a01b followup (PEACHES finding on the doctor-only fix): a
+    doctor check alone only fires when someone runs `loadout-doctor` --
+    the reported failure was an UNATTENDED merge reporting exit 0 with
+    steps_run=0. merge.verb._run's step 10 now surfaces the SAME
+    .crew/*.yaml cross-check as a loud, non-blocking WARNING on the path
+    that actually runs unattended. WARN, NEVER REFUSE (operator-directed
+    disposition) -- every test here that reaches this shape still asserts
+    EXIT_OK; there is no test in this class asserting a non-zero exit
+    caused by this warning, because none exists."""
+
+    def test_stale_crew_yaml_mention_warns_but_still_exits_ok(self, tmp_path, capsys):
+        _init_repo_with_origin(tmp_path)
+        _write_crew_yaml(
+            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+        )
+        # No .clagentic/loadout/config.yaml at all -- the trap shape.
+        argv = _base_args(**{"--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "NEVER reads that key from .crew/*.yaml" in stderr
+        assert str(tmp_path / ".crew" / "amos.yaml") in stderr
+
+    def test_stale_crew_yaml_mention_never_makes_a_step_execute(self, tmp_path, capsys):
+        """READ-ONLY CONTRACT: a .crew/*.yaml mention is never a source of
+        EXECUTABLE steps -- if it were somehow honored, this test's
+        marker file would exist after the run. It must not."""
+        _init_repo_with_origin(tmp_path)
+        marker = tmp_path / "should-never-exist.txt"
+        _write_crew_yaml(
+            tmp_path,
+            "amos.yaml",
+            f"post_merge_steps:\n  - cmd: \"{_PY} -c \\\"open('{marker}', 'w').close()\\\"\"\n",
+        )
+        argv = _base_args(**{"--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        assert not marker.exists()
+
+    def test_no_warning_when_live_config_already_declares_steps(self, tmp_path, capsys):
+        _init_repo_with_origin(tmp_path)
+        _write_crew_yaml(
+            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+        )
+        _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
+        argv = _base_args(**{"--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "NEVER reads that key from .crew/*.yaml" not in stderr
+
+    def test_no_warning_when_live_config_explicitly_declares_empty_list(
+        self, tmp_path, capsys
+    ):
+        """lr-f9a01b followup (Move 2 re-evaluated): a repo that
+        explicitly wrote post_merge_steps: [] at the CORRECT file has made
+        an informed choice -- must never be warned about an unrelated
+        stale .crew/*.yaml mention just because bool([]) is falsy."""
+        _init_repo_with_origin(tmp_path)
+        _write_crew_yaml(
+            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+        )
+        _write_merge_config(tmp_path, [])
+        argv = _base_args(**{"--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "NEVER reads that key from .crew/*.yaml" not in stderr
+
+    def test_no_crew_dir_no_warning(self, tmp_path, capsys):
+        _init_repo_with_origin(tmp_path)
+        argv = _base_args(**{"--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "NEVER reads that key from .crew/*.yaml" not in stderr
+
+    def test_skip_post_merge_still_warns_about_stale_crew_yaml(self, tmp_path, capsys):
+        """--skip-post-merge deliberately runs no steps THIS invocation, but
+        a stale .crew/*.yaml mention pointing at a config surface that will
+        NEVER run steps on any future invocation either is still worth
+        naming loudly."""
+        _init_repo_with_origin(tmp_path)
+        _write_crew_yaml(
+            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+        )
+        argv = _base_args(**{"--repo-path": str(tmp_path)})
+        argv.append("--skip-post-merge")
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "NEVER reads that key from .crew/*.yaml" in stderr

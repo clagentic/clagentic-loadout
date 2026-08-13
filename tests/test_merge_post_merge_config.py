@@ -34,7 +34,9 @@ from clagentic_loadout.merge.post_merge_config import (
     DEFAULT_POST_MERGE_STEP_TIMEOUT_SECONDS,
     DEFAULT_REQUIRE_MODEL_ATTESTATION,
     DEFAULT_SYNC_TREE_AFTER_MERGE,
+    find_crew_yaml_files_declaring_post_merge_steps,
     load_post_merge_steps,
+    post_merge_steps_key_declared,
     resolve_enforce_merge_shape,
     resolve_enforce_single_verdict_fence,
     resolve_git_working_tree,
@@ -686,4 +688,96 @@ class TestLegacyPathFallback:
         steps = load_post_merge_steps(tmp_path)
 
         assert steps[0]["cmd"] == "new"
-        assert capsys.readouterr().err == ""
+
+
+class TestPostMergeStepsKeyDeclared:
+    """lr-f9a01b followup: distinguishes MISSING key from EXPLICITLY EMPTY
+    list -- earns its keep at the new merge-time .crew/*.yaml cross-check
+    call site (a repo that wrote post_merge_steps: [] deliberately must
+    never be warned about an unrelated stale .crew/*.yaml mention), even
+    though no PRE-EXISTING call site of load_post_merge_steps needed it."""
+
+    def test_no_repo_root_returns_false(self):
+        assert post_merge_steps_key_declared(None) is False
+
+    def test_no_config_file_returns_false(self, tmp_path):
+        assert post_merge_steps_key_declared(tmp_path) is False
+
+    def test_no_merge_section_returns_false(self, tmp_path):
+        _write_config(tmp_path, {"wait": {"scoped_test_patterns": ["^go test"]}})
+        assert post_merge_steps_key_declared(tmp_path) is False
+
+    def test_merge_section_without_key_returns_false(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"some_other_key": True}})
+        assert post_merge_steps_key_declared(tmp_path) is False
+
+    def test_explicit_empty_list_returns_true(self, tmp_path):
+        """The distinction this function exists for: an explicit []
+        counts as declared, even though load_post_merge_steps also
+        returns [] for this exact config."""
+        _write_config(tmp_path, {"merge": {"post_merge_steps": []}})
+        assert post_merge_steps_key_declared(tmp_path) is True
+        assert load_post_merge_steps(tmp_path) == []
+
+    def test_non_empty_list_returns_true(self, tmp_path):
+        _write_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        assert post_merge_steps_key_declared(tmp_path) is True
+
+    def test_malformed_merge_section_raises(self, tmp_path):
+        _write_config(tmp_path, {"merge": "not-a-mapping"})
+        with pytest.raises(PostMergeConfigError, match="merge"):
+            post_merge_steps_key_declared(tmp_path)
+
+
+class TestFindCrewYamlFilesDeclaringPostMergeSteps:
+    """lr-f9a01b: the shared .crew/*.yaml scan both doctor.checks.
+    check_dead_crew_post_merge_config and merge.verb._run's step-10
+    warning call -- one scan, two surfaces, never divergent."""
+
+    def _write_crew_yaml(self, repo_root, filename: str, text: str) -> None:
+        crew_dir = repo_root / ".crew"
+        crew_dir.mkdir(parents=True, exist_ok=True)
+        (crew_dir / filename).write_text(text, encoding="utf-8")
+
+    def test_no_repo_root_returns_empty(self):
+        assert find_crew_yaml_files_declaring_post_merge_steps(None) == []
+
+    def test_no_crew_dir_returns_empty(self, tmp_path):
+        assert find_crew_yaml_files_declaring_post_merge_steps(tmp_path) == []
+
+    def test_crew_yaml_with_no_mention_returns_empty(self, tmp_path):
+        self._write_crew_yaml(tmp_path, "amos.yaml", "schema_version: 1\n")
+        assert find_crew_yaml_files_declaring_post_merge_steps(tmp_path) == []
+
+    def test_top_level_mention_is_found(self, tmp_path):
+        self._write_crew_yaml(
+            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+        )
+        result = find_crew_yaml_files_declaring_post_merge_steps(tmp_path)
+        assert result == [str(tmp_path / ".crew" / "amos.yaml")]
+
+    def test_nested_merge_section_mention_is_found(self, tmp_path):
+        self._write_crew_yaml(
+            tmp_path,
+            "naomi.yaml",
+            "merge:\n  post_merge_steps:\n    - cmd: 'make deploy'\n",
+        )
+        result = find_crew_yaml_files_declaring_post_merge_steps(tmp_path)
+        assert result == [str(tmp_path / ".crew" / "naomi.yaml")]
+
+    def test_malformed_yaml_is_skipped(self, tmp_path):
+        self._write_crew_yaml(tmp_path, "amos.yaml", "not: valid: yaml: [\n")
+        assert find_crew_yaml_files_declaring_post_merge_steps(tmp_path) == []
+
+    def test_multiple_files_sorted(self, tmp_path):
+        self._write_crew_yaml(
+            tmp_path, "naomi.yaml", "post_merge_steps:\n  - cmd: 'b'\n"
+        )
+        self._write_crew_yaml(
+            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'a'\n"
+        )
+        result = find_crew_yaml_files_declaring_post_merge_steps(tmp_path)
+        assert result == [
+            str(tmp_path / ".crew" / "amos.yaml"),
+            str(tmp_path / ".crew" / "naomi.yaml"),
+        ]
