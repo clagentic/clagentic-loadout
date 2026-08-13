@@ -1535,6 +1535,23 @@ define, always reporting RESOLVED values rather than a guess:
    `.loadout/` marker dir (no config at the new path, or a config.yaml only
    present there) is a WARN, not a failure — migration-incomplete signal,
    removed once every repo finishes migrating onto the new path.
+3b. **Dead `.crew/<role>.yaml` `post_merge_steps` cross-check**
+   (`check_dead_crew_post_merge_config`, `--repo-root`) — `.crew/<role>.yaml`
+   is a DIFFERENT config surface than `.clagentic/loadout/config.yaml`
+   (per-role dispatch config, not this package's own repo-local config),
+   and `merge.post_merge_config.load_post_merge_steps` has NEVER read a
+   `post_merge_steps` key from it — both the missing-section and
+   missing-key path there are documented, silent no-ops. A repo whose
+   `.crew/<role>.yaml` declares `post_merge_steps` while its own
+   `.clagentic/loadout/config.yaml` declares none gets a clean
+   `loadout-merge` exit with `steps_run=0` and never deploys, with nothing
+   in that run's own output naming the file the steps actually needed to
+   live in. This check FAILs that shape, naming every offending
+   `.crew/*.yaml` file and the one file `post_merge_steps` must actually
+   live in to run. A repo whose `.clagentic/loadout/config.yaml` already
+   declares its own live `post_merge_steps` passes even if `.crew/*.yaml`
+   also mentions the key — a leftover mention there is dead documentation,
+   not a dead deploy.
 4. **`builder_identity` / `review.reviewer_logins` deployment-tier config**
    (no `--repo-root` needed — always runs) — validates the
    USER-LEVEL config.yaml's `builder_identity:` section
@@ -1547,11 +1564,12 @@ define, always reporting RESOLVED values rather than a guess:
    deployment-tier design calls.
 
 Exits `2` (`EXIT_CHECKS_FAILED`) if any check's outcome is a failure, `0`
-if every check passes. `--repo-root` opts into the schema check and scopes
-the slugs-coverage check's role taxonomy to that repo; omitting it skips
-the schema check and falls back to the built-in reference role mapping for
-slugs coverage. The deployment-tier identity check (item 4 above) always
-runs, with or without `--repo-root`.
+if every check passes. `--repo-root` opts into the schema check and the
+dead-crew-post_merge_config cross-check, and scopes the slugs-coverage
+check's role taxonomy to that repo; omitting it skips both repo-scoped
+checks and falls back to the built-in reference role mapping for slugs
+coverage. The deployment-tier identity check (item 4 above) always runs,
+with or without `--repo-root`.
 
 ## Not yet landed
 
