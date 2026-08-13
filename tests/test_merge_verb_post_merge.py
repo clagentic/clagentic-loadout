@@ -458,14 +458,18 @@ class TestPostMergeRunsOnlyAfterSuccess:
 
 
 class TestSkipPostMerge:
-    def test_skip_flag_bypasses_configured_steps_but_tree_still_syncs(self, tmp_path):
-        # lr-d95cdb: --skip-post-merge now ONLY skips the configured STEPS --
-        # it no longer implies "skip the working-tree sync too" (that
-        # conflation of one flag skipping two independent things was itself
-        # part of the gap lr-d95cdb closes). The tree still needs a real
-        # origin remote to sync against, hence _init_repo_with_origin here
-        # (see that fixture's own docstring).
-        _init_repo_with_origin(tmp_path)
+    def test_skip_flag_bypasses_configured_steps_and_never_checks_anything_out(self, tmp_path):
+        # lr-173768: --skip-post-merge means no step will ever run this
+        # invocation, so no checkout happens either -- only the merged commit
+        # is fetched into the local object database (still needed so the
+        # merge-shape readback and attestation SHA claim stay verified). The
+        # working tree is left EXACTLY where the caller had it (still on the
+        # initial local commit _init_repo_with_origin leaves it on, never
+        # advanced to the remote's later tip) -- this is the direct
+        # regression proof for the contention class this task removes: a
+        # merge with nothing to run post-merge must never yank the caller's
+        # checked-out files out from under it.
+        starting_sha = _init_repo_with_origin(tmp_path)
         marker = tmp_path / "should-not-run.txt"
         _write_merge_config(
             tmp_path,
@@ -483,13 +487,19 @@ class TestSkipPostMerge:
         )
         assert code == verb.EXIT_OK
         assert not marker.exists()
-        # The tree still lands on the base branch, updated -- --skip-post-merge
-        # skipped only the step, never the sync.
+        # The tree is untouched: still on the pre-existing local branch/SHA,
+        # never detached, never repointed onto the (unfetched-into-the-
+        # working-tree) merged base-branch tip.
         branch = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],
             capture_output=True, text=True, cwd=str(tmp_path),
         )
+        assert branch.returncode == 0
         assert branch.stdout.strip() == _BASE_BRANCH
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        )
+        assert rev_parse.stdout.strip() == starting_sha
 
     def test_sync_tree_after_merge_false_skips_sync_entirely_even_without_skip_flag(
         self, tmp_path
@@ -577,13 +587,23 @@ class TestNoConfiguredStepsIsNoop:
 
 
 class TestSyncTreeAfterMergeDefaultOn:
-    """lr-d95cdb: the core of this task -- tree-sync-after-merge is now
-    UNCONDITIONAL on any --repo-path, default ON, independent of whether
-    post_merge_steps are configured. Covers: default-on with steps
-    configured, default-on WITHOUT any steps configured (the previously-
-    unsynced gap), the config flip-off path, the fail-loud path preserved,
-    both platform resolution paths, and the final-tree-state assertion (base
-    branch, not detached)."""
+    """lr-d95cdb, re-scoped lr-173768: sync-after-merge (a FETCH, always, of
+    the merged commit into the local object database) is default ON for any
+    --repo-path whose repo has not opted out via
+    `merge.sync_tree_after_merge: false` -- independent of whether
+    post_merge_steps are configured. A CHECKOUT, however, happens ONLY when
+    at least one post_merge_steps entry will actually run (lr-173768): a
+    repo with steps configured still lands on the base branch (checked out);
+    a repo with NONE configured gets the merged commit fetched but the
+    working tree is left untouched (see
+    test_default_on_without_any_post_merge_steps_configured_fetches_but_never_
+    checks_out below -- this is the exact scenario lr-173768 closes: a
+    checkout that serves nothing must never mutate a shared checkout out
+    from under another in-flight agent). Covers: default-on with steps
+    configured (checks out), default-on WITHOUT any steps configured (fetch
+    only, no checkout), the config flip-off path (no fetch, no checkout),
+    the fail-loud path preserved, both platform resolution paths, and the
+    final-tree-state assertion in each case."""
 
     def _current_branch(self, repo_dir):
         result = subprocess.run(
@@ -614,16 +634,22 @@ class TestSyncTreeAfterMergeDefaultOn:
         assert branch.returncode == 0
         assert branch.stdout.strip() == _BASE_BRANCH
 
-    def test_default_on_without_any_post_merge_steps_configured_still_syncs(
+    def test_default_on_without_any_post_merge_steps_configured_fetches_but_never_checks_out(
         self, tmp_path
     ):
-        # THE GAP THIS TASK CLOSES: before lr-d95cdb, a repo with NO
-        # post_merge_steps configured got NO tree sync at all -- the tree
-        # stayed wherever the caller left it (the feature-branch HEAD that
-        # opened the PR, simulated here by _init_repo_with_origin leaving the
-        # repo on its initial 'main' commit, distinct from the remote's
-        # subsequently-advanced tip).
-        merged_sha = _init_repo_with_origin(tmp_path)
+        # lr-173768: a repo with NO post_merge_steps configured still gets
+        # the merged commit FETCHED (so the merge-shape readback below and
+        # the merge-completion attestation SHA claim stay independently
+        # verified) -- but nothing checks it out, since nothing will read
+        # the working tree this invocation. The tree is left EXACTLY where
+        # the caller had it: still on its initial local commit
+        # (_init_repo_with_origin's seed commit), never advanced to the
+        # remote's later tip. This directly replaces the pre-lr-173768
+        # contract (which asserted the checkout DID happen here) -- that
+        # unconditional checkout, with nothing configured to ever read it,
+        # was exactly the unsignaled shared-checkout mutation lr-173768
+        # removes.
+        starting_sha = _init_repo_with_origin(tmp_path)
         # No _write_merge_config call at all -- no .clagentic/loadout/config.yaml.
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
@@ -639,7 +665,7 @@ class TestSyncTreeAfterMergeDefaultOn:
         rev_parse = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
         )
-        assert rev_parse.stdout.strip() == merged_sha
+        assert rev_parse.stdout.strip() == starting_sha
 
     def test_config_flip_off_leaves_tree_exactly_where_caller_left_it(self, tmp_path):
         # merge.sync_tree_after_merge: false is the ONLY way to restore the
@@ -669,9 +695,10 @@ class TestSyncTreeAfterMergeDefaultOn:
         assert rev_parse.stdout.strip() == starting_sha
 
     def test_fail_loud_path_preserved_with_sync_enabled_by_default(self, tmp_path):
-        # No origin remote at all (bare tmp_path) -- advance_repo_to_merged_sha
-        # must still fail loud with EXIT_POST_MERGE_FAILED, never a silent
-        # partial sync, now that this phase runs unconditionally.
+        # No origin remote at all (bare tmp_path, no post_merge_steps
+        # configured) -- fetch_merged_sha_object must still fail loud with
+        # EXIT_POST_MERGE_FAILED, never a silent partial sync, even on the
+        # fetch-only (no-checkout) path this shape now takes (lr-173768).
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
@@ -686,8 +713,14 @@ class TestSyncTreeAfterMergeDefaultOn:
     ):
         # Forgejo's merge response carries no SHA at all (merge_pr returns
         # None) -- tree_sync's base-branch-fallback path resolves FETCH_HEAD,
-        # and land_on_base_branch must still work off THAT resolution.
+        # and land_on_base_branch must still work off THAT resolution. A
+        # trivial post_merge_steps entry is configured so this invocation
+        # actually takes the CHECKOUT path (lr-173768: checkout only happens
+        # when something will read the tree) -- this test's whole purpose is
+        # proving the SHA-resolution-then-checkout machinery, not the
+        # no-checkout fast path covered elsewhere in this class.
         merged_sha = _init_repo_with_origin(tmp_path)
+        _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "forgejo"})
         code = verb.main(
             argv,
@@ -706,8 +739,11 @@ class TestSyncTreeAfterMergeDefaultOn:
     def test_github_platform_known_sha_resolution_lands_on_base_branch(self, tmp_path):
         # GitHub's merge response DOES carry the merged SHA -- tree_sync's
         # known_merged_sha path is exercised (not the base-branch fallback),
-        # and land_on_base_branch must land on that exact SHA too.
+        # and land_on_base_branch must land on that exact SHA too. A trivial
+        # post_merge_steps entry is configured so this invocation actually
+        # takes the CHECKOUT path (lr-173768).
         merged_sha = _init_repo_with_origin(tmp_path)
+        _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
             argv,
@@ -729,8 +765,11 @@ class TestSyncTreeAfterMergeDefaultOn:
         # A GitHub response with no usable "sha" field (merge_pr returns
         # None, per that backend's own documented fallback contract) must
         # still resolve and land correctly via the SAME base-branch-fallback
-        # path the Forgejo platform always uses.
+        # path the Forgejo platform always uses. A trivial post_merge_steps
+        # entry is configured so this invocation actually takes the CHECKOUT
+        # path (lr-173768).
         merged_sha = _init_repo_with_origin(tmp_path)
+        _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
             argv,
