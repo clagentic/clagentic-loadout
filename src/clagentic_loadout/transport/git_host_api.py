@@ -623,6 +623,7 @@ def build_expected_verdict_body(
     reviewer: str,
     pr_number: int,
     expected_head_sha: str,
+    model_attested: str | None = None,
 ) -> str:
     """Construct the POST body for an --expect-verdict-block invocation.
 
@@ -658,6 +659,13 @@ def build_expected_verdict_body(
     sanctioned path: a caller with a pre-embedded fence gets a same-shaped,
     resolved-values usage error instead of a comment silently landing with
     two.
+
+    *model_attested* (lr-95543d, OPTIONAL): passed through to
+    merge.verdict.build_verdict_block unchanged -- see that function's own
+    docstring for the full contract and merge.model_attestation's module
+    docstring for what this field can and cannot prove. None (the default)
+    posts no model_attested field at all, matching the pre-existing fence
+    shape byte-for-byte.
 
     Raises GitHostApiError(code=EXIT_VERDICT_BLOCK_USAGE) when the JSON is
     malformed, is not an object, is missing 'body'/'review_status',
@@ -710,7 +718,9 @@ def build_expected_verdict_body(
             code=EXIT_VERDICT_BLOCK_USAGE,
         )
     try:
-        fence = build_verdict_block(reviewer, review_status, expected_head_sha, pr_number)
+        fence = build_verdict_block(
+            reviewer, review_status, expected_head_sha, pr_number, model_attested
+        )
     except ValueError as exc:
         _fail(f"--expect-verdict-block: {exc}", code=EXIT_VERDICT_BLOCK_USAGE)
     return f"{prose}\n{fence}"
@@ -1125,6 +1135,7 @@ def verify_verdict_block(
     expected_review_status: str,
     expected_head_sha: str,
     expected_pr_number: int,
+    expected_model_attested: str | None = None,
 ) -> None:
     """Re-parse the fenced ```review-result``` block from the VERIFIED
     comment's own body (the readback --verify-comment already confirmed
@@ -1165,6 +1176,17 @@ def verify_verdict_block(
     if parsed.get("pr_number") != expected_pr_number:
         mismatches.append(
             f"pr_number: expected {expected_pr_number!r}, got {parsed.get('pr_number')!r}"
+        )
+    # model_attested (lr-95543d): only checked when --model-attested was
+    # actually supplied -- omitting it posts no field at all (the
+    # pre-existing fence shape), so there is nothing to compare here.
+    if (
+        expected_model_attested is not None
+        and parsed.get("model_attested") != expected_model_attested
+    ):
+        mismatches.append(
+            f"model_attested: expected {expected_model_attested!r}, got "
+            f"{parsed.get('model_attested')!r}"
         )
     if mismatches:
         _fail(
@@ -1454,6 +1476,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "taken from PATH. After the ordinary --verify-comment readback, "
         "the verified comment's own body is re-parsed and checked "
         "field-for-field against what was requested.",
+    )
+    parser.add_argument(
+        "--model-attested",
+        metavar="MODEL",
+        default=None,
+        help="OPTIONAL, alongside --expect-verdict-block only: supplies the "
+        "fenced verdict block's 'model_attested' field -- the model "
+        "backend this reviewer reports having run as (a resolved model "
+        "identifier, not a bare deployment tier alias). TOOL-CONSTRUCTED "
+        "into the fence exactly like every other verdict field, but the "
+        "VALUE itself is still a SELF-REPORTED claim this tool does not "
+        "verify -- see clagentic_loadout.merge.model_attestation's module "
+        "docstring for the full trust model. Omit to post no "
+        "model_attested field at all (unchanged, pre-existing fence "
+        "shape).",
     )
     parser.add_argument(
         "--caller-tracking-id",
@@ -1911,6 +1948,16 @@ def _run(
                 f"underscore; no path separators or traversal).",
                 code=EXIT_VERDICT_BLOCK_USAGE,
             )
+    elif args.model_attested is not None:
+        # --model-attested is only meaningful alongside --expect-verdict-
+        # block (lr-95543d): there is no other fence-building route on this
+        # verb for it to attach to.
+        _fail(
+            "--model-attested requires --expect-verdict-block (it supplies "
+            "that fence's OPTIONAL 'model_attested' field; there is no "
+            "other verdict-fence route on this verb).",
+            code=EXIT_VERDICT_BLOCK_USAGE,
+        )
 
     # --caller-tracking-id preconditions, checked BEFORE any I/O (lr-10a996,
     # same fail-fast posture as --expect-verdict-block above): the tracking
@@ -2214,6 +2261,7 @@ def _run(
             reviewer=args.expect_verdict_block,
             pr_number=pr_number_int,
             expected_head_sha=args.pr_sha,
+            model_attested=args.model_attested,
         )
         post_body_bytes = json.dumps({"body": combined_body}).encode("utf-8")
 
@@ -2289,6 +2337,7 @@ def _run(
                 expected_review_status=json.loads(stdin_bytes.decode("utf-8"))["review_status"],
                 expected_head_sha=args.pr_sha,
                 expected_pr_number=int(pr_number),
+                expected_model_attested=args.model_attested,
             )
             result["verdict_block_verified"] = True
 

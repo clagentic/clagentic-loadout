@@ -493,6 +493,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "keep in sync.",
     )
     parser.add_argument(
+        "--model-attested",
+        metavar="MODEL",
+        default=None,
+        help="OPTIONAL, alongside --verdict-review-status or "
+        "--verdict-findings only: supplies the fenced verdict block's "
+        "'model_attested' field -- the model backend this reviewer "
+        "reports having run as (a resolved model identifier, not a bare "
+        "deployment tier alias). TOOL-CONSTRUCTED into the fence exactly "
+        "like every other verdict field on this route, but the VALUE "
+        "itself is still a SELF-REPORTED claim this verb does not verify "
+        "-- see clagentic_loadout.merge.model_attestation's module "
+        "docstring for the full trust model. Omit to post no "
+        "model_attested field at all (unchanged, pre-existing fence "
+        "shape).",
+    )
+    parser.add_argument(
         "--delete-own-comment",
         metavar="COMMENT_ID",
         default=None,
@@ -710,6 +726,21 @@ def _run(
             "not a second value to keep in sync).",
             code=EXIT_VERDICT_BLOCK_USAGE,
         )
+    # --model-attested is only meaningful alongside one of the two verdict
+    # routes (lr-95543d): there is no other fence-building route on this
+    # verb for it to attach to.
+    if (
+        args.model_attested is not None
+        and args.verdict_review_status is None
+        and not args.verdict_findings
+    ):
+        _fail(
+            "--model-attested requires --verdict-review-status or "
+            "--verdict-findings (it supplies that fence's OPTIONAL "
+            "'model_attested' field; there is no other verdict-fence "
+            "route on this verb).",
+            code=EXIT_VERDICT_BLOCK_USAGE,
+        )
 
     # Platform guard + token mint BEFORE --body-env's CONSUMING read
     # (security re-audit follow-up, same class of fix as push.verb's
@@ -841,7 +872,12 @@ def _run(
     if verdict_findings is not None:
         try:
             body = build_findings_verdict_body(
-                caller, verdict_review_status, args.verdict_head_sha, pr_number, verdict_findings
+                caller,
+                verdict_review_status,
+                args.verdict_head_sha,
+                pr_number,
+                verdict_findings,
+                args.model_attested,
             )
         except ValueError as exc:
             _fail(f"--verdict-findings: {exc}", code=EXIT_VERDICT_BLOCK_USAGE)
@@ -873,7 +909,10 @@ def _run(
                 code=EXIT_VERDICT_BLOCK_USAGE,
             )
         try:
-            fence = build_verdict_block(caller, verdict_review_status, args.verdict_head_sha, pr_number)
+            fence = build_verdict_block(
+                caller, verdict_review_status, args.verdict_head_sha, pr_number,
+                args.model_attested,
+            )
         except ValueError as exc:
             _fail(f"--verdict-review-status: {exc}", code=EXIT_VERDICT_BLOCK_USAGE)
         body = f"{body}\n{fence}"
@@ -953,6 +992,15 @@ def _run(
         if parsed.get("pr_number") != pr_number:
             mismatches.append(
                 f"pr_number: expected {pr_number!r}, got {parsed.get('pr_number')!r}"
+            )
+        # model_attested (lr-95543d): only checked when --model-attested was
+        # actually supplied -- omitting the flag posts no field at all (the
+        # pre-existing fence shape), so there is nothing to compare the
+        # readback against in that case.
+        if args.model_attested is not None and parsed.get("model_attested") != args.model_attested:
+            mismatches.append(
+                f"model_attested: expected {args.model_attested!r}, got "
+                f"{parsed.get('model_attested')!r}"
             )
         if mismatches:
             _fail(
