@@ -25,6 +25,13 @@ real local git repos):
   - (lr-d95cdb) land_on_base_branch moves a detached tree onto base_branch,
     repointed at exactly the already-verified landed SHA -- never a merge/
     rebase -- and fails loud on a mismatch or a checkout failure.
+  - (lr-173768) fetch_merged_sha_object fetches the merged commit WITHOUT
+    checking anything out, on both the known_merged_sha and base-branch-
+    fallback resolution paths -- and (security-review finding, folded into
+    lr-173768) independently verifies the fetched object both EXISTS
+    locally and IS A COMMIT via `git cat-file -e <sha>^{commit}`, on BOTH
+    paths, rather than trusting a caller-supplied SHA on a bare fetch
+    exit-code success alone.
 
 Uses REAL local git repos in tmp_path (git subprocess calls are the whole
 point of this module) -- no real network access anywhere (every remote is a
@@ -40,6 +47,7 @@ import pytest
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
     advance_repo_to_merged_sha,
+    fetch_merged_sha_object,
     land_on_base_branch,
     resolve_base_branch,
 )
@@ -403,3 +411,115 @@ class TestLandOnBaseBranch:
 
         with pytest.raises(TreeSyncError, match="refusing to leave the tree"):
             land_on_base_branch(clone_dir, base_branch=_BASE_BRANCH, landed_sha=landed_sha)
+
+
+class TestFetchMergedShaObject:
+    """lr-173768: fetch_merged_sha_object fetches the merged commit into the
+    local object database WITHOUT ever checking anything out. (Security-
+    review finding, folded into lr-173768): the object's presence AND
+    commit-ness is independently verified via `git cat-file -e <sha>^{commit}`
+    on BOTH the known_merged_sha and base-branch-fallback resolution paths --
+    this class pins that contract directly so a future refactor of this
+    function cannot silently drop the readback and have no test notice."""
+
+    def test_known_sha_path_fetches_without_checking_out(self, repo_with_origin):
+        clone_dir, _origin_dir, merged_sha, stale_sha = repo_with_origin
+        fetched = fetch_merged_sha_object(
+            clone_dir, base_branch=_BASE_BRANCH, known_merged_sha=merged_sha
+        )
+        assert fetched == merged_sha
+        # No checkout: HEAD/working tree are untouched, still on stale_sha.
+        assert _head_sha(clone_dir) == stale_sha
+        assert (clone_dir / "f.txt").read_text(encoding="utf-8") == "feature-branch-content\n"
+
+    def test_base_branch_fallback_path_fetches_without_checking_out(self, repo_with_origin):
+        clone_dir, _origin_dir, merged_sha, stale_sha = repo_with_origin
+        fetched = fetch_merged_sha_object(clone_dir, base_branch=_BASE_BRANCH)
+        assert fetched == merged_sha
+        assert _head_sha(clone_dir) == stale_sha
+        assert (clone_dir / "f.txt").read_text(encoding="utf-8") == "feature-branch-content\n"
+
+    def test_known_sha_path_verifies_object_exists_and_is_a_commit(
+        self, repo_with_origin, monkeypatch
+    ):
+        # THE BOBBIE FINDING'S DIRECT REGRESSION PROOF: a caller-supplied
+        # known_merged_sha that does NOT correspond to any object actually
+        # present in the local object database (e.g. a stale/wrong value
+        # from a buggy backend) must be refused HERE -- never returned on
+        # the strength of a bare `git fetch` exit code alone. A real fetch
+        # cannot itself succeed against a nonexistent SHA (git refuses the
+        # fetch outright, proven separately elsewhere) -- so this simulates
+        # the narrower case the cat-file readback exists specifically to
+        # catch: the fetch step reports success, but the object it claims to
+        # have fetched is not actually present locally (e.g. a backend that
+        # returns a SHA it never itself pushed/fetched). Only the `fetch`
+        # call is faked; the cat-file call runs for real against this tree's
+        # actual object database.
+        clone_dir, _origin_dir, _merged_sha, _stale_sha = repo_with_origin
+        nonexistent_sha = "f" * 40
+        import clagentic_loadout.merge.tree_sync as tree_sync_module
+
+        real_run_git = tree_sync_module._run_git
+
+        def _fake_run_git(args, *, cwd):
+            if args[:1] == ["fetch"]:
+                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+            return real_run_git(args, cwd=cwd)
+
+        monkeypatch.setattr(tree_sync_module, "_run_git", _fake_run_git)
+
+        with pytest.raises(TreeSyncError, match="git cat-file -e"):
+            fetch_merged_sha_object(
+                clone_dir, base_branch=_BASE_BRANCH, known_merged_sha=nonexistent_sha
+            )
+
+    def test_known_sha_path_refuses_a_non_commit_object(self, repo_with_origin):
+        # A well-formed, LOCALLY-PRESENT object that is not a commit (here: a
+        # blob, the sha of a tracked file's own content) must also be
+        # refused -- proving the check asserts TYPE, not merely existence.
+        clone_dir, _origin_dir, _merged_sha, _stale_sha = repo_with_origin
+        blob_sha_result = _run_git(
+            ["rev-parse", "HEAD:f.txt"], cwd=clone_dir
+        )
+        assert blob_sha_result.returncode == 0
+        blob_sha = blob_sha_result.stdout.strip()
+        with pytest.raises(TreeSyncError, match="git cat-file -e"):
+            fetch_merged_sha_object(
+                clone_dir, base_branch=_BASE_BRANCH, known_merged_sha=blob_sha
+            )
+
+    def test_base_branch_fallback_path_verification_is_reached(self, repo_with_origin, monkeypatch):
+        # Proves the SAME cat-file readback also runs on the fallback path
+        # (no known_merged_sha) -- forcing `git rev-parse FETCH_HEAD` to
+        # report a well-formed-but-nonexistent SHA (a resolver defect this
+        # function must not trust blindly) must refuse loudly here too.
+        clone_dir, _origin_dir, _merged_sha, _stale_sha = repo_with_origin
+        import clagentic_loadout.merge.tree_sync as tree_sync_module
+
+        real_run_git = tree_sync_module._run_git
+        nonexistent_sha = "e" * 40
+
+        def _fake_run_git(args, *, cwd):
+            if args[:2] == ["rev-parse", "FETCH_HEAD"]:
+                result = subprocess.CompletedProcess(
+                    args, 0, stdout=nonexistent_sha + "\n", stderr=""
+                )
+                return result
+            return real_run_git(args, cwd=cwd)
+
+        monkeypatch.setattr(tree_sync_module, "_run_git", _fake_run_git)
+
+        with pytest.raises(TreeSyncError, match="git cat-file -e"):
+            fetch_merged_sha_object(clone_dir, base_branch=_BASE_BRANCH)
+
+    def test_empty_base_branch_raises_before_any_git_call(self, repo_with_origin):
+        clone_dir, _origin_dir, _merged_sha, stale_sha = repo_with_origin
+        with pytest.raises(TreeSyncError, match="no base branch"):
+            fetch_merged_sha_object(clone_dir, base_branch="")
+        assert _head_sha(clone_dir) == stale_sha
+
+    def test_unresolvable_remote_branch_raises(self, repo_with_origin):
+        clone_dir, _origin_dir, _merged_sha, stale_sha = repo_with_origin
+        with pytest.raises(TreeSyncError, match="git fetch"):
+            fetch_merged_sha_object(clone_dir, base_branch="branch-that-does-not-exist")
+        assert _head_sha(clone_dir) == stale_sha
