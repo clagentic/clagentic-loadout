@@ -50,7 +50,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from clagentic_loadout.push.errors import AuthorMismatchError
+from clagentic_loadout.push.errors import AuthorMismatchError, DirtyWorkTreeError
 
 
 def _run(
@@ -87,6 +87,52 @@ def verify_head_author(expected_email: str, git_cwd: Path | None = None) -> bool
     if not actual:
         return False
     return actual == expected_email
+
+
+def check_clean_work_tree(git_cwd: Path | None = None) -> None:
+    """Pre-flight check (lr-4cd7ac, diagnosis lr-60781e): `git
+    filter-branch` refuses outright on a working tree carrying unstaged
+    changes to tracked files ("You have unstaged changes", git-sh-setup's
+    own require_clean_work_tree). Run this BEFORE reauthor_commits so that
+    failure is reported as the LOCAL, RECOVERABLE condition it actually is
+    -- commit or stash and retry -- rather than surfacing later as a bare
+    filter-branch failure inside AuthorMismatchError's mis-attribution
+    framing, which does not apply here: an unstaged change is never a
+    mis-attribution risk, since filter-branch never even starts rewriting.
+
+    Uses `git diff --name-only` (tracked files with unstaged working-tree
+    changes; deliberately NOT `git status --porcelain`, which would also
+    flag untracked files -- out of scope here, since filter-branch's own
+    precondition is specifically about the tracked working tree/index
+    matching HEAD) to name the offending files directly in the raised
+    message, distinguishing this from a genuine identity mismatch.
+
+    Raises:
+        DirtyWorkTreeError: one or more tracked files have unstaged
+            changes. Message enumerates the file count and (up to a small
+            cap) their paths.
+
+    A no-op (returns None) when the check itself cannot run (not a git
+    repo, git missing) or when the tree is clean -- this function never
+    raises for anything other than a confirmed dirty tracked tree; a
+    caller relying on a clean tree downstream still hits filter-branch's
+    own failure in that case, just without this pre-flight's more specific
+    message.
+    """
+    result = _run(["git", "diff", "--name-only"], cwd=git_cwd)
+    if result.returncode != 0:
+        return
+    dirty_files = [line for line in result.stdout.splitlines() if line.strip()]
+    if not dirty_files:
+        return
+    listed = ", ".join(repr(f) for f in dirty_files[:10])
+    more = f" (+{len(dirty_files) - 10} more)" if len(dirty_files) > 10 else ""
+    raise DirtyWorkTreeError(
+        f"working tree has unstaged changes in {len(dirty_files)} tracked "
+        f"file(s): {listed}{more}. This is a LOCAL, RECOVERABLE condition, "
+        f"not an identity/mis-attribution problem -- commit or stash the "
+        f"changes and retry."
+    )
 
 
 def _merge_base_with_head(ref: str, git_cwd: Path | None) -> str | None:
@@ -195,24 +241,36 @@ def reauthor_commits(
     bot_name: str,
     bot_email: str,
     git_cwd: Path | None = None,
-) -> bool:
+) -> tuple[bool, str]:
     """Rewrite every commit on the current branch (not reachable from the
     resolved exclusion ref) to *bot_name*/*bot_email* as both author and
-    committer. Returns True on success (including the no-op case where
-    there is nothing to rewrite), False on any failure — callers must fail
-    closed on False.
+    committer.
+
+    Returns (True, "") on success (including the no-op case where there is
+    nothing to rewrite). Returns (False, cause) on any failure — callers
+    must fail closed on False; *cause* is a short, non-empty diagnostic
+    string suitable for embedding directly in a caller's own error message
+    (lr-4cd7ac, diagnosis lr-60781e: the underlying `git
+    filter-branch` stderr was previously captured and then discarded,
+    collapsing every precondition failure -- a dirty tree, an unresolvable
+    ref, anything else -- into one indistinguishable message with no cause
+    at all).
     """
     quick_check = _run(["git", "rev-list", "--count", f"{base_branch}..HEAD"], cwd=git_cwd)
     if quick_check.returncode != 0 or quick_check.stdout.strip() == "0":
-        return True
+        return True, ""
 
     exclusion_ref, label = resolve_exclusion_ref(base_branch, git_cwd)
     if exclusion_ref is None:
-        return False
+        return False, (
+            f"could not resolve an exclusion ref for base branch "
+            f"{base_branch!r} (neither a remote-tracking nor a local ref "
+            f"resolved against HEAD)"
+        )
 
     range_check = _run(["git", "rev-list", "--count", "HEAD", f"^{exclusion_ref}"], cwd=git_cwd)
     if range_check.returncode != 0 or range_check.stdout.strip() == "0":
-        return True
+        return True, ""
 
     # Fix direction (3), lr-501695: log the rewrite set (count + SHAs) to
     # stderr BEFORE filter-branch runs, so a future regression in the
@@ -266,7 +324,23 @@ def reauthor_commits(
         cwd=str(git_cwd) if git_cwd is not None else None,
     )
 
-    return result.returncode == 0
+    if result.returncode == 0:
+        return True, ""
+    return False, _first_nonempty_stderr_line(result.stderr)
+
+
+def _first_nonempty_stderr_line(stderr: str) -> str:
+    """Return the first non-blank line of *stderr*, or a fixed fallback
+    string when *stderr* is empty/whitespace-only -- `git filter-branch`'s
+    own decisive diagnostic (e.g. "Cannot rewrite branches: You have
+    unstaged changes.") is always its FIRST line, with any subsequent
+    lines being secondary detail (e.g. a suggested `git status` command)
+    that would only dilute the embedded cause."""
+    for line in stderr.splitlines():
+        stripped = line.strip()
+        if stripped:
+            return stripped
+    return "git filter-branch exited non-zero with no stderr output"
 
 
 def pin_commits_to_bot_identity(
@@ -295,7 +369,19 @@ def pin_commits_to_bot_identity(
     Raises AuthorMismatchError when re-authoring fails, or when HEAD's
     author does not match the expected identity afterward — a
     mis-attributed push is unrecoverable, so this never returns a silent
-    partial success.
+    partial success. The raised message embeds the real cause reported by
+    the underlying `git filter-branch` call (lr-4cd7ac, diagnosis
+    lr-60781e) — never a generic "filter-branch failed" with no
+    diagnostic content.
+
+    A dirty tracked work tree is NOT surfaced here — see
+    check_clean_work_tree, a separate pre-flight callers should run before
+    this function: an unstaged-changes precondition failure is a LOCAL,
+    RECOVERABLE condition unrelated to commit authorship, and raising it
+    as an AuthorMismatchError would misleadingly frame it as an
+    unrecoverable mis-attribution risk. This function does not run that
+    pre-flight itself so a caller that already ran it is never charged a
+    second `git diff` round-trip.
     """
     if not bot_name or not bot_email:
         if fail_closed_on_missing:
@@ -307,12 +393,12 @@ def pin_commits_to_bot_identity(
             )
         return False
 
-    ok = reauthor_commits(base_branch, bot_name, bot_email, git_cwd)
+    ok, cause = reauthor_commits(base_branch, bot_name, bot_email, git_cwd)
     if not ok:
         raise AuthorMismatchError(
             f"commit re-authoring failed — cannot pin commits to bot identity "
-            f"{bot_email!r}. A mis-attributed push is unrecoverable; fix the "
-            f"filter-branch failure and retry."
+            f"{bot_email!r}. Cause: {cause}. A mis-attributed push is "
+            f"unrecoverable; fix the underlying failure and retry."
         )
 
     if not verify_head_author(bot_email, git_cwd):
@@ -327,6 +413,7 @@ def pin_commits_to_bot_identity(
 
 
 __all__ = [
+    "check_clean_work_tree",
     "get_head_author_email",
     "pin_commits_to_bot_identity",
     "reauthor_commits",

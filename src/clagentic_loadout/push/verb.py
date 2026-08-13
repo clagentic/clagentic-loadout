@@ -252,6 +252,7 @@ from clagentic_loadout.push.contention_config import load_contention_config
 from clagentic_loadout.push.errors import (
     AuthorMismatchError,
     BodyEmptyError,
+    DirtyWorkTreeError,
     GitPushError,
     HostDeniedError,
     MissingIssueLinkError,
@@ -412,6 +413,17 @@ EXIT_WORKING_TREE_CONTENTION = 34
 #: reasoning). See docs/verbs.md's `loadout-push` section for the full
 #: contract, including how to change the pattern or turn this check off.
 EXIT_TASK_ID_GUARD_VIOLATION = 35
+#: The working tree carries unstaged changes to one or more tracked files
+#: (push.identity.check_clean_work_tree / DirtyWorkTreeError, lr-4cd7ac,
+#: diagnosis lr-60781e) -- `git filter-branch` refuses outright on a
+#: dirty tracked tree, and this pre-flight fires BEFORE that rewrite is
+#: attempted so the failure is reported as the LOCAL, RECOVERABLE condition
+#: it actually is (commit or stash and retry), distinct from
+#: EXIT_AUTHOR_MISMATCH's mis-attribution framing, which does not apply to
+#: this cause. ONLY reachable when a bot identity was resolved (name AND
+#: email) -- with no bot identity, no re-authoring is attempted at all, so
+#: this check does not run.
+EXIT_DIRTY_WORK_TREE = 36
 
 
 class PushVerbError(Exception):
@@ -2065,6 +2077,21 @@ def _run_create_pr(
             f"not supplied on this invocation.",
             file=sys.stderr,
         )
+
+    # DIRTY-WORK-TREE PRE-FLIGHT (lr-4cd7ac, diagnosis lr-60781e):
+    # runs ONLY when a bot identity was actually resolved -- with no bot
+    # identity, pin_commits_to_bot_identity below either no-ops (returns
+    # False) or fails closed on missing identity, and never reaches
+    # filter-branch at all, so there is nothing for this check to guard.
+    # Fires BEFORE the re-authoring attempt so a caller sees the dirty-tree
+    # cause distinctly from AuthorMismatchError's mis-attribution framing,
+    # which does not apply to a precondition failure that never even starts
+    # rewriting history.
+    if effective_bot_name and effective_bot_email:
+        try:
+            identity.check_clean_work_tree(project_root)
+        except DirtyWorkTreeError as exc:
+            _fail(str(exc), code=EXIT_DIRTY_WORK_TREE)
 
     try:
         history_rewritten = identity.pin_commits_to_bot_identity(

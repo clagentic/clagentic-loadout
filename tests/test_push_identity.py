@@ -13,10 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from clagentic_loadout.push.errors import AuthorMismatchError
+from clagentic_loadout.push.errors import AuthorMismatchError, DirtyWorkTreeError
 from clagentic_loadout.push.identity import (
+    check_clean_work_tree,
     get_head_author_email,
     pin_commits_to_bot_identity,
+    reauthor_commits,
     resolve_exclusion_ref,
     verify_head_author,
 )
@@ -353,3 +355,89 @@ class TestResolveExclusionRefMergeBaseBleed:
         ).stdout.strip()
         assert landed_commit_after == f"{landed_sha} base@example.com"
         assert get_head_author_email(repo) == "bot@example.com"
+
+
+class TestCheckCleanWorkTree:
+    """lr-4cd7ac (MILLER diagnosis lr-60781e): a dirty tracked work tree is
+    a LOCAL, RECOVERABLE precondition failure -- `git filter-branch`
+    refuses outright before it ever starts rewriting -- and must be
+    reported distinctly from a genuine identity mismatch, never folded
+    into AuthorMismatchError's mis-attribution framing."""
+
+    def test_clean_tree_is_a_noop(self, tmp_path):
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        check_clean_work_tree(repo)  # must not raise
+
+    def test_dirty_tracked_file_raises_naming_the_file(self, tmp_path):
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        (repo / "feature.txt").write_text("unstaged edit\n")
+
+        with pytest.raises(DirtyWorkTreeError) as exc_info:
+            check_clean_work_tree(repo)
+        message = str(exc_info.value)
+        assert "feature.txt" in message
+        assert "unstaged changes" in message
+        assert "LOCAL, RECOVERABLE" in message
+
+    def test_untracked_file_alone_does_not_raise(self, tmp_path):
+        """check_clean_work_tree mirrors filter-branch's own precondition
+        (tracked working tree/index vs HEAD) -- an untracked file is a
+        cleanliness_check concern (push.cleanliness_check), not this one."""
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        (repo / "untracked.txt").write_text("stray file\n")
+        check_clean_work_tree(repo)  # must not raise
+
+    def test_non_repo_is_a_noop(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+        not_a_repo = tmp_path / "not_a_repo"
+        not_a_repo.mkdir()
+        check_clean_work_tree(not_a_repo)  # must not raise
+
+
+class TestReauthorCommitsPropagatesStderr:
+    """lr-4cd7ac (MILLER diagnosis lr-60781e): reauthor_commits' failure
+    return must carry the real `git filter-branch` stderr cause, and
+    pin_commits_to_bot_identity must embed it in the raised
+    AuthorMismatchError, rather than discarding it (the pre-fix behavior:
+    result.stderr was captured and never read anywhere)."""
+
+    def test_reauthor_commits_returns_cause_on_dirty_tree_filter_branch_failure(self, tmp_path):
+        """reauthor_commits() itself is called directly here (bypassing
+        both check_clean_work_tree and pin_commits_to_bot_identity) so this
+        exercises the REAL `git filter-branch` failure path end to end --
+        the exact discarded-stderr defect MILLER diagnosed: filter-branch's
+        own precondition check ('You have unstaged changes') firing and its
+        stderr making it all the way back to the caller."""
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        (repo / "feature.txt").write_text("unstaged edit\n")
+
+        ok, cause = reauthor_commits(
+            "main", "Bot Name", "bot@example.com", repo,
+        )
+        assert ok is False
+        assert cause != ""
+        assert "unstaged changes" in cause.lower()
+
+    def test_pin_commits_error_message_embeds_the_real_filter_branch_cause(self, tmp_path):
+        """Regression for lr-4cd7ac (MILLER diagnosis lr-60781e): the
+        AuthorMismatchError raised by pin_commits_to_bot_identity must
+        embed the real filter-branch stderr, not a generic message with no
+        diagnostic content. pin_commits_to_bot_identity does not itself run
+        the check_clean_work_tree pre-flight (that is verb.py's job, see
+        TestBotIdentity.test_dirty_work_tree_fails_with_a_distinct_message_
+        before_reauthoring in test_push_verb.py for the pre-flight's own
+        coverage) -- calling it directly here on a dirty tree exercises the
+        underlying filter-branch-failure-propagation fix in isolation."""
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        (repo / "feature.txt").write_text("unstaged edit\n")
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity(
+                "Bot Name", "bot@example.com", "main", repo,
+            )
+        message = str(exc_info.value)
+        assert "Cause:" in message
+        assert "unstaged changes" in message.lower()
+        assert message.strip().endswith(
+            "unrecoverable; fix the underlying failure and retry."
+        )
