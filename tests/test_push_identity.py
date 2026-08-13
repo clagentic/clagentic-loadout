@@ -15,6 +15,7 @@ import pytest
 
 from clagentic_loadout.push.errors import AuthorMismatchError, DirtyWorkTreeError
 from clagentic_loadout.push.identity import (
+    AmbiguousExclusionRefError,
     check_clean_work_tree,
     get_head_author_email,
     pin_commits_to_bot_identity,
@@ -355,6 +356,169 @@ class TestResolveExclusionRefMergeBaseBleed:
         ).stdout.strip()
         assert landed_commit_after == f"{landed_sha} base@example.com"
         assert get_head_author_email(repo) == "bot@example.com"
+
+
+class TestResolveExclusionRefDivergedBaseBranch:
+    """lr-1cd30b (follow-up gap the lr-501695 security review named
+    non-blocking): resolve_exclusion_ref's "more advanced of the two
+    merge-bases" comparison assumes the two candidates' merge-base points
+    are ancestor-comparable. Constructs the geometry where that assumption
+    fails -- a merge commit on HEAD's own line joining two independently-
+    evolved sides, one reachable only via the (diverged) remote-tracking
+    ref's pre-divergence history, the other only via the local ref's --
+    verified directly (git primitives, not by reasoning alone) to produce
+    two merge-base points where NEITHER is an ancestor of the other.
+    """
+
+    def test_diverged_merge_base_points_raise_ambiguous_exclusion_ref(self, tmp_path):
+        """The constructed geometry: root A, two independent lines (X off
+        A, Y off A). Local `main` = X's tip. `origin/main` (remote-tracking)
+        is force-pushed to Y's tip -- diverging it from local `main`, which
+        shares only the root commit A with it. HEAD (`feature`) branches
+        from local `main` (X), merges in line Y, then adds its own commit.
+
+        merge-base(origin/main, HEAD) = Y (Y is reachable from HEAD only
+        via the merge's second parent; X's line is not an ancestor of Y).
+        merge-base(main, HEAD) = X (main IS X's tip, hence its own
+        merge-base with anything reachable from it is itself).
+        X != Y and neither is an ancestor of the other -- verified via `git
+        merge-base --is-ancestor` in both directions before asserting
+        against resolve_exclusion_ref, so this test fails loudly if the
+        constructed geometry ever stops being genuinely diverged rather
+        than silently asserting against a comparable pair.
+        """
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "root.txt").write_text("root\n")
+        _git(["add", "root.txt"], repo)
+        _git(["commit", "-m", "root commit"], repo)
+        root_sha = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        _git(["checkout", "-b", "line-x"], repo)
+        (repo / "x.txt").write_text("x\n")
+        _git(["add", "x.txt"], repo)
+        _git(["commit", "-m", "commit X"], repo)
+        x_sha = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        _git(["checkout", "-b", "line-y", root_sha], repo)
+        (repo / "y.txt").write_text("y\n")
+        _git(["add", "y.txt"], repo)
+        _git(["commit", "-m", "commit Y"], repo)
+        y_sha = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        _git(["checkout", "main"], repo)
+        _git(["reset", "--hard", "line-x"], repo)
+
+        _git(["checkout", "-b", "feature", "main"], repo)
+        _git(["merge", "--no-ff", "-m", "merge line-y into feature", "line-y"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+
+        origin = tmp_path / "origin.git"
+        origin.mkdir()
+        _git(["init", "--bare"], origin)
+        _git(["push", str(origin), "line-y:refs/heads/main"], repo)
+        _git(["remote", "add", "origin", str(origin)], repo)
+        _git(["fetch", "origin"], repo)
+
+        assert _git(["rev-parse", "origin/main"], repo).stdout.strip() == y_sha
+        assert _git(["rev-parse", "main"], repo).stdout.strip() == x_sha
+
+        mb_origin = _git(["merge-base", "origin/main", "feature"], repo).stdout.strip()
+        mb_local = _git(["merge-base", "main", "feature"], repo).stdout.strip()
+        assert mb_origin == y_sha
+        assert mb_local == x_sha
+        assert mb_origin != mb_local
+
+        is_ancestor_origin_of_local = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", mb_origin, mb_local],
+            cwd=str(repo), capture_output=True, text=True,
+        ).returncode
+        is_ancestor_local_of_origin = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", mb_local, mb_origin],
+            cwd=str(repo), capture_output=True, text=True,
+        ).returncode
+        assert is_ancestor_origin_of_local != 0
+        assert is_ancestor_local_of_origin != 0
+
+        with pytest.raises(AmbiguousExclusionRefError) as exc_info:
+            resolve_exclusion_ref("main", repo)
+        message = str(exc_info.value)
+        assert "diverged" in message
+        assert mb_origin in message
+        assert mb_local in message
+
+    def test_reauthor_commits_fails_closed_on_diverged_base_branch(self, tmp_path):
+        """The same geometry via reauthor_commits/pin_commits_to_bot_identity:
+        the ambiguous floor must be refused BEFORE `git filter-branch` ever
+        runs (never a silent re-authoring on a guessed floor), and the
+        cause must be visible -- reauthor_commits returns (False, cause)
+        naming both candidate SHAs, and pin_commits_to_bot_identity embeds
+        that cause in the raised AuthorMismatchError (the same fail-closed
+        surface every other re-authoring failure uses, see
+        TestReauthorCommitsPropagatesStderr below) -- so an operator or CI
+        log sees exactly why the push was refused, matching PR #21's own
+        stderr-visibility requirement for this failure path."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "root.txt").write_text("root\n")
+        _git(["add", "root.txt"], repo)
+        _git(["commit", "-m", "root commit"], repo)
+        root_sha = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        _git(["checkout", "-b", "line-x"], repo)
+        (repo / "x.txt").write_text("x\n")
+        _git(["add", "x.txt"], repo)
+        _git(["commit", "-m", "commit X"], repo)
+
+        _git(["checkout", "-b", "line-y", root_sha], repo)
+        (repo / "y.txt").write_text("y\n")
+        _git(["add", "y.txt"], repo)
+        _git(["commit", "-m", "commit Y"], repo)
+        y_sha = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        _git(["checkout", "main"], repo)
+        _git(["reset", "--hard", "line-x"], repo)
+        x_sha = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        _git(["checkout", "-b", "feature", "main"], repo)
+        _git(["merge", "--no-ff", "-m", "merge line-y into feature", "line-y"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        origin = tmp_path / "origin.git"
+        origin.mkdir()
+        _git(["init", "--bare"], origin)
+        _git(["push", str(origin), "line-y:refs/heads/main"], repo)
+        _git(["remote", "add", "origin", str(origin)], repo)
+        _git(["fetch", "origin"], repo)
+
+        ok, cause = reauthor_commits("main", "Bot Name", "bot@example.com", repo)
+        assert ok is False
+        assert "diverged" in cause
+        assert x_sha in cause
+        assert y_sha in cause
+
+        # Refused BEFORE filter-branch ran -- HEAD and its author are
+        # completely untouched.
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+        assert get_head_author_email(repo) == "original@example.com"
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot Name", "bot@example.com", "main", repo)
+        assert "diverged" in str(exc_info.value)
+        assert get_head_author_email(repo) == "original@example.com"
 
 
 class TestCheckCleanWorkTree:
