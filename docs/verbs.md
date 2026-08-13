@@ -1130,6 +1130,25 @@ API-only merge) or `--skip-post-merge` (skip regardless of tree). Omitting
 caller must now say what it means, never rely on what a missing flag happens
 to default to.
 
+**Dead `.crew/<role>.yaml` `post_merge_steps` cross-check, WARN not refuse:**
+`.crew/<role>.yaml` (crew-dispatch config, a DIFFERENT surface than this
+repo's own `.clagentic/loadout/config.yaml`) can declare a `post_merge_steps`
+key that `load_post_merge_steps` has never read — `loadout-doctor`'s
+`check_dead_crew_post_merge_config` (see that section above) flags this, but
+only when someone explicitly runs doctor. Step 10 also surfaces the SAME
+cross-check directly here, on the path that actually runs unattended: when no
+steps will run this invocation AND the repo's own live config never
+EXPLICITLY declares the `post_merge_steps` key (a repo that wrote
+`post_merge_steps: []` deliberately is never warned — only a repo where the
+key is absent everywhere) AND at least one `.crew/*.yaml` file mentions the
+key, a `merge: WARNING --` line on stderr names every offending file and
+proceeds with the merge exactly as before — never a refusal, never a changed
+exit code. A repo with a stale `.crew/*.yaml` comment must never become
+unmergeable over it; this is a diagnostic surfaced louder, not a new gate.
+Read-only: only the key's presence and the declaring filename are ever
+inspected or printed — `.crew/*.yaml` is not, and does not become, an
+executable step-loading path.
+
 **Working-tree sync after merge, and landing on the base branch
 (`sync_tree_after_merge`):** whenever `--repo-path` is given,
 `merge.tree_sync.advance_repo_to_merged_sha` now runs **unconditionally** —
@@ -1551,7 +1570,12 @@ define, always reporting RESOLVED values rather than a guess:
    live in to run. A repo whose `.clagentic/loadout/config.yaml` already
    declares its own live `post_merge_steps` passes even if `.crew/*.yaml`
    also mentions the key — a leftover mention there is dead documentation,
-   not a dead deploy.
+   not a dead deploy. THIS CHECK IS DOCTOR-ONLY AND POST-HOC — it fires
+   only when someone runs `loadout-doctor --repo-root`. `loadout-merge`'s
+   own step 10 (see the `loadout-merge` section, "Dead `.crew/<role>.yaml`
+   `post_merge_steps` cross-check") surfaces the SAME cross-check as a
+   loud, non-blocking WARNING at the point a merge actually happens, so the
+   class is caught even on an unattended merge where nobody runs doctor.
 4. **`builder_identity` / `review.reviewer_logins` deployment-tier config**
    (no `--repo-root` needed — always runs) — validates the
    USER-LEVEL config.yaml's `builder_identity:` section
