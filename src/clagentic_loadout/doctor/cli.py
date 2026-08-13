@@ -34,6 +34,7 @@ from clagentic_loadout.doctor.checks import (
     check_builder_identity_config,
     check_credential_validity,
     check_credentials,
+    check_dead_crew_post_merge_config,
     check_github_app_slugs_coverage,
     check_repo_loadout_schema,
 )
@@ -65,7 +66,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "-- an unsatisfiable gate; the same mismatch WARNs instead when "
             "the repo declares no roles: section at all, since that check "
             "falls back to a reference role taxonomy rather than this "
-            "repo's own declaration). "
+            "repo's own declaration). Also flags post_merge_steps declared "
+            "in a .crew/<role>.yaml file when the repo's own "
+            ".clagentic/loadout/config.yaml declares none -- that key is "
+            "never read from .crew/*.yaml and would silently never run. "
             "Read-only for the default check set: never mutates config, "
             "never mints a real credential. Passing --caller additionally "
             "resolves and probes a REAL credential for that caller against "
@@ -161,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     results.append(check_attestation_source_configured(config_root=config_root))
     if repo_root is not None:
         results.append(check_repo_loadout_schema(Path(repo_root)))
+        results.append(check_dead_crew_post_merge_config(Path(repo_root)))
 
     for result in results:
         print(_format_result_line(result))
