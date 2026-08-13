@@ -1726,6 +1726,22 @@ class TestBuildExpectedVerdictBody:
         )
         assert body.count("```review-result") == 1
 
+    def test_model_attested_included_when_given(self):
+        # lr-95543d: OPTIONAL, threaded through to build_verdict_block.
+        body = git_host_api.build_expected_verdict_body(
+            b'{"body":"LGTM.","review_status":"clean"}',
+            reviewer="some-reviewer", pr_number=1, expected_head_sha=_FULL_SHA,
+            model_attested="claude-opus-4-1-20250805",
+        )
+        assert '"model_attested": "claude-opus-4-1-20250805"' in body
+
+    def test_model_attested_omitted_when_not_given(self):
+        body = git_host_api.build_expected_verdict_body(
+            b'{"body":"LGTM.","review_status":"clean"}',
+            reviewer="some-reviewer", pr_number=1, expected_head_sha=_FULL_SHA,
+        )
+        assert "model_attested" not in body
+
 
 class TestVerifyVerdictBlock:
     def test_matching_fence_passes(self):
@@ -1798,6 +1814,48 @@ class TestVerifyVerdictBlock:
             )
         assert exc_info.value.code == git_host_api.EXIT_VERDICT_BLOCK_MISMATCH
 
+    def test_matching_model_attested_passes(self):
+        fence = git_host_api.build_verdict_block(
+            "some-reviewer", "clean", _FULL_SHA, 5, "claude-opus-4-1-20250805"
+        )
+        git_host_api.verify_verdict_block(
+            f"prose\n{fence}",
+            reviewer="some-reviewer",
+            expected_review_status="clean",
+            expected_head_sha=_FULL_SHA,
+            expected_pr_number=5,
+            expected_model_attested="claude-opus-4-1-20250805",
+        )  # no raise
+
+    def test_wrong_model_attested_raises_mismatch(self):
+        fence = git_host_api.build_verdict_block(
+            "some-reviewer", "clean", _FULL_SHA, 5, "claude-haiku-4-5-20251001"
+        )
+        with pytest.raises(git_host_api.GitHostApiError) as exc_info:
+            git_host_api.verify_verdict_block(
+                fence,
+                reviewer="some-reviewer",
+                expected_review_status="clean",
+                expected_head_sha=_FULL_SHA,
+                expected_pr_number=5,
+                expected_model_attested="claude-opus-4-1-20250805",
+            )
+        assert exc_info.value.code == git_host_api.EXIT_VERDICT_BLOCK_MISMATCH
+
+    def test_expected_model_attested_omitted_is_a_noop(self):
+        # Not passing expected_model_attested at all (the default) means no
+        # comparison happens, regardless of what the fence carries.
+        fence = git_host_api.build_verdict_block(
+            "some-reviewer", "clean", _FULL_SHA, 5, "anything-at-all"
+        )
+        git_host_api.verify_verdict_block(
+            fence,
+            reviewer="some-reviewer",
+            expected_review_status="clean",
+            expected_head_sha=_FULL_SHA,
+            expected_pr_number=5,
+        )  # no raise
+
 
 class TestMainExpectVerdictBlockUsageGuards:
     """Preflight refusals BEFORE any I/O -- mirrors
@@ -1853,6 +1911,17 @@ class TestMainExpectVerdictBlockUsageGuards:
     def test_invalid_reviewer_token_rejected(self):
         rc = self._refused_before_network(
             ["--expect-verdict-block", "not a safe token!", "--body-stdin",
+             "--verify-comment", "--pr-sha", _FULL_SHA,
+             "POST", "/api/v1/repos/o/r/issues/5/comments"],
+        )
+        assert rc == git_host_api.EXIT_VERDICT_BLOCK_USAGE
+
+    def test_model_attested_without_expect_verdict_block_rejected(self):
+        # lr-95543d: --model-attested is only meaningful alongside
+        # --expect-verdict-block -- there is no other fence-building route
+        # on this verb for it to attach to.
+        rc = self._refused_before_network(
+            ["--model-attested", "claude-opus-4-1-20250805", "--body-stdin",
              "--verify-comment", "--pr-sha", _FULL_SHA,
              "POST", "/api/v1/repos/o/r/issues/5/comments"],
         )
@@ -2035,6 +2104,23 @@ class TestMainExpectVerdictBlockEndToEnd:
             token_provider=_RecordingProvider(), opener=fake_opener,
         )
         assert rc == git_host_api.EXIT_VERDICT_BLOCK_MISMATCH
+
+    def test_model_attested_lands_and_verifies(self, monkeypatch, capsys):
+        self._stdin(monkeypatch, b'{"body":"LGTM, no issues found.","review_status":"clean"}')
+        opener = self._make_opener()
+
+        argv = [
+            "--caller", "some-reviewer",
+            "--body-stdin", "--verify-comment", "--pr-sha", _FULL_SHA,
+            "--expect-verdict-block", "some-reviewer",
+            "--model-attested", "claude-opus-4-1-20250805",
+            "POST", "/api/v1/repos/o/r/issues/5/comments",
+        ]
+        rc = git_host_api.main(argv, token_provider=_RecordingProvider(), opener=opener)
+        assert rc == git_host_api.EXIT_OK
+        out = capsys.readouterr().out
+        payload = json.loads(out.strip().splitlines()[-1])
+        assert payload["verdict_block_verified"] is True
 
     def test_stale_pr_sha_fails_before_post_expect_verdict_block(self, monkeypatch):
         self._stdin(monkeypatch, b'{"body":"LGTM.","review_status":"clean"}')

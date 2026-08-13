@@ -673,6 +673,104 @@ class TestVerdictRouteEndToEndSuccess:
         assert '"pr_number": 42' in posted
 
 
+class TestModelAttestedFlag:
+    """lr-95543d: --model-attested is OPTIONAL, supplies the fenced
+    verdict block's 'model_attested' field on the --verdict-review-status
+    route, tool-constructed exactly like every other field, re-verified
+    against the landed readback body."""
+
+    def test_model_attested_lands_in_posted_fence(self, monkeypatch):
+        opener_state: dict = {}
+        opener = _github_verdict_opener(posted_id=5, capture_into=opener_state)
+
+        code = _run_main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--model-attested", "claude-opus-4-1-20250805",
+                "some-owner/some-repo", "42",
+            ],
+            stdin_bytes=b'{"body": "No issues found.", "review_status": "clean"}',
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        posted = opener_state["posted_body"]
+        assert '"model_attested": "claude-opus-4-1-20250805"' in posted
+
+    def test_omitted_model_attested_posts_no_field_at_all(self, monkeypatch):
+        opener_state: dict = {}
+        opener = _github_verdict_opener(posted_id=5, capture_into=opener_state)
+
+        code = _run_main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "some-owner/some-repo", "42",
+            ],
+            stdin_bytes=b'{"body": "No issues found.", "review_status": "clean"}',
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        posted = opener_state["posted_body"]
+        assert "model_attested" not in posted
+
+    def test_mismatch_on_landed_readback_fails_closed(self, monkeypatch):
+        # Mirrors TestVerdictRouteMismatchFailsClosed's own pattern: append
+        # a SECOND, corrupted fence (with a different model_attested) after
+        # the real one -- the fully-posted body remains a strict prefix of
+        # what lands (so the ordinary post_and_verify substring check still
+        # passes), while parse_verdict_block's own "last match wins" rule
+        # makes the re-parsed LATEST fence the corrupted one, isolating the
+        # model_attested mismatch check from an ordinary verify-phase
+        # failure.
+        def append_corrupt_fence(posted_body: str) -> str:
+            corrupt = (
+                "\n```review-result\n"
+                '{"reviewer": "reviewer", "review_status": "clean", '
+                f'"head_sha": "{_HEAD_SHA}", "pr_number": 42, '
+                '"model_attested": "claude-haiku-4-5-20251001"}\n```\n'
+            )
+            return posted_body + corrupt
+
+        code = _run_main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--model-attested", "claude-opus-4-1-20250805",
+                "some-owner/some-repo", "42",
+            ],
+            stdin_bytes=b'{"body": "No issues found.", "review_status": "clean"}',
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_verdict_opener(landed_body=append_corrupt_fence),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERDICT_BLOCK_MISMATCH
+
+    def test_requires_a_verdict_route(self, monkeypatch):
+        # --model-attested with neither --verdict-review-status nor
+        # --verdict-findings is a usage error -- there is no other
+        # fence-building route on this verb for it to attach to.
+        code = _run_main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--model-attested", "claude-opus-4-1-20250805",
+                "o/r", "42",
+            ],
+            stdin_bytes=b'{"body": "LGTM"}',
+            token_provider=_RefusingTokenProvider(),
+            opener=None,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERDICT_BLOCK_USAGE
+
+
 class TestVerdictRouteMismatchFailsClosed:
     """These drive the verify_verdict_block-equivalent re-parse via
     parse_verdict_block's OWN "only the LAST fence match wins" rule

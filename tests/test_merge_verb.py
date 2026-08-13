@@ -20,6 +20,8 @@ import json
 import urllib.error
 from datetime import datetime, timezone
 
+import yaml
+
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.verdict import build_verdict_block
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
@@ -405,6 +407,159 @@ class TestReviewerVerdicts:
             opener=_make_opener(),
         )
         assert code == verb.EXIT_OK
+
+
+def _write_merge_config(repo_path, content: dict) -> None:
+    config_dir = repo_path / ".clagentic" / "loadout"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(yaml.safe_dump({"merge": content}), encoding="utf-8")
+
+
+class TestModelAttestation:
+    """lr-95543d: `merge: require_model_attestation:` -- OPT-IN, default
+    off. A clean verdict passes the reviewer-verdict gate (step 5) whether
+    or not it carries model_attested UNLESS the repo's own config opts in
+    -- at which point a clean verdict missing/malformed model_attested
+    refuses with the SAME EXIT_GATE_RESULT_BLOCKED disposition a blocking
+    verdict already gets. Uses --repo-path pointed at a bare tmp_path
+    carrying only a config file -- the reviewer-verdict gate (step 5) runs
+    well before tree_sync (step 10), so a refusal here never reaches any
+    git-tree machinery; a PASS reaches EXIT_OK via _make_opener's ordinary
+    merge/attestation-post responses exactly like every other test in this
+    file.
+    """
+
+    def _opener_with_comment(self, body: str):
+        return _make_opener(
+            pr_info={"head": {"sha": _FULL_SHA}, "title": "feat: x"},
+            comments=[{"id": 1, "user": {"login": "reviewer-login"}, "body": body}],
+        )
+
+    def test_default_off_clean_verdict_without_model_attested_passes(self, tmp_path):
+        # No require_model_attestation key at all -- defaults False, so a
+        # clean verdict with no model_attested field still passes, exactly
+        # like TestReviewerVerdicts.test_clean_current_sha_verdict_passes.
+        # sync_tree_after_merge: false -- this test asserts the gate outcome
+        # only, never post_merge_steps/tree_sync; the bare tmp_path has no
+        # local git tree for step 10's fetch/checkout to target.
+        _write_merge_config(tmp_path, {"sync_tree_after_merge": False})
+        block = build_verdict_block("some-reviewer", "clean", _FULL_SHA, 1)
+        argv = _base_args(
+            **{
+                "--required-reviewer": "some-reviewer:reviewer-login",
+                "--repo-path": str(tmp_path),
+            }
+        )
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=self._opener_with_comment(block),
+        )
+        assert code == verb.EXIT_OK
+
+    def test_opted_in_clean_verdict_missing_model_attested_refuses(self, tmp_path):
+        _write_merge_config(tmp_path, {"require_model_attestation": True})
+        block = build_verdict_block("some-reviewer", "clean", _FULL_SHA, 1)
+        argv = _base_args(
+            **{
+                "--required-reviewer": "some-reviewer:reviewer-login",
+                "--repo-path": str(tmp_path),
+            }
+        )
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=self._opener_with_comment(block),
+        )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+
+    def test_opted_in_clean_verdict_bare_tier_alias_refuses(self, tmp_path):
+        _write_merge_config(tmp_path, {"require_model_attestation": True})
+        block = build_verdict_block("some-reviewer", "clean", _FULL_SHA, 1, "gpt-flagship")
+        argv = _base_args(
+            **{
+                "--required-reviewer": "some-reviewer:reviewer-login",
+                "--repo-path": str(tmp_path),
+            }
+        )
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=self._opener_with_comment(block),
+        )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+
+    def test_opted_in_clean_verdict_resolved_model_string_passes(self, tmp_path):
+        # sync_tree_after_merge: false -- see the sibling PASS test above.
+        _write_merge_config(
+            tmp_path,
+            {"require_model_attestation": True, "sync_tree_after_merge": False},
+        )
+        block = build_verdict_block(
+            "some-reviewer", "clean", _FULL_SHA, 1, "claude-opus-4-1-20250805"
+        )
+        argv = _base_args(
+            **{
+                "--required-reviewer": "some-reviewer:reviewer-login",
+                "--repo-path": str(tmp_path),
+            }
+        )
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=self._opener_with_comment(block),
+        )
+        assert code == verb.EXIT_OK
+
+    def test_opted_in_clean_verdict_denylisted_model_refuses(self, tmp_path):
+        _write_merge_config(
+            tmp_path,
+            {
+                "require_model_attestation": True,
+                "model_attestation_denylist": ["deprecated-fallback-4-0"],
+            },
+        )
+        block = build_verdict_block(
+            "some-reviewer", "clean", _FULL_SHA, 1, "deprecated-fallback-4-0"
+        )
+        argv = _base_args(
+            **{
+                "--required-reviewer": "some-reviewer:reviewer-login",
+                "--repo-path": str(tmp_path),
+            }
+        )
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=self._opener_with_comment(block),
+        )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+
+    def test_opted_in_blocking_verdict_unaffected_by_missing_model_attested(self, tmp_path):
+        # A blocking verdict is already refused by assert_clean_verdict --
+        # model-attestation enforcement must not additionally punish (or
+        # change the disposition of) a reviewer that correctly found a
+        # blocking issue, regardless of model_attested.
+        _write_merge_config(tmp_path, {"require_model_attestation": True})
+        block = build_verdict_block("some-reviewer", "blocking", _FULL_SHA, 1)
+        argv = _base_args(
+            **{
+                "--required-reviewer": "some-reviewer:reviewer-login",
+                "--repo-path": str(tmp_path),
+            }
+        )
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=self._opener_with_comment(block),
+        )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
 
 
 class TestBareReviewerNameResolution:
