@@ -456,6 +456,141 @@ def load_post_merge_steps(
     return steps
 
 
+def post_merge_steps_key_declared(
+    repo_root: str | Path | None,
+    *,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+) -> bool:
+    """Whether the repo's own live config EXPLICITLY names the
+    `post_merge_steps` key inside its `merge:` section (lr-f9a01b followup
+    — see `merge.verb`'s module docstring, "DEAD .crew/<role>.yaml
+    post_merge_steps CROSS-CHECK", for the caller this exists for).
+
+    `load_post_merge_steps` returns `[]` for BOTH "this repo configured no
+    steps" (a key present as `post_merge_steps: []`, or a `merge:` section
+    that omits the key while still wanting other `merge:` keys honored) AND
+    "this repo's steps might be declared somewhere this loader does not
+    read" (the key absent everywhere) — a caller that only has `load_post_
+    merge_steps`'s own return value cannot tell those apart, which is
+    correct for every call site `load_post_merge_steps` has served UNTIL
+    NOW (`merge.verb`'s step 10, `merge.post_merge_verb`, `doctor.checks`'
+    `check_repo_loadout_schema` all only ever needed "will steps run,
+    yes/no" — see that function's own docstring). A cross-check that warns
+    when a DIFFERENT config surface (`.crew/<role>.yaml`) mentions
+    `post_merge_steps` needs the finer distinction: a repo that explicitly
+    wrote `post_merge_steps: []` in its OWN live config has made an
+    informed choice at the CORRECT file and should never be warned about a
+    stale mention elsewhere, whereas a repo whose live config never
+    mentions the key at all is exactly the silent-no-op shape worth
+    flagging.
+
+    Returns `True` only when the resolved config file exists, its `merge:`
+    section exists and is a mapping, and that mapping contains a
+    `post_merge_steps` key (whatever its value — an empty list still
+    counts as "declared here"). Returns `False` when *repo_root* is None,
+    the config file is absent, the `merge:` section is absent, or the
+    section exists but never mentions the key.
+
+    Never raises `PostMergeConfigError` on a malformed `post_merge_steps`
+    value (unlike `load_post_merge_steps`) — this function only asks
+    whether the key is PRESENT, not whether its value validates; the
+    caller who needs the malformed-config failure already gets it from its
+    own `load_post_merge_steps` call. Does raise on a malformed `merge:`
+    section (not a mapping) or unreadable/invalid YAML, mirroring every
+    other resolver in this module's fail-fast contract for those two
+    failure modes specifically.
+    """
+    if repo_root is None:
+        return False
+
+    config_path = resolve_repo_config_path(
+        repo_root, config_relative_path=config_relative_path
+    )
+    raw = _read_yaml_mapping(config_path)
+
+    merge_section = raw.get(CONFIG_SECTION_MERGE)
+    if merge_section is None:
+        return False
+    if not isinstance(merge_section, dict):
+        raise PostMergeConfigError(
+            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
+            f"got {type(merge_section).__name__}."
+        )
+
+    return CONFIG_KEY_POST_MERGE_STEPS in merge_section
+
+
+#: Directory name (repo-root-relative) holding per-role dispatch config
+#: files (one `<role>.yaml` file per role) -- a DIFFERENT config surface
+#: than this module's own repo-local config file. `load_post_merge_steps`
+#: has never read from here (see its own docstring) -- this constant/the
+#: scan function below exist ONLY to detect a `post_merge_steps` mention
+#: declared in one of these files, which silently never runs (lr-f9a01b).
+CREW_CONFIG_DIR_NAME = ".crew"
+
+
+def find_crew_yaml_files_declaring_post_merge_steps(
+    repo_root: str | Path | None,
+) -> list[str]:
+    """Return the sorted, stringified paths of every `<repo_root>/.crew/
+    *.yaml` file that mentions a `post_merge_steps` key -- either at that
+    file's own top level, or nested one level under a `merge:` section (the
+    shape a repo author who has seen this module's own `merge:`-section
+    convention might reasonably also try there, even though neither shape
+    is ever read from `.crew/*.yaml`) (lr-f9a01b).
+
+    SHARED SCAN LOGIC, ONE OWNER: both `doctor.checks.
+    check_dead_crew_post_merge_config` (the diagnostic, `--repo-root`-gated
+    doctor finding) and `merge.verb._run`'s step-10 warning (the same
+    cross-check surfaced loudly at the point a merge actually happens,
+    added because a doctor-only check only fires when someone thinks to
+    run doctor -- see that module's docstring, "DEAD .crew/<role>.yaml
+    post_merge_steps CROSS-CHECK") call this SAME function, so the two
+    surfaces can never diverge on what counts as an offending file.
+
+    Returns `[]` when *repo_root* is None, there is no `.crew/` directory,
+    or no `.crew/*.yaml` file mentions the key anywhere -- the common case,
+    nothing to warn about. A `.crew/*.yaml` file that is unreadable or
+    malformed YAML, or whose top-level document is not a mapping, is
+    silently skipped (never raised) -- this is a read-only scan of a
+    config surface this module does not own the schema for; a malformed
+    `.crew/*.yaml` file is a conformance concern for whatever schema DOES
+    own that file's shape, not something this function should fail over.
+
+    Read-only: never parses/returns `post_merge_steps`' own VALUE (the
+    step list itself) -- only whether the KEY is present and which file
+    declared it. A `.crew/*.yaml` mention is never treated as a source of
+    steps to execute; `.crew/*.yaml` was not, and is not by this function,
+    part of any executable step-loading path (see `load_post_merge_steps`'
+    own docstring).
+    """
+    if repo_root is None:
+        return []
+
+    repo_root_path = Path(repo_root)
+    crew_dir = repo_root_path / CREW_CONFIG_DIR_NAME
+    if not crew_dir.is_dir():
+        return []
+
+    offending_files: list[str] = []
+    for crew_config_path in sorted(crew_dir.glob("*.yaml")):
+        try:
+            raw = yaml.safe_load(crew_config_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        declares_top_level = CONFIG_KEY_POST_MERGE_STEPS in raw
+        merge_section = raw.get(CONFIG_SECTION_MERGE)
+        declares_nested = (
+            isinstance(merge_section, dict) and CONFIG_KEY_POST_MERGE_STEPS in merge_section
+        )
+        if declares_top_level or declares_nested:
+            offending_files.append(str(crew_config_path))
+
+    return offending_files
+
+
 def resolve_git_working_tree(
     repo_root: str | Path | None,
     *,
@@ -980,6 +1115,7 @@ __all__ = [
     "CONFIG_KEY_SYNC_TREE_AFTER_MERGE",
     "CONFIG_SECTION_MERGE",
     "CONFIG_SECTION_POST_MERGE_ENV",
+    "CREW_CONFIG_DIR_NAME",
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "DEFAULT_ENFORCE_MERGE_SHAPE",
     "DEFAULT_ENFORCE_SINGLE_VERDICT_FENCE",
@@ -987,7 +1123,9 @@ __all__ = [
     "DEFAULT_REQUIRE_MODEL_ATTESTATION",
     "DEFAULT_SYNC_TREE_AFTER_MERGE",
     "ENV_OVERRIDE_PREFIX",
+    "find_crew_yaml_files_declaring_post_merge_steps",
     "load_post_merge_steps",
+    "post_merge_steps_key_declared",
     "resolve_enforce_merge_shape",
     "resolve_enforce_single_verdict_fence",
     "resolve_env_overrides",
