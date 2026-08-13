@@ -1254,6 +1254,43 @@ class TestBotIdentity:
         )
         assert code == verb.EXIT_OK
 
+    def test_dirty_work_tree_fails_with_a_distinct_message_before_reauthoring(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """lr-4cd7ac (MILLER diagnosis lr-60781e): a push with a bot
+        identity AND unstaged tracked changes must fail with a message
+        naming the dirty tree, distinguishable from a genuine identity
+        mismatch -- not the pre-fix generic 'commit re-authoring failed'
+        with no cause, and not EXIT_AUTHOR_MISMATCH's mis-attribution
+        framing (this is a local, recoverable condition, unrelated to
+        commit authorship)."""
+        repo, remote = repo_with_remote
+        (repo / "feature.txt").write_text("unstaged edit after commit\n")
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--bot-name", "Bot Name", "--bot-email", "bot@example.com",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_DIRTY_WORK_TREE
+        assert code != verb.EXIT_AUTHOR_MISMATCH
+        stderr = capsys.readouterr().err
+        assert "feature.txt" in stderr
+        assert "unstaged changes" in stderr
+        assert "LOCAL, RECOVERABLE" in stderr
+
+        # Nothing was pushed to the remote -- the pre-flight must fire
+        # BEFORE any re-authoring or push attempt.
+        r = subprocess.run(
+            ["git", "branch"], cwd=str(remote), capture_output=True, text=True, check=True,
+        )
+        assert "feature" not in r.stdout
+
 
 class TestLeaseControl:
     """lr-f57f13, D5 DECIDED: push.verb no longer silently derives
