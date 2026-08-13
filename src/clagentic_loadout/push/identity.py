@@ -8,9 +8,30 @@ push authored under the wrong identity is unrecoverable once merged, so the
 caller's own bot identity is verified on HEAD before every push.
 
 WHAT MOVED / WHAT DIDN'T:
-  - The re-authoring mechanism (git filter-branch --env-filter over the
-    caller's own commits, excluded against the caller-resolved base ref)
+  - The re-authoring mechanism itself (git filter-branch --env-filter over
+    the caller's own commits, excluded against a resolved exclusion ref)
     is unchanged.
+  - THE EXCLUSION-REF COMPUTATION IS NOT UNCHANGED (lr-501695 fix, ported
+    defect closed): a prior revision of this module carried this claim
+    verbatim from the ported reference, and resolve_exclusion_ref's own
+    "prefer origin/<base> over local <base>" logic was ALSO ported
+    unchanged — including a one-directional defect it inherited rather
+    than fixed (see resolve_exclusion_ref's own docstring for the full
+    account: preferring the remote-tracking ref only guards against a
+    LAGGING LOCAL base ref; when the remote-tracking ref is the stale one
+    instead, the old logic let the rewrite range over-extend past the true
+    merge base and re-stamp already-landed commits). This module now
+    computes each resolvable candidate ref's OWN merge base with HEAD and
+    takes the more-advanced of the two (see resolve_exclusion_ref's own
+    docstring for why a merge-base against a single, unconditionally-
+    preferred candidate does not fully close this on its own) instead of
+    returning a branch ref directly — correct regardless of which side is
+    stale. Worth stating plainly: a defect surviving a
+    "ported, not fixed" transition into a stated-unchanged mechanism is
+    exactly the failure mode a prior closed-as-moot task (a stale-local-
+    base fix on a since-deleted predecessor script) already illustrated —
+    this fix does not repeat it by leaving a second "unchanged" claim
+    standing over logic that no longer is.
   - The IDENTITY SOURCE is no longer read from a reference-implementation-
     specific per-agent config section or credential-provider config file.
     Both are caller inputs to this module: `bot_name` / `bot_email` are
@@ -26,6 +47,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from clagentic_loadout.push.errors import AuthorMismatchError
@@ -67,27 +89,105 @@ def verify_head_author(expected_email: str, git_cwd: Path | None = None) -> bool
     return actual == expected_email
 
 
+def _merge_base_with_head(ref: str, git_cwd: Path | None) -> str | None:
+    """`git merge-base <ref> HEAD`, or None if the ref doesn't resolve
+    against HEAD (unrelated histories, or *ref* itself absent)."""
+    mb = _run(["git", "merge-base", ref, "HEAD"], cwd=git_cwd)
+    if mb.returncode != 0 or not mb.stdout.strip():
+        return None
+    return mb.stdout.strip()
+
+
+def _is_ancestor(candidate_sha: str, of_sha: str, git_cwd: Path | None) -> bool:
+    """True iff *candidate_sha* is an ancestor of (or equal to) *of_sha*."""
+    if candidate_sha == of_sha:
+        return True
+    r = _run(["git", "merge-base", "--is-ancestor", candidate_sha, of_sha], cwd=git_cwd)
+    return r.returncode == 0
+
+
 def resolve_exclusion_ref(
     base_branch: str,
     git_cwd: Path | None = None,
 ) -> tuple[str, str] | tuple[None, None]:
     """Resolve the exclusion ref filter-branch uses as the rewrite floor.
 
-    Prefers `origin/<base_branch>` (remote tracking ref) over the local
-    `<base_branch>` ref — a lagging local base ref would otherwise place
-    already-landed commits inside the rewrite range and corrupt their SHAs.
-    Returns (ref, label) on success, (None, None) if neither ref resolves.
+    THE FLOOR IS THE MORE-ADVANCED MERGE BASE, NEVER A SINGLE BRANCH REF
+    DIRECTLY (fix direction (2), lr-501695): a prior revision of this
+    function preferred `origin/<base_branch>` (remote tracking ref) over
+    the local `<base_branch>` ref, on the reasoning that a LAGGING LOCAL
+    base ref would place already-landed commits inside the rewrite range
+    and corrupt their SHAs. That reasoning was correct as far as it went,
+    but the failure is SYMMETRIC and a straight "always prefer one ref
+    over the other" choice only ever guards one direction: when the
+    REMOTE-TRACKING ref is the stale one instead (local `<base_branch>`
+    merged or fast-forwarded ahead of `origin/<base_branch>` without a
+    subsequent fetch — routine on a repo that merges non-squash, since a
+    landed merge commit advances local `<base_branch>` immediately but the
+    remote-tracking ref only catches up on the next fetch), unconditionally
+    preferring `origin/<base_branch>` makes it the STALE, BEHIND-BUT-STILL-
+    AN-ANCESTOR-OF-HEAD ref — `HEAD ^origin/<base_branch>` then over-
+    extends past the true merge base and includes already-landed commits
+    that are already reachable from the MORE CURRENT of the two refs (see
+    push.reauthor_commits' caller — identity re-authoring is unrecoverable
+    once pushed). Taking `merge-base(origin/<base_branch>, HEAD)` alone
+    does not fix this specific geometry either: when origin/<base_branch>
+    is a plain ancestor of HEAD (the diagnosed shape — local main was
+    fast-forwarded/merged ahead of a stale origin/main, so origin/main is
+    STILL reachable from HEAD, just further back), its own merge-base with
+    HEAD is itself — unchanged from the unfixed behavior.
+
+    THE FIX: resolve BOTH candidates that exist (remote-tracking AND
+    local), compute each one's OWN merge-base with HEAD, and return
+    whichever of the two merge-base points is the more advanced (i.e. the
+    one the OTHER is an ancestor of) — the floor is always the LATEST
+    point both HEAD and at least one resolvable base-branch ref agree is
+    already-landed history, never the earliest. This is correct regardless
+    of which single ref (local or remote-tracking) is the stale one: the
+    stale ref's own merge-base-with-HEAD is necessarily an ancestor of (or
+    equal to) the current ref's, so the more-advanced comparison always
+    picks the current one's floor without needing to know in advance which
+    side was stale. When only one candidate ref resolves at all (e.g. no
+    remote configured), its own merge-base with HEAD is used directly —
+    unchanged behavior for that case.
+
+    Returns (floor_sha, label) on success, (None, None) if neither
+    candidate ref resolves, or if merge-base fails against every
+    resolved candidate (e.g. genuinely unrelated histories).
     """
+    candidates: list[tuple[str, str]] = []
+
     remote_ref = f"origin/{base_branch}"
-    r = _run(["git", "rev-parse", "--verify", remote_ref], cwd=git_cwd)
-    if r.returncode == 0:
-        return remote_ref, f"remote tracking ref {remote_ref!r}"
+    if _run(["git", "rev-parse", "--verify", remote_ref], cwd=git_cwd).returncode == 0:
+        candidates.append((remote_ref, f"remote tracking ref {remote_ref!r}"))
 
-    r2 = _run(["git", "rev-parse", "--verify", base_branch], cwd=git_cwd)
-    if r2.returncode == 0:
-        return base_branch, f"local ref {base_branch!r} (remote unavailable)"
+    if _run(["git", "rev-parse", "--verify", base_branch], cwd=git_cwd).returncode == 0:
+        candidates.append((base_branch, f"local ref {base_branch!r}"))
 
-    return None, None
+    if not candidates:
+        return None, None
+
+    resolved: list[tuple[str, str]] = []
+    for ref, ref_label in candidates:
+        merge_base_sha = _merge_base_with_head(ref, git_cwd)
+        if merge_base_sha is not None:
+            resolved.append((merge_base_sha, ref_label))
+
+    if not resolved:
+        return None, None
+
+    # Pick the most-advanced merge-base point: the one every OTHER
+    # resolved candidate's merge-base is an ancestor of (or equal to).
+    # With at most two candidates (remote-tracking, local) this always
+    # terminates on a well-defined winner, since one ref being stale
+    # relative to the other means its merge-base-with-HEAD is necessarily
+    # an ancestor of the current ref's.
+    best_sha, best_label = resolved[0]
+    for sha, label in resolved[1:]:
+        if _is_ancestor(best_sha, sha, git_cwd):
+            best_sha, best_label = sha, label
+
+    return best_sha, f"merge-base({best_label}, HEAD) = {best_sha}"
 
 
 def reauthor_commits(
@@ -106,13 +206,33 @@ def reauthor_commits(
     if quick_check.returncode != 0 or quick_check.stdout.strip() == "0":
         return True
 
-    exclusion_ref, _label = resolve_exclusion_ref(base_branch, git_cwd)
+    exclusion_ref, label = resolve_exclusion_ref(base_branch, git_cwd)
     if exclusion_ref is None:
         return False
 
     range_check = _run(["git", "rev-list", "--count", "HEAD", f"^{exclusion_ref}"], cwd=git_cwd)
     if range_check.returncode != 0 or range_check.stdout.strip() == "0":
         return True
+
+    # Fix direction (3), lr-501695: log the rewrite set (count + SHAs) to
+    # stderr BEFORE filter-branch runs, so a future regression in the
+    # exclusion-ref/merge-base computation above is VISIBLE to an operator
+    # (or CI log) instead of silently re-stamping already-landed history.
+    # Best-effort only — a failure to enumerate the set never blocks the
+    # rewrite itself; the set is diagnostic, not a gate.
+    log = _run(
+        ["git", "log", "--format=%H %s", "HEAD", f"^{exclusion_ref}"],
+        cwd=git_cwd,
+    )
+    if log.returncode == 0:
+        rewrite_lines = [line for line in log.stdout.splitlines() if line.strip()]
+        print(
+            f"push: re-authoring {len(rewrite_lines)} commit(s) to bot identity "
+            f"(exclusion ref: {label}):",
+            file=sys.stderr,
+        )
+        for line in rewrite_lines:
+            print(f"push:   {line}", file=sys.stderr)
 
     env_filter = (
         'GIT_AUTHOR_NAME="$_BOT_NAME" '
