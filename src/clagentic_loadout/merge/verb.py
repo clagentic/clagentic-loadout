@@ -192,11 +192,13 @@ pyproject.toml/package source off disk) has no way to see "what merged"
 other than a real, populated checkout, via
 merge.tree_sync.advance_repo_to_merged_sha (fetch + detached checkout, with
 a post-checkout `git rev-parse HEAD` readback verified against the merge
-API's own reported SHA when one was returned — see that module's docstring
-for why only that path can independently confirm the landed SHA). When NO
-steps will run (none configured, or `--skip-post-merge`), step 10 instead
-calls merge.tree_sync.fetch_merged_sha_object -- the SAME fetch and SHA
-verification, but with NO checkout at all: the working tree, index, and
+API's own reported SHA when one was returned — see that module's docstring).
+When NO steps will run (none configured, or `--skip-post-merge`), step 10
+instead calls merge.tree_sync.fetch_merged_sha_object -- the SAME fetch and
+an equally independent local `git cat-file -e <sha>^{commit}` readback (see
+that function's own docstring, "VERIFICATION IS THIS FUNCTION'S OWN, NOT
+DELEGATED TO THE CALLER" — added after a security-review finding on this
+PR), but with NO checkout at all: the working tree, index, and
 HEAD are left exactly as the caller had them. This still keeps the merge-
 shape readback (below) and the merge-completion attestation's SHA claim
 independently confirmed against a real fetched object in EVERY case, while

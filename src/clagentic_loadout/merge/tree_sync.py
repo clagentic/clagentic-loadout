@@ -278,10 +278,35 @@ def fetch_merged_sha_object(
     still be independently confirmed against a real fetched object, without
     paying for a checkout nothing will read.
 
+    VERIFICATION IS THIS FUNCTION'S OWN, NOT DELEGATED TO THE CALLER
+    (security-review finding, folded into lr-173768): BOTH
+    the known_merged_sha path and the base-branch-fallback path run a real
+    local readback -- `git cat-file -e <sha>^{commit}` -- confirming the
+    fetched object EXISTS locally and IS A COMMIT, not merely that some ref
+    or literal SHA string resolves. Before this fix, the known_merged_sha
+    path returned the caller-supplied value on a bare `git fetch` exit-code
+    success alone, with no independent confirmation the object actually
+    landed in this tree's object database or was even a commit -- that made
+    this function's own claimed verification contract a property of its ONE
+    caller (`merge.verb._run` happens to run `merge.merge_shape.
+    check_merge_shape`'s own `git log` immediately afterward, which would
+    have caught a missing/non-commit object) rather than a property of this
+    function itself. A future call site that reorders, removes, or never
+    adds that follow-up check would have silently lost the verification, and
+    no test here would have caught it. `git cat-file -e ...^{commit}` is
+    used (rather than another `git rev-parse`) specifically because
+    `rev-parse` alone only confirms "some object with a name shaped like
+    this string is known" without confirming its TYPE -- the `^{commit}`
+    peel makes a tree/blob/tag-only object (which `git log`/`git checkout`
+    would then fail on downstream anyway) a refusal HERE instead, at the
+    earliest possible point.
+
     Raises TreeSyncError on the same conditions `advance_repo_to_merged_sha`
-    does: a missing/unresolvable *base_branch*, a non-zero `git fetch`, or
-    (when *known_merged_sha* is supplied) a resolved SHA that does not match
-    it. Since there is no checkout here, "resolved SHA" for the
+    does: a missing/unresolvable *base_branch*, a non-zero `git fetch`, a
+    resolved SHA that does not match *known_merged_sha* when one was
+    supplied, or (either path) a failed `git cat-file -e ...^{commit}`
+    readback -- meaning the fetched object either does not exist locally or
+    is not a commit. Since there is no checkout here, "resolved SHA" for the
     base-branch-fallback path (no *known_merged_sha*) is read via
     `git rev-parse FETCH_HEAD` rather than a post-checkout `git rev-parse
     HEAD` -- the object is the same either way; only the ref used to name it
@@ -306,21 +331,40 @@ def fetch_merged_sha_object(
         )
 
     if known_merged_sha:
-        return known_merged_sha
+        fetched_sha = known_merged_sha
+    else:
+        rev_parse_result = _run_git(["rev-parse", "FETCH_HEAD"], cwd=repo_path)
+        if rev_parse_result.returncode != 0:
+            raise TreeSyncError(
+                f"git rev-parse FETCH_HEAD failed (exit "
+                f"{rev_parse_result.returncode}) in {repo_path} after fetch: "
+                f"{rev_parse_result.stderr.strip()[:400]}"
+            )
+        fetched_sha = rev_parse_result.stdout.strip()
+        if not fetched_sha:
+            raise TreeSyncError(
+                f"git rev-parse FETCH_HEAD returned an empty SHA in "
+                f"{repo_path} after fetch -- cannot verify the merged "
+                f"commit was fetched."
+            )
 
-    rev_parse_result = _run_git(["rev-parse", "FETCH_HEAD"], cwd=repo_path)
-    if rev_parse_result.returncode != 0:
+    # Independent local readback (see docstring above): both
+    # paths converge here so NEITHER can skip verification -- confirms
+    # *fetched_sha* both exists in this tree's object database and is a
+    # commit object, never trusting a bare fetch exit code or a resolved-ref
+    # name alone.
+    cat_file_result = _run_git(
+        ["cat-file", "-e", f"{fetched_sha}^{{commit}}"], cwd=repo_path
+    )
+    if cat_file_result.returncode != 0:
         raise TreeSyncError(
-            f"git rev-parse FETCH_HEAD failed (exit "
-            f"{rev_parse_result.returncode}) in {repo_path} after fetch: "
-            f"{rev_parse_result.stderr.strip()[:400]}"
+            f"git cat-file -e {fetched_sha}^{{commit}} failed (exit "
+            f"{cat_file_result.returncode}) in {repo_path} after fetch -- "
+            f"the fetched object does not exist locally or is not a commit; "
+            f"refusing to report a SHA this function cannot independently "
+            f"confirm landed: {cat_file_result.stderr.strip()[:400]}"
         )
-    fetched_sha = rev_parse_result.stdout.strip()
-    if not fetched_sha:
-        raise TreeSyncError(
-            f"git rev-parse FETCH_HEAD returned an empty SHA in {repo_path} "
-            f"after fetch -- cannot verify the merged commit was fetched."
-        )
+
     return fetched_sha
 
 
