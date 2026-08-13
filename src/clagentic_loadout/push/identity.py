@@ -41,6 +41,19 @@ WHAT MOVED / WHAT DIDN'T:
     tier — that was GitHub-App-install-token-specific plumbing this module
     does not own. A caller integrating a credential-minting provider that
     also exposes a bot identity resolves it itself and passes the result in.
+  - DIVERGED-BASE-BRANCH FAIL-CLOSED (lr-1cd30b, follow-up gap the
+    lr-501695 security review named non-blocking): resolve_exclusion_ref's
+    "more advanced of the two merge-bases" comparison assumed the two
+    candidates' merge-base points were always ancestor-comparable. When a
+    base branch has genuinely diverged (its local and remote-tracking refs
+    share only an older common ancestor — the realistic path being an
+    upstream force-push), that assumption can fail; the prior code
+    silently kept whichever candidate resolved first (always
+    remote-tracking), an iteration-order artifact that a constructed case
+    shows is NOT reliably the safer floor. resolve_exclusion_ref now raises
+    AmbiguousExclusionRefError in that case instead — see its own
+    docstring, "DIVERGED CANDIDATES", for the full geometry, the
+    constructed evidence, and this deployment's reachability assessment.
 """
 
 from __future__ import annotations
@@ -152,6 +165,14 @@ def _is_ancestor(candidate_sha: str, of_sha: str, git_cwd: Path | None) -> bool:
     return r.returncode == 0
 
 
+class AmbiguousExclusionRefError(Exception):
+    """Raised by resolve_exclusion_ref when the remote-tracking and local
+    candidate refs' own merge-bases with HEAD are mutually non-comparable
+    (neither is an ancestor of the other) -- see resolve_exclusion_ref's own
+    docstring, "DIVERGED CANDIDATES" section, for the full geometry and why
+    this is a fail-closed refusal rather than a silent pick."""
+
+
 def resolve_exclusion_ref(
     base_branch: str,
     git_cwd: Path | None = None,
@@ -197,9 +218,47 @@ def resolve_exclusion_ref(
     remote configured), its own merge-base with HEAD is used directly —
     unchanged behavior for that case.
 
+    DIVERGED CANDIDATES (lr-1cd30b, follow-up gap named non-blocking by the
+    lr-501695 security review): the "more advanced of the two" comparison
+    above presumes the two candidates' merge-base points are
+    ancestor-comparable — one reachable from the other. That presumption
+    can fail: if HEAD's own history contains a merge commit joining two
+    independently-evolved lines (e.g. an upstream force-push on
+    `origin/<base_branch>` diverges it from local `<base_branch>`, and HEAD
+    later merges history reachable only via each ref's own pre-divergence
+    side), `merge-base(origin/<base_branch>, HEAD)` and
+    `merge-base(<base_branch>, HEAD)` can be two DISTINCT commits, NEITHER
+    an ancestor of the other. Constructed and verified directly (lr-1cd30b
+    investigation, not by reasoning alone): in that geometry, the prior
+    unguarded comparison loop silently returned the remote-tracking
+    candidate's merge-base every time (an artifact of candidate iteration
+    order — remote-tracking is always resolved first — never a reasoned
+    safety choice), and that pick is NOT reliably the more-advanced of the
+    two: a constructed case exists where it is the LESS advanced point,
+    placing already-landed commits reachable only via the local ref's line
+    (including a merge commit) inside the rewrite range — the same
+    already-landed-commits-get-re-stamped class lr-501695 fixed for the
+    single-stale-ref case. There is no general topological law forcing
+    either candidate to be the safer pick when they are incomparable, so
+    THIS FUNCTION NOW RAISES AmbiguousExclusionRefError instead of guessing
+    — rewriting history on an undefined floor is worse than refusing.
+    REACHABILITY: this verb's push-time call site does not fetch
+    `origin/<base_branch>` immediately before re-authoring runs (see
+    push.verb._run_create_pr, where pin_commits_to_bot_identity is called
+    before the branch-commit-check's own fetch and before resolve_lease's
+    conditional pre-lease fetch) — an upstream force-push on the base
+    branch landing between a caller's last fetch and this push, combined
+    with independent local history advancing via a merge, is realistic
+    operational geometry here, not purely theoretical.
+
     Returns (floor_sha, label) on success, (None, None) if neither
     candidate ref resolves, or if merge-base fails against every
     resolved candidate (e.g. genuinely unrelated histories).
+
+    Raises:
+        AmbiguousExclusionRefError: both candidates resolved, but their
+            merge-base points with HEAD are mutually non-comparable (see
+            "DIVERGED CANDIDATES" above).
     """
     candidates: list[tuple[str, str]] = []
 
@@ -224,14 +283,30 @@ def resolve_exclusion_ref(
 
     # Pick the most-advanced merge-base point: the one every OTHER
     # resolved candidate's merge-base is an ancestor of (or equal to).
-    # With at most two candidates (remote-tracking, local) this always
-    # terminates on a well-defined winner, since one ref being stale
-    # relative to the other means its merge-base-with-HEAD is necessarily
-    # an ancestor of the current ref's.
+    # With at most two candidates (remote-tracking, local), this is
+    # well-defined ONLY when the two merge-base points are themselves
+    # ancestor-comparable -- see "DIVERGED CANDIDATES" above for the
+    # constructed geometry where they are not, and why that case raises
+    # rather than silently keeping the first-resolved candidate.
     best_sha, best_label = resolved[0]
     for sha, label in resolved[1:]:
+        if sha == best_sha:
+            continue
         if _is_ancestor(best_sha, sha, git_cwd):
             best_sha, best_label = sha, label
+        elif not _is_ancestor(sha, best_sha, git_cwd):
+            raise AmbiguousExclusionRefError(
+                f"base branch {base_branch!r} has diverged: the "
+                f"remote-tracking and local candidate refs' merge-bases "
+                f"with HEAD are two different commits "
+                f"({best_sha} via {best_label}, {sha} via {label}) and "
+                f"neither is an ancestor of the other. Refusing to guess "
+                f"which is the safe rewrite floor -- rewriting history on "
+                f"an undefined floor risks re-stamping already-landed "
+                f"commits. Fetch the base branch and resolve the "
+                f"divergence (e.g. rebase or reset the local ref onto the "
+                f"current upstream) before retrying."
+            )
 
     return best_sha, f"merge-base({best_label}, HEAD) = {best_sha}"
 
@@ -254,13 +329,20 @@ def reauthor_commits(
     filter-branch` stderr was previously captured and then discarded,
     collapsing every precondition failure -- a dirty tree, an unresolvable
     ref, anything else -- into one indistinguishable message with no cause
-    at all).
+    at all). Also returns (False, cause) when resolve_exclusion_ref raises
+    AmbiguousExclusionRefError (lr-1cd30b: a diverged base branch with no
+    ancestor-comparable floor) — an undefined rewrite floor is refused
+    here, before filter-branch ever runs, rather than proceeding on a
+    guess.
     """
     quick_check = _run(["git", "rev-list", "--count", f"{base_branch}..HEAD"], cwd=git_cwd)
     if quick_check.returncode != 0 or quick_check.stdout.strip() == "0":
         return True, ""
 
-    exclusion_ref, label = resolve_exclusion_ref(base_branch, git_cwd)
+    try:
+        exclusion_ref, label = resolve_exclusion_ref(base_branch, git_cwd)
+    except AmbiguousExclusionRefError as exc:
+        return False, str(exc)
     if exclusion_ref is None:
         return False, (
             f"could not resolve an exclusion ref for base branch "
@@ -413,6 +495,7 @@ def pin_commits_to_bot_identity(
 
 
 __all__ = [
+    "AmbiguousExclusionRefError",
     "check_clean_work_tree",
     "get_head_author_email",
     "pin_commits_to_bot_identity",
