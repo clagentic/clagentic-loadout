@@ -21,6 +21,7 @@ from clagentic_loadout.doctor.checks import (
     check_builder_identity_config,
     check_credential_validity,
     check_credentials,
+    check_dead_crew_post_merge_config,
     check_github_app_slugs_coverage,
     check_repo_loadout_schema,
 )
@@ -83,6 +84,12 @@ def _write_loadout_config(repo_root, yaml_text: str) -> None:
     loadout_dir = repo_root / ".clagentic" / "loadout"
     loadout_dir.mkdir(parents=True, exist_ok=True)
     (loadout_dir / "config.yaml").write_text(yaml_text, encoding="utf-8")
+
+
+def _write_crew_config(repo_root, filename: str, yaml_text: str) -> None:
+    crew_dir = repo_root / ".crew"
+    crew_dir.mkdir(parents=True, exist_ok=True)
+    (crew_dir / filename).write_text(yaml_text, encoding="utf-8")
 
 
 def _write_legacy_loadout_config(repo_root, yaml_text: str) -> None:
@@ -808,6 +815,127 @@ class TestCheckRepoLoadoutSchema:
         assert result.ok is True
         assert result.resolved["unknown_gate_roles"] == []
         assert result.resolved["unsatisfiable_gate_roles"] == []
+
+
+class TestCheckDeadCrewPostMergeConfig:
+    """lr-f9a01b: post_merge_steps declared in .crew/<role>.yaml is NEVER
+    read by merge.post_merge_config.load_post_merge_steps -- this check
+    catches that dead-config trap before a merge silently no-ops it."""
+
+    def test_no_crew_dir_is_ok_no_op(self, tmp_path):
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is True
+        assert result.resolved["offending_files"] == []
+
+    def test_crew_dir_with_no_post_merge_steps_mention_is_ok(self, tmp_path):
+        _write_crew_config(
+            tmp_path,
+            "amos.yaml",
+            "schema_version: 1\nmerge_allowed: false\n",
+        )
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is True
+        assert result.resolved["offending_files"] == []
+
+    def test_top_level_post_merge_steps_in_crew_yaml_with_no_live_config_fails(
+        self, tmp_path
+    ):
+        """The exact trap: .crew/amos.yaml declares post_merge_steps at its
+        own top level (the shape its own starter template shows), and the
+        repo's .clagentic/loadout/config.yaml never mentions it at all."""
+        _write_crew_config(
+            tmp_path,
+            "amos.yaml",
+            "schema_version: 1\n"
+            "post_merge_steps:\n"
+            "  - cmd: 'make install'\n"
+            "    description: 'Refresh local install after merge'\n"
+            "    on_failure: warn\n",
+        )
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is False
+        assert str(tmp_path / ".crew" / "amos.yaml") in result.resolved["offending_files"]
+        assert result.resolved["live_steps_count"] == 0
+        assert "post_merge_steps" in result.summary
+        assert "never" in result.summary
+
+    def test_nested_merge_section_post_merge_steps_in_crew_yaml_fails(self, tmp_path):
+        """A repo author who has seen the merge: section convention this
+        package's own .clagentic/loadout/config.yaml uses might reasonably
+        try nesting under merge: inside .crew/naomi.yaml too -- still dead."""
+        _write_crew_config(
+            tmp_path,
+            "naomi.yaml",
+            "schema_version: 1\n"
+            "merge:\n"
+            "  post_merge_steps:\n"
+            "    - cmd: 'make deploy-staging'\n"
+            "      on_failure: warn\n",
+        )
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is False
+        assert str(tmp_path / ".crew" / "naomi.yaml") in result.resolved["offending_files"]
+
+    def test_crew_yaml_mention_with_live_config_present_passes(self, tmp_path):
+        """The correctly-migrated shape (.crew/naomi.yaml's own real-world
+        header comment): .crew/*.yaml still has an old commented-out
+        example, but the LIVE config already declares its own
+        post_merge_steps -- not a dead deploy, so this check passes."""
+        _write_crew_config(
+            tmp_path,
+            "amos.yaml",
+            "schema_version: 1\n"
+            "post_merge_steps:\n"
+            "  - cmd: 'make install'\n"
+            "    on_failure: warn\n",
+        )
+        _write_loadout_config(
+            tmp_path,
+            "merge:\n"
+            "  post_merge_steps:\n"
+            "    - cmd: 'make install'\n"
+            "      on_failure: warn\n",
+        )
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is True
+        assert result.resolved["live_steps_count"] == 1
+
+    def test_explicit_empty_live_steps_list_passes_not_a_dead_deploy(self, tmp_path):
+        """lr-f9a01b followup (PEACHES finding): a repo that explicitly
+        wrote post_merge_steps: [] in its OWN live config has made an
+        informed choice at the correct file -- an unrelated stale
+        .crew/*.yaml mention must not be flagged as a dead deploy just
+        because bool([]) is falsy, same as the missing-key case would be."""
+        _write_crew_config(
+            tmp_path,
+            "amos.yaml",
+            "post_merge_steps:\n  - cmd: 'make install'\n",
+        )
+        _write_loadout_config(tmp_path, "merge:\n  post_merge_steps: []\n")
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is True
+        assert result.resolved["live_steps_count"] == 0
+
+    def test_multiple_offending_crew_files_all_named(self, tmp_path):
+        _write_crew_config(
+            tmp_path,
+            "amos.yaml",
+            "post_merge_steps:\n  - cmd: 'make install'\n",
+        )
+        _write_crew_config(
+            tmp_path,
+            "naomi.yaml",
+            "post_merge_steps:\n  - cmd: 'make deploy'\n",
+        )
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is False
+        assert len(result.resolved["offending_files"]) == 2
+
+    def test_malformed_crew_yaml_is_skipped_not_raised(self, tmp_path):
+        _write_crew_config(tmp_path, "amos.yaml", "not: valid: yaml: [\n")
+        result = check_dead_crew_post_merge_config(tmp_path)
+        assert result.ok is True
+        assert result.resolved["offending_files"] == []
 
 
 class TestCheckBuilderIdentityConfig:

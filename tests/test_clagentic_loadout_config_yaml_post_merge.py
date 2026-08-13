@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from clagentic_loadout.doctor.checks import check_dead_crew_post_merge_config
 from clagentic_loadout.merge.post_merge import validate_post_merge_steps
 from clagentic_loadout.merge.post_merge_config import load_post_merge_steps
 
@@ -128,3 +129,14 @@ class TestPostMergeStepsWellFormed:
             tokens = cmd.split() if isinstance(cmd, str) else cmd
             found = shell_operators.intersection(tokens)
             assert not found, f"shell operator token(s) {found} found in step cmd {cmd!r}"
+
+
+class TestNoDeadCrewPostMergeConfig:
+    """lr-f9a01b: this repo's own .crew/*.yaml files must never carry a live
+    (uncommented) post_merge_steps mention now that the real config lives at
+    .clagentic/loadout/config.yaml -- a regression here would be exactly the
+    class this task's own doctor check exists to catch, in this repo."""
+
+    def test_repo_own_crew_yaml_files_pass_dead_config_check(self):
+        result = check_dead_crew_post_merge_config(REPO_ROOT)
+        assert result.ok is True, result.summary
