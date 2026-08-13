@@ -89,10 +89,16 @@ Seven checks, matching the task's numbered scope plus one added later
      that `merge.post_merge_config.load_post_merge_steps` has NEVER read —
      both the missing-section and missing-key path there are documented,
      silent no-ops. FAILs when a `.crew/*.yaml` file declares
-     `post_merge_steps` while the repo's own live config declares none —
-     a repo in that shape gets a clean `loadout-merge` exit with
-     `steps_run=0` and never deploys, with nothing in that run's output
-     naming the file the steps actually needed to live in.
+     `post_merge_steps` while the repo's own live config never explicitly
+     declares the key — a repo in that shape gets a clean `loadout-merge`
+     exit with `steps_run=0` and never deploys, with nothing in that run's
+     output naming the file the steps actually needed to live in. THIS IS
+     DOCTOR-ONLY AND POST-HOC: it fires only when someone runs
+     `loadout-doctor --repo-root`. `merge.verb._run`'s step 10 surfaces the
+     SAME cross-check as a loud, non-blocking WARNING at the point a merge
+     actually happens — the path that runs unattended — so the class is
+     caught even when nobody thinks to run doctor; see that module's
+     docstring, "DEAD .crew/<role>.yaml post_merge_steps CROSS-CHECK".
   4. `check_builder_identity_config` (lr-0a03c3) — DEPLOYMENT-TIER: validates
      the USER-LEVEL config.yaml's `builder_identity:` section
      (push.identity_config) and `review.reviewer_logins:` map
@@ -137,7 +143,10 @@ from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_POST_MERGE_STEPS,
     CONFIG_SECTION_MERGE,
+    CREW_CONFIG_DIR_NAME,
+    find_crew_yaml_files_declaring_post_merge_steps,
     load_post_merge_steps,
+    post_merge_steps_key_declared,
 )
 from clagentic_loadout.merge.pre_checks_config import load_pre_checks
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
@@ -1051,21 +1060,12 @@ def check_repo_loadout_schema(
 #     which loadout-merge NEVER reads (lr-f9a01b).
 # ---------------------------------------------------------------------------
 
-#: Directory name (repo-root-relative) holding per-role dispatch config
-#: files (one `<role>.yaml` file per role) -- a DIFFERENT config surface
-#: than this package's own repo-local `.clagentic/loadout/config.yaml` /
-#: legacy `.loadout/config.yaml`. load_post_merge_steps has never read
-#: from here (see that function's own docstring) -- this check exists
-#: ONLY to catch a `post_merge_steps` key declared in one of these files,
-#: which silently never runs.
-CREW_CONFIG_DIR_NAME = ".crew"
-
-
 def check_dead_crew_post_merge_config(repo_root: str | Path) -> CheckResult:
     """Flag a repo that declares `post_merge_steps` inside a
     `.crew/<role>.yaml` file while its OWN `.clagentic/loadout/config.yaml`
     (the only file `merge.post_merge_config.load_post_merge_steps` ever
-    reads -- see that function's docstring) declares none (lr-f9a01b).
+    reads -- see that function's docstring) never explicitly declares the
+    key at all (lr-f9a01b).
 
     THE CLASS THIS CLOSES: `.crew/<role>.yaml`'s own starter template
     documents a `post_merge_steps` section (with `cmd`/`description`/
@@ -1081,32 +1081,47 @@ def check_dead_crew_post_merge_config(repo_root: str | Path) -> CheckResult:
     with nothing in that run's own output naming the file the steps
     actually needed to live in.
 
-    Reads every `*.yaml` file directly under `<repo_root>/.crew/` (a flat,
-    non-recursive glob -- matching how `.crew/<role>.yaml` files are always
-    named, one per role, never nested) looking for a top-level
-    `post_merge_steps` key OR a `post_merge_steps` key nested one level
-    under a `merge:` section (the shape a repo author who has seen this
-    package's own `merge:`-section convention might reasonably also try in
-    `.crew/*.yaml`, even though neither shape is ever read there).
+    THIS IS A DOCTOR-ONLY, POST-HOC CHECK -- it fires only when someone
+    invokes `loadout-doctor --repo-root`. `merge.verb._run`'s step 10 also
+    surfaces this SAME cross-check (via the SAME
+    `find_crew_yaml_files_declaring_post_merge_steps` scan this check
+    calls) as a loud, non-blocking WARNING at the point a merge actually
+    happens -- the path that runs unattended -- so the silent-no-op shape
+    is caught even when nobody thinks to run doctor. See that module's
+    docstring, "DEAD .crew/<role>.yaml post_merge_steps CROSS-CHECK", for
+    why that surface warns rather than refuses.
+
+    Uses `merge.post_merge_config.find_crew_yaml_files_declaring_
+    post_merge_steps` (a flat, non-recursive scan of `<repo_root>/.crew/
+    *.yaml`, matching how `.crew/<role>.yaml` files are always named, one
+    per role, never nested) for a top-level `post_merge_steps` key OR a
+    `post_merge_steps` key nested one level under a `merge:` section (the
+    shape a repo author who has seen this package's own `merge:`-section
+    convention might reasonably also try in `.crew/*.yaml`, even though
+    neither shape is ever read there).
 
     A repo with NO `.crew/` directory, or whose `.crew/*.yaml` files never
     mention `post_merge_steps` anywhere, is `ok=True` -- nothing here for
     this check to flag; the vast majority of repos.
 
     A repo where at least one `.crew/*.yaml` file mentions `post_merge_steps`
-    AND `.clagentic/loadout/config.yaml`'s own `merge.post_merge_steps` key
-    is absent (or the whole `merge:` section, or the whole config file, is
-    absent) is `ok=False` -- naming every offending `.crew/*.yaml` file and
-    the one file (`.clagentic/loadout/config.yaml`) `post_merge_steps` must
-    actually live in to run.
+    AND `.clagentic/loadout/config.yaml`'s own `merge:` section never
+    EXPLICITLY names the `post_merge_steps` key (checked via
+    `merge.post_merge_config.post_merge_steps_key_declared`, not merely
+    "the resolved step list happens to be empty" -- see that function's own
+    docstring for why the distinction matters here) is `ok=False` -- naming
+    every offending `.crew/*.yaml` file and the one file
+    (`.clagentic/loadout/config.yaml`) `post_merge_steps` must actually
+    live in to run.
 
     A repo where `.crew/*.yaml` ALSO mentions `post_merge_steps` but
-    `.clagentic/loadout/config.yaml` ALREADY declares its own
-    `merge.post_merge_steps` (non-empty) is `ok=True` -- the LIVE config
-    is present and correct; a leftover/decorative mention in `.crew/*.yaml`
-    is not itself an error this check flags (it is dead documentation, not
-    a dead deploy -- `check_repo_loadout_schema`'s own schema validation is
-    the place a malformed LIVE config is caught).
+    `.clagentic/loadout/config.yaml` ALREADY declares the key explicitly
+    (even as `post_merge_steps: []`, a repo's own informed choice of zero
+    steps) is `ok=True` -- the LIVE config already has the last word at the
+    correct file; a leftover/decorative mention in `.crew/*.yaml` is not
+    itself an error this check flags (it is dead documentation, not a dead
+    deploy -- `check_repo_loadout_schema`'s own schema validation is the
+    place a malformed LIVE config is caught).
 
     A `.crew/*.yaml` file that is unreadable/malformed YAML is skipped for
     THIS check (reported neither ok nor not-ok by it) -- a malformed
@@ -1117,23 +1132,7 @@ def check_dead_crew_post_merge_config(repo_root: str | Path) -> CheckResult:
     repo_root_path = Path(repo_root)
     crew_dir = repo_root_path / CREW_CONFIG_DIR_NAME
 
-    offending_files: list[str] = []
-    if crew_dir.is_dir():
-        for crew_config_path in sorted(crew_dir.glob("*.yaml")):
-            try:
-                raw = yaml.safe_load(crew_config_path.read_text(encoding="utf-8"))
-            except (OSError, yaml.YAMLError):
-                continue
-            if not isinstance(raw, dict):
-                continue
-            declares_top_level = CONFIG_KEY_POST_MERGE_STEPS in raw
-            merge_section = raw.get(CONFIG_SECTION_MERGE)
-            declares_nested = (
-                isinstance(merge_section, dict)
-                and CONFIG_KEY_POST_MERGE_STEPS in merge_section
-            )
-            if declares_top_level or declares_nested:
-                offending_files.append(str(crew_config_path))
+    offending_files = find_crew_yaml_files_declaring_post_merge_steps(repo_root_path)
 
     if not offending_files:
         return CheckResult(
@@ -1146,10 +1145,11 @@ def check_dead_crew_post_merge_config(repo_root: str | Path) -> CheckResult:
             resolved={"crew_dir": str(crew_dir), "offending_files": []},
         )
 
-    live_steps = load_post_merge_steps(repo_root_path)
+    live_key_declared = post_merge_steps_key_declared(repo_root_path)
     live_config_path = resolve_repo_config_path(repo_root_path, warn=False)
 
-    if live_steps:
+    if live_key_declared:
+        live_steps = load_post_merge_steps(repo_root_path)
         return CheckResult(
             name="dead_crew_post_merge_config",
             ok=True,
