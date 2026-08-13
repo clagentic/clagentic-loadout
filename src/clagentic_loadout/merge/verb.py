@@ -95,12 +95,14 @@ documented step ordering):
      non-zero — never merge. The GitHub path's 200+merged:false
      disambiguation (never trust the status code alone — see
      merge.github_backend.merge_pr) is reached unchanged through this same
-     call site. When --repo-path is given, step 10 below FIRST advances that
-     local tree to the merged SHA (merge.tree_sync, lr-7c5540), THEN (lr-14f704
-     item 3) reads back that landed commit's ACTUAL parent count and compares
-     it against what the requested --merge-method predicts — a mismatch is
-     logged loudly (WARN by default; a hard refusal, EXIT_MERGE_SHAPE_MISMATCH,
-     only for a repo that opts in via `merge: enforce_merge_shape: true` — see
+     call site. When --repo-path is given, step 10 below FIRST fetches the
+     merged commit into that tree's local object database (merge.tree_sync,
+     lr-7c5540 — a CHECKOUT only when post_merge_steps will actually run
+     this invocation, see lr-173768), THEN (lr-14f704 item 3) reads back
+     that landed commit's ACTUAL parent count and compares it against what
+     the requested --merge-method predicts — a mismatch is logged loudly
+     (WARN by default; a hard refusal, EXIT_MERGE_SHAPE_MISMATCH, only for a
+     repo that opts in via `merge: enforce_merge_shape: true` — see
      merge.merge_shape's own docstring for the full trade-off) before any
      post_merge_steps entry runs — see "WORKING-TREE SYNC BEFORE POST-MERGE
      STEPS" further down.
@@ -177,37 +179,52 @@ docstring point 2 above and this repo's CLAUDE.md rule 2/6a); loadout's
 contract is only that the choice must be explicit, never implicit.
 
 WORKING-TREE SYNC BEFORE POST-MERGE STEPS, AND LANDING ON THE BASE BRANCH
-AFTER (lr-7c5540, extended lr-d95cdb): step 9's `backend.merge_pr` is a
-server-side API merge — it never advances the local `--repo-path` tree.
-Step 10 below now UNCONDITIONALLY (whenever `--repo-path` is given, and the
-repo's own `merge.sync_tree_after_merge` config key -- default True -- has
-not opted out) advances that tree onto the merged commit via
+AFTER (lr-7c5540, extended lr-d95cdb, re-scoped lr-173768): step 9's
+`backend.merge_pr` is a server-side API merge — it never advances the local
+`--repo-path` tree. Whenever `--repo-path` is given and the repo's own
+`merge.sync_tree_after_merge` config key (default True) has not opted out,
+step 10 below fetches the merged commit into that tree's local object
+database — but a `git checkout` (detached or otherwise) is performed ONLY
+when at least one `post_merge_steps` entry will actually run this
+invocation (a non-empty, non-`--skip-post-merge`-bypassed list): a step that
+packages/installs the repo (e.g. `scripts/install.sh` reading
+pyproject.toml/package source off disk) has no way to see "what merged"
+other than a real, populated checkout, via
 merge.tree_sync.advance_repo_to_merged_sha (fetch + detached checkout, with
 a post-checkout `git rev-parse HEAD` readback verified against the merge
 API's own reported SHA when one was returned — see that module's docstring
-for why only that path can independently confirm the landed SHA) BEFORE any
-post_merge_steps entry runs, so a step that packages/installs the repo sees
-exactly what landed on main, never the pre-merge branch HEAD the caller
-happened to leave checked out. This no longer depends on post_merge_steps
-being configured at all — before lr-d95cdb, a repo with none configured got
-NO sync whatsoever, and the tree was left wherever the caller last checked
-it out (see merge.tree_sync's module docstring, "LANDING ON THE BASE BRANCH
-AFTER POST-MERGE STEPS", for the full defect this closed). See that
-module's docstring for the per-backend SHA-resolution trade-off. Any
-failure to verify the tree landed on the merged commit is
-EXIT_POST_MERGE_FAILED, never a silent run against the stale ref.
+for why only that path can independently confirm the landed SHA). When NO
+steps will run (none configured, or `--skip-post-merge`), step 10 instead
+calls merge.tree_sync.fetch_merged_sha_object -- the SAME fetch and SHA
+verification, but with NO checkout at all: the working tree, index, and
+HEAD are left exactly as the caller had them. This still keeps the merge-
+shape readback (below) and the merge-completion attestation's SHA claim
+independently confirmed against a real fetched object in EVERY case, while
+eliminating the unsignaled working-tree mutation on every merge whose repo
+either has no post_merge_steps configured or is invoked with
+--skip-post-merge — the documented cross-agent contention source on a host
+where multiple agents share one on-disk checkout (see merge.tree_sync's own
+module docstring, "NO CHECKOUT UNLESS SOMETHING WILL ACTUALLY READ THE
+TREE", for the full rationale). See that module's docstring for the
+per-backend SHA-resolution trade-off. Any failure to verify the tree/object
+landed on the merged commit is EXIT_POST_MERGE_FAILED, never a silent run
+against the stale ref.
 
-AFTER post_merge_steps run (or are skipped via --skip-post-merge, which now
-ONLY skips the configured STEPS, never the tree sync itself -- see below),
-merge.tree_sync.land_on_base_branch moves the tree OFF the detached HEAD
-onto the PR's base branch, repointed (`git checkout -B`, never a merge/
-rebase) at the SAME already-verified landed SHA -- so the tree is left
-positioned exactly where the NEXT dispatch into this repo needs it: on an
-updated local base branch, not detached. `--skip-post-merge` therefore no
-longer implies "skip the sync too" -- that conflation (one flag skipping two
-independent things) was itself part of the original gap; a repo that wants
-NEITHER sync NOR steps sets `merge.sync_tree_after_merge: false` in its own
-config instead.
+AFTER post_merge_steps run (only reachable when steps_will_run above was
+True — see below), merge.tree_sync.land_on_base_branch moves the tree OFF
+the detached HEAD onto the PR's base branch, repointed (`git checkout -B`,
+never a merge/rebase) at the SAME already-verified landed SHA -- so the tree
+is left positioned exactly where the NEXT dispatch into this repo needs it:
+on an updated local base branch, not detached. When steps_will_run is False
+(no checkout ever happened), land_on_base_branch is skipped entirely too --
+there is no detached HEAD to move off of, and repointing the caller's branch
+ref with nothing having read the tree would be exactly the same class of
+unsignaled mutation this task removes. `--skip-post-merge` therefore skips
+BOTH the configured steps AND any checkout that would otherwise exist only
+to serve them — it no longer forces a sync-then-do-nothing checkout the way
+it did between lr-d95cdb and lr-173768; a repo that wants to suppress even
+the FETCH (not just the checkout) sets `merge.sync_tree_after_merge: false`
+in its own config instead.
 
 CONFIG-ROOT VS GIT-TREE-ROOT (lr-93d718): --repo-path is not always a git
 working tree. A wrapper-layout repo keeps `.clagentic/loadout/config.yaml`
@@ -321,6 +338,7 @@ from clagentic_loadout.merge.stale_sha import check_stale_head_sha
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
     advance_repo_to_merged_sha,
+    fetch_merged_sha_object,
     land_on_base_branch,
     resolve_base_branch,
 )
@@ -1363,16 +1381,25 @@ def _run(
     # remaining silent-skip path where --repo-path is simply missing and
     # nothing is logged.
     #
-    # lr-d95cdb: tree-sync (advance_repo_to_merged_sha + land_on_base_branch)
-    # is now UNCONDITIONAL on any --repo-path -- no longer gated on whether
-    # post_merge_steps are configured, or on --skip-post-merge (that flag
-    # only ever meant "skip the configured STEPS", never "leave the tree
-    # wherever the caller left it"; conflating the two was the exact gap this
-    # task closes -- a repo with no post_merge_steps got no sync at all, and
-    # --skip-post-merge on a repo that DID have steps configured skipped the
-    # sync right along with them). A per-repo `merge.sync_tree_after_merge`
-    # key (default True, merge.post_merge_config.resolve_sync_tree_after_merge)
-    # is the only thing that turns this phase off entirely.
+    # lr-173768: a CHECKOUT (git checkout --detach / git checkout -B) is now
+    # performed ONLY when something will actually read the checked-out files
+    # this invocation -- i.e. at least one post_merge_steps entry will
+    # actually run (non-empty list AND --skip-post-merge not given). When
+    # nothing will run, this phase still FETCHES and verifies the merged
+    # commit is present locally (merge.tree_sync.fetch_merged_sha_object) --
+    # so merge.merge_shape.check_merge_shape's local `git log` readback and
+    # the merge-completion attestation's SHA claim keep working
+    # unconditionally -- but never checks anything out: the working tree,
+    # the index, and HEAD are left exactly where the caller had them. This
+    # closes the documented contention source of a shared build-agent
+    # checkout being yanked out from under other in-flight work on every
+    # merge, regardless of whether that merge's own repo even has
+    # post_merge_steps configured (see merge.tree_sync's own module
+    # docstring, "NO CHECKOUT UNLESS SOMETHING WILL ACTUALLY READ THE TREE",
+    # for the full rationale). A per-repo
+    # `merge.sync_tree_after_merge` key (default True,
+    # merge.post_merge_config.resolve_sync_tree_after_merge) still turns off
+    # even the fetch-only phase entirely, unchanged from before this task.
     if args.repo_path:
         try:
             sync_tree_after_merge = resolve_sync_tree_after_merge(args.repo_path)
@@ -1388,17 +1415,6 @@ def _run(
                 file=sys.stderr,
             )
         else:
-            # lr-7c5540: advance the --repo-path working tree to the merged
-            # main SHA BEFORE reading/running any post_merge_steps --
-            # backend.merge_pr above was a server-side API merge; it never
-            # touched this local tree. Without this, a post-merge step that
-            # packages/installs the repo (e.g. `npm pack`) would silently
-            # package whatever ref the caller left checked out (the feature
-            # branch HEAD), not what actually landed on main. See
-            # merge.tree_sync's module docstring for the full trade-off on
-            # how the merged SHA is resolved per backend and why. FAIL LOUD
-            # on any inability to verify the tree landed on the merged
-            # commit -- never a silent run against the stale ref.
             base_branch = resolve_base_branch(pr_info)
             # lr-93d718: config discovery (load_post_merge_steps below) and
             # tree_sync's git-tree target are no longer assumed to be the
@@ -1421,31 +1437,91 @@ def _run(
             git_tree_path = (
                 str(declared_working_tree) if declared_working_tree is not None else args.repo_path
             )
-            try:
-                landed_sha = advance_repo_to_merged_sha(
-                    git_tree_path,
-                    base_branch=base_branch,
-                    known_merged_sha=merged_sha,
+
+            # lr-173768: resolve WHETHER any post_merge_steps will actually
+            # run this invocation BEFORE deciding whether to check anything
+            # out -- a caller-config-load error here is reported exactly as
+            # it always was (EXIT_POST_MERGE_FAILED), just moved earlier so
+            # the checkout-vs-fetch-only decision itself can be made off a
+            # fully-resolved `steps` value.
+            if args.skip_post_merge:
+                steps: list[dict] = []
+            else:
+                try:
+                    steps = load_post_merge_steps(args.repo_path)
+                except PostMergeConfigError as exc:
+                    _fail(
+                        f"post-merge config FAILED to load -- {exc}",
+                        code=EXIT_POST_MERGE_FAILED,
+                    )
+            steps_will_run = bool(steps)
+
+            if steps_will_run:
+                # lr-7c5540: advance the --repo-path working tree to the
+                # merged main SHA BEFORE running any post_merge_steps --
+                # backend.merge_pr above was a server-side API merge; it
+                # never touched this local tree. Without this, a post-merge
+                # step that packages/installs the repo (e.g.
+                # `scripts/install.sh` reading pyproject.toml/package source
+                # off disk) would silently package whatever ref the caller
+                # left checked out (the feature branch HEAD), not what
+                # actually landed on main. See merge.tree_sync's module
+                # docstring for the full trade-off on how the merged SHA is
+                # resolved per backend and why. FAIL LOUD on any inability to
+                # verify the tree landed on the merged commit -- never a
+                # silent run against the stale ref.
+                try:
+                    landed_sha = advance_repo_to_merged_sha(
+                        git_tree_path,
+                        base_branch=base_branch,
+                        known_merged_sha=merged_sha,
+                    )
+                except TreeSyncError as exc:
+                    _fail(
+                        f"post-merge working-tree sync FAILED -- {exc}",
+                        code=EXIT_POST_MERGE_FAILED,
+                    )
+                print(
+                    f"merge: working tree at {git_tree_path} advanced to "
+                    f"merged SHA {landed_sha!r}",
+                    file=sys.stderr,
                 )
-            except TreeSyncError as exc:
-                _fail(
-                    f"post-merge working-tree sync FAILED -- {exc}",
-                    code=EXIT_POST_MERGE_FAILED,
+            else:
+                # lr-173768: nothing will read the checked-out files this
+                # invocation (no post_merge_steps to run) -- fetch and
+                # verify the merged commit is present in the local object
+                # database WITHOUT checking anything out. Never a `git
+                # checkout`, so the working tree/index/HEAD are left exactly
+                # as the caller had them.
+                try:
+                    landed_sha = fetch_merged_sha_object(
+                        git_tree_path,
+                        base_branch=base_branch,
+                        known_merged_sha=merged_sha,
+                    )
+                except TreeSyncError as exc:
+                    _fail(
+                        f"post-merge working-tree sync FAILED -- {exc}",
+                        code=EXIT_POST_MERGE_FAILED,
+                    )
+                print(
+                    f"merge: fetched merged SHA {landed_sha!r} into "
+                    f"{git_tree_path} (no post_merge_steps to run -- "
+                    f"working tree left untouched, no checkout performed)",
+                    file=sys.stderr,
                 )
-            print(
-                f"merge: working tree at {git_tree_path} advanced to merged "
-                f"SHA {landed_sha!r}",
-                file=sys.stderr,
-            )
 
             # lr-14f704 item 3: surface a requested-vs-actual merge-shape
             # mismatch loudly rather than silently -- the exact defect class
             # push.remote_readback (lr-4e8a43) closed one layer down, applied
-            # here to the merge call itself. Only possible now that a local
-            # tree has been synced onto the verified landed SHA (see
-            # merge.merge_shape's own docstring, "SCOPE" -- a bare API-only
-            # merge with no --repo-path has no local object database to read
-            # a parent count from, and is not covered by this check).
+            # here to the merge call itself. Reads the ALREADY-FETCHED local
+            # object (see merge.merge_shape's own docstring, "SCOPE") --
+            # this readback needs the commit object present, never a
+            # checkout, so it runs unconditionally here regardless of
+            # whether steps_will_run checked anything out above. A bare
+            # API-only merge with no --repo-path has no local object
+            # database to read a parent count from, and is not covered by
+            # this check.
             try:
                 shape_check = check_merge_shape(
                     landed_sha, args.merge_method, git_tree_path
@@ -1470,88 +1546,90 @@ def _run(
                     _fail(mismatch_message, code=EXIT_MERGE_SHAPE_MISMATCH)
                 print(f"merge: WARNING -- {mismatch_message}", file=sys.stderr)
 
-            if args.skip_post_merge:
+            if not steps_will_run:
+                if args.skip_post_merge:
+                    print(
+                        "merge: post-merge steps SKIPPED via --skip-post-merge",
+                        file=sys.stderr,
+                    )
+                # else: steps genuinely resolved to an empty list -- nothing
+                # to log beyond the fetch-only message already printed above.
+            else:
                 print(
-                    "merge: post-merge steps SKIPPED via --skip-post-merge",
+                    f"merge: running {len(steps)} post-merge step(s) in "
+                    f"{args.repo_path}",
                     file=sys.stderr,
                 )
-            else:
+                # Deployment-owned env-override seam (lr-52d7): resolved
+                # from CLAGENTIC_LOADOUT_POST_MERGE_ENV_<NAME> env vars
+                # and the user-level config file's post_merge_env:
+                # section — never from this repo's own (possibly
+                # committed) .clagentic/loadout/config.yaml. See
+                # merge.post_merge_config.resolve_env_overrides for the
+                # full precedence and why this is the correct trust
+                # boundary.
+                deployment_env_overrides = resolve_env_overrides()
+                # lr-d6e52b: repo-tier default bound for any ORDINARY
+                # step that does not set its own timeout_seconds -- see
+                # merge.post_merge_config's own docstring,
+                # "POST_MERGE_STEP_TIMEOUT_SECONDS". None (absent) is a
+                # no-op, matching pre-lr-d6e52b unbounded-wait behavior.
                 try:
-                    steps = load_post_merge_steps(args.repo_path)
+                    default_step_timeout = resolve_post_merge_step_timeout_seconds(
+                        args.repo_path
+                    )
                 except PostMergeConfigError as exc:
                     _fail(
                         f"post-merge config FAILED to load -- {exc}",
                         code=EXIT_POST_MERGE_FAILED,
                     )
-                if steps:
-                    print(
-                        f"merge: running {len(steps)} post-merge step(s) in "
-                        f"{args.repo_path}",
-                        file=sys.stderr,
+                try:
+                    run_post_merge_steps(
+                        steps,
+                        args.repo_path,
+                        deployment_env_overrides=deployment_env_overrides,
+                        default_timeout_seconds=default_step_timeout,
                     )
-                    # Deployment-owned env-override seam (lr-52d7): resolved
-                    # from CLAGENTIC_LOADOUT_POST_MERGE_ENV_<NAME> env vars
-                    # and the user-level config file's post_merge_env:
-                    # section — never from this repo's own (possibly
-                    # committed) .clagentic/loadout/config.yaml. See
-                    # merge.post_merge_config.resolve_env_overrides for the
-                    # full precedence and why this is the correct trust
-                    # boundary.
-                    deployment_env_overrides = resolve_env_overrides()
-                    # lr-d6e52b: repo-tier default bound for any ORDINARY
-                    # step that does not set its own timeout_seconds -- see
-                    # merge.post_merge_config's own docstring,
-                    # "POST_MERGE_STEP_TIMEOUT_SECONDS". None (absent) is a
-                    # no-op, matching pre-lr-d6e52b unbounded-wait behavior.
-                    try:
-                        default_step_timeout = resolve_post_merge_step_timeout_seconds(
-                            args.repo_path
-                        )
-                    except PostMergeConfigError as exc:
-                        _fail(
-                            f"post-merge config FAILED to load -- {exc}",
-                            code=EXIT_POST_MERGE_FAILED,
-                        )
-                    try:
-                        run_post_merge_steps(
-                            steps,
-                            args.repo_path,
-                            deployment_env_overrides=deployment_env_overrides,
-                            default_timeout_seconds=default_step_timeout,
-                        )
-                    except (
-                        PostMergeStepFailedError,
-                        PostMergeStepTimeoutError,
-                        PostMergeLivenessError,
-                    ) as exc:
-                        _fail(str(exc), code=EXIT_POST_MERGE_FAILED)
+                except (
+                    PostMergeStepFailedError,
+                    PostMergeStepTimeoutError,
+                    PostMergeLivenessError,
+                ) as exc:
+                    _fail(str(exc), code=EXIT_POST_MERGE_FAILED)
 
-            # lr-d95cdb: only NOW -- after post_merge_steps (if any) have run
-            # against the detached, verified tree -- move the tree off that
-            # detached HEAD onto base_branch, pointed at the SAME landed_sha
-            # advance_repo_to_merged_sha already verified. See
-            # merge.tree_sync.land_on_base_branch's own docstring: this is a
-            # ref repoint (git checkout -B), never a merge/rebase, so it
-            # cannot diverge from the server-side merge result. Runs against
-            # git_tree_path (the SAME target advance_repo_to_merged_sha used
-            # above), not necessarily --repo-path itself (the wrapper-layout
-            # split, lr-93d718).
-            try:
-                landed_branch_sha = land_on_base_branch(
-                    git_tree_path,
-                    base_branch=base_branch,
-                    landed_sha=landed_sha,
+            if steps_will_run:
+                # lr-d95cdb: only NOW -- after post_merge_steps have run
+                # against the detached, verified tree -- move the tree off
+                # that detached HEAD onto base_branch, pointed at the SAME
+                # landed_sha advance_repo_to_merged_sha already verified. See
+                # merge.tree_sync.land_on_base_branch's own docstring: this
+                # is a ref repoint (git checkout -B), never a merge/rebase,
+                # so it cannot diverge from the server-side merge result.
+                # Runs against git_tree_path (the SAME target
+                # advance_repo_to_merged_sha used above), not necessarily
+                # --repo-path itself (the wrapper-layout split, lr-93d718).
+                # lr-173768: skipped entirely when steps_will_run is False --
+                # there is no detached HEAD to move off of in that case (only
+                # a fetch happened, never a checkout), and re-pointing the
+                # caller's branch ref out from under it with nothing having
+                # read the tree would be exactly the unsignaled-mutation
+                # class this task removes.
+                try:
+                    landed_branch_sha = land_on_base_branch(
+                        git_tree_path,
+                        base_branch=base_branch,
+                        landed_sha=landed_sha,
+                    )
+                except TreeSyncError as exc:
+                    _fail(
+                        f"post-merge working-tree sync FAILED -- {exc}",
+                        code=EXIT_POST_MERGE_FAILED,
+                    )
+                print(
+                    f"merge: working tree at {git_tree_path} landed on "
+                    f"{base_branch!r} at {landed_branch_sha!r}",
+                    file=sys.stderr,
                 )
-            except TreeSyncError as exc:
-                _fail(
-                    f"post-merge working-tree sync FAILED -- {exc}",
-                    code=EXIT_POST_MERGE_FAILED,
-                )
-            print(
-                f"merge: working tree at {git_tree_path} landed on "
-                f"{base_branch!r} at {landed_branch_sha!r}",
-                file=sys.stderr,
-            )
     elif args.skip_post_merge:
         print("merge: post-merge steps SKIPPED via --skip-post-merge", file=sys.stderr)
     elif args.no_post_merge_tree:
