@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clagentic.ai/schemas/loadout/review-result.schema.json",
   "title": "review-result verdict block",
-  "description": "The JSON payload embedded in a fenced ```review-result``` block inside a reviewer's PR comment (clagentic_loadout.merge.verdict). Single source of truth for the field set shared by the emit side (build_verdict_block) and the gate-consumer side (parse_verdict_block, read_reviewer_verdict — the merge gate's verdict-fence assertion). Field set is deliberately minimal: reviewer identity, outcome, the SHA the reviewer evaluated, and the PR number.\n\nNOTE on head_sha: this schema intentionally does NOT declare a format pattern on head_sha. read_reviewer_verdict() performs a dedicated full-40-char clagentic_loadout.sha.validate_sha(allow_abbreviated=False) check AFTER parse_verdict_block() returns, raising a specific 'malformed head_sha stamp' error distinct from a generic schema violation. Adding a head_sha pattern at the schema layer would upstage that dedicated check and its distinct error message.",
+  "description": "The JSON payload embedded in a fenced ```review-result``` block inside a reviewer's PR comment (clagentic_loadout.merge.verdict). Single source of truth for the field set shared by the emit side (build_verdict_block) and the gate-consumer side (parse_verdict_block, read_reviewer_verdict — the merge gate's verdict-fence assertion). Field set is deliberately minimal: reviewer identity, outcome, the SHA the reviewer evaluated, the PR number, and (optional) the model the reviewer self-reports having run as.\n\nNOTE on head_sha: this schema intentionally does NOT declare a format pattern on head_sha. read_reviewer_verdict() performs a dedicated full-40-char clagentic_loadout.sha.validate_sha(allow_abbreviated=False) check AFTER parse_verdict_block() returns, raising a specific 'malformed head_sha stamp' error distinct from a generic schema violation. Adding a head_sha pattern at the schema layer would upstage that dedicated check and its distinct error message.\n\nNOTE on model_attested: this field is CALLER-SUPPLIED FREE TEXT, exactly like 'reviewer' — this schema does not, and cannot, verify it names the model that actually produced the review. See clagentic_loadout.merge.model_attestation's module docstring for why no tool-witnessed alternative exists at this seam today, and what enforcement this field's downstream check does and does not provide.",
   "type": "object",
   "additionalProperties": false,
   "required": ["reviewer", "review_status", "head_sha", "pr_number"],
@@ -26,6 +26,11 @@
       "type": "integer",
       "minimum": 1,
       "description": "PR number the verdict applies to."
+    },
+    "model_attested": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OPTIONAL, caller-supplied free text naming the model backend the reviewer reports having run as (e.g. a resolved model identifier, not a bare tier alias). This is a SELF-REPORTED claim, not a tool-witnessed fact — see clagentic_loadout.merge.model_attestation for the shape/denylist check applied downstream and its documented trust limits."
     }
   }
 }
