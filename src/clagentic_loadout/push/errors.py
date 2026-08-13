@@ -43,6 +43,18 @@ class AuthorMismatchError(Exception):
     any push is attempted."""
 
 
+class DirtyWorkTreeError(Exception):
+    """Raised by the pre-flight clean-work-tree check (push.identity.
+    check_clean_work_tree) BEFORE any re-authoring is attempted: `git
+    filter-branch` refuses outright ("You have unstaged changes") on a
+    working tree carrying unstaged changes to tracked files. Deliberately
+    NOT an AuthorMismatchError -- a dirty tree is a LOCAL, RECOVERABLE
+    condition (commit or stash and retry) with no bearing on commit
+    authorship, unlike a genuine re-authoring/verification failure, and the
+    message here must say so instead of reusing mis-attribution framing
+    that does not apply to this cause."""
+
+
 class GitPushError(Exception):
     """Raised when the underlying `git push` subprocess exits non-zero.
 
@@ -147,6 +159,7 @@ class RemoteResolutionError(Exception):
 __all__ = [
     "AuthorMismatchError",
     "BodyEmptyError",
+    "DirtyWorkTreeError",
     "GitPushError",
     "HostDeniedError",
     "MissingIssueLinkError",
