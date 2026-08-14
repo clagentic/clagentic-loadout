@@ -92,6 +92,17 @@ documented step ordering):
      fetch_ci_status for the fail-closed fetch contract (unreachable/non-200
      still raises GateFactUnavailableError exactly like every other
      gate-fact fetch below).
+  8b. Pre-merge checks gate (merge.pre_checks_config, lr-843900) — an
+     OPTIONAL, repo-declared `merge: pre_checks:` list (same step shape as
+     post_merge_steps, reusing merge.post_merge.run_post_merge_steps
+     VERBATIM — same cwd, same on_failure semantics, same PASS/FAIL/exit-
+     code stderr record on every step). Read from the SAME --repo-path
+     config root every other repo-tier gate key here resolves through — a
+     repo with no local tree (--no-post-merge-tree/--skip-post-merge)
+     resolves to [], the same pre-existing "no tree, no repo-local config
+     readable at all" boundary every other repo-tier key in this chain
+     already has, not a new gap this step introduces. See "PRE-MERGE
+     CHECKS" further down for the full history/contract this closes.
   9. Only after ALL of the above pass: execute the merge via the resolved
      backend's merge_pr (Forgejo or GitHub, both via a redirect-hardened
      transport), passing args.merge_method THROUGH to the backend (lr-14f704
@@ -150,9 +161,40 @@ IDENTITY / SEAM STRIP FROM THE SOURCE MODULE (full inventory in the PR body):
      lore-coupled, best-effort audit trail features in the reference module)
      are out of this package's task boundary (CLAUDE.md hard rule 6a: lore
      never appears in product code) and are not ported.
-  6. The reference module's per-repo pre_checks config loading (a
-     reference-implementation-specific config-file convention) is not part
-     of the gate chain itself and is not ported in this slice.
+  6. (SUPERSEDED by lr-843900 — see "PRE-MERGE CHECKS" below.) The reference
+     module's per-repo pre_checks config loading was NOT ported at the time
+     this inventory was first written; merge.pre_checks_config existed as an
+     unwired module for a full release cycle before lr-843900 wired it into
+     the gate chain as step 8b above. Left here, struck through in prose
+     rather than deleted, as the documented history of the gap — see
+     "PRE-MERGE CHECKS" for the defect this caused and the fix.
+
+PRE-MERGE CHECKS (lr-843900): merge.pre_checks_config's `load_pre_checks`
+existed as a fully-implemented, fully-tested module (repo-local `merge:
+pre_checks:` config, same step shape/validator as post_merge_steps) for a
+full release cycle WITHOUT ever being imported or called from this module —
+item 6 above documented the omission as deliberate, but the module was never
+actually gate-chain-dead by design; it was a completed port that was never
+wired in. Consequence: a repo could declare `pre_checks` with
+`on_failure: fail`, believe it had a deterministic merge gate (particularly a
+repo with no CI runner wired up, using pre_checks AS its gate), and get zero
+signal that the check never ran at all — the merge proceeded silently, gate
+config accepted and inert. Step 8b above closes this: `pre_checks` are now a
+REAL gate step, executed via the SAME merge.post_merge.run_post_merge_steps
+executor post_merge_steps already uses (same cmd shape, same shell-operator-
+token rejection, same on_failure semantics) — a repo's `on_failure: fail`
+pre_check that exits non-zero now REFUSES the merge (EXIT_PRE_CHECKS_FAILED)
+BEFORE step 9's merge_pr call is ever reached, and a malformed/unreadable
+pre_checks config at load time refuses the SAME way — a config the verb
+cannot be shown to have actually validated and run is never treated as a
+pass. `--skip-pre-checks` is the explicit, logged bypass (mirroring
+--skip-post-merge exactly); the gate is enforced by default. Every step,
+success or failure, now emits an explicit PASS/FAIL line carrying the raw
+exit code and the RESOLVED cwd it executed in (see merge.post_merge.
+run_post_merge_steps' own docstring) — silent-on-success was the specific
+defect that let this stay undetected: a gate that says nothing when it
+passes is indistinguishable from a gate that says nothing because it never
+ran.
 
 POST-MERGE STEPS (lr-77d6, added after the identity-strip inventory above
 was written): the reference module's post_merge_steps MECHANISM (not its
@@ -388,6 +430,7 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_require_model_attestation,
     resolve_sync_tree_after_merge,
 )
+from clagentic_loadout.merge.pre_checks_config import load_pre_checks
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
@@ -484,6 +527,15 @@ EXIT_CALLER_INVOKER_MISMATCH = 33
 #: default mode once a pattern IS set is "block"). See docs/verbs.md's
 #: `loadout-merge` section for the full contract.
 EXIT_TASK_ID_GUARD_VIOLATION = 36
+#: A repo-declared `merge: pre_checks:` step (merge.pre_checks_config,
+#: lr-843900) failed -- either an `on_failure: fail` step exited non-zero/
+#: timed out, or the repo's own config could not be loaded/validated at
+#: all. FAIL-CLOSED in BOTH cases: a pre_check a caller cannot be shown to
+#: have actually run is never treated as a pass (see merge.verb's own
+#: module docstring, "PRE-MERGE CHECKS", for the full contract this closes
+#: -- a declared `on_failure: fail` pre_check was previously accepted by
+#: config and silently never executed at all).
+EXIT_PRE_CHECKS_FAILED = 37
 
 #: Reviewers required to post a clean verdict before a merge is authorized.
 #: A caller wanting a different reviewer roster passes --required-reviewer
@@ -861,13 +913,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         dest="repo_path",
         help="Local working-tree root the merged repo lives in. When given, "
-        "post_merge_steps (see merge.post_merge_config) are read from "
+        "pre_checks (see merge.pre_checks_config) are read from the SAME "
         f"<repo-path>/{DEFAULT_POST_MERGE_CONFIG_RELATIVE_PATH} and, if "
-        "present, run in this directory ONLY after the merge in step 8 "
-        "actually succeeds. This is an OPTIONAL override, not a required "
-        "input -- the caller (a dispatcher with its own project registry) "
-        "is expected to supply it whenever a local tree exists; loadout "
-        "itself has no project registry to derive one from (see "
+        "present, run in this directory BEFORE the merge is authorized -- "
+        "an on_failure: fail pre_check refuses the merge (see "
+        "--skip-pre-checks). post_merge_steps are read from the same file "
+        "and, if present, run in this directory ONLY after the merge in "
+        "step 9 actually succeeds. This is an OPTIONAL override, not a "
+        "required input -- the caller (a dispatcher with its own project "
+        "registry) is expected to supply it whenever a local tree exists; "
+        "loadout itself has no project registry to derive one from (see "
         "merge.verb's module docstring). Omitting it entirely "
         "is ONLY a no-op when paired with --no-post-merge-tree; omitting "
         "both is a usage error (EXIT_USAGE) -- see that flag's help.",
@@ -896,6 +951,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "satisfies the --repo-path/--no-post-merge-tree usage requirement "
         "when --repo-path is omitted (an explicit blanket skip covers the "
         "no-tree case too).",
+    )
+    parser.add_argument(
+        "--skip-pre-checks",
+        action="store_true",
+        default=False,
+        dest="skip_pre_checks",
+        help="Skip the merge: pre_checks: gate (see merge.pre_checks_config) "
+        "even when --repo-path is given and the repo's config declares "
+        "checks. Logged to stderr for audit, exactly like --skip-post-merge. "
+        "Default: enforced -- a repo-declared on_failure: fail pre_check "
+        "refuses the merge (EXIT_PRE_CHECKS_FAILED) unless this flag is "
+        "passed.",
     )
     return parser
 
@@ -1329,6 +1396,52 @@ def _run(
         ci_status.check_ci_status(ci_result, args.pr_number, owner, repo)
     except CiStatusFailedError as exc:
         _fail(str(exc), code=EXIT_CI_STATUS_FAILED)
+
+    # 8b. Pre-merge checks gate (merge.pre_checks_config, lr-843900) -- see
+    # this module's docstring, "PRE-MERGE CHECKS", for the full contract.
+    # Reads the SAME --repo-path config root every other repo-tier gate key
+    # here resolves through; None (--no-post-merge-tree/--skip-post-merge)
+    # resolves load_pre_checks to [], a legitimate no-op -- there is no
+    # config file to read without a local tree, the same pre-existing
+    # boundary every other repo-tier key in this chain already has.
+    if args.skip_pre_checks:
+        print(
+            f"merge: pre_checks gate BYPASSED via --skip-pre-checks for "
+            f"PR #{args.pr_number} in {owner}/{repo}",
+            file=sys.stderr,
+        )
+    else:
+        try:
+            pre_checks = load_pre_checks(args.repo_path)
+        except PostMergeConfigError as exc:
+            _fail(
+                f"pre_checks config FAILED to load -- {exc}",
+                code=EXIT_PRE_CHECKS_FAILED,
+            )
+        if pre_checks:
+            print(
+                f"merge: pre_checks gate -- running {len(pre_checks)} "
+                f"declared check(s) in {args.repo_path!r} before authorizing "
+                f"PR #{args.pr_number} in {owner}/{repo}",
+                file=sys.stderr,
+            )
+            try:
+                run_post_merge_steps(pre_checks, args.repo_path)
+            except (
+                PostMergeStepFailedError,
+                PostMergeStepTimeoutError,
+                PostMergeLivenessError,
+            ) as exc:
+                _fail(
+                    f"pre_checks gate FAILED -- {exc} -- refusing to merge "
+                    f"PR #{args.pr_number} in {owner}/{repo}.",
+                    code=EXIT_PRE_CHECKS_FAILED,
+                )
+            print(
+                f"merge: pre_checks gate -- all {len(pre_checks)} check(s) "
+                f"PASSED for PR #{args.pr_number} in {owner}/{repo}",
+                file=sys.stderr,
+            )
 
     # 9. All gates passed -- execute the merge.
     print(
