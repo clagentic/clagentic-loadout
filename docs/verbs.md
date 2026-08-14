@@ -1071,15 +1071,42 @@ homes" section):** `--authorized-role`, `--required-reviewer`, and
 default — a caller (a dispatch/lead layer) re-supplies them on every
 invocation. `merge.pre_checks_config` and `merge.gate_config` now give a
 repo a `.clagentic/loadout/config.yaml` `merge:` section home for that
-same declaration (`pre_checks`, `merge_requirements`,
-`required_reviewer_roles`, `authorized_roles`) plus a NEW pre-merge-check
-gate link (`pre_checks`, run before step 9's merge call — not yet wired
-into this CLI's own gate chain). `push.identity_config` and
-`review.login_config` add matching deployment-tier homes for the identity
-half (`builder_identity`, `review.reviewer_logins`). Wiring `merge.verb`'s
-own flag DEFAULTS to read these values, and adding `pre_checks` as an
-actual gate-chain link, are named follow-ups — this slice is the schema +
-`loadout-doctor` validation only.
+same declaration (`merge_requirements`, `required_reviewer_roles`,
+`authorized_roles`) plus the pre-merge-check gate link (`pre_checks` —
+see "Pre-merge checks" below for the ACTUAL gate-chain wiring).
+`push.identity_config` and `review.login_config` add matching
+deployment-tier homes for the identity half (`builder_identity`,
+`review.reviewer_logins`). Wiring `merge.verb`'s own flag DEFAULTS to
+read `merge_requirements`/`required_reviewer_roles`/`authorized_roles`
+remains a named follow-up — this slice is the schema + `loadout-doctor`
+validation only for those three keys.
+
+**Pre-merge checks (`merge.pre_checks_config` / `merge.post_merge`):**
+an OPTIONAL, repo-declared `merge: pre_checks:` list (SAME
+step shape as `post_merge_steps` below — `{cmd, description, on_failure,
+detaches}`, read from the same `.clagentic/loadout/config.yaml` `merge:`
+section, reusing `merge.post_merge.run_post_merge_steps` verbatim), run
+against `--repo-path` BEFORE step 9's merge call, gating the merge itself:
+an `on_failure: fail` pre_check that exits non-zero (or times out, or a
+`detaches: true` step's `liveness_probe` never confirms) refuses the merge
+(`EXIT_PRE_CHECKS_FAILED`) BEFORE `merge_pr` is ever called. `pre_checks_config`
+existed as a fully-implemented, fully-tested module for a full release cycle
+before this wiring landed — a repo could declare `on_failure: fail`
+pre_checks (particularly a repo with no CI runner wired up, using
+`pre_checks` AS its merge gate) and get **zero signal** that the check
+never actually ran; the merge proceeded silently, config accepted and
+inert. `--skip-pre-checks` is the explicit, logged bypass (mirrors
+`--skip-post-merge` exactly); the gate is **enforced by default**. Every
+step, success or failure, emits an explicit `PASS`/`FAIL` line to stderr
+carrying the raw exit code and the RESOLVED cwd it executed in (see
+"Post-merge steps" below, same executor) — silent-on-success was the
+specific defect that let a red `pre_checks` gate go undetected across 100+
+merges in one deployment: a gate that says nothing when it passes is
+indistinguishable from a gate that says nothing because it never ran.
+`--repo-path` omitted (`--no-post-merge-tree`/`--skip-post-merge`)
+resolves `pre_checks` to `[]` — there is no repo-local config file to read
+without a local tree, the same pre-existing boundary every other
+repo-tier `merge:` key in this chain already has.
 
 **Merge-completion attestation (`merge.attestation`):**
 immediately after step 9 actually merges the PR — before any post-merge
@@ -1109,7 +1136,10 @@ working tree. Steps are read from `<repo-path>/.loadout/config.yaml`'s
 `merge:` section, `post_merge_steps:` key (a list of `{cmd, description,
 on_failure, detaches}` mappings). `--skip-post-merge` is an explicit, logged
 opt-out even when `--repo-path` and a configured step list are both
-present.
+present. Every ordinary (non-detached) step, success or failure, emits an
+explicit `PASS`/`FAIL` line to stderr carrying the raw exit code and the
+RESOLVED cwd it executed in — the SAME executor `pre_checks` above reuses,
+so both surfaces share one observability contract.
 
 **`--repo-path` is an OPTIONAL override, never a silent skip:**
 `--repo-path` is a caller-supplied working-tree root — a dispatcher with its
