@@ -609,6 +609,15 @@ def run_post_merge_steps(
         caller translates this to EXIT_POST_MERGE_FAILED. No further steps
         run.
 
+    EVERY ordinary (non-detached) step emits an explicit PASS or FAIL line
+    to stderr, on success as well as failure, carrying the raw exit code and
+    the RESOLVED cwd the step actually executed in (lr-843900): a gate that
+    is silent on success is indistinguishable from a gate that never ran at
+    all, and a repo-relative step command's correctness depends entirely on
+    which directory it executed in — see merge.pre_checks_config's own
+    module docstring for the concrete failure mode this closes (a repo-
+    relative validator that no-ops and exits 0 when run from the wrong cwd).
+
     A step whose process never launches at all (its binary is missing from
     PATH, or present but not executable — `FileNotFoundError`/
     `PermissionError`, both `OSError` subclasses) is treated identically to
@@ -694,7 +703,10 @@ def run_post_merge_steps(
 
         if description:
             print(f"merge: post-merge {label}: {description}", file=sys.stderr)
-        print(f"merge: post-merge {label}: running: {cmd!r}", file=sys.stderr)
+        print(
+            f"merge: post-merge {label}: running: {cmd!r} (cwd={root!r})",
+            file=sys.stderr,
+        )
 
         argv, env_overrides = _resolve_argv(cmd, step_label=f"post_merge_steps[{i}]")
         combined_overrides = {**active_deployment_overrides, **env_overrides}
@@ -797,6 +809,11 @@ def run_post_merge_steps(
 
         if result.returncode != 0:
             msg = f"post-merge {label} failed (exit {result.returncode}): {cmd!r}"
+            print(
+                f"merge: post-merge {label}: FAIL (exit={result.returncode}, "
+                f"cwd={root!r}): {cmd!r}",
+                file=sys.stderr,
+            )
             if on_failure == ON_FAILURE_FAIL:
                 raise PostMergeStepFailedError(msg)
             print(
@@ -805,7 +822,10 @@ def run_post_merge_steps(
                 file=sys.stderr,
             )
         else:
-            print(f"merge: post-merge {label}: ok", file=sys.stderr)
+            print(
+                f"merge: post-merge {label}: PASS (exit=0, cwd={root!r}): {cmd!r}",
+                file=sys.stderr,
+            )
 
 
 __all__ = [
