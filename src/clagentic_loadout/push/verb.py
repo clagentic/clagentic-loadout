@@ -415,14 +415,13 @@ EXIT_WORKING_TREE_CONTENTION = 34
 EXIT_TASK_ID_GUARD_VIOLATION = 35
 #: The working tree carries unstaged changes to one or more tracked files
 #: (push.identity.check_clean_work_tree / DirtyWorkTreeError, lr-4cd7ac,
-#: diagnosis lr-60781e) -- `git filter-branch` refuses outright on a
-#: dirty tracked tree, and this pre-flight fires BEFORE that rewrite is
-#: attempted so the failure is reported as the LOCAL, RECOVERABLE condition
-#: it actually is (commit or stash and retry), distinct from
-#: EXIT_AUTHOR_MISMATCH's mis-attribution framing, which does not apply to
-#: this cause. ONLY reachable when a bot identity was resolved (name AND
-#: email) -- with no bot identity, no re-authoring is attempted at all, so
-#: this check does not run.
+#: diagnosis lr-60781e; rationale updated lr-ac7bb0) -- this pre-flight
+#: fires BEFORE re-authoring is attempted so the failure is reported as the
+#: LOCAL, RECOVERABLE condition it actually is (commit or stash and retry),
+#: distinct from EXIT_AUTHOR_MISMATCH's mis-attribution framing, which does
+#: not apply to this cause. ONLY reachable when a bot identity was resolved
+#: (name AND email) -- with no bot identity, no re-authoring is attempted
+#: at all, so this check does not run.
 EXIT_DIRTY_WORK_TREE = 36
 
 
@@ -1040,10 +1039,10 @@ def _run_contention_check(project_root: Path, *, override: bool) -> None:
     byte-identical to before this check existed.
 
     Runs BEFORE token resolution and BEFORE
-    `push.identity.pin_commits_to_bot_identity` (the actual working-tree
-    mutation this check exists to gate -- a `git filter-branch` rewrite of
-    HEAD) -- a refusal here must never spend a token mint or touch history
-    first.
+    `push.identity.pin_commits_to_bot_identity` (the actual commit-history
+    mutation this check exists to gate -- a re-authoring rewrite of HEAD
+    via new commit objects + `git update-ref`, lr-ac7bb0) -- a refusal here
+    must never spend a token mint or touch history first.
 
     Raises push.contention_check.WorkingTreeContentionError when contention
     is found and *override* is False; caught at the CLI boundary in main()
@@ -2078,15 +2077,15 @@ def _run_create_pr(
             file=sys.stderr,
         )
 
-    # DIRTY-WORK-TREE PRE-FLIGHT (lr-4cd7ac, diagnosis lr-60781e):
-    # runs ONLY when a bot identity was actually resolved -- with no bot
-    # identity, pin_commits_to_bot_identity below either no-ops (returns
-    # False) or fails closed on missing identity, and never reaches
-    # filter-branch at all, so there is nothing for this check to guard.
-    # Fires BEFORE the re-authoring attempt so a caller sees the dirty-tree
-    # cause distinctly from AuthorMismatchError's mis-attribution framing,
-    # which does not apply to a precondition failure that never even starts
-    # rewriting history.
+    # DIRTY-WORK-TREE PRE-FLIGHT (lr-4cd7ac, diagnosis lr-60781e; rationale
+    # updated lr-ac7bb0): runs ONLY when a bot identity was actually
+    # resolved -- with no bot identity, pin_commits_to_bot_identity below
+    # either no-ops (returns False) or fails closed on missing identity,
+    # and never reaches re-authoring at all, so there is nothing for this
+    # check to guard. Fires BEFORE the re-authoring attempt so a caller
+    # sees the dirty-tree cause distinctly from AuthorMismatchError's
+    # mis-attribution framing, which does not apply to a precondition
+    # failure that never even starts rewriting history.
     if effective_bot_name and effective_bot_email:
         try:
             identity.check_clean_work_tree(project_root)

@@ -457,9 +457,10 @@ commit on the branch to:
   `resolve_reviewer_login` already use for the login string.
 - **email:** `<slug>[bot]@users.noreply.github.com`
 
-applied in-flight at push time (the existing `git filter-branch
---env-filter` re-authoring path) and persisted nowhere — no local git
-config is written, on any host or in any repo, to produce this.
+applied in-flight at push time (the existing re-authoring path, which
+rebuilds each commit's git object directly with the new identity rather
+than checking anything out) and persisted nowhere — no local git config
+is written, on any host or in any repo, to produce this.
 
 **Where `<slug>` comes from — a credential provider's VERIFIED slug now
 outranks this config.** Precedence, most-specific first:

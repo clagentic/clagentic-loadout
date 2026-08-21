@@ -45,14 +45,17 @@ class AuthorMismatchError(Exception):
 
 class DirtyWorkTreeError(Exception):
     """Raised by the pre-flight clean-work-tree check (push.identity.
-    check_clean_work_tree) BEFORE any re-authoring is attempted: `git
-    filter-branch` refuses outright ("You have unstaged changes") on a
-    working tree carrying unstaged changes to tracked files. Deliberately
-    NOT an AuthorMismatchError -- a dirty tree is a LOCAL, RECOVERABLE
-    condition (commit or stash and retry) with no bearing on commit
-    authorship, unlike a genuine re-authoring/verification failure, and the
-    message here must say so instead of reusing mis-attribution framing
-    that does not apply to this cause."""
+    check_clean_work_tree) BEFORE any re-authoring is attempted: an
+    unstaged change to a tracked file most often means a caller is mid-edit
+    or the tree is otherwise locally inconsistent -- a push should not run
+    against that silently, even though commit re-authoring itself
+    (push.identity.reauthor_commits, lr-ac7bb0) no longer touches the
+    working tree and so no longer has its own precondition this check needs
+    to pre-empt. Deliberately NOT an AuthorMismatchError -- a dirty tree is
+    a LOCAL, RECOVERABLE condition (commit or stash and retry) with no
+    bearing on commit authorship, unlike a genuine re-authoring/
+    verification failure, and the message here must say so instead of
+    reusing mis-attribution framing that does not apply to this cause."""
 
 
 class GitPushError(Exception):

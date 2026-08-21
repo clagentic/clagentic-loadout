@@ -124,8 +124,8 @@ class TestPinCommitsToBotIdentity:
         """Branch at base with no new commits, and HEAD is ALREADY authored
         under the target bot identity: reauthor_commits() has nothing to
         rewrite (True, no-op) and the subsequent verify step passes because
-        HEAD already matches -- the overall call succeeds without a
-        filter-branch rewrite."""
+        HEAD already matches -- the overall call succeeds with no rewrite
+        performed at all."""
         repo = tmp_path / "repo"
         repo.mkdir()
         _git(["init", "-b", "main"], repo)
@@ -142,9 +142,9 @@ class TestPinCommitsToBotIdentity:
     def test_branch_at_base_with_different_author_fails_closed(self, tmp_path):
         """Branch at base (nothing ahead of base to rewrite) but HEAD's
         existing author does not match the target bot identity: there is
-        nothing for filter-branch to rewrite, and the post-rewrite verify
-        step correctly refuses rather than silently reporting success for
-        an unmatched HEAD."""
+        nothing to rewrite, and the post-rewrite verify step correctly
+        refuses rather than silently reporting success for an unmatched
+        HEAD."""
         repo = tmp_path / "repo"
         repo.mkdir()
         _git(["init", "-b", "main"], repo)
@@ -156,6 +156,601 @@ class TestPinCommitsToBotIdentity:
 
         with pytest.raises(AuthorMismatchError):
             pin_commits_to_bot_identity("Bot Name", "bot@example.com", "main", repo)
+
+
+class TestReauthorCommitsNeverTouchesWorkingTree:
+    """lr-ac7bb0: reauthor_commits' rewrite only ever reads/writes git
+    objects, so working-tree content the caller has not yet committed --
+    staged, unstaged, or untracked -- must survive a re-authoring rewrite
+    byte-for-byte. The prior `git filter-branch` mechanism's terminal `git
+    read-tree -u -m HEAD` checked out the newly rewritten tree over the
+    working tree; this class is the regression coverage for the primitive
+    swap that removes that step entirely."""
+
+    def test_staged_but_uncommitted_change_survives_reauthoring(self, tmp_path):
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        (repo / "feature.txt").write_text("staged edit, not yet committed\n")
+        _git(["add", "feature.txt"], repo)
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+        assert get_head_author_email(repo) == "bot@example.com"
+        assert (repo / "feature.txt").read_text() == "staged edit, not yet committed\n"
+        staged = _git(["diff", "--cached", "--name-only"], repo).stdout.strip()
+        assert staged == "feature.txt"
+
+    def test_untracked_file_survives_reauthoring(self, tmp_path):
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        (repo / "untracked.txt").write_text("stray file, never added\n")
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+        assert get_head_author_email(repo) == "bot@example.com"
+        assert (repo / "untracked.txt").read_text() == "stray file, never added\n"
+        untracked = _git(
+            ["ls-files", "--others", "--exclude-standard"], repo
+        ).stdout.strip()
+        assert untracked == "untracked.txt"
+
+    def test_merge_commit_inside_rewrite_range_is_rebuilt_correctly(self, tmp_path):
+        """A merge commit that is ITSELF part of the rewrite range (not an
+        already-landed one excluded by the floor) must be rebuilt with both
+        parents remapped to their own rebuilt SHAs, its original tree
+        (content) preserved, and its original message preserved -- exactly
+        the geometry `git commit-tree`'s per-parent remap in reauthor_commits
+        exists to get right without ever checking anything out."""
+        origin = tmp_path / "origin.git"
+        origin.mkdir()
+        _git(["init", "--bare"], origin)
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+        _git(["remote", "add", "origin", str(origin)], repo)
+        _git(["push", "origin", "main"], repo)
+        _git(["fetch", "origin"], repo)
+
+        _git(["checkout", "-b", "side"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "side.txt").write_text("side work\n")
+        _git(["add", "side.txt"], repo)
+        _git(["commit", "-m", "side commit"], repo)
+
+        _git(["checkout", "-b", "feature", "main"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+        _git(["merge", "--no-ff", "-m", "merge side into feature", "side"], repo)
+        merge_tree_before = _git(["rev-parse", "HEAD^{tree}"], repo).stdout.strip()
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        head_after = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+        parents_after = _git(["rev-parse", "HEAD^@"], repo).stdout.split()
+        assert len(parents_after) == 2
+
+        merge_subject = _git(["log", "-1", "--format=%s", head_after], repo).stdout.strip()
+        assert merge_subject == "merge side into feature"
+        merge_tree_after = _git(["rev-parse", f"{head_after}^{{tree}}"], repo).stdout.strip()
+        assert merge_tree_after == merge_tree_before
+
+        # Both parents (the rebuilt feature-branch tip and the rebuilt side
+        # tip) must carry the bot identity -- neither is reachable from
+        # main, so both are inside the rewrite range.
+        for parent_sha in parents_after:
+            assert (
+                _git(["log", "-1", "--format=%ae", parent_sha], repo).stdout.strip()
+                == "bot@example.com"
+            )
+
+
+def _commit_with_raw_message(
+    repo: Path, message_bytes: bytes, *, env: dict[str, str] | None = None
+) -> None:
+    """Create a commit whose message is EXACTLY *message_bytes* -- bypasses
+    `git commit -m`, which normalizes trailing whitespace, by piping raw
+    bytes into `git commit -F -` (`text=False`, no decode/re-encode
+    anywhere in this helper)."""
+    subprocess.run(
+        ["git", "commit", "-F", "-"],
+        cwd=str(repo),
+        input=message_bytes,
+        capture_output=True,
+        check=True,
+        env=env,
+    )
+
+
+def _git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Like _git, but never decodes stdout/stderr -- for a git subcommand
+    (e.g. `checkout`) whose own output embeds a commit subject that may not
+    be valid UTF-8, where this test helper has no reason to read the
+    output as text at all."""
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=False, check=True
+    )
+
+
+def _commit_with_exact_object_message(repo: Path, message_bytes: bytes) -> None:
+    """Create a commit on HEAD whose stored message is EXACTLY
+    *message_bytes*, bypassing `git commit`'s own message normalization
+    entirely (which collapses runs of trailing blank lines -- `git commit
+    -F -` cannot produce a message with more than one trailing newline no
+    matter what is piped into it, so this helper is what makes a test of
+    "does an unusual-but-real stored message survive a rewrite unchanged"
+    possible at all: it builds a real commit OBJECT directly with
+    `git hash-object` + `git update-ref`, the same primitives
+    `_rebuild_commit` itself uses, so the resulting HEAD carries genuinely
+    non-normalized message bytes to rewrite)."""
+    tree = subprocess.run(
+        ["git", "write-tree"], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    parent = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    name_email = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>"], cwd=str(repo),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    header = f"tree {tree}\nparent {parent}\nauthor {name_email} 1700000000 +0000\ncommitter {name_email} 1700000000 +0000\n\n"
+    new_object = header.encode("utf-8") + message_bytes
+    new_sha = subprocess.run(
+        ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+        cwd=str(repo), input=new_object, capture_output=True, check=True,
+    ).stdout.strip().decode("ascii")
+    subprocess.run(
+        ["git", "update-ref", "HEAD", new_sha], cwd=str(repo), capture_output=True, check=True,
+    )
+
+
+class TestReauthorCommitsMessageFidelity:
+    """lr-ac7bb0 follow-up (PR #27 review): reauthor_commits must
+    preserve a commit message's exact original bytes, including whatever
+    encoding it was written in and its own trailing-whitespace shape --
+    never re-add a trailing newline (which made re-authoring
+    NON-IDEMPOTENT: an already-bot-identity branch produced a new SHA on
+    every re-authoring pass instead of being a stable no-op), and never
+    force a UTF-8 decode that raises on a legacy-encoded message instead of
+    returning (False, cause)."""
+
+    def test_reauthoring_is_idempotent(self, tmp_path):
+        """Re-authoring an already-bot-identity branch a second time must
+        produce the IDENTICAL SHA, not a new one -- the direct regression
+        test for the trailing-newline-accumulation defect: `git log
+        --format=%B` appends its own newline on top of the message's own
+        terminator, so a naive read-message/write-message round trip grows
+        the message (and therefore changes the SHA) on every pass."""
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+
+        first_pass = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert first_pass is True
+        sha_after_first = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        second_pass_ok, second_pass_cause = reauthor_commits(
+            "main", "Bot Name", "bot@example.com", repo,
+        )
+        assert second_pass_ok is True
+        assert second_pass_cause == ""
+        sha_after_second = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        assert sha_after_second == sha_after_first
+
+    def test_message_with_trailing_blank_line_survives_byte_exact(self, tmp_path):
+        """An intentional trailing blank line in the original message must
+        survive -- the fix must NOT `.rstrip()` the message (that would
+        trade the newline-growth bug for a newline-loss bug on exactly this
+        input). `git commit` itself normalizes away a message's own
+        trailing blank lines at commit-creation time (it cannot produce
+        this input), so the test commit is built directly via
+        `_commit_with_exact_object_message` -- the same underlying
+        primitives (`hash-object` + `update-ref`) `_rebuild_commit` itself
+        uses -- to genuinely exercise a stored message with more than one
+        trailing newline."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+        original_message = b"subject line\n\nbody paragraph one.\n\nbody paragraph two.\n\n"
+        _commit_with_exact_object_message(repo, original_message)
+        original_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        original_header, original_msg_bytes = original_raw.split(b"\n\n", 1)
+        assert original_msg_bytes == original_message
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        rewritten_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        _rewritten_header, rewritten_msg_bytes = rewritten_raw.split(b"\n\n", 1)
+        assert rewritten_msg_bytes == original_message
+
+    def test_multi_paragraph_message_survives_byte_exact(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        original_message = (
+            b"fix(thing): do the thing\n\n"
+            b"First paragraph explains the defect in detail, across\n"
+            b"multiple lines of prose.\n\n"
+            b"Second paragraph explains the fix.\n\n"
+            b"Task: lr-example\n"
+        )
+        _commit_with_raw_message(repo, original_message)
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        rewritten_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        _rewritten_header, rewritten_msg_bytes = rewritten_raw.split(b"\n\n", 1)
+        assert rewritten_msg_bytes == original_message
+
+    def test_non_utf8_message_rebuilds_with_encoding_header_intact(self, tmp_path):
+        """A commit whose message is encoded per `i18n.commitEncoding`
+        (here ISO-8859-1, carrying a byte -- 0xE9, 'e' + acute accent --
+        that is not valid UTF-8 on its own) must rebuild successfully, with
+        the exact original message bytes AND the commit object's own
+        `encoding` header both preserved. A UTF-8 forced-decode anywhere in
+        the rewrite path would raise UnicodeDecodeError on this input
+        instead."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        _git(["config", "i18n.commitEncoding", "ISO-8859-1"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        # "caf\xe9" in ISO-8859-1 -- 0xE9 alone is not valid UTF-8.
+        non_utf8_message = "café fix\n".encode("iso-8859-1")
+        assert b"\xe9" in non_utf8_message
+        with pytest.raises(UnicodeDecodeError):
+            non_utf8_message.decode("utf-8")
+        _commit_with_raw_message(repo, non_utf8_message)
+
+        original_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        assert b"encoding ISO-8859-1" in original_raw
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        rewritten_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        assert b"encoding ISO-8859-1" in rewritten_raw
+        rewritten_header, rewritten_msg_bytes = rewritten_raw.split(b"\n\n", 1)
+        assert rewritten_msg_bytes == non_utf8_message
+
+    def test_non_utf8_message_failure_path_returns_cause_not_raise(self, tmp_path):
+        """A non-UTF-8 message on a detached-HEAD repo (a real,
+        deterministic reauthor_commits failure -- see
+        TestReauthorCommitsPropagatesStderr) must still return
+        (False, cause), never raise -- confirms the byte-exact message path
+        does not introduce a new way for a UTF-8 decode to escape the
+        documented (False, cause) contract on ANY failure combination, not
+        only the success path covered above."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        _git(["config", "i18n.commitEncoding", "ISO-8859-1"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _commit_with_raw_message(repo, "café fix\n".encode("iso-8859-1"))
+        _git_bytes(["checkout", "--detach", "HEAD"], repo)
+
+        ok, cause = reauthor_commits("main", "Bot Name", "bot@example.com", repo)
+        assert ok is False
+        assert cause != ""
+        assert "detached head" in cause.lower()
+
+
+class TestRebuildCommitRejectsHeaderInjection:
+    """lr-ac7bb0 follow-up (PR #27 security review, same defect
+    independently found by two reviewers): `_rebuild_commit` f-string-
+    interpolates bot_name/bot_email/dates directly into raw commit-object
+    header bytes and hands them to `git hash-object`, which performs no
+    validation. A newline embedded in any of the four values must be
+    REFUSED via the documented (False, cause) surface -- never silently
+    stripped, never raised uncaught, and never written as an actual commit
+    object (asserted here by reading the object back afterward and
+    confirming no injected header line landed)."""
+
+    def _build_feature_branch(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+        return repo
+
+    def test_newline_in_bot_name_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+        malicious_name = "Bot Name\ngpgsig -----BEGIN PGP SIGNATURE-----"
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity(malicious_name, "bot@example.com", "main", repo)
+        message = str(exc_info.value)
+        assert "Cause:" in message
+        assert "newline" in message.lower()
+
+        # HEAD must be completely untouched -- refused BEFORE any write.
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+        # No commit carrying an injected gpgsig line exists in the repo's
+        # object store at all -- not just "HEAD didn't move", but "the
+        # object was never created".
+        fsck = subprocess.run(
+            ["git", "fsck", "--unreachable", "--dangling"],
+            cwd=str(repo), capture_output=True, text=True,
+        )
+        assert "gpgsig" not in fsck.stdout
+
+    def test_newline_in_bot_email_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+        malicious_email = "bot@example.com\nparent 0000000000000000000000000000000000000000"
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot Name", malicious_email, "main", repo)
+        message = str(exc_info.value)
+        assert "Cause:" in message
+        assert "newline" in message.lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_carriage_return_in_bot_name_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot\rName", "bot@example.com", "main", repo)
+        assert "carriage return" in str(exc_info.value).lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_nul_in_bot_email_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot Name", "bot@ex\x00ample.com", "main", repo)
+        assert "nul" in str(exc_info.value).lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_leading_trailing_whitespace_in_bot_name_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity(" Bot Name", "bot@example.com", "main", repo)
+        assert "whitespace" in str(exc_info.value).lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_angle_bracket_in_bot_name_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot <Name", "bot@example.com", "main", repo)
+        assert "'<' or '>'" in str(exc_info.value)
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_reauthor_commits_returns_false_cause_not_raise_on_injection(self, tmp_path):
+        """The lower-level reauthor_commits (bypassing
+        pin_commits_to_bot_identity's AuthorMismatchError wrapping) must
+        itself return (False, cause) -- confirms the refusal is enforced
+        at the actual write site, not merely re-framed one layer up."""
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        ok, cause = reauthor_commits(
+            "main", "Bot Name\nInjected", "bot@example.com", repo,
+        )
+        assert ok is False
+        assert cause != ""
+        assert "newline" in cause.lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+
+class TestRejectDateInjection:
+    """lr-ac7bb0 follow-up (PR #27 review): author_date/committer_date are
+    interpolated into the same raw header bytes as bot_name/bot_email and
+    are equally capable of injecting a newline -- covered directly against
+    the private _reject_date_injection helper since a malformed date is
+    not reachable through the public API (dates always come from
+    `git log --date=raw` on a real commit, never from caller input),
+    matching how _reject_ident_injection is exercised end-to-end (reachable
+    via bot_name/bot_email) while its date counterpart is exercised as a
+    unit."""
+
+    def test_newline_in_date_is_rejected(self):
+        from clagentic_loadout.push.identity import _reject_date_injection as reject
+
+        cause = reject("author_date", "1700000000 +0000\ngpgsig evil")
+        assert cause is not None
+        assert "newline" in cause.lower()
+
+    def test_carriage_return_in_date_is_rejected(self):
+        from clagentic_loadout.push.identity import _reject_date_injection as reject
+
+        cause = reject("committer_date", "1700000000 +0000\r")
+        assert cause is not None
+        assert "carriage return" in cause.lower()
+
+    def test_nul_in_date_is_rejected(self):
+        from clagentic_loadout.push.identity import _reject_date_injection as reject
+
+        cause = reject("author_date", "1700000000\x00 +0000")
+        assert cause is not None
+        assert "nul" in cause.lower()
+
+    def test_well_formed_raw_date_is_accepted(self):
+        from clagentic_loadout.push.identity import _reject_date_injection as reject
+
+        assert reject("author_date", "1700000000 +0000") is None
+
+
+class TestRebuildCommitDropsExtraHeaders:
+    """lr-ac7bb0 follow-up (PR #27 review): _rebuild_commit only
+    ever reconstructs tree/parent(s)/author/committer/encoding -- every
+    other header on the original object (gpgsig being the realistic case)
+    is intentionally dropped, matching the prior git filter-branch
+    mechanism's own behavior (a signature cannot remain valid over a
+    rebuilt object's changed author/committer content regardless of which
+    write mechanism performs the rewrite). This pins that as INTENDED
+    behavior, not an oversight -- see _rebuild_commit's own docstring,
+    "ONLY tree/parent(s).../ARE RECONSTRUCTED", for the full reasoning."""
+
+    def test_commit_with_gpgsig_header_rebuilds_successfully_without_it(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+
+        # Construct a commit object carrying a (fake, unverifiable --
+        # correctness of the signature itself is irrelevant here, only
+        # its PRESENCE as a header this rewrite must drop) multi-line
+        # gpgsig header, using the same hash-object primitive the module
+        # itself uses to build commits, so this test exercises a real
+        # object shape rather than a synthetic string.
+        tree = _git(["rev-parse", "HEAD^{tree}"], repo).stdout.strip()
+        parent = _git(["rev-parse", "HEAD^"], repo).stdout.strip()
+        ident = _git(["log", "-1", "--format=%an <%ae> %ad", "--date=raw", "HEAD"], repo).stdout.strip()
+        fake_gpgsig = (
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n"
+            " not a real signature, only shaped like one\n"
+            " -----END PGP SIGNATURE-----"
+        )
+        header = (
+            f"tree {tree}\n"
+            f"parent {parent}\n"
+            f"author {ident}\n"
+            f"committer {ident}\n"
+            f"{fake_gpgsig}\n"
+            "\n"
+        )
+        new_object = header.encode("utf-8") + b"feature commit\n"
+        new_sha = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=str(repo), input=new_object, capture_output=True, check=True,
+        ).stdout.strip().decode("ascii")
+        _git(["update-ref", "HEAD", new_sha], repo)
+
+        original_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        assert b"gpgsig -----BEGIN PGP SIGNATURE-----" in original_raw
+        original_header, original_message = original_raw.split(b"\n\n", 1)
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        rewritten_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        rewritten_header, rewritten_message = rewritten_raw.split(b"\n\n", 1)
+
+        # The signature is gone.
+        assert b"gpgsig" not in rewritten_header
+        assert b"PGP SIGNATURE" not in rewritten_raw
+        # Everything else survived: tree unchanged, message byte-exact,
+        # new identity applied.
+        assert f"tree {tree}".encode("ascii") in rewritten_header
+        assert rewritten_message == original_message
+        assert get_head_author_email(repo) == "bot@example.com"
 
 
 class TestResolveExclusionRefMergeBaseBleed:
@@ -454,8 +1049,8 @@ class TestResolveExclusionRefDivergedBaseBranch:
 
     def test_reauthor_commits_fails_closed_on_diverged_base_branch(self, tmp_path):
         """The same geometry via reauthor_commits/pin_commits_to_bot_identity:
-        the ambiguous floor must be refused BEFORE `git filter-branch` ever
-        runs (never a silent re-authoring on a guessed floor), and the
+        the ambiguous floor must be refused BEFORE any rewrite ever runs
+        (never a silent re-authoring on a guessed floor), and the
         cause must be visible -- reauthor_commits returns (False, cause)
         naming both candidate SHAs, and pin_commits_to_bot_identity embeds
         that cause in the raised AuthorMismatchError (the same fail-closed
@@ -510,7 +1105,7 @@ class TestResolveExclusionRefDivergedBaseBranch:
         assert x_sha in cause
         assert y_sha in cause
 
-        # Refused BEFORE filter-branch ran -- HEAD and its author are
+        # Refused BEFORE any rewrite ran -- HEAD and its author are
         # completely untouched.
         assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
         assert get_head_author_email(repo) == "original@example.com"
@@ -522,11 +1117,14 @@ class TestResolveExclusionRefDivergedBaseBranch:
 
 
 class TestCheckCleanWorkTree:
-    """lr-4cd7ac (MILLER diagnosis lr-60781e): a dirty tracked work tree is
-    a LOCAL, RECOVERABLE precondition failure -- `git filter-branch`
-    refuses outright before it ever starts rewriting -- and must be
-    reported distinctly from a genuine identity mismatch, never folded
-    into AuthorMismatchError's mis-attribution framing."""
+    """lr-4cd7ac (MILLER diagnosis lr-60781e; rationale updated lr-ac7bb0):
+    a dirty tracked work tree is a LOCAL, RECOVERABLE condition and must be
+    reported distinctly from a genuine identity mismatch, never folded into
+    AuthorMismatchError's mis-attribution framing. This check is now a
+    residual safety signal rather than a filter-branch precondition
+    pre-empt -- see check_clean_work_tree's own docstring -- but its
+    behavior (flags unstaged tracked changes, ignores untracked files) is
+    unchanged."""
 
     def test_clean_tree_is_a_noop(self, tmp_path):
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
@@ -544,9 +1142,9 @@ class TestCheckCleanWorkTree:
         assert "LOCAL, RECOVERABLE" in message
 
     def test_untracked_file_alone_does_not_raise(self, tmp_path):
-        """check_clean_work_tree mirrors filter-branch's own precondition
-        (tracked working tree/index vs HEAD) -- an untracked file is a
-        cleanliness_check concern (push.cleanliness_check), not this one."""
+        """check_clean_work_tree only ever flags unstaged changes to
+        TRACKED files -- an untracked file is a cleanliness_check concern
+        (push.cleanliness_check), not this one."""
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
         (repo / "untracked.txt").write_text("stray file\n")
         check_clean_work_tree(repo)  # must not raise
@@ -560,40 +1158,51 @@ class TestCheckCleanWorkTree:
 
 class TestReauthorCommitsPropagatesStderr:
     """lr-4cd7ac (MILLER diagnosis lr-60781e): reauthor_commits' failure
-    return must carry the real `git filter-branch` stderr cause, and
-    pin_commits_to_bot_identity must embed it in the raised
-    AuthorMismatchError, rather than discarding it (the pre-fix behavior:
-    result.stderr was captured and never read anywhere)."""
+    return must carry a real, specific cause, and pin_commits_to_bot_identity
+    must embed it in the raised AuthorMismatchError, rather than discarding
+    it (the pre-fix behavior: the underlying rewrite's own failure detail
+    was captured and never read anywhere).
 
-    def test_reauthor_commits_returns_cause_on_dirty_tree_filter_branch_failure(self, tmp_path):
+    lr-ac7bb0 replaced the prior `git filter-branch` mechanism with a
+    `git commit-tree`-based rewrite that never reads the working tree, so a
+    dirty tracked working tree (this class's original failure trigger) no
+    longer fails the rewrite at all -- see TestPinCommitsToBotIdentity /
+    TestCheckCleanWorkTree elsewhere in this file for coverage that a dirty
+    tree, while still guarded pre-flight by check_clean_work_tree in
+    verb.py, no longer defeats reauthor_commits itself. The cause-
+    propagation contract this class covers is exercised here instead via a
+    detached HEAD -- a real, deterministic reauthor_commits failure the new
+    mechanism raises on purpose (it must move a branch ref, and refuses to
+    guess which one on a detached checkout)."""
+
+    def test_reauthor_commits_returns_cause_on_detached_head(self, tmp_path):
         """reauthor_commits() itself is called directly here (bypassing
         both check_clean_work_tree and pin_commits_to_bot_identity) so this
-        exercises the REAL `git filter-branch` failure path end to end --
-        the exact discarded-stderr defect MILLER diagnosed: filter-branch's
-        own precondition check ('You have unstaged changes') firing and its
-        stderr making it all the way back to the caller."""
+        exercises the real detached-HEAD failure path end to end -- the
+        cause must be specific and non-empty, never a generic message with
+        no diagnostic content."""
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
-        (repo / "feature.txt").write_text("unstaged edit\n")
+        _git(["checkout", "--detach", "HEAD"], repo)
 
         ok, cause = reauthor_commits(
             "main", "Bot Name", "bot@example.com", repo,
         )
         assert ok is False
         assert cause != ""
-        assert "unstaged changes" in cause.lower()
+        assert "detached head" in cause.lower()
 
-    def test_pin_commits_error_message_embeds_the_real_filter_branch_cause(self, tmp_path):
+    def test_pin_commits_error_message_embeds_the_real_cause(self, tmp_path):
         """Regression for lr-4cd7ac (MILLER diagnosis lr-60781e): the
         AuthorMismatchError raised by pin_commits_to_bot_identity must
-        embed the real filter-branch stderr, not a generic message with no
+        embed the real underlying cause, not a generic message with no
         diagnostic content. pin_commits_to_bot_identity does not itself run
         the check_clean_work_tree pre-flight (that is verb.py's job, see
         TestBotIdentity.test_dirty_work_tree_fails_with_a_distinct_message_
         before_reauthoring in test_push_verb.py for the pre-flight's own
-        coverage) -- calling it directly here on a dirty tree exercises the
-        underlying filter-branch-failure-propagation fix in isolation."""
+        coverage) -- calling it directly here on a detached HEAD exercises
+        the underlying failure-propagation fix in isolation."""
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
-        (repo / "feature.txt").write_text("unstaged edit\n")
+        _git(["checkout", "--detach", "HEAD"], repo)
 
         with pytest.raises(AuthorMismatchError) as exc_info:
             pin_commits_to_bot_identity(
@@ -601,7 +1210,7 @@ class TestReauthorCommitsPropagatesStderr:
             )
         message = str(exc_info.value)
         assert "Cause:" in message
-        assert "unstaged changes" in message.lower()
+        assert "detached head" in message.lower()
         assert message.strip().endswith(
             "unrecoverable; fix the underlying failure and retry."
         )

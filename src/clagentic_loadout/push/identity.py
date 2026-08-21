@@ -8,9 +8,24 @@ push authored under the wrong identity is unrecoverable once merged, so the
 caller's own bot identity is verified on HEAD before every push.
 
 WHAT MOVED / WHAT DIDN'T:
-  - The re-authoring mechanism itself (git filter-branch --env-filter over
-    the caller's own commits, excluded against a resolved exclusion ref)
-    is unchanged.
+  - THE RE-AUTHORING MECHANISM IS NOT UNCHANGED (lr-ac7bb0 fix): a prior
+    revision of this module used `git filter-branch --env-filter` over the
+    caller's own commits, excluded against a resolved exclusion ref, ported
+    verbatim from the reference implementation. `git filter-branch`
+    materializes its rewritten tree onto the working tree by design (its
+    terminal step checks out the new HEAD), which is unnecessary risk on a
+    push path that runs against a caller's live working tree. This module
+    now rebuilds the same commit range by constructing each new commit
+    object's bytes directly (`git hash-object -t commit -w --stdin`,
+    following a PR #27 review fix to a first cut that used
+    `git commit-tree`; see `_rebuild_commit`'s own docstring for why the
+    write mechanism changed a second time) -- a primitive that only ever
+    writes new git objects, never the working tree or the index — and
+    moves the branch ref to the rebuilt tip with a single `git update-ref`
+    call. See reauthor_commits' own docstring, "PRIMITIVE", for the full
+    account. The rewrite-floor semantics
+    (`HEAD ^<exclusion_ref>`, resolve_exclusion_ref below) are unchanged by
+    this fix — only the mechanism that performs the rewrite changed.
   - THE EXCLUSION-REF COMPUTATION IS NOT UNCHANGED (lr-501695 fix, ported
     defect closed): a prior revision of this module carried this claim
     verbatim from the ported reference, and resolve_exclusion_ref's own
@@ -58,7 +73,6 @@ WHAT MOVED / WHAT DIDN'T:
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -103,22 +117,31 @@ def verify_head_author(expected_email: str, git_cwd: Path | None = None) -> bool
 
 
 def check_clean_work_tree(git_cwd: Path | None = None) -> None:
-    """Pre-flight check (lr-4cd7ac, diagnosis lr-60781e): `git
-    filter-branch` refuses outright on a working tree carrying unstaged
-    changes to tracked files ("You have unstaged changes", git-sh-setup's
-    own require_clean_work_tree). Run this BEFORE reauthor_commits so that
-    failure is reported as the LOCAL, RECOVERABLE condition it actually is
-    -- commit or stash and retry -- rather than surfacing later as a bare
-    filter-branch failure inside AuthorMismatchError's mis-attribution
-    framing, which does not apply here: an unstaged change is never a
-    mis-attribution risk, since filter-branch never even starts rewriting.
+    """Pre-flight check (lr-4cd7ac, diagnosis lr-60781e; rationale updated
+    lr-ac7bb0). ORIGINAL RATIONALE, now historical: this pre-flight existed
+    to pre-empt `git filter-branch`'s own refusal precondition
+    ("You have unstaged changes", git-sh-setup's own
+    require_clean_work_tree) with a more specific, LOCAL/RECOVERABLE
+    message before that refusal surfaced as a bare filter-branch failure
+    inside AuthorMismatchError's mis-attribution framing.
 
-    Uses `git diff --name-only` (tracked files with unstaged working-tree
-    changes; deliberately NOT `git status --porcelain`, which would also
-    flag untracked files -- out of scope here, since filter-branch's own
-    precondition is specifically about the tracked working tree/index
-    matching HEAD) to name the offending files directly in the raised
-    message, distinguishing this from a genuine identity mismatch.
+    reauthor_commits no longer calls `git filter-branch` (lr-ac7bb0: it
+    rebuilds the rewrite range with `git commit-tree`, which reads and
+    writes git objects only, never the working tree or the index) -- so
+    that specific precondition no longer exists to pre-empt, and an
+    unstaged change in a TRACKED file can no longer cause the rewrite
+    itself to fail. This check is kept as a residual safety signal: an
+    unstaged edit present at push time most often means a caller is mid-
+    edit or the tree is in some other locally-inconsistent state a push
+    should not run against silently, even though the underlying
+    tree-clobbering risk this pre-flight was originally written to prevent
+    is gone. Deliberately still `git diff --name-only` (tracked files with
+    unstaged working-tree changes), not `git status --porcelain` (which
+    would also flag untracked files) -- widening this check's scope is not
+    required for correctness now that the rewrite mechanism never touches
+    the working tree at all, and would only make this a stricter,
+    unrelated cleanliness gate (see push.cleanliness_check for that
+    concern's own, purpose-built home).
 
     Raises:
         DirtyWorkTreeError: one or more tracked files have unstaged
@@ -126,11 +149,7 @@ def check_clean_work_tree(git_cwd: Path | None = None) -> None:
             cap) their paths.
 
     A no-op (returns None) when the check itself cannot run (not a git
-    repo, git missing) or when the tree is clean -- this function never
-    raises for anything other than a confirmed dirty tracked tree; a
-    caller relying on a clean tree downstream still hits filter-branch's
-    own failure in that case, just without this pre-flight's more specific
-    message.
+    repo, git missing) or when the tree is clean.
     """
     result = _run(["git", "diff", "--name-only"], cwd=git_cwd)
     if result.returncode != 0:
@@ -177,7 +196,7 @@ def resolve_exclusion_ref(
     base_branch: str,
     git_cwd: Path | None = None,
 ) -> tuple[str, str] | tuple[None, None]:
-    """Resolve the exclusion ref filter-branch uses as the rewrite floor.
+    """Resolve the exclusion ref reauthor_commits uses as the rewrite floor.
 
     THE FLOOR IS THE MORE-ADVANCED MERGE BASE, NEVER A SINGLE BRANCH REF
     DIRECTLY (fix direction (2), lr-501695): a prior revision of this
@@ -311,6 +330,356 @@ def resolve_exclusion_ref(
     return best_sha, f"merge-base({best_label}, HEAD) = {best_sha}"
 
 
+def _commit_tree_sha(git_cwd: Path | None, sha: str) -> str | None:
+    r = _run(["git", "rev-parse", f"{sha}^{{tree}}"], cwd=git_cwd)
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def _commit_parents(git_cwd: Path | None, sha: str) -> list[str] | None:
+    r = _run(["git", "rev-parse", f"{sha}^@"], cwd=git_cwd)
+    if r.returncode != 0:
+        return None
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
+def _commit_date_raw(git_cwd: Path | None, sha: str, fmt: str) -> str | None:
+    """Return *sha*'s author/committer date in git's own internal header
+    format (`<epoch> <tz-offset>`, via `--date=raw`) -- never the
+    locale-dependent default date format, and never re-parsed/re-serialized
+    through an intermediate representation. ASCII-only (a Unix timestamp and
+    a numeric offset), so this stays a `text=True` subprocess call unlike
+    the message/encoding read below."""
+    r = _run(["git", "log", "-1", f"--format={fmt}", "--date=raw", sha], cwd=git_cwd)
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def _commit_object_raw(git_cwd: Path | None, sha: str) -> bytes | None:
+    """Return the RAW bytes of commit *sha*'s object (`git cat-file commit
+    <sha>`), read in binary mode -- never decoded as text. A commit message
+    is not guaranteed to be UTF-8 (see `i18n.commitEncoding`), and even when
+    it is, decoding-then-reencoding through Python's text layer is an
+    unnecessary round-trip this function avoids entirely by never
+    interpreting the bytes as a string at any point."""
+    result = subprocess.run(
+        ["git", "cat-file", "commit", sha],
+        capture_output=True,
+        text=False,
+        cwd=str(git_cwd) if git_cwd is not None else None,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _split_commit_object(raw: bytes) -> tuple[bytes, bytes] | None:
+    """Split a raw commit object's bytes into (header_block, message) on the
+    first blank line -- the commit-object format's own header/message
+    separator (RFC 822-style: headers, one blank line, then the message
+    verbatim with no further interpretation). Returns None if no separator
+    is found (malformed object, should not happen for a real commit `git
+    cat-file` just emitted)."""
+    separator = raw.find(b"\n\n")
+    if separator == -1:
+        return None
+    return raw[:separator], raw[separator + 2 :]
+
+
+def _header_value(header_block: bytes, key: bytes) -> bytes | None:
+    """Return the value of the first `<key> <value>` header line in
+    *header_block*, or None if absent. Used to recover the `encoding`
+    header specifically (see _rebuild_commit) -- a commit object carries
+    `encoding <name>` only when `i18n.commitEncoding` was non-default at
+    commit time; its absence means UTF-8, and this function returning None
+    for that case is what lets the caller correctly omit re-adding it."""
+    prefix = key + b" "
+    for line in header_block.split(b"\n"):
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return None
+
+
+def _reject_ident_injection(field_name: str, value: str) -> str | None:
+    """Return a non-empty cause string if *value* (a `bot_name` or
+    `bot_email`) is unsafe to interpolate directly into a raw commit-object
+    header line, or None if it is safe. Returns None (no violation) for an
+    empty string -- pin_commits_to_bot_identity already handles the
+    missing-identity case itself (fail_closed_on_missing) before this
+    function is ever reached; an empty value reaching here is a caller
+    contract issue, not an injection risk, and is not this function's
+    concern.
+
+    HEADER INJECTION (lr-ac7bb0 follow-up, PR #27 security review):
+    `_rebuild_commit` builds the `author `/`committer ` header lines with
+    plain f-string interpolation and hands the result straight to
+    `git hash-object -t commit -w --stdin`, which performs NO header
+    validation and stores exactly the bytes it is given. The PRIOR
+    `git commit-tree`-based mechanism passed identity via
+    GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL env vars, which git's own internal
+    ident formatter (`fmt_ident()`) sanitizes -- it strips embedded control
+    characters, including newlines, before ever reaching the object bytes.
+    Moving to hand-built header bytes silently dropped that protection: a
+    newline embedded in *bot_name* or *bot_email* injects an arbitrary
+    additional header line into the commit object (a forged `gpgsig`, a
+    second `parent`, a different `author`); a `\\n\\n` sequence terminates
+    the header block early and shifts the remainder into the message body.
+
+    NO GIT PRIMITIVE SUBSTITUTES FOR THIS: `git var GIT_AUTHOR_IDENT` reads
+    identity from env vars/config, not from an arbitrary string passed as
+    data -- using it here would mean routing *bot_name*/*bot_email* back
+    through env vars just to get them sanitized, which reintroduces
+    exactly the coupling to an env-var-mediated call this function's
+    caller (_rebuild_commit) was written to avoid, for no benefit over
+    validating directly. `git check-ref-format` validates REF names, not
+    idents, and has no ident equivalent. There is no `git`-native "validate
+    this string as a safe ident component" primitive that does not also
+    require either writing an object with it (round-tripping through
+    `commit-tree`, i.e. reintroducing an extra object write and the
+    env-var path this fix moved away from) or shelling identity through an
+    env var. Explicit validation, matching git's own ident grammar exactly
+    (no LF/CR/NUL, no leading/trailing whitespace, no bare `<`/`>` that
+    would break the `name <email>` boundary), is the more precise and more
+    auditable choice here: it is a pure function, independently testable,
+    and the exact same check applies uniformly regardless of which write
+    primitive resulted in the security review, rather than depending on an
+    incidental protection from ANOTHER command's own parameter-passing
+    convention.
+
+    Checks (git's own ident-line grammar, `Documentation/*` and
+    `ident.c`'s `fmt_ident()` -- no embedded control characters, no
+    boundary-breaking angle brackets, no leading/trailing whitespace that
+    would shift the header's own field boundaries):
+      - no LF (0x0A) or CR (0x0D) -- the header-injection vector itself;
+        splits or extends the header block.
+      - no NUL (0x00) -- git object bytes are NUL-delimited at a higher
+        level (the object HEADER's own length-prefix uses NUL as its own
+        terminator before the commit body even starts); a NUL inside a
+        header VALUE is never valid ident content.
+      - no leading or trailing ASCII space -- would shift where git's own
+        parser believes the name/email field starts or ends when the
+        object is later read back.
+      - no literal `<` or `>` -- these are the name/email delimiters in
+        the `author `/`committer ` line grammar itself; permitting them
+        inside a value lets a crafted name or email masquerade as (or
+        break) that delimiter structure.
+    """
+    if not value:
+        return None
+    if "\n" in value or "\r" in value:
+        return f"{field_name} {value!r} contains a newline or carriage return"
+    if "\x00" in value:
+        return f"{field_name} {value!r} contains a NUL byte"
+    if value != value.strip(" "):
+        return f"{field_name} {value!r} has leading or trailing whitespace"
+    if "<" in value or ">" in value:
+        return f"{field_name} {value!r} contains '<' or '>'"
+    return None
+
+
+def _reject_date_injection(field_name: str, value: str) -> str | None:
+    """Return a non-empty cause string if *value* (a raw `<epoch> <tz>`
+    date string read from `_commit_date_raw`) is unsafe to interpolate into
+    a raw commit-object header line, or None if it is safe.
+
+    Same injection class as `_reject_ident_injection` (LF/CR/NUL), applied
+    to the date fields named in the same security review -- these are
+    normally git-produced (`git log --date=raw`) and therefore always
+    well-formed in practice, but this function treats that as an
+    assumption to verify, not a guarantee to trust, exactly like the
+    identity fields: any future caller or git version producing an
+    unexpected format is refused here rather than trusted through into the
+    hand-built header bytes.
+    """
+    if "\n" in value or "\r" in value:
+        return f"{field_name} {value!r} contains a newline or carriage return"
+    if "\x00" in value:
+        return f"{field_name} {value!r} contains a NUL byte"
+    return None
+
+
+def _rebuild_commit(
+    git_cwd: Path | None,
+    original_sha: str,
+    new_parents: list[str],
+    bot_name: str,
+    bot_email: str,
+) -> tuple[str | None, str]:
+    """Create a new commit object carrying *original_sha*'s tree and
+    message BYTE-FOR-BYTE, *new_parents* as its parent list,
+    *bot_name*/*bot_email* as both author and committer, the ORIGINAL
+    author/committer dates (never "now"), and the original `encoding`
+    header when *original_sha* carried one. Returns (new_sha, "") on
+    success, or (None, cause) on any failure -- a non-empty, specific
+    *cause* on EVERY failure path, including an injection refusal (see
+    "HEADER INJECTION" below and `_reject_ident_injection`/
+    `_reject_date_injection`'s own docstrings), not just a caller-supplied
+    generic message reconstructed one level up.
+
+    BYTE-EXACT MESSAGE HANDLING (lr-ac7bb0 follow-up, PR #27 review): a
+    prior revision of this function read the message via `git log
+    --format=%B` (a `text=True` subprocess call) and passed it to `git
+    commit-tree -F -`. Two defects, both fixed by building the raw commit
+    object ourselves instead:
+
+    (1) NON-IDEMPOTENT MESSAGE GROWTH: `git log --format=%B` appends its
+        OWN trailing newline on top of whatever terminator the message
+        object already had -- a message stored as "subject\\n" came back as
+        "subject\\n\\n", which `commit-tree -F -` then wrote as the new
+        message verbatim, permanently growing by one newline on every
+        re-authoring pass (re-authoring an already-bot-identity branch
+        produced a NEW SHA every time instead of being a stable no-op).
+        Reading the raw object via `git cat-file commit <sha>` and slicing
+        the message out at the header/message blank-line separator (see
+        _split_commit_object) recovers the EXACT original message bytes,
+        with nothing added or stripped -- including any intentional
+        trailing blank line the author wrote, which a `.rstrip()`-based fix
+        would have destroyed instead of preserving.
+    (2) FORCED UTF-8 DECODE: `text=True` forces a UTF-8 decode of the
+        subprocess's stdout. A commit message that is not valid UTF-8 (a
+        repo with `i18n.commitEncoding` set to e.g. ISO-8859-1) raised an
+        uncaught UnicodeDecodeError out of this function -- bypassing the
+        `(False, cause)` contract reauthor_commits/pin_commits_to_bot_identity
+        depend on, and silently dropping the commit's own `encoding` header
+        in the process (git-commit-tree(1) has no flag to set it directly;
+        it is driven by the REPO's `i18n.commitEncoding` config at write
+        time, which need not match the ORIGINAL commit's own encoding).
+        Reading and writing the message as raw bytes throughout (`cat-file`
+        with `text=False`, `hash-object` with raw bytes on stdin) never
+        decodes it at all, so no encoding can ever raise here, and the
+        original `encoding` header (if present) is read straight out of the
+        original object and copied into the header block this function
+        constructs, rather than being left to git's write-time config to
+        maybe reproduce.
+
+    PRIMITIVE, tree/parent/date construction unchanged (lr-ac7bb0's
+    original commit-tree design): the new commit object's header block
+    (tree, parent(s), author, committer, encoding) is now written directly
+    (`git hash-object -t commit -w --stdin`, which stores the exact bytes
+    given it -- no header synthesis of its own) rather than letting `git
+    commit-tree` synthesize the header block from CLI flags and env vars.
+    This is a strictly more precise version of the same operation: every
+    header value below is still exactly what the prior commit-tree-based
+    version supplied (tree, remapped parents, bot name/email, original
+    author/committer dates in git's own raw `<epoch> <tz>` format) -- only
+    the message/encoding handling changed, and only the write mechanism
+    needed to change to make that possible (commit-tree cannot accept an
+    arbitrary encoding header; hash-object writes whatever bytes it is
+    given).
+
+    HEADER INJECTION (lr-ac7bb0 follow-up, PR #27 security review):
+    the header-block-written-directly design above has a consequence the
+    prior design's env-var identity passing hid: `git hash-object` does
+    NO validation of the bytes it is given, unlike the prior
+    `git commit-tree` mechanism, whose GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL env
+    vars were sanitized by git's own `fmt_ident()` before ever reaching the
+    object. *bot_name*, *bot_email*, *author_date*, and *committer_date*
+    are therefore all validated here (`_reject_ident_injection`/
+    `_reject_date_injection`) BEFORE they are interpolated into the header
+    block -- refuse-and-report, never silently strip -- so a newline (or
+    other control byte) embedded in any of the four can never inject an
+    extra header line, forge a `gpgsig`/`parent`, or shift the
+    header/message boundary. See `_reject_ident_injection`'s own docstring
+    for the exact grammar and why no existing git primitive substitutes
+    for this validation call.
+
+    ONLY tree/parent(s)/author/committer/encoding ARE RECONSTRUCTED --
+    EVERY OTHER ORIGINAL HEADER IS INTENTIONALLY DROPPED (lr-ac7bb0
+    follow-up, PR #27 review): a commit object can carry other
+    valid headers this function never reads or reproduces -- `gpgsig` (a
+    detached PGP signature over the ORIGINAL object's exact bytes) is the
+    realistic case; `mergetag` (an embedded signed tag object, from
+    `git merge --verify-signatures` merging a signed tag) is the other
+    named header git itself recognizes. Both are silently absent from the
+    rebuilt object. This is DELIBERATE, not an oversight, and not new
+    behavior this fix introduced: the prior `git filter-branch
+    --env-filter` mechanism dropped `gpgsig` too (env-filter rewrites
+    author/committer identity, which changes the commit's own hashed
+    content, and filter-branch does not attempt to re-sign or otherwise
+    preserve a signature that content change already invalidates). A
+    signature is cryptographically bound to the EXACT bytes of the object
+    it was made over; re-authoring changes those bytes (a new
+    author/committer, and therefore a new tree-independent hash) by
+    definition, so the original `gpgsig` cannot possibly remain valid over
+    the rebuilt object regardless of which write mechanism performs the
+    rewrite. The only two honest choices are drop it (this function's
+    choice, matching the prior mechanism) or actively re-sign with this
+    deployment's own signing key (out of scope -- no such key/config
+    exists on this push path, and re-signing would be a new capability,
+    not a preservation of an old one). SILENTLY CARRYING A NOW-INVALID
+    SIGNATURE FORWARD WOULD BE STRICTLY WORSE than dropping it: a
+    downstream verifier trusting a `gpgsig` header's mere PRESENCE without
+    itself re-verifying it against the current object would be misled into
+    believing the rebuilt commit is still signed-and-valid when it is
+    not. `mergetag` receives the same treatment for the same underlying
+    reason (it too is validated against exact original bytes this rewrite
+    changes) and because this push path has no mechanism to reconstruct or
+    re-verify an embedded signed-tag object either. See
+    TestRebuildCommitDropsExtraHeaders in tests/test_push_identity.py for
+    the regression coverage pinning this as intended behavior.
+    """
+    tree = _commit_tree_sha(git_cwd, original_sha)
+    if tree is None:
+        return None, f"could not resolve the tree of commit {original_sha}"
+    author_date = _commit_date_raw(git_cwd, original_sha, "%ad")
+    committer_date = _commit_date_raw(git_cwd, original_sha, "%cd")
+    if author_date is None or committer_date is None:
+        return None, f"could not resolve author/committer date of commit {original_sha}"
+    raw_object = _commit_object_raw(git_cwd, original_sha)
+    if raw_object is None:
+        return None, f"could not read the raw commit object for {original_sha}"
+    split = _split_commit_object(raw_object)
+    if split is None:
+        return None, f"commit object {original_sha} has no header/message separator"
+    original_header_block, message = split
+    encoding = _header_value(original_header_block, b"encoding")
+
+    for field_name, value in (
+        ("bot_name", bot_name),
+        ("bot_email", bot_email),
+    ):
+        violation = _reject_ident_injection(field_name, value)
+        if violation is not None:
+            return None, f"refusing to rebuild commit {original_sha}: {violation}"
+    for field_name, value in (
+        ("author_date", author_date),
+        ("committer_date", committer_date),
+    ):
+        violation = _reject_date_injection(field_name, value)
+        if violation is not None:
+            return None, f"refusing to rebuild commit {original_sha}: {violation}"
+
+    header_lines = [f"tree {tree}".encode("ascii")]
+    for parent in new_parents:
+        header_lines.append(f"parent {parent}".encode("ascii"))
+    header_lines.append(
+        f"author {bot_name} <{bot_email}> {author_date}".encode("utf-8")
+    )
+    header_lines.append(
+        f"committer {bot_name} <{bot_email}> {committer_date}".encode("utf-8")
+    )
+    if encoding is not None:
+        header_lines.append(b"encoding " + encoding)
+
+    new_object = b"\n".join(header_lines) + b"\n\n" + message
+
+    result = subprocess.run(
+        ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+        input=new_object,
+        capture_output=True,
+        text=False,
+        cwd=str(git_cwd) if git_cwd is not None else None,
+    )
+    if result.returncode != 0:
+        return None, (
+            f"git hash-object failed to write the rebuilt commit for "
+            f"{original_sha} ({_first_nonempty_stderr_line(result.stderr.decode('utf-8', errors='replace'))})"
+        )
+    return result.stdout.decode("ascii").strip(), ""
+
+
 def reauthor_commits(
     base_branch: str,
     bot_name: str,
@@ -325,15 +694,46 @@ def reauthor_commits(
     nothing to rewrite). Returns (False, cause) on any failure — callers
     must fail closed on False; *cause* is a short, non-empty diagnostic
     string suitable for embedding directly in a caller's own error message
-    (lr-4cd7ac, diagnosis lr-60781e: the underlying `git
-    filter-branch` stderr was previously captured and then discarded,
-    collapsing every precondition failure -- a dirty tree, an unresolvable
-    ref, anything else -- into one indistinguishable message with no cause
-    at all). Also returns (False, cause) when resolve_exclusion_ref raises
+    (lr-4cd7ac, diagnosis lr-60781e: the underlying rewrite's stderr/cause
+    was previously captured and then discarded, collapsing every
+    precondition failure -- a dirty tree, an unresolvable ref, anything
+    else -- into one indistinguishable message with no cause at all). Also
+    returns (False, cause) when resolve_exclusion_ref raises
     AmbiguousExclusionRefError (lr-1cd30b: a diverged base branch with no
     ancestor-comparable floor) — an undefined rewrite floor is refused
-    here, before filter-branch ever runs, rather than proceeding on a
-    guess.
+    here, before any rewrite runs, rather than proceeding on a guess.
+
+    PRIMITIVE (lr-ac7bb0, replaces a prior `git filter-branch --env-filter`
+    call): this function no longer uses `git filter-branch`. filter-branch
+    materializes its rewritten tree onto the working tree by design (its
+    terminal step is `git read-tree -u -m HEAD`, a working-tree-touching
+    two-way merge against the newly rewritten HEAD) -- unnecessary risk on
+    a push path that runs against a caller's live working tree, and on at
+    least one deployment topology (a shared, non-worktree-isolated
+    checkout) that read-tree lands on content other in-flight work shares.
+    Investigation (lr-ac7bb0 task thread) found the guard-width framing
+    this task was originally filed under unsupported -- filter-branch's
+    own precondition
+    (git-sh-setup's require_clean_work_tree) already refuses on staged
+    changes too, and the terminal read-tree is a two-way merge that refuses
+    to clobber untracked files rather than deleting them -- but the
+    tree-touching primitive itself remains an avoidable risk regardless of
+    whether it has yet destroyed anything, so it is replaced here: for each
+    commit in the rewrite range (oldest first), a new commit object is
+    built from the ORIGINAL commit's tree and message (byte-exact -- see
+    `_rebuild_commit`'s own docstring for the message/encoding fidelity fix
+    that replaced this function's first-cut `git commit-tree` write with
+    `git hash-object -t commit -w --stdin`), the already-rebuilt SHAs of
+    any in-range parent (an excluded/already-landed parent keeps its
+    original SHA unchanged -- the same rewrite-floor semantics
+    `HEAD ^<exclusion_ref>` already expresses, unchanged by this fix), and
+    *bot_name*/*bot_email* as both author and committer. Neither
+    `git hash-object` nor `git commit-tree` reads or writes the working
+    tree or the index -- both only ever write new git objects -- so no
+    working-tree content, tracked or untracked, staged or not, can ever be
+    touched by this rewrite. The branch ref is moved to the last rebuilt
+    commit via a single `git update-ref` call at the end; nothing is
+    checked out.
     """
     quick_check = _run(["git", "rev-list", "--count", f"{base_branch}..HEAD"], cwd=git_cwd)
     if quick_check.returncode != 0 or quick_check.stdout.strip() == "0":
@@ -350,22 +750,57 @@ def reauthor_commits(
             f"resolved against HEAD)"
         )
 
-    range_check = _run(["git", "rev-list", "--count", "HEAD", f"^{exclusion_ref}"], cwd=git_cwd)
-    if range_check.returncode != 0 or range_check.stdout.strip() == "0":
-        return True, ""
+    branch_ref = _run(["git", "symbolic-ref", "-q", "HEAD"], cwd=git_cwd)
+    if branch_ref.returncode != 0 or not branch_ref.stdout.strip():
+        return False, (
+            "HEAD is not a branch (detached HEAD) -- re-authoring updates a "
+            "branch ref and refuses on a detached checkout rather than "
+            "guessing which ref to move"
+        )
+    head_ref_name = branch_ref.stdout.strip()
 
-    # Fix direction (3), lr-501695: log the rewrite set (count + SHAs) to
-    # stderr BEFORE filter-branch runs, so a future regression in the
-    # exclusion-ref/merge-base computation above is VISIBLE to an operator
-    # (or CI log) instead of silently re-stamping already-landed history.
-    # Best-effort only — a failure to enumerate the set never blocks the
-    # rewrite itself; the set is diagnostic, not a gate.
-    log = _run(
-        ["git", "log", "--format=%H %s", "HEAD", f"^{exclusion_ref}"],
+    head_before = _run(["git", "rev-parse", "HEAD"], cwd=git_cwd)
+    if head_before.returncode != 0 or not head_before.stdout.strip():
+        return False, "could not resolve HEAD to a commit SHA"
+    original_head_sha = head_before.stdout.strip()
+
+    rewrite_set = _run(
+        ["git", "rev-list", "--reverse", "--topo-order", "HEAD", f"^{exclusion_ref}"],
         cwd=git_cwd,
     )
-    if log.returncode == 0:
-        rewrite_lines = [line for line in log.stdout.splitlines() if line.strip()]
+    if rewrite_set.returncode != 0:
+        return False, (
+            f"could not enumerate the rewrite range (HEAD ^{exclusion_ref})"
+        )
+    original_shas = [line for line in rewrite_set.stdout.splitlines() if line.strip()]
+    if not original_shas:
+        return True, ""
+
+    # Fix direction (3), lr-501695: log the rewrite set (count + SHAs)
+    # BEFORE the rewrite runs, so a future regression in the
+    # exclusion-ref/merge-base computation above is VISIBLE to an operator
+    # (or CI log) instead of silently re-stamping already-landed history.
+    # Best-effort only — a failure to enumerate subjects never blocks the
+    # rewrite itself; the set is diagnostic, not a gate.
+    #
+    # `errors="replace"`, never `_run`'s default strict UTF-8 decode
+    # (lr-ac7bb0 follow-up, PR #27 review): `%s` here is a commit
+    # SUBJECT, which -- unlike every other `_run` call site in this module
+    # (SHAs, counts, ref names, all ASCII) -- can carry non-UTF-8 bytes on a
+    # repo with a legacy `i18n.commitEncoding`. This is purely diagnostic
+    # stderr output; a decode failure here must never raise past this
+    # best-effort log line and into the (False, cause) contract the actual
+    # rewrite below honors precisely (see _rebuild_commit's own docstring
+    # for the byte-exact handling the real message content gets).
+    subjects = subprocess.run(
+        ["git", "log", "--format=%H %s", "HEAD", f"^{exclusion_ref}"],
+        capture_output=True,
+        text=False,
+        cwd=str(git_cwd) if git_cwd is not None else None,
+    )
+    if subjects.returncode == 0:
+        decoded_subjects = subjects.stdout.decode("utf-8", errors="replace")
+        rewrite_lines = [line for line in decoded_subjects.splitlines() if line.strip()]
         print(
             f"push: re-authoring {len(rewrite_lines)} commit(s) to bot identity "
             f"(exclusion ref: {label}):",
@@ -374,55 +809,51 @@ def reauthor_commits(
         for line in rewrite_lines:
             print(f"push:   {line}", file=sys.stderr)
 
-    env_filter = (
-        'GIT_AUTHOR_NAME="$_BOT_NAME" '
-        'GIT_AUTHOR_EMAIL="$_BOT_EMAIL" '
-        'GIT_COMMITTER_NAME="$_BOT_NAME" '
-        'GIT_COMMITTER_EMAIL="$_BOT_EMAIL" '
-        "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL"
-    )
-    filter_env = os.environ.copy()
-    filter_env["_BOT_NAME"] = bot_name
-    filter_env["_BOT_EMAIL"] = bot_email
-    filter_env["FILTER_BRANCH_SQUELCH_WARNING"] = "1"
+    sha_map: dict[str, str] = {}
+    for original_sha in original_shas:
+        original_parents = _commit_parents(git_cwd, original_sha)
+        if original_parents is None:
+            return False, f"could not resolve parents of commit {original_sha}"
+        # A parent already rebuilt (inside this rewrite range) is remapped
+        # to its new SHA; a parent outside the range (already-landed,
+        # reachable from exclusion_ref) keeps its original SHA -- this is
+        # exactly the rewrite-floor semantics `HEAD ^<exclusion_ref>`
+        # already expresses, just applied per-parent instead of via a
+        # single filter-branch range argument.
+        new_parents = [sha_map.get(p, p) for p in original_parents]
+        new_sha, rebuild_cause = _rebuild_commit(
+            git_cwd, original_sha, new_parents, bot_name, bot_email
+        )
+        if new_sha is None:
+            return False, rebuild_cause
+        sha_map[original_sha] = new_sha
 
-    result = subprocess.run(
-        ["git", "filter-branch", "-f", "--env-filter", env_filter, "HEAD", f"^{exclusion_ref}"],
-        capture_output=True,
-        text=True,
-        env=filter_env,
-        cwd=str(git_cwd) if git_cwd is not None else None,
+    new_head_sha = sha_map[original_shas[-1]]
+    update = _run(
+        ["git", "update-ref", head_ref_name, new_head_sha, original_head_sha],
+        cwd=git_cwd,
     )
+    if update.returncode != 0:
+        return False, (
+            f"rebuilt {len(original_shas)} commit(s) but failed to move "
+            f"{head_ref_name} to the new tip {new_head_sha} "
+            f"({_first_nonempty_stderr_line(update.stderr)})"
+        )
 
-    # Clean up filter-branch's backup refs regardless of outcome.
-    subprocess.run(
-        ["git", "update-ref", "-d", "refs/filter-branch/backup/refs/heads/HEAD"],
-        capture_output=True,
-        cwd=str(git_cwd) if git_cwd is not None else None,
-    )
-    subprocess.run(
-        ["git", "update-ref", "-d", "ORIG_HEAD"],
-        capture_output=True,
-        cwd=str(git_cwd) if git_cwd is not None else None,
-    )
-
-    if result.returncode == 0:
-        return True, ""
-    return False, _first_nonempty_stderr_line(result.stderr)
+    return True, ""
 
 
 def _first_nonempty_stderr_line(stderr: str) -> str:
     """Return the first non-blank line of *stderr*, or a fixed fallback
-    string when *stderr* is empty/whitespace-only -- `git filter-branch`'s
-    own decisive diagnostic (e.g. "Cannot rewrite branches: You have
-    unstaged changes.") is always its FIRST line, with any subsequent
-    lines being secondary detail (e.g. a suggested `git status` command)
-    that would only dilute the embedded cause."""
+    string when *stderr* is empty/whitespace-only -- a git subprocess's own
+    decisive diagnostic is generally its FIRST line, with any subsequent
+    lines being secondary detail that would only dilute the embedded
+    cause."""
     for line in stderr.splitlines():
         stripped = line.strip()
         if stripped:
             return stripped
-    return "git filter-branch exited non-zero with no stderr output"
+    return "git exited non-zero with no stderr output"
 
 
 def pin_commits_to_bot_identity(
@@ -452,9 +883,8 @@ def pin_commits_to_bot_identity(
     author does not match the expected identity afterward — a
     mis-attributed push is unrecoverable, so this never returns a silent
     partial success. The raised message embeds the real cause reported by
-    the underlying `git filter-branch` call (lr-4cd7ac, diagnosis
-    lr-60781e) — never a generic "filter-branch failed" with no
-    diagnostic content.
+    the underlying rewrite (lr-4cd7ac, diagnosis lr-60781e) — never a
+    generic "re-authoring failed" with no diagnostic content.
 
     A dirty tracked work tree is NOT surfaced here — see
     check_clean_work_tree, a separate pre-flight callers should run before
