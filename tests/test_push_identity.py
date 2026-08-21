@@ -124,8 +124,8 @@ class TestPinCommitsToBotIdentity:
         """Branch at base with no new commits, and HEAD is ALREADY authored
         under the target bot identity: reauthor_commits() has nothing to
         rewrite (True, no-op) and the subsequent verify step passes because
-        HEAD already matches -- the overall call succeeds without a
-        filter-branch rewrite."""
+        HEAD already matches -- the overall call succeeds with no rewrite
+        performed at all."""
         repo = tmp_path / "repo"
         repo.mkdir()
         _git(["init", "-b", "main"], repo)
@@ -142,9 +142,9 @@ class TestPinCommitsToBotIdentity:
     def test_branch_at_base_with_different_author_fails_closed(self, tmp_path):
         """Branch at base (nothing ahead of base to rewrite) but HEAD's
         existing author does not match the target bot identity: there is
-        nothing for filter-branch to rewrite, and the post-rewrite verify
-        step correctly refuses rather than silently reporting success for
-        an unmatched HEAD."""
+        nothing to rewrite, and the post-rewrite verify step correctly
+        refuses rather than silently reporting success for an unmatched
+        HEAD."""
         repo = tmp_path / "repo"
         repo.mkdir()
         _git(["init", "-b", "main"], repo)
@@ -156,6 +156,105 @@ class TestPinCommitsToBotIdentity:
 
         with pytest.raises(AuthorMismatchError):
             pin_commits_to_bot_identity("Bot Name", "bot@example.com", "main", repo)
+
+
+class TestReauthorCommitsNeverTouchesWorkingTree:
+    """lr-ac7bb0: `git commit-tree` only ever reads/writes git objects, so
+    working-tree content the caller has not yet committed -- staged,
+    unstaged, or untracked -- must survive a re-authoring rewrite byte-for-
+    byte. The prior `git filter-branch` mechanism's terminal `git read-tree
+    -u -m HEAD` checked out the newly rewritten tree over the working tree;
+    this class is the regression coverage for the primitive swap that
+    removes that step entirely."""
+
+    def test_staged_but_uncommitted_change_survives_reauthoring(self, tmp_path):
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        (repo / "feature.txt").write_text("staged edit, not yet committed\n")
+        _git(["add", "feature.txt"], repo)
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+        assert get_head_author_email(repo) == "bot@example.com"
+        assert (repo / "feature.txt").read_text() == "staged edit, not yet committed\n"
+        staged = _git(["diff", "--cached", "--name-only"], repo).stdout.strip()
+        assert staged == "feature.txt"
+
+    def test_untracked_file_survives_reauthoring(self, tmp_path):
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        (repo / "untracked.txt").write_text("stray file, never added\n")
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+        assert get_head_author_email(repo) == "bot@example.com"
+        assert (repo / "untracked.txt").read_text() == "stray file, never added\n"
+        untracked = _git(
+            ["ls-files", "--others", "--exclude-standard"], repo
+        ).stdout.strip()
+        assert untracked == "untracked.txt"
+
+    def test_merge_commit_inside_rewrite_range_is_rebuilt_correctly(self, tmp_path):
+        """A merge commit that is ITSELF part of the rewrite range (not an
+        already-landed one excluded by the floor) must be rebuilt with both
+        parents remapped to their own rebuilt SHAs, its original tree
+        (content) preserved, and its original message preserved -- exactly
+        the geometry `git commit-tree`'s per-parent remap in reauthor_commits
+        exists to get right without ever checking anything out."""
+        origin = tmp_path / "origin.git"
+        origin.mkdir()
+        _git(["init", "--bare"], origin)
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+        _git(["remote", "add", "origin", str(origin)], repo)
+        _git(["push", "origin", "main"], repo)
+        _git(["fetch", "origin"], repo)
+
+        _git(["checkout", "-b", "side"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "side.txt").write_text("side work\n")
+        _git(["add", "side.txt"], repo)
+        _git(["commit", "-m", "side commit"], repo)
+
+        _git(["checkout", "-b", "feature", "main"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+        _git(["merge", "--no-ff", "-m", "merge side into feature", "side"], repo)
+        merge_tree_before = _git(["rev-parse", "HEAD^{tree}"], repo).stdout.strip()
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        head_after = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+        parents_after = _git(["rev-parse", "HEAD^@"], repo).stdout.split()
+        assert len(parents_after) == 2
+
+        merge_subject = _git(["log", "-1", "--format=%s", head_after], repo).stdout.strip()
+        assert merge_subject == "merge side into feature"
+        merge_tree_after = _git(["rev-parse", f"{head_after}^{{tree}}"], repo).stdout.strip()
+        assert merge_tree_after == merge_tree_before
+
+        # Both parents (the rebuilt feature-branch tip and the rebuilt side
+        # tip) must carry the bot identity -- neither is reachable from
+        # main, so both are inside the rewrite range.
+        for parent_sha in parents_after:
+            assert (
+                _git(["log", "-1", "--format=%ae", parent_sha], repo).stdout.strip()
+                == "bot@example.com"
+            )
 
 
 class TestResolveExclusionRefMergeBaseBleed:
@@ -454,8 +553,8 @@ class TestResolveExclusionRefDivergedBaseBranch:
 
     def test_reauthor_commits_fails_closed_on_diverged_base_branch(self, tmp_path):
         """The same geometry via reauthor_commits/pin_commits_to_bot_identity:
-        the ambiguous floor must be refused BEFORE `git filter-branch` ever
-        runs (never a silent re-authoring on a guessed floor), and the
+        the ambiguous floor must be refused BEFORE any rewrite ever runs
+        (never a silent re-authoring on a guessed floor), and the
         cause must be visible -- reauthor_commits returns (False, cause)
         naming both candidate SHAs, and pin_commits_to_bot_identity embeds
         that cause in the raised AuthorMismatchError (the same fail-closed
@@ -510,7 +609,7 @@ class TestResolveExclusionRefDivergedBaseBranch:
         assert x_sha in cause
         assert y_sha in cause
 
-        # Refused BEFORE filter-branch ran -- HEAD and its author are
+        # Refused BEFORE any rewrite ran -- HEAD and its author are
         # completely untouched.
         assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
         assert get_head_author_email(repo) == "original@example.com"
@@ -522,11 +621,14 @@ class TestResolveExclusionRefDivergedBaseBranch:
 
 
 class TestCheckCleanWorkTree:
-    """lr-4cd7ac (MILLER diagnosis lr-60781e): a dirty tracked work tree is
-    a LOCAL, RECOVERABLE precondition failure -- `git filter-branch`
-    refuses outright before it ever starts rewriting -- and must be
-    reported distinctly from a genuine identity mismatch, never folded
-    into AuthorMismatchError's mis-attribution framing."""
+    """lr-4cd7ac (MILLER diagnosis lr-60781e; rationale updated lr-ac7bb0):
+    a dirty tracked work tree is a LOCAL, RECOVERABLE condition and must be
+    reported distinctly from a genuine identity mismatch, never folded into
+    AuthorMismatchError's mis-attribution framing. This check is now a
+    residual safety signal rather than a filter-branch precondition
+    pre-empt -- see check_clean_work_tree's own docstring -- but its
+    behavior (flags unstaged tracked changes, ignores untracked files) is
+    unchanged."""
 
     def test_clean_tree_is_a_noop(self, tmp_path):
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
@@ -544,9 +646,9 @@ class TestCheckCleanWorkTree:
         assert "LOCAL, RECOVERABLE" in message
 
     def test_untracked_file_alone_does_not_raise(self, tmp_path):
-        """check_clean_work_tree mirrors filter-branch's own precondition
-        (tracked working tree/index vs HEAD) -- an untracked file is a
-        cleanliness_check concern (push.cleanliness_check), not this one."""
+        """check_clean_work_tree only ever flags unstaged changes to
+        TRACKED files -- an untracked file is a cleanliness_check concern
+        (push.cleanliness_check), not this one."""
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
         (repo / "untracked.txt").write_text("stray file\n")
         check_clean_work_tree(repo)  # must not raise
@@ -560,40 +662,51 @@ class TestCheckCleanWorkTree:
 
 class TestReauthorCommitsPropagatesStderr:
     """lr-4cd7ac (MILLER diagnosis lr-60781e): reauthor_commits' failure
-    return must carry the real `git filter-branch` stderr cause, and
-    pin_commits_to_bot_identity must embed it in the raised
-    AuthorMismatchError, rather than discarding it (the pre-fix behavior:
-    result.stderr was captured and never read anywhere)."""
+    return must carry a real, specific cause, and pin_commits_to_bot_identity
+    must embed it in the raised AuthorMismatchError, rather than discarding
+    it (the pre-fix behavior: the underlying rewrite's own failure detail
+    was captured and never read anywhere).
 
-    def test_reauthor_commits_returns_cause_on_dirty_tree_filter_branch_failure(self, tmp_path):
+    lr-ac7bb0 replaced the prior `git filter-branch` mechanism with a
+    `git commit-tree`-based rewrite that never reads the working tree, so a
+    dirty tracked working tree (this class's original failure trigger) no
+    longer fails the rewrite at all -- see TestPinCommitsToBotIdentity /
+    TestCheckCleanWorkTree elsewhere in this file for coverage that a dirty
+    tree, while still guarded pre-flight by check_clean_work_tree in
+    verb.py, no longer defeats reauthor_commits itself. The cause-
+    propagation contract this class covers is exercised here instead via a
+    detached HEAD -- a real, deterministic reauthor_commits failure the new
+    mechanism raises on purpose (it must move a branch ref, and refuses to
+    guess which one on a detached checkout)."""
+
+    def test_reauthor_commits_returns_cause_on_detached_head(self, tmp_path):
         """reauthor_commits() itself is called directly here (bypassing
         both check_clean_work_tree and pin_commits_to_bot_identity) so this
-        exercises the REAL `git filter-branch` failure path end to end --
-        the exact discarded-stderr defect MILLER diagnosed: filter-branch's
-        own precondition check ('You have unstaged changes') firing and its
-        stderr making it all the way back to the caller."""
+        exercises the real detached-HEAD failure path end to end -- the
+        cause must be specific and non-empty, never a generic message with
+        no diagnostic content."""
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
-        (repo / "feature.txt").write_text("unstaged edit\n")
+        _git(["checkout", "--detach", "HEAD"], repo)
 
         ok, cause = reauthor_commits(
             "main", "Bot Name", "bot@example.com", repo,
         )
         assert ok is False
         assert cause != ""
-        assert "unstaged changes" in cause.lower()
+        assert "detached head" in cause.lower()
 
-    def test_pin_commits_error_message_embeds_the_real_filter_branch_cause(self, tmp_path):
+    def test_pin_commits_error_message_embeds_the_real_cause(self, tmp_path):
         """Regression for lr-4cd7ac (MILLER diagnosis lr-60781e): the
         AuthorMismatchError raised by pin_commits_to_bot_identity must
-        embed the real filter-branch stderr, not a generic message with no
+        embed the real underlying cause, not a generic message with no
         diagnostic content. pin_commits_to_bot_identity does not itself run
         the check_clean_work_tree pre-flight (that is verb.py's job, see
         TestBotIdentity.test_dirty_work_tree_fails_with_a_distinct_message_
         before_reauthoring in test_push_verb.py for the pre-flight's own
-        coverage) -- calling it directly here on a dirty tree exercises the
-        underlying filter-branch-failure-propagation fix in isolation."""
+        coverage) -- calling it directly here on a detached HEAD exercises
+        the underlying failure-propagation fix in isolation."""
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
-        (repo / "feature.txt").write_text("unstaged edit\n")
+        _git(["checkout", "--detach", "HEAD"], repo)
 
         with pytest.raises(AuthorMismatchError) as exc_info:
             pin_commits_to_bot_identity(
@@ -601,7 +714,7 @@ class TestReauthorCommitsPropagatesStderr:
             )
         message = str(exc_info.value)
         assert "Cause:" in message
-        assert "unstaged changes" in message.lower()
+        assert "detached head" in message.lower()
         assert message.strip().endswith(
             "unrecoverable; fix the underlying failure and retry."
         )
