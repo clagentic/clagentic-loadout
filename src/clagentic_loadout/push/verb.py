@@ -1041,7 +1041,7 @@ def _run_contention_check(project_root: Path, *, override: bool) -> None:
     Runs BEFORE token resolution and BEFORE
     `push.identity.pin_commits_to_bot_identity` (the actual commit-history
     mutation this check exists to gate -- a re-authoring rewrite of HEAD
-    via `git commit-tree` + `git update-ref`, lr-ac7bb0) -- a refusal here
+    via new commit objects + `git update-ref`, lr-ac7bb0) -- a refusal here
     must never spend a token mint or touch history first.
 
     Raises push.contention_check.WorkingTreeContentionError when contention

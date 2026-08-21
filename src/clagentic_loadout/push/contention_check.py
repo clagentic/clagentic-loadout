@@ -81,7 +81,7 @@ WHICH VERBS THIS APPLIES TO (task-mandated adjudication): `push.verb`'s
 create-PR path is the only wiring in this task — it is the one loadout verb
 that mutates repo state on the ordinary write path used by every
 build-agent caller (`push.identity.pin_commits_to_bot_identity`'s commit
-re-authoring rewrite of HEAD via `git commit-tree` + `git update-ref`,
+re-authoring rewrite of HEAD via new commit objects + `git update-ref`,
 immediately followed by `git push`; lr-ac7bb0 replaced the prior
 `git filter-branch` mechanism with one that never touches the working
 tree, but push.verb still moves refs and pushes, so it remains the
