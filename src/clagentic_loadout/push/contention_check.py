@@ -79,9 +79,13 @@ enabling this feature must know what it does NOT cover.
 
 WHICH VERBS THIS APPLIES TO (task-mandated adjudication): `push.verb`'s
 create-PR path is the only wiring in this task — it is the one loadout verb
-that mutates the working tree on the ordinary write path used by every
-build-agent caller (`push.identity.pin_commits_to_bot_identity`'s
-`git filter-branch` rewrite of HEAD, immediately followed by `git push`).
+that mutates repo state on the ordinary write path used by every
+build-agent caller (`push.identity.pin_commits_to_bot_identity`'s commit
+re-authoring rewrite of HEAD via `git commit-tree` + `git update-ref`,
+immediately followed by `git push`; lr-ac7bb0 replaced the prior
+`git filter-branch` mechanism with one that never touches the working
+tree, but push.verb still moves refs and pushes, so it remains the
+mutating write path this check protects).
 `push.verb`'s own `--update-pr` path performs no git-tree mutation at all
 (metadata-only PATCH; see that module's own docstring) and is NOT gated —
 there is nothing for this check to protect there. `merge.verb`/
