@@ -317,7 +317,7 @@ def _commit_with_exact_object_message(repo: Path, message_bytes: bytes) -> None:
 
 
 class TestReauthorCommitsMessageFidelity:
-    """lr-ac7bb0 follow-up (PEACHES review, PR #27): reauthor_commits must
+    """lr-ac7bb0 follow-up (PR #27 review): reauthor_commits must
     preserve a commit message's exact original bytes, including whatever
     encoding it was written in and its own trailing-whitespace shape --
     never re-add a trailing newline (which made re-authoring
@@ -512,6 +512,245 @@ class TestReauthorCommitsMessageFidelity:
         assert ok is False
         assert cause != ""
         assert "detached head" in cause.lower()
+
+
+class TestRebuildCommitRejectsHeaderInjection:
+    """lr-ac7bb0 follow-up (PR #27 security review, same defect
+    independently found by two reviewers): `_rebuild_commit` f-string-
+    interpolates bot_name/bot_email/dates directly into raw commit-object
+    header bytes and hands them to `git hash-object`, which performs no
+    validation. A newline embedded in any of the four values must be
+    REFUSED via the documented (False, cause) surface -- never silently
+    stripped, never raised uncaught, and never written as an actual commit
+    object (asserted here by reading the object back afterward and
+    confirming no injected header line landed)."""
+
+    def _build_feature_branch(self, tmp_path: Path) -> Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+        return repo
+
+    def test_newline_in_bot_name_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+        malicious_name = "Bot Name\ngpgsig -----BEGIN PGP SIGNATURE-----"
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity(malicious_name, "bot@example.com", "main", repo)
+        message = str(exc_info.value)
+        assert "Cause:" in message
+        assert "newline" in message.lower()
+
+        # HEAD must be completely untouched -- refused BEFORE any write.
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+        # No commit carrying an injected gpgsig line exists in the repo's
+        # object store at all -- not just "HEAD didn't move", but "the
+        # object was never created".
+        fsck = subprocess.run(
+            ["git", "fsck", "--unreachable", "--dangling"],
+            cwd=str(repo), capture_output=True, text=True,
+        )
+        assert "gpgsig" not in fsck.stdout
+
+    def test_newline_in_bot_email_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+        malicious_email = "bot@example.com\nparent 0000000000000000000000000000000000000000"
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot Name", malicious_email, "main", repo)
+        message = str(exc_info.value)
+        assert "Cause:" in message
+        assert "newline" in message.lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_carriage_return_in_bot_name_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot\rName", "bot@example.com", "main", repo)
+        assert "carriage return" in str(exc_info.value).lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_nul_in_bot_email_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot Name", "bot@ex\x00ample.com", "main", repo)
+        assert "nul" in str(exc_info.value).lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_leading_trailing_whitespace_in_bot_name_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity(" Bot Name", "bot@example.com", "main", repo)
+        assert "whitespace" in str(exc_info.value).lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_angle_bracket_in_bot_name_is_refused(self, tmp_path):
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        with pytest.raises(AuthorMismatchError) as exc_info:
+            pin_commits_to_bot_identity("Bot <Name", "bot@example.com", "main", repo)
+        assert "'<' or '>'" in str(exc_info.value)
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+    def test_reauthor_commits_returns_false_cause_not_raise_on_injection(self, tmp_path):
+        """The lower-level reauthor_commits (bypassing
+        pin_commits_to_bot_identity's AuthorMismatchError wrapping) must
+        itself return (False, cause) -- confirms the refusal is enforced
+        at the actual write site, not merely re-framed one layer up."""
+        repo = self._build_feature_branch(tmp_path)
+        head_before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        ok, cause = reauthor_commits(
+            "main", "Bot Name\nInjected", "bot@example.com", repo,
+        )
+        assert ok is False
+        assert cause != ""
+        assert "newline" in cause.lower()
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == head_before
+
+
+class TestRejectDateInjection:
+    """lr-ac7bb0 follow-up (PR #27 review): author_date/committer_date are
+    interpolated into the same raw header bytes as bot_name/bot_email and
+    are equally capable of injecting a newline -- covered directly against
+    the private _reject_date_injection helper since a malformed date is
+    not reachable through the public API (dates always come from
+    `git log --date=raw` on a real commit, never from caller input),
+    matching how _reject_ident_injection is exercised end-to-end (reachable
+    via bot_name/bot_email) while its date counterpart is exercised as a
+    unit."""
+
+    def test_newline_in_date_is_rejected(self):
+        from clagentic_loadout.push.identity import _reject_date_injection as reject
+
+        cause = reject("author_date", "1700000000 +0000\ngpgsig evil")
+        assert cause is not None
+        assert "newline" in cause.lower()
+
+    def test_carriage_return_in_date_is_rejected(self):
+        from clagentic_loadout.push.identity import _reject_date_injection as reject
+
+        cause = reject("committer_date", "1700000000 +0000\r")
+        assert cause is not None
+        assert "carriage return" in cause.lower()
+
+    def test_nul_in_date_is_rejected(self):
+        from clagentic_loadout.push.identity import _reject_date_injection as reject
+
+        cause = reject("author_date", "1700000000\x00 +0000")
+        assert cause is not None
+        assert "nul" in cause.lower()
+
+    def test_well_formed_raw_date_is_accepted(self):
+        from clagentic_loadout.push.identity import _reject_date_injection as reject
+
+        assert reject("author_date", "1700000000 +0000") is None
+
+
+class TestRebuildCommitDropsExtraHeaders:
+    """lr-ac7bb0 follow-up (PR #27 review): _rebuild_commit only
+    ever reconstructs tree/parent(s)/author/committer/encoding -- every
+    other header on the original object (gpgsig being the realistic case)
+    is intentionally dropped, matching the prior git filter-branch
+    mechanism's own behavior (a signature cannot remain valid over a
+    rebuilt object's changed author/committer content regardless of which
+    write mechanism performs the rewrite). This pins that as INTENDED
+    behavior, not an oversight -- see _rebuild_commit's own docstring,
+    "ONLY tree/parent(s).../ARE RECONSTRUCTED", for the full reasoning."""
+
+    def test_commit_with_gpgsig_header_rebuilds_successfully_without_it(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+
+        # Construct a commit object carrying a (fake, unverifiable --
+        # correctness of the signature itself is irrelevant here, only
+        # its PRESENCE as a header this rewrite must drop) multi-line
+        # gpgsig header, using the same hash-object primitive the module
+        # itself uses to build commits, so this test exercises a real
+        # object shape rather than a synthetic string.
+        tree = _git(["rev-parse", "HEAD^{tree}"], repo).stdout.strip()
+        parent = _git(["rev-parse", "HEAD^"], repo).stdout.strip()
+        ident = _git(["log", "-1", "--format=%an <%ae> %ad", "--date=raw", "HEAD"], repo).stdout.strip()
+        fake_gpgsig = (
+            "gpgsig -----BEGIN PGP SIGNATURE-----\n"
+            " not a real signature, only shaped like one\n"
+            " -----END PGP SIGNATURE-----"
+        )
+        header = (
+            f"tree {tree}\n"
+            f"parent {parent}\n"
+            f"author {ident}\n"
+            f"committer {ident}\n"
+            f"{fake_gpgsig}\n"
+            "\n"
+        )
+        new_object = header.encode("utf-8") + b"feature commit\n"
+        new_sha = subprocess.run(
+            ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+            cwd=str(repo), input=new_object, capture_output=True, check=True,
+        ).stdout.strip().decode("ascii")
+        _git(["update-ref", "HEAD", new_sha], repo)
+
+        original_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        assert b"gpgsig -----BEGIN PGP SIGNATURE-----" in original_raw
+        original_header, original_message = original_raw.split(b"\n\n", 1)
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        rewritten_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        rewritten_header, rewritten_message = rewritten_raw.split(b"\n\n", 1)
+
+        # The signature is gone.
+        assert b"gpgsig" not in rewritten_header
+        assert b"PGP SIGNATURE" not in rewritten_raw
+        # Everything else survived: tree unchanged, message byte-exact,
+        # new identity applied.
+        assert f"tree {tree}".encode("ascii") in rewritten_header
+        assert rewritten_message == original_message
+        assert get_head_author_email(repo) == "bot@example.com"
 
 
 class TestResolveExclusionRefMergeBaseBleed:
