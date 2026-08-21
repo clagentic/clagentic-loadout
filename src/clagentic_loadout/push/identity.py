@@ -8,9 +8,20 @@ push authored under the wrong identity is unrecoverable once merged, so the
 caller's own bot identity is verified on HEAD before every push.
 
 WHAT MOVED / WHAT DIDN'T:
-  - The re-authoring mechanism itself (git filter-branch --env-filter over
-    the caller's own commits, excluded against a resolved exclusion ref)
-    is unchanged.
+  - THE RE-AUTHORING MECHANISM IS NOT UNCHANGED (lr-ac7bb0 fix): a prior
+    revision of this module used `git filter-branch --env-filter` over the
+    caller's own commits, excluded against a resolved exclusion ref, ported
+    verbatim from the reference implementation. `git filter-branch`
+    materializes its rewritten tree onto the working tree by design (its
+    terminal step checks out the new HEAD), which is unnecessary risk on a
+    push path that runs against a caller's live working tree. This module
+    now rebuilds the same commit range with `git commit-tree` instead — a
+    primitive that only ever writes new git objects, never the working tree
+    or the index — and moves the branch ref to the rebuilt tip with a
+    single `git update-ref` call. See reauthor_commits' own docstring,
+    "PRIMITIVE", for the full account. The rewrite-floor semantics
+    (`HEAD ^<exclusion_ref>`, resolve_exclusion_ref below) are unchanged by
+    this fix — only the mechanism that performs the rewrite changed.
   - THE EXCLUSION-REF COMPUTATION IS NOT UNCHANGED (lr-501695 fix, ported
     defect closed): a prior revision of this module carried this claim
     verbatim from the ported reference, and resolve_exclusion_ref's own
@@ -103,22 +114,31 @@ def verify_head_author(expected_email: str, git_cwd: Path | None = None) -> bool
 
 
 def check_clean_work_tree(git_cwd: Path | None = None) -> None:
-    """Pre-flight check (lr-4cd7ac, diagnosis lr-60781e): `git
-    filter-branch` refuses outright on a working tree carrying unstaged
-    changes to tracked files ("You have unstaged changes", git-sh-setup's
-    own require_clean_work_tree). Run this BEFORE reauthor_commits so that
-    failure is reported as the LOCAL, RECOVERABLE condition it actually is
-    -- commit or stash and retry -- rather than surfacing later as a bare
-    filter-branch failure inside AuthorMismatchError's mis-attribution
-    framing, which does not apply here: an unstaged change is never a
-    mis-attribution risk, since filter-branch never even starts rewriting.
+    """Pre-flight check (lr-4cd7ac, diagnosis lr-60781e; rationale updated
+    lr-ac7bb0). ORIGINAL RATIONALE, now historical: this pre-flight existed
+    to pre-empt `git filter-branch`'s own refusal precondition
+    ("You have unstaged changes", git-sh-setup's own
+    require_clean_work_tree) with a more specific, LOCAL/RECOVERABLE
+    message before that refusal surfaced as a bare filter-branch failure
+    inside AuthorMismatchError's mis-attribution framing.
 
-    Uses `git diff --name-only` (tracked files with unstaged working-tree
-    changes; deliberately NOT `git status --porcelain`, which would also
-    flag untracked files -- out of scope here, since filter-branch's own
-    precondition is specifically about the tracked working tree/index
-    matching HEAD) to name the offending files directly in the raised
-    message, distinguishing this from a genuine identity mismatch.
+    reauthor_commits no longer calls `git filter-branch` (lr-ac7bb0: it
+    rebuilds the rewrite range with `git commit-tree`, which reads and
+    writes git objects only, never the working tree or the index) -- so
+    that specific precondition no longer exists to pre-empt, and an
+    unstaged change in a TRACKED file can no longer cause the rewrite
+    itself to fail. This check is kept as a residual safety signal: an
+    unstaged edit present at push time most often means a caller is mid-
+    edit or the tree is in some other locally-inconsistent state a push
+    should not run against silently, even though the underlying
+    tree-clobbering risk this pre-flight was originally written to prevent
+    is gone. Deliberately still `git diff --name-only` (tracked files with
+    unstaged working-tree changes), not `git status --porcelain` (which
+    would also flag untracked files) -- widening this check's scope is not
+    required for correctness now that the rewrite mechanism never touches
+    the working tree at all, and would only make this a stricter,
+    unrelated cleanliness gate (see push.cleanliness_check for that
+    concern's own, purpose-built home).
 
     Raises:
         DirtyWorkTreeError: one or more tracked files have unstaged
@@ -126,11 +146,7 @@ def check_clean_work_tree(git_cwd: Path | None = None) -> None:
             cap) their paths.
 
     A no-op (returns None) when the check itself cannot run (not a git
-    repo, git missing) or when the tree is clean -- this function never
-    raises for anything other than a confirmed dirty tracked tree; a
-    caller relying on a clean tree downstream still hits filter-branch's
-    own failure in that case, just without this pre-flight's more specific
-    message.
+    repo, git missing) or when the tree is clean.
     """
     result = _run(["git", "diff", "--name-only"], cwd=git_cwd)
     if result.returncode != 0:
@@ -177,7 +193,7 @@ def resolve_exclusion_ref(
     base_branch: str,
     git_cwd: Path | None = None,
 ) -> tuple[str, str] | tuple[None, None]:
-    """Resolve the exclusion ref filter-branch uses as the rewrite floor.
+    """Resolve the exclusion ref reauthor_commits uses as the rewrite floor.
 
     THE FLOOR IS THE MORE-ADVANCED MERGE BASE, NEVER A SINGLE BRANCH REF
     DIRECTLY (fix direction (2), lr-501695): a prior revision of this
@@ -311,6 +327,86 @@ def resolve_exclusion_ref(
     return best_sha, f"merge-base({best_label}, HEAD) = {best_sha}"
 
 
+def _commit_tree_sha(git_cwd: Path | None, sha: str) -> str | None:
+    r = _run(["git", "rev-parse", f"{sha}^{{tree}}"], cwd=git_cwd)
+    if r.returncode != 0:
+        return None
+    return r.stdout.strip()
+
+
+def _commit_parents(git_cwd: Path | None, sha: str) -> list[str] | None:
+    r = _run(["git", "rev-parse", f"{sha}^@"], cwd=git_cwd)
+    if r.returncode != 0:
+        return None
+    return [line for line in r.stdout.splitlines() if line.strip()]
+
+
+def _commit_field(git_cwd: Path | None, sha: str, fmt: str) -> str | None:
+    r = _run(["git", "log", "-1", f"--format={fmt}", sha], cwd=git_cwd)
+    if r.returncode != 0:
+        return None
+    return r.stdout
+
+
+def _rebuild_commit(
+    git_cwd: Path | None,
+    original_sha: str,
+    new_parents: list[str],
+    bot_name: str,
+    bot_email: str,
+) -> str | None:
+    """Create a new commit object carrying *original_sha*'s tree and
+    message, *new_parents* as its parent list, *bot_name*/*bot_email* as
+    both author and committer, and the ORIGINAL author/committer dates
+    (never "now" -- `git commit-tree` defaults to the current time when no
+    date env var is supplied, and silently re-dating every rewritten commit
+    to the moment of the push would be its own, unrelated behavior change
+    from what `git filter-branch --env-filter` did, which only ever
+    overrode name/email). Returns the new commit SHA, or None on any
+    failure (a caller-visible cause is not reconstructed here -- the
+    top-level `reauthor_commits` cause message covers the whole rewrite as
+    a unit, matching filter-branch's own single-cause failure surface).
+    """
+    tree = _commit_tree_sha(git_cwd, original_sha)
+    if tree is None:
+        return None
+    message = _commit_field(git_cwd, original_sha, "%B")
+    if message is None:
+        return None
+    # Strict ISO 8601 (%aI/%cI), never the locale-dependent default date
+    # format -- GIT_AUTHOR_DATE/GIT_COMMITTER_DATE must parse unambiguously
+    # regardless of the runtime's locale or git's own `date.format` config.
+    author_date = _commit_field(git_cwd, original_sha, "%aI")
+    committer_date = _commit_field(git_cwd, original_sha, "%cI")
+    if author_date is None or committer_date is None:
+        return None
+
+    commit_tree_env = os.environ.copy()
+    commit_tree_env["GIT_AUTHOR_NAME"] = bot_name
+    commit_tree_env["GIT_AUTHOR_EMAIL"] = bot_email
+    commit_tree_env["GIT_AUTHOR_DATE"] = author_date.strip()
+    commit_tree_env["GIT_COMMITTER_NAME"] = bot_name
+    commit_tree_env["GIT_COMMITTER_EMAIL"] = bot_email
+    commit_tree_env["GIT_COMMITTER_DATE"] = committer_date.strip()
+
+    cmd = ["git", "commit-tree", tree]
+    for parent in new_parents:
+        cmd += ["-p", parent]
+    cmd += ["-F", "-"]
+
+    result = subprocess.run(
+        cmd,
+        input=message,
+        capture_output=True,
+        text=True,
+        env=commit_tree_env,
+        cwd=str(git_cwd) if git_cwd is not None else None,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
 def reauthor_commits(
     base_branch: str,
     bot_name: str,
@@ -325,15 +421,42 @@ def reauthor_commits(
     nothing to rewrite). Returns (False, cause) on any failure — callers
     must fail closed on False; *cause* is a short, non-empty diagnostic
     string suitable for embedding directly in a caller's own error message
-    (lr-4cd7ac, diagnosis lr-60781e: the underlying `git
-    filter-branch` stderr was previously captured and then discarded,
-    collapsing every precondition failure -- a dirty tree, an unresolvable
-    ref, anything else -- into one indistinguishable message with no cause
-    at all). Also returns (False, cause) when resolve_exclusion_ref raises
+    (lr-4cd7ac, diagnosis lr-60781e: the underlying rewrite's stderr/cause
+    was previously captured and then discarded, collapsing every
+    precondition failure -- a dirty tree, an unresolvable ref, anything
+    else -- into one indistinguishable message with no cause at all). Also
+    returns (False, cause) when resolve_exclusion_ref raises
     AmbiguousExclusionRefError (lr-1cd30b: a diverged base branch with no
     ancestor-comparable floor) — an undefined rewrite floor is refused
-    here, before filter-branch ever runs, rather than proceeding on a
-    guess.
+    here, before any rewrite runs, rather than proceeding on a guess.
+
+    PRIMITIVE (lr-ac7bb0, replaces a prior `git filter-branch --env-filter`
+    call): this function no longer uses `git filter-branch`. filter-branch
+    materializes its rewritten tree onto the working tree by design (its
+    terminal step is `git read-tree -u -m HEAD`, a working-tree-touching
+    two-way merge against the newly rewritten HEAD) -- unnecessary risk on
+    a push path that runs against a caller's live working tree, and on at
+    least one deployment topology (a shared, non-worktree-isolated
+    checkout) that read-tree lands on content other in-flight work shares.
+    Investigation (lr-ac7bb0 task thread) found the guard-width framing
+    this task was originally filed under unsupported -- filter-branch's
+    own precondition
+    (git-sh-setup's require_clean_work_tree) already refuses on staged
+    changes too, and the terminal read-tree is a two-way merge that refuses
+    to clobber untracked files rather than deleting them -- but the
+    tree-touching primitive itself remains an avoidable risk regardless of
+    whether it has yet destroyed anything, so it is replaced here with
+    `git commit-tree`: for each commit in the rewrite range (oldest first),
+    a new commit object is built from the ORIGINAL commit's tree and
+    message, the already-rebuilt SHAs of any in-range parent (an
+    excluded/already-landed parent keeps its original SHA unchanged -- the
+    same rewrite-floor semantics `HEAD ^<exclusion_ref>` already expresses,
+    unchanged by this fix), and *bot_name*/*bot_email* as both author and
+    committer. `git commit-tree` never reads or writes the working tree or
+    the index -- it only writes new git objects -- so no working-tree
+    content, tracked or untracked, staged or not, can ever be touched by
+    this rewrite. The branch ref is moved to the last rebuilt commit via a
+    single `git update-ref` call at the end; nothing is checked out.
     """
     quick_check = _run(["git", "rev-list", "--count", f"{base_branch}..HEAD"], cwd=git_cwd)
     if quick_check.returncode != 0 or quick_check.stdout.strip() == "0":
@@ -350,22 +473,44 @@ def reauthor_commits(
             f"resolved against HEAD)"
         )
 
-    range_check = _run(["git", "rev-list", "--count", "HEAD", f"^{exclusion_ref}"], cwd=git_cwd)
-    if range_check.returncode != 0 or range_check.stdout.strip() == "0":
+    branch_ref = _run(["git", "symbolic-ref", "-q", "HEAD"], cwd=git_cwd)
+    if branch_ref.returncode != 0 or not branch_ref.stdout.strip():
+        return False, (
+            "HEAD is not a branch (detached HEAD) -- re-authoring updates a "
+            "branch ref and refuses on a detached checkout rather than "
+            "guessing which ref to move"
+        )
+    head_ref_name = branch_ref.stdout.strip()
+
+    head_before = _run(["git", "rev-parse", "HEAD"], cwd=git_cwd)
+    if head_before.returncode != 0 or not head_before.stdout.strip():
+        return False, "could not resolve HEAD to a commit SHA"
+    original_head_sha = head_before.stdout.strip()
+
+    rewrite_set = _run(
+        ["git", "rev-list", "--reverse", "--topo-order", "HEAD", f"^{exclusion_ref}"],
+        cwd=git_cwd,
+    )
+    if rewrite_set.returncode != 0:
+        return False, (
+            f"could not enumerate the rewrite range (HEAD ^{exclusion_ref})"
+        )
+    original_shas = [line for line in rewrite_set.stdout.splitlines() if line.strip()]
+    if not original_shas:
         return True, ""
 
-    # Fix direction (3), lr-501695: log the rewrite set (count + SHAs) to
-    # stderr BEFORE filter-branch runs, so a future regression in the
+    # Fix direction (3), lr-501695: log the rewrite set (count + SHAs)
+    # BEFORE the rewrite runs, so a future regression in the
     # exclusion-ref/merge-base computation above is VISIBLE to an operator
     # (or CI log) instead of silently re-stamping already-landed history.
-    # Best-effort only — a failure to enumerate the set never blocks the
+    # Best-effort only — a failure to enumerate subjects never blocks the
     # rewrite itself; the set is diagnostic, not a gate.
-    log = _run(
+    subjects = _run(
         ["git", "log", "--format=%H %s", "HEAD", f"^{exclusion_ref}"],
         cwd=git_cwd,
     )
-    if log.returncode == 0:
-        rewrite_lines = [line for line in log.stdout.splitlines() if line.strip()]
+    if subjects.returncode == 0:
+        rewrite_lines = [line for line in subjects.stdout.splitlines() if line.strip()]
         print(
             f"push: re-authoring {len(rewrite_lines)} commit(s) to bot identity "
             f"(exclusion ref: {label}):",
@@ -374,55 +519,49 @@ def reauthor_commits(
         for line in rewrite_lines:
             print(f"push:   {line}", file=sys.stderr)
 
-    env_filter = (
-        'GIT_AUTHOR_NAME="$_BOT_NAME" '
-        'GIT_AUTHOR_EMAIL="$_BOT_EMAIL" '
-        'GIT_COMMITTER_NAME="$_BOT_NAME" '
-        'GIT_COMMITTER_EMAIL="$_BOT_EMAIL" '
-        "export GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL"
-    )
-    filter_env = os.environ.copy()
-    filter_env["_BOT_NAME"] = bot_name
-    filter_env["_BOT_EMAIL"] = bot_email
-    filter_env["FILTER_BRANCH_SQUELCH_WARNING"] = "1"
+    sha_map: dict[str, str] = {}
+    for original_sha in original_shas:
+        original_parents = _commit_parents(git_cwd, original_sha)
+        if original_parents is None:
+            return False, f"could not resolve parents of commit {original_sha}"
+        # A parent already rebuilt (inside this rewrite range) is remapped
+        # to its new SHA; a parent outside the range (already-landed,
+        # reachable from exclusion_ref) keeps its original SHA -- this is
+        # exactly the rewrite-floor semantics `HEAD ^<exclusion_ref>`
+        # already expresses, just applied per-parent instead of via a
+        # single filter-branch range argument.
+        new_parents = [sha_map.get(p, p) for p in original_parents]
+        new_sha = _rebuild_commit(git_cwd, original_sha, new_parents, bot_name, bot_email)
+        if new_sha is None:
+            return False, f"failed to rebuild commit {original_sha} via git commit-tree"
+        sha_map[original_sha] = new_sha
 
-    result = subprocess.run(
-        ["git", "filter-branch", "-f", "--env-filter", env_filter, "HEAD", f"^{exclusion_ref}"],
-        capture_output=True,
-        text=True,
-        env=filter_env,
-        cwd=str(git_cwd) if git_cwd is not None else None,
+    new_head_sha = sha_map[original_shas[-1]]
+    update = _run(
+        ["git", "update-ref", head_ref_name, new_head_sha, original_head_sha],
+        cwd=git_cwd,
     )
+    if update.returncode != 0:
+        return False, (
+            f"rebuilt {len(original_shas)} commit(s) but failed to move "
+            f"{head_ref_name} to the new tip {new_head_sha} "
+            f"({_first_nonempty_stderr_line(update.stderr)})"
+        )
 
-    # Clean up filter-branch's backup refs regardless of outcome.
-    subprocess.run(
-        ["git", "update-ref", "-d", "refs/filter-branch/backup/refs/heads/HEAD"],
-        capture_output=True,
-        cwd=str(git_cwd) if git_cwd is not None else None,
-    )
-    subprocess.run(
-        ["git", "update-ref", "-d", "ORIG_HEAD"],
-        capture_output=True,
-        cwd=str(git_cwd) if git_cwd is not None else None,
-    )
-
-    if result.returncode == 0:
-        return True, ""
-    return False, _first_nonempty_stderr_line(result.stderr)
+    return True, ""
 
 
 def _first_nonempty_stderr_line(stderr: str) -> str:
     """Return the first non-blank line of *stderr*, or a fixed fallback
-    string when *stderr* is empty/whitespace-only -- `git filter-branch`'s
-    own decisive diagnostic (e.g. "Cannot rewrite branches: You have
-    unstaged changes.") is always its FIRST line, with any subsequent
-    lines being secondary detail (e.g. a suggested `git status` command)
-    that would only dilute the embedded cause."""
+    string when *stderr* is empty/whitespace-only -- a git subprocess's own
+    decisive diagnostic is generally its FIRST line, with any subsequent
+    lines being secondary detail that would only dilute the embedded
+    cause."""
     for line in stderr.splitlines():
         stripped = line.strip()
         if stripped:
             return stripped
-    return "git filter-branch exited non-zero with no stderr output"
+    return "git exited non-zero with no stderr output"
 
 
 def pin_commits_to_bot_identity(
@@ -452,9 +591,8 @@ def pin_commits_to_bot_identity(
     author does not match the expected identity afterward — a
     mis-attributed push is unrecoverable, so this never returns a silent
     partial success. The raised message embeds the real cause reported by
-    the underlying `git filter-branch` call (lr-4cd7ac, diagnosis
-    lr-60781e) — never a generic "filter-branch failed" with no
-    diagnostic content.
+    the underlying rewrite (lr-4cd7ac, diagnosis lr-60781e) — never a
+    generic "re-authoring failed" with no diagnostic content.
 
     A dirty tracked work tree is NOT surfaced here — see
     check_clean_work_tree, a separate pre-flight callers should run before
