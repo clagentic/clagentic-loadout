@@ -15,11 +15,15 @@ WHAT MOVED / WHAT DIDN'T:
     materializes its rewritten tree onto the working tree by design (its
     terminal step checks out the new HEAD), which is unnecessary risk on a
     push path that runs against a caller's live working tree. This module
-    now rebuilds the same commit range with `git commit-tree` instead — a
-    primitive that only ever writes new git objects, never the working tree
-    or the index — and moves the branch ref to the rebuilt tip with a
-    single `git update-ref` call. See reauthor_commits' own docstring,
-    "PRIMITIVE", for the full account. The rewrite-floor semantics
+    now rebuilds the same commit range by constructing each new commit
+    object's bytes directly (`git hash-object -t commit -w --stdin`,
+    following a PR #27 review fix to a first cut that used
+    `git commit-tree`; see `_rebuild_commit`'s own docstring for why the
+    write mechanism changed a second time) -- a primitive that only ever
+    writes new git objects, never the working tree or the index — and
+    moves the branch ref to the rebuilt tip with a single `git update-ref`
+    call. See reauthor_commits' own docstring, "PRIMITIVE", for the full
+    account. The rewrite-floor semantics
     (`HEAD ^<exclusion_ref>`, resolve_exclusion_ref below) are unchanged by
     this fix — only the mechanism that performs the rewrite changed.
   - THE EXCLUSION-REF COMPUTATION IS NOT UNCHANGED (lr-501695 fix, ported
@@ -69,7 +73,6 @@ WHAT MOVED / WHAT DIDN'T:
 
 from __future__ import annotations
 
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -341,11 +344,62 @@ def _commit_parents(git_cwd: Path | None, sha: str) -> list[str] | None:
     return [line for line in r.stdout.splitlines() if line.strip()]
 
 
-def _commit_field(git_cwd: Path | None, sha: str, fmt: str) -> str | None:
-    r = _run(["git", "log", "-1", f"--format={fmt}", sha], cwd=git_cwd)
+def _commit_date_raw(git_cwd: Path | None, sha: str, fmt: str) -> str | None:
+    """Return *sha*'s author/committer date in git's own internal header
+    format (`<epoch> <tz-offset>`, via `--date=raw`) -- never the
+    locale-dependent default date format, and never re-parsed/re-serialized
+    through an intermediate representation. ASCII-only (a Unix timestamp and
+    a numeric offset), so this stays a `text=True` subprocess call unlike
+    the message/encoding read below."""
+    r = _run(["git", "log", "-1", f"--format={fmt}", "--date=raw", sha], cwd=git_cwd)
     if r.returncode != 0:
         return None
-    return r.stdout
+    return r.stdout.strip()
+
+
+def _commit_object_raw(git_cwd: Path | None, sha: str) -> bytes | None:
+    """Return the RAW bytes of commit *sha*'s object (`git cat-file commit
+    <sha>`), read in binary mode -- never decoded as text. A commit message
+    is not guaranteed to be UTF-8 (see `i18n.commitEncoding`), and even when
+    it is, decoding-then-reencoding through Python's text layer is an
+    unnecessary round-trip this function avoids entirely by never
+    interpreting the bytes as a string at any point."""
+    result = subprocess.run(
+        ["git", "cat-file", "commit", sha],
+        capture_output=True,
+        text=False,
+        cwd=str(git_cwd) if git_cwd is not None else None,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout
+
+
+def _split_commit_object(raw: bytes) -> tuple[bytes, bytes] | None:
+    """Split a raw commit object's bytes into (header_block, message) on the
+    first blank line -- the commit-object format's own header/message
+    separator (RFC 822-style: headers, one blank line, then the message
+    verbatim with no further interpretation). Returns None if no separator
+    is found (malformed object, should not happen for a real commit `git
+    cat-file` just emitted)."""
+    separator = raw.find(b"\n\n")
+    if separator == -1:
+        return None
+    return raw[:separator], raw[separator + 2 :]
+
+
+def _header_value(header_block: bytes, key: bytes) -> bytes | None:
+    """Return the value of the first `<key> <value>` header line in
+    *header_block*, or None if absent. Used to recover the `encoding`
+    header specifically (see _rebuild_commit) -- a commit object carries
+    `encoding <name>` only when `i18n.commitEncoding` was non-default at
+    commit time; its absence means UTF-8, and this function returning None
+    for that case is what lets the caller correctly omit re-adding it."""
+    prefix = key + b" "
+    for line in header_block.split(b"\n"):
+        if line.startswith(prefix):
+            return line[len(prefix) :]
+    return None
 
 
 def _rebuild_commit(
@@ -356,55 +410,105 @@ def _rebuild_commit(
     bot_email: str,
 ) -> str | None:
     """Create a new commit object carrying *original_sha*'s tree and
-    message, *new_parents* as its parent list, *bot_name*/*bot_email* as
-    both author and committer, and the ORIGINAL author/committer dates
-    (never "now" -- `git commit-tree` defaults to the current time when no
-    date env var is supplied, and silently re-dating every rewritten commit
-    to the moment of the push would be its own, unrelated behavior change
-    from what `git filter-branch --env-filter` did, which only ever
-    overrode name/email). Returns the new commit SHA, or None on any
-    failure (a caller-visible cause is not reconstructed here -- the
-    top-level `reauthor_commits` cause message covers the whole rewrite as
-    a unit, matching filter-branch's own single-cause failure surface).
+    message BYTE-FOR-BYTE, *new_parents* as its parent list,
+    *bot_name*/*bot_email* as both author and committer, the ORIGINAL
+    author/committer dates (never "now"), and the original `encoding`
+    header when *original_sha* carried one. Returns the new commit SHA, or
+    None on any failure (a caller-visible cause is not reconstructed here
+    -- the top-level `reauthor_commits` cause message covers the whole
+    rewrite as a unit).
+
+    BYTE-EXACT MESSAGE HANDLING (lr-ac7bb0 follow-up, PR #27 review): a
+    prior revision of this function read the message via `git log
+    --format=%B` (a `text=True` subprocess call) and passed it to `git
+    commit-tree -F -`. Two defects, both fixed by building the raw commit
+    object ourselves instead:
+
+    (1) NON-IDEMPOTENT MESSAGE GROWTH: `git log --format=%B` appends its
+        OWN trailing newline on top of whatever terminator the message
+        object already had -- a message stored as "subject\\n" came back as
+        "subject\\n\\n", which `commit-tree -F -` then wrote as the new
+        message verbatim, permanently growing by one newline on every
+        re-authoring pass (re-authoring an already-bot-identity branch
+        produced a NEW SHA every time instead of being a stable no-op).
+        Reading the raw object via `git cat-file commit <sha>` and slicing
+        the message out at the header/message blank-line separator (see
+        _split_commit_object) recovers the EXACT original message bytes,
+        with nothing added or stripped -- including any intentional
+        trailing blank line the author wrote, which a `.rstrip()`-based fix
+        would have destroyed instead of preserving.
+    (2) FORCED UTF-8 DECODE: `text=True` forces a UTF-8 decode of the
+        subprocess's stdout. A commit message that is not valid UTF-8 (a
+        repo with `i18n.commitEncoding` set to e.g. ISO-8859-1) raised an
+        uncaught UnicodeDecodeError out of this function -- bypassing the
+        `(False, cause)` contract reauthor_commits/pin_commits_to_bot_identity
+        depend on, and silently dropping the commit's own `encoding` header
+        in the process (git-commit-tree(1) has no flag to set it directly;
+        it is driven by the REPO's `i18n.commitEncoding` config at write
+        time, which need not match the ORIGINAL commit's own encoding).
+        Reading and writing the message as raw bytes throughout (`cat-file`
+        with `text=False`, `hash-object` with raw bytes on stdin) never
+        decodes it at all, so no encoding can ever raise here, and the
+        original `encoding` header (if present) is read straight out of the
+        original object and copied into the header block this function
+        constructs, rather than being left to git's write-time config to
+        maybe reproduce.
+
+    PRIMITIVE, tree/parent/date construction unchanged (lr-ac7bb0's
+    original commit-tree design): the new commit object's header block
+    (tree, parent(s), author, committer, encoding) is now written directly
+    (`git hash-object -t commit -w --stdin`, which stores the exact bytes
+    given it -- no header synthesis of its own) rather than letting `git
+    commit-tree` synthesize the header block from CLI flags and env vars.
+    This is a strictly more precise version of the same operation: every
+    header value below is still exactly what the prior commit-tree-based
+    version supplied (tree, remapped parents, bot name/email, original
+    author/committer dates in git's own raw `<epoch> <tz>` format) -- only
+    the message/encoding handling changed, and only the write mechanism
+    needed to change to make that possible (commit-tree cannot accept an
+    arbitrary encoding header; hash-object writes whatever bytes it is
+    given).
     """
     tree = _commit_tree_sha(git_cwd, original_sha)
     if tree is None:
         return None
-    message = _commit_field(git_cwd, original_sha, "%B")
-    if message is None:
-        return None
-    # Strict ISO 8601 (%aI/%cI), never the locale-dependent default date
-    # format -- GIT_AUTHOR_DATE/GIT_COMMITTER_DATE must parse unambiguously
-    # regardless of the runtime's locale or git's own `date.format` config.
-    author_date = _commit_field(git_cwd, original_sha, "%aI")
-    committer_date = _commit_field(git_cwd, original_sha, "%cI")
+    author_date = _commit_date_raw(git_cwd, original_sha, "%ad")
+    committer_date = _commit_date_raw(git_cwd, original_sha, "%cd")
     if author_date is None or committer_date is None:
         return None
+    raw_object = _commit_object_raw(git_cwd, original_sha)
+    if raw_object is None:
+        return None
+    split = _split_commit_object(raw_object)
+    if split is None:
+        return None
+    original_header_block, message = split
+    encoding = _header_value(original_header_block, b"encoding")
 
-    commit_tree_env = os.environ.copy()
-    commit_tree_env["GIT_AUTHOR_NAME"] = bot_name
-    commit_tree_env["GIT_AUTHOR_EMAIL"] = bot_email
-    commit_tree_env["GIT_AUTHOR_DATE"] = author_date.strip()
-    commit_tree_env["GIT_COMMITTER_NAME"] = bot_name
-    commit_tree_env["GIT_COMMITTER_EMAIL"] = bot_email
-    commit_tree_env["GIT_COMMITTER_DATE"] = committer_date.strip()
-
-    cmd = ["git", "commit-tree", tree]
+    header_lines = [f"tree {tree}".encode("ascii")]
     for parent in new_parents:
-        cmd += ["-p", parent]
-    cmd += ["-F", "-"]
+        header_lines.append(f"parent {parent}".encode("ascii"))
+    header_lines.append(
+        f"author {bot_name} <{bot_email}> {author_date}".encode("utf-8")
+    )
+    header_lines.append(
+        f"committer {bot_name} <{bot_email}> {committer_date}".encode("utf-8")
+    )
+    if encoding is not None:
+        header_lines.append(b"encoding " + encoding)
+
+    new_object = b"\n".join(header_lines) + b"\n\n" + message
 
     result = subprocess.run(
-        cmd,
-        input=message,
+        ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+        input=new_object,
         capture_output=True,
-        text=True,
-        env=commit_tree_env,
+        text=False,
         cwd=str(git_cwd) if git_cwd is not None else None,
     )
     if result.returncode != 0:
         return None
-    return result.stdout.strip()
+    return result.stdout.decode("ascii").strip()
 
 
 def reauthor_commits(
@@ -445,18 +549,22 @@ def reauthor_commits(
     changes too, and the terminal read-tree is a two-way merge that refuses
     to clobber untracked files rather than deleting them -- but the
     tree-touching primitive itself remains an avoidable risk regardless of
-    whether it has yet destroyed anything, so it is replaced here with
-    `git commit-tree`: for each commit in the rewrite range (oldest first),
-    a new commit object is built from the ORIGINAL commit's tree and
-    message, the already-rebuilt SHAs of any in-range parent (an
-    excluded/already-landed parent keeps its original SHA unchanged -- the
-    same rewrite-floor semantics `HEAD ^<exclusion_ref>` already expresses,
-    unchanged by this fix), and *bot_name*/*bot_email* as both author and
-    committer. `git commit-tree` never reads or writes the working tree or
-    the index -- it only writes new git objects -- so no working-tree
-    content, tracked or untracked, staged or not, can ever be touched by
-    this rewrite. The branch ref is moved to the last rebuilt commit via a
-    single `git update-ref` call at the end; nothing is checked out.
+    whether it has yet destroyed anything, so it is replaced here: for each
+    commit in the rewrite range (oldest first), a new commit object is
+    built from the ORIGINAL commit's tree and message (byte-exact -- see
+    `_rebuild_commit`'s own docstring for the message/encoding fidelity fix
+    that replaced this function's first-cut `git commit-tree` write with
+    `git hash-object -t commit -w --stdin`), the already-rebuilt SHAs of
+    any in-range parent (an excluded/already-landed parent keeps its
+    original SHA unchanged -- the same rewrite-floor semantics
+    `HEAD ^<exclusion_ref>` already expresses, unchanged by this fix), and
+    *bot_name*/*bot_email* as both author and committer. Neither
+    `git hash-object` nor `git commit-tree` reads or writes the working
+    tree or the index -- both only ever write new git objects -- so no
+    working-tree content, tracked or untracked, staged or not, can ever be
+    touched by this rewrite. The branch ref is moved to the last rebuilt
+    commit via a single `git update-ref` call at the end; nothing is
+    checked out.
     """
     quick_check = _run(["git", "rev-list", "--count", f"{base_branch}..HEAD"], cwd=git_cwd)
     if quick_check.returncode != 0 or quick_check.stdout.strip() == "0":
@@ -505,12 +613,25 @@ def reauthor_commits(
     # (or CI log) instead of silently re-stamping already-landed history.
     # Best-effort only — a failure to enumerate subjects never blocks the
     # rewrite itself; the set is diagnostic, not a gate.
-    subjects = _run(
+    #
+    # `errors="replace"`, never `_run`'s default strict UTF-8 decode
+    # (lr-ac7bb0 follow-up, PR #27 review): `%s` here is a commit
+    # SUBJECT, which -- unlike every other `_run` call site in this module
+    # (SHAs, counts, ref names, all ASCII) -- can carry non-UTF-8 bytes on a
+    # repo with a legacy `i18n.commitEncoding`. This is purely diagnostic
+    # stderr output; a decode failure here must never raise past this
+    # best-effort log line and into the (False, cause) contract the actual
+    # rewrite below honors precisely (see _rebuild_commit's own docstring
+    # for the byte-exact handling the real message content gets).
+    subjects = subprocess.run(
         ["git", "log", "--format=%H %s", "HEAD", f"^{exclusion_ref}"],
-        cwd=git_cwd,
+        capture_output=True,
+        text=False,
+        cwd=str(git_cwd) if git_cwd is not None else None,
     )
     if subjects.returncode == 0:
-        rewrite_lines = [line for line in subjects.stdout.splitlines() if line.strip()]
+        decoded_subjects = subjects.stdout.decode("utf-8", errors="replace")
+        rewrite_lines = [line for line in decoded_subjects.splitlines() if line.strip()]
         print(
             f"push: re-authoring {len(rewrite_lines)} commit(s) to bot identity "
             f"(exclusion ref: {label}):",
