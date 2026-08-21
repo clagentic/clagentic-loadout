@@ -159,13 +159,13 @@ class TestPinCommitsToBotIdentity:
 
 
 class TestReauthorCommitsNeverTouchesWorkingTree:
-    """lr-ac7bb0: `git commit-tree` only ever reads/writes git objects, so
-    working-tree content the caller has not yet committed -- staged,
-    unstaged, or untracked -- must survive a re-authoring rewrite byte-for-
-    byte. The prior `git filter-branch` mechanism's terminal `git read-tree
-    -u -m HEAD` checked out the newly rewritten tree over the working tree;
-    this class is the regression coverage for the primitive swap that
-    removes that step entirely."""
+    """lr-ac7bb0: reauthor_commits' rewrite only ever reads/writes git
+    objects, so working-tree content the caller has not yet committed --
+    staged, unstaged, or untracked -- must survive a re-authoring rewrite
+    byte-for-byte. The prior `git filter-branch` mechanism's terminal `git
+    read-tree -u -m HEAD` checked out the newly rewritten tree over the
+    working tree; this class is the regression coverage for the primitive
+    swap that removes that step entirely."""
 
     def test_staged_but_uncommitted_change_survives_reauthoring(self, tmp_path):
         repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
@@ -255,6 +255,263 @@ class TestReauthorCommitsNeverTouchesWorkingTree:
                 _git(["log", "-1", "--format=%ae", parent_sha], repo).stdout.strip()
                 == "bot@example.com"
             )
+
+
+def _commit_with_raw_message(
+    repo: Path, message_bytes: bytes, *, env: dict[str, str] | None = None
+) -> None:
+    """Create a commit whose message is EXACTLY *message_bytes* -- bypasses
+    `git commit -m`, which normalizes trailing whitespace, by piping raw
+    bytes into `git commit -F -` (`text=False`, no decode/re-encode
+    anywhere in this helper)."""
+    subprocess.run(
+        ["git", "commit", "-F", "-"],
+        cwd=str(repo),
+        input=message_bytes,
+        capture_output=True,
+        check=True,
+        env=env,
+    )
+
+
+def _git_bytes(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Like _git, but never decodes stdout/stderr -- for a git subcommand
+    (e.g. `checkout`) whose own output embeds a commit subject that may not
+    be valid UTF-8, where this test helper has no reason to read the
+    output as text at all."""
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=False, check=True
+    )
+
+
+def _commit_with_exact_object_message(repo: Path, message_bytes: bytes) -> None:
+    """Create a commit on HEAD whose stored message is EXACTLY
+    *message_bytes*, bypassing `git commit`'s own message normalization
+    entirely (which collapses runs of trailing blank lines -- `git commit
+    -F -` cannot produce a message with more than one trailing newline no
+    matter what is piped into it, so this helper is what makes a test of
+    "does an unusual-but-real stored message survive a rewrite unchanged"
+    possible at all: it builds a real commit OBJECT directly with
+    `git hash-object` + `git update-ref`, the same primitives
+    `_rebuild_commit` itself uses, so the resulting HEAD carries genuinely
+    non-normalized message bytes to rewrite)."""
+    tree = subprocess.run(
+        ["git", "write-tree"], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    parent = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    name_email = subprocess.run(
+        ["git", "log", "-1", "--format=%an <%ae>"], cwd=str(repo),
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    header = f"tree {tree}\nparent {parent}\nauthor {name_email} 1700000000 +0000\ncommitter {name_email} 1700000000 +0000\n\n"
+    new_object = header.encode("utf-8") + message_bytes
+    new_sha = subprocess.run(
+        ["git", "hash-object", "-t", "commit", "-w", "--stdin"],
+        cwd=str(repo), input=new_object, capture_output=True, check=True,
+    ).stdout.strip().decode("ascii")
+    subprocess.run(
+        ["git", "update-ref", "HEAD", new_sha], cwd=str(repo), capture_output=True, check=True,
+    )
+
+
+class TestReauthorCommitsMessageFidelity:
+    """lr-ac7bb0 follow-up (PEACHES review, PR #27): reauthor_commits must
+    preserve a commit message's exact original bytes, including whatever
+    encoding it was written in and its own trailing-whitespace shape --
+    never re-add a trailing newline (which made re-authoring
+    NON-IDEMPOTENT: an already-bot-identity branch produced a new SHA on
+    every re-authoring pass instead of being a stable no-op), and never
+    force a UTF-8 decode that raises on a legacy-encoded message instead of
+    returning (False, cause)."""
+
+    def test_reauthoring_is_idempotent(self, tmp_path):
+        """Re-authoring an already-bot-identity branch a second time must
+        produce the IDENTICAL SHA, not a new one -- the direct regression
+        test for the trailing-newline-accumulation defect: `git log
+        --format=%B` appends its own newline on top of the message's own
+        terminator, so a naive read-message/write-message round trip grows
+        the message (and therefore changes the SHA) on every pass."""
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+
+        first_pass = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert first_pass is True
+        sha_after_first = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        second_pass_ok, second_pass_cause = reauthor_commits(
+            "main", "Bot Name", "bot@example.com", repo,
+        )
+        assert second_pass_ok is True
+        assert second_pass_cause == ""
+        sha_after_second = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        assert sha_after_second == sha_after_first
+
+    def test_message_with_trailing_blank_line_survives_byte_exact(self, tmp_path):
+        """An intentional trailing blank line in the original message must
+        survive -- the fix must NOT `.rstrip()` the message (that would
+        trade the newline-growth bug for a newline-loss bug on exactly this
+        input). `git commit` itself normalizes away a message's own
+        trailing blank lines at commit-creation time (it cannot produce
+        this input), so the test commit is built directly via
+        `_commit_with_exact_object_message` -- the same underlying
+        primitives (`hash-object` + `update-ref`) `_rebuild_commit` itself
+        uses -- to genuinely exercise a stored message with more than one
+        trailing newline."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _git(["commit", "-m", "feature commit"], repo)
+        original_message = b"subject line\n\nbody paragraph one.\n\nbody paragraph two.\n\n"
+        _commit_with_exact_object_message(repo, original_message)
+        original_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        original_header, original_msg_bytes = original_raw.split(b"\n\n", 1)
+        assert original_msg_bytes == original_message
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        rewritten_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        _rewritten_header, rewritten_msg_bytes = rewritten_raw.split(b"\n\n", 1)
+        assert rewritten_msg_bytes == original_message
+
+    def test_multi_paragraph_message_survives_byte_exact(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        original_message = (
+            b"fix(thing): do the thing\n\n"
+            b"First paragraph explains the defect in detail, across\n"
+            b"multiple lines of prose.\n\n"
+            b"Second paragraph explains the fix.\n\n"
+            b"Task: lr-example\n"
+        )
+        _commit_with_raw_message(repo, original_message)
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        rewritten_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        _rewritten_header, rewritten_msg_bytes = rewritten_raw.split(b"\n\n", 1)
+        assert rewritten_msg_bytes == original_message
+
+    def test_non_utf8_message_rebuilds_with_encoding_header_intact(self, tmp_path):
+        """A commit whose message is encoded per `i18n.commitEncoding`
+        (here ISO-8859-1, carrying a byte -- 0xE9, 'e' + acute accent --
+        that is not valid UTF-8 on its own) must rebuild successfully, with
+        the exact original message bytes AND the commit object's own
+        `encoding` header both preserved. A UTF-8 forced-decode anywhere in
+        the rewrite path would raise UnicodeDecodeError on this input
+        instead."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        _git(["config", "i18n.commitEncoding", "ISO-8859-1"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        # "caf\xe9" in ISO-8859-1 -- 0xE9 alone is not valid UTF-8.
+        non_utf8_message = "café fix\n".encode("iso-8859-1")
+        assert b"\xe9" in non_utf8_message
+        with pytest.raises(UnicodeDecodeError):
+            non_utf8_message.decode("utf-8")
+        _commit_with_raw_message(repo, non_utf8_message)
+
+        original_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        assert b"encoding ISO-8859-1" in original_raw
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+        )
+        assert rewritten is True
+
+        rewritten_raw = subprocess.run(
+            ["git", "cat-file", "commit", "HEAD"],
+            cwd=str(repo), capture_output=True, check=True,
+        ).stdout
+        assert b"encoding ISO-8859-1" in rewritten_raw
+        rewritten_header, rewritten_msg_bytes = rewritten_raw.split(b"\n\n", 1)
+        assert rewritten_msg_bytes == non_utf8_message
+
+    def test_non_utf8_message_failure_path_returns_cause_not_raise(self, tmp_path):
+        """A non-UTF-8 message on a detached-HEAD repo (a real,
+        deterministic reauthor_commits failure -- see
+        TestReauthorCommitsPropagatesStderr) must still return
+        (False, cause), never raise -- confirms the byte-exact message path
+        does not introduce a new way for a UTF-8 decode to escape the
+        documented (False, cause) contract on ANY failure combination, not
+        only the success path covered above."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "main"], repo)
+        _git(["config", "user.email", "base@example.com"], repo)
+        _git(["config", "user.name", "Base Author"], repo)
+        _git(["config", "i18n.commitEncoding", "ISO-8859-1"], repo)
+        (repo / "README.md").write_text("hello\n")
+        _git(["add", "README.md"], repo)
+        _git(["commit", "-m", "initial commit"], repo)
+
+        _git(["checkout", "-b", "feature"], repo)
+        _git(["config", "user.email", "original@example.com"], repo)
+        _git(["config", "user.name", "Feature Author"], repo)
+        (repo / "feature.txt").write_text("feature work\n")
+        _git(["add", "feature.txt"], repo)
+        _commit_with_raw_message(repo, "café fix\n".encode("iso-8859-1"))
+        _git_bytes(["checkout", "--detach", "HEAD"], repo)
+
+        ok, cause = reauthor_commits("main", "Bot Name", "bot@example.com", repo)
+        assert ok is False
+        assert cause != ""
+        assert "detached head" in cause.lower()
 
 
 class TestResolveExclusionRefMergeBaseBleed:
