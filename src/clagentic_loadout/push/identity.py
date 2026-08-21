@@ -402,21 +402,121 @@ def _header_value(header_block: bytes, key: bytes) -> bytes | None:
     return None
 
 
+def _reject_ident_injection(field_name: str, value: str) -> str | None:
+    """Return a non-empty cause string if *value* (a `bot_name` or
+    `bot_email`) is unsafe to interpolate directly into a raw commit-object
+    header line, or None if it is safe. Returns None (no violation) for an
+    empty string -- pin_commits_to_bot_identity already handles the
+    missing-identity case itself (fail_closed_on_missing) before this
+    function is ever reached; an empty value reaching here is a caller
+    contract issue, not an injection risk, and is not this function's
+    concern.
+
+    HEADER INJECTION (lr-ac7bb0 follow-up, PR #27 security review):
+    `_rebuild_commit` builds the `author `/`committer ` header lines with
+    plain f-string interpolation and hands the result straight to
+    `git hash-object -t commit -w --stdin`, which performs NO header
+    validation and stores exactly the bytes it is given. The PRIOR
+    `git commit-tree`-based mechanism passed identity via
+    GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL env vars, which git's own internal
+    ident formatter (`fmt_ident()`) sanitizes -- it strips embedded control
+    characters, including newlines, before ever reaching the object bytes.
+    Moving to hand-built header bytes silently dropped that protection: a
+    newline embedded in *bot_name* or *bot_email* injects an arbitrary
+    additional header line into the commit object (a forged `gpgsig`, a
+    second `parent`, a different `author`); a `\\n\\n` sequence terminates
+    the header block early and shifts the remainder into the message body.
+
+    NO GIT PRIMITIVE SUBSTITUTES FOR THIS: `git var GIT_AUTHOR_IDENT` reads
+    identity from env vars/config, not from an arbitrary string passed as
+    data -- using it here would mean routing *bot_name*/*bot_email* back
+    through env vars just to get them sanitized, which reintroduces
+    exactly the coupling to an env-var-mediated call this function's
+    caller (_rebuild_commit) was written to avoid, for no benefit over
+    validating directly. `git check-ref-format` validates REF names, not
+    idents, and has no ident equivalent. There is no `git`-native "validate
+    this string as a safe ident component" primitive that does not also
+    require either writing an object with it (round-tripping through
+    `commit-tree`, i.e. reintroducing an extra object write and the
+    env-var path this fix moved away from) or shelling identity through an
+    env var. Explicit validation, matching git's own ident grammar exactly
+    (no LF/CR/NUL, no leading/trailing whitespace, no bare `<`/`>` that
+    would break the `name <email>` boundary), is the more precise and more
+    auditable choice here: it is a pure function, independently testable,
+    and the exact same check applies uniformly regardless of which write
+    primitive resulted in the security review, rather than depending on an
+    incidental protection from ANOTHER command's own parameter-passing
+    convention.
+
+    Checks (git's own ident-line grammar, `Documentation/*` and
+    `ident.c`'s `fmt_ident()` -- no embedded control characters, no
+    boundary-breaking angle brackets, no leading/trailing whitespace that
+    would shift the header's own field boundaries):
+      - no LF (0x0A) or CR (0x0D) -- the header-injection vector itself;
+        splits or extends the header block.
+      - no NUL (0x00) -- git object bytes are NUL-delimited at a higher
+        level (the object HEADER's own length-prefix uses NUL as its own
+        terminator before the commit body even starts); a NUL inside a
+        header VALUE is never valid ident content.
+      - no leading or trailing ASCII space -- would shift where git's own
+        parser believes the name/email field starts or ends when the
+        object is later read back.
+      - no literal `<` or `>` -- these are the name/email delimiters in
+        the `author `/`committer ` line grammar itself; permitting them
+        inside a value lets a crafted name or email masquerade as (or
+        break) that delimiter structure.
+    """
+    if not value:
+        return None
+    if "\n" in value or "\r" in value:
+        return f"{field_name} {value!r} contains a newline or carriage return"
+    if "\x00" in value:
+        return f"{field_name} {value!r} contains a NUL byte"
+    if value != value.strip(" "):
+        return f"{field_name} {value!r} has leading or trailing whitespace"
+    if "<" in value or ">" in value:
+        return f"{field_name} {value!r} contains '<' or '>'"
+    return None
+
+
+def _reject_date_injection(field_name: str, value: str) -> str | None:
+    """Return a non-empty cause string if *value* (a raw `<epoch> <tz>`
+    date string read from `_commit_date_raw`) is unsafe to interpolate into
+    a raw commit-object header line, or None if it is safe.
+
+    Same injection class as `_reject_ident_injection` (LF/CR/NUL), applied
+    to the date fields named in the same security review -- these are
+    normally git-produced (`git log --date=raw`) and therefore always
+    well-formed in practice, but this function treats that as an
+    assumption to verify, not a guarantee to trust, exactly like the
+    identity fields: any future caller or git version producing an
+    unexpected format is refused here rather than trusted through into the
+    hand-built header bytes.
+    """
+    if "\n" in value or "\r" in value:
+        return f"{field_name} {value!r} contains a newline or carriage return"
+    if "\x00" in value:
+        return f"{field_name} {value!r} contains a NUL byte"
+    return None
+
+
 def _rebuild_commit(
     git_cwd: Path | None,
     original_sha: str,
     new_parents: list[str],
     bot_name: str,
     bot_email: str,
-) -> str | None:
+) -> tuple[str | None, str]:
     """Create a new commit object carrying *original_sha*'s tree and
     message BYTE-FOR-BYTE, *new_parents* as its parent list,
     *bot_name*/*bot_email* as both author and committer, the ORIGINAL
     author/committer dates (never "now"), and the original `encoding`
-    header when *original_sha* carried one. Returns the new commit SHA, or
-    None on any failure (a caller-visible cause is not reconstructed here
-    -- the top-level `reauthor_commits` cause message covers the whole
-    rewrite as a unit).
+    header when *original_sha* carried one. Returns (new_sha, "") on
+    success, or (None, cause) on any failure -- a non-empty, specific
+    *cause* on EVERY failure path, including an injection refusal (see
+    "HEADER INJECTION" below and `_reject_ident_injection`/
+    `_reject_date_injection`'s own docstrings), not just a caller-supplied
+    generic message reconstructed one level up.
 
     BYTE-EXACT MESSAGE HANDLING (lr-ac7bb0 follow-up, PR #27 review): a
     prior revision of this function read the message via `git log
@@ -468,22 +568,88 @@ def _rebuild_commit(
     needed to change to make that possible (commit-tree cannot accept an
     arbitrary encoding header; hash-object writes whatever bytes it is
     given).
+
+    HEADER INJECTION (lr-ac7bb0 follow-up, PR #27 security review):
+    the header-block-written-directly design above has a consequence the
+    prior design's env-var identity passing hid: `git hash-object` does
+    NO validation of the bytes it is given, unlike the prior
+    `git commit-tree` mechanism, whose GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL env
+    vars were sanitized by git's own `fmt_ident()` before ever reaching the
+    object. *bot_name*, *bot_email*, *author_date*, and *committer_date*
+    are therefore all validated here (`_reject_ident_injection`/
+    `_reject_date_injection`) BEFORE they are interpolated into the header
+    block -- refuse-and-report, never silently strip -- so a newline (or
+    other control byte) embedded in any of the four can never inject an
+    extra header line, forge a `gpgsig`/`parent`, or shift the
+    header/message boundary. See `_reject_ident_injection`'s own docstring
+    for the exact grammar and why no existing git primitive substitutes
+    for this validation call.
+
+    ONLY tree/parent(s)/author/committer/encoding ARE RECONSTRUCTED --
+    EVERY OTHER ORIGINAL HEADER IS INTENTIONALLY DROPPED (lr-ac7bb0
+    follow-up, PR #27 review): a commit object can carry other
+    valid headers this function never reads or reproduces -- `gpgsig` (a
+    detached PGP signature over the ORIGINAL object's exact bytes) is the
+    realistic case; `mergetag` (an embedded signed tag object, from
+    `git merge --verify-signatures` merging a signed tag) is the other
+    named header git itself recognizes. Both are silently absent from the
+    rebuilt object. This is DELIBERATE, not an oversight, and not new
+    behavior this fix introduced: the prior `git filter-branch
+    --env-filter` mechanism dropped `gpgsig` too (env-filter rewrites
+    author/committer identity, which changes the commit's own hashed
+    content, and filter-branch does not attempt to re-sign or otherwise
+    preserve a signature that content change already invalidates). A
+    signature is cryptographically bound to the EXACT bytes of the object
+    it was made over; re-authoring changes those bytes (a new
+    author/committer, and therefore a new tree-independent hash) by
+    definition, so the original `gpgsig` cannot possibly remain valid over
+    the rebuilt object regardless of which write mechanism performs the
+    rewrite. The only two honest choices are drop it (this function's
+    choice, matching the prior mechanism) or actively re-sign with this
+    deployment's own signing key (out of scope -- no such key/config
+    exists on this push path, and re-signing would be a new capability,
+    not a preservation of an old one). SILENTLY CARRYING A NOW-INVALID
+    SIGNATURE FORWARD WOULD BE STRICTLY WORSE than dropping it: a
+    downstream verifier trusting a `gpgsig` header's mere PRESENCE without
+    itself re-verifying it against the current object would be misled into
+    believing the rebuilt commit is still signed-and-valid when it is
+    not. `mergetag` receives the same treatment for the same underlying
+    reason (it too is validated against exact original bytes this rewrite
+    changes) and because this push path has no mechanism to reconstruct or
+    re-verify an embedded signed-tag object either. See
+    TestRebuildCommitDropsExtraHeaders in tests/test_push_identity.py for
+    the regression coverage pinning this as intended behavior.
     """
     tree = _commit_tree_sha(git_cwd, original_sha)
     if tree is None:
-        return None
+        return None, f"could not resolve the tree of commit {original_sha}"
     author_date = _commit_date_raw(git_cwd, original_sha, "%ad")
     committer_date = _commit_date_raw(git_cwd, original_sha, "%cd")
     if author_date is None or committer_date is None:
-        return None
+        return None, f"could not resolve author/committer date of commit {original_sha}"
     raw_object = _commit_object_raw(git_cwd, original_sha)
     if raw_object is None:
-        return None
+        return None, f"could not read the raw commit object for {original_sha}"
     split = _split_commit_object(raw_object)
     if split is None:
-        return None
+        return None, f"commit object {original_sha} has no header/message separator"
     original_header_block, message = split
     encoding = _header_value(original_header_block, b"encoding")
+
+    for field_name, value in (
+        ("bot_name", bot_name),
+        ("bot_email", bot_email),
+    ):
+        violation = _reject_ident_injection(field_name, value)
+        if violation is not None:
+            return None, f"refusing to rebuild commit {original_sha}: {violation}"
+    for field_name, value in (
+        ("author_date", author_date),
+        ("committer_date", committer_date),
+    ):
+        violation = _reject_date_injection(field_name, value)
+        if violation is not None:
+            return None, f"refusing to rebuild commit {original_sha}: {violation}"
 
     header_lines = [f"tree {tree}".encode("ascii")]
     for parent in new_parents:
@@ -507,8 +673,11 @@ def _rebuild_commit(
         cwd=str(git_cwd) if git_cwd is not None else None,
     )
     if result.returncode != 0:
-        return None
-    return result.stdout.decode("ascii").strip()
+        return None, (
+            f"git hash-object failed to write the rebuilt commit for "
+            f"{original_sha} ({_first_nonempty_stderr_line(result.stderr.decode('utf-8', errors='replace'))})"
+        )
+    return result.stdout.decode("ascii").strip(), ""
 
 
 def reauthor_commits(
@@ -652,9 +821,11 @@ def reauthor_commits(
         # already expresses, just applied per-parent instead of via a
         # single filter-branch range argument.
         new_parents = [sha_map.get(p, p) for p in original_parents]
-        new_sha = _rebuild_commit(git_cwd, original_sha, new_parents, bot_name, bot_email)
+        new_sha, rebuild_cause = _rebuild_commit(
+            git_cwd, original_sha, new_parents, bot_name, bot_email
+        )
         if new_sha is None:
-            return False, f"failed to rebuild commit {original_sha} via git commit-tree"
+            return False, rebuild_cause
         sha_map[original_sha] = new_sha
 
     new_head_sha = sha_map[original_shas[-1]]
