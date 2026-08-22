@@ -2404,6 +2404,30 @@ class TestMainBodyEnvUsageGuards:
         )
         assert rc == git_host_api.EXIT_BODY_ENV_UNREADABLE
 
+    def test_neither_body_flag_refused_before_network(self, monkeypatch, tmp_path):
+        """lr-9ca25a fold-in (same seam, same repo, discovered auditing this
+        exact body-ingestion contract): before this fix, a comments POST
+        with NEITHER --body-stdin nor --body-env silently fell through with
+        no local body content and no local usage error -- the caller's
+        failure surfaced later as an opaque remote 422/EXIT_CURL_FAILED
+        rather than the specific, named EXIT_BODY_INGESTION_USAGE this
+        module already defines for exactly this contract. No network call
+        should ever be reachable on this path."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+
+        def fake_opener(req, timeout=15):
+            raise AssertionError("no network call should happen when neither body flag is given")
+
+        rc = git_host_api.main(
+            [
+                "--caller", "some-role",
+                "--verify-comment",
+                "POST", "/api/v1/repos/o/r/issues/7/comments",
+            ],
+            token_provider=_RecordingProvider(), opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_BODY_INGESTION_USAGE
+
 
 class TestMainBodyEnvEndToEnd:
     """--body-env posts the SAME way --body-stdin does -- only the
@@ -2567,6 +2591,78 @@ class TestMainBodyEnvEndToEnd:
         )
         assert rc == git_host_api.EXIT_OK
         assert "```review-result" in fake_opener.posted_body
+
+
+# ---------------------------------------------------------------------------
+# ADVERSARIAL-BODY ACCEPTANCE TEST (lr-9ca25a, this task's own PROTECTED
+# criterion, second read site): a caller posts a review body containing
+# backticks, a fenced code block, embedded JSON, AND quotes, in ONE SHOT,
+# with NO special instructions/sanitization, and gets back a verified
+# comment id -- exercised here through transport.git_host_api.main()'s own
+# --body-env consumer, the SECOND read site MILLER's diagnosis named
+# alongside review.verb's. A sanitized/plain-prose body would pass while
+# the underlying defect survives; this uses the exact adversarial shape.
+# ---------------------------------------------------------------------------
+
+_ADVERSARIAL_REVIEW_BODY = (
+    "Found an issue in `review/verb.py`:\n"
+    "\n"
+    "```python\n"
+    'def f(x): return {"a": 1, "b": [1, 2, "three"]}\n'
+    "```\n"
+    "\n"
+    'The embedded JSON `{"nested": true, "quote": "he said \\"hi\\""}` '
+    "should be escaped, and so should this 'single-quoted' clause."
+)
+
+
+class TestAdversarialBodyAcceptanceViaBodyEnv:
+    def _stage(self, tmp_path, body: bytes, *, caller: str, target_pr: int) -> None:
+        from clagentic_loadout.transport.body_env import stage_caller_body
+
+        stage_caller_body(
+            caller=caller, body_bytes=body, target_pr=target_pr,
+            env={"TMPDIR": str(tmp_path)},
+        )
+
+    def test_backtick_fence_json_and_quotes_post_in_one_shot(self, monkeypatch, tmp_path):
+        """The adversarial body is staged exactly as a real harness would
+        (loadout-stage-body) and posted through git_host_api.main()'s
+        --body-env route -- NO sanitization, NO --body-stdin Python-string
+        shortcut. The posted bytes must be byte-identical to the source
+        content: nothing stripped, escaped away, or truncated in transit."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        self._stage(
+            tmp_path,
+            json.dumps({"body": _ADVERSARIAL_REVIEW_BODY}).encode("utf-8"),
+            caller="some-role",
+            target_pr=7,
+        )
+        state = {"posted_body": None}
+
+        def fake_opener(req, timeout=15):
+            url = req.full_url
+            if req.get_method() == "POST" and url.endswith("/comments"):
+                posted = json.loads(req.data.decode("utf-8"))
+                state["posted_body"] = posted["body"]
+                return _FakeResponse(200, b'{"id": 55}')
+            if url.endswith("/api/v1/user"):
+                return _FakeResponse(200, b'{"login": "some-role-bot"}')
+            return _FakeResponse(200, json.dumps([
+                {"id": 55, "html_url": "http://x/55", "user": {"login": "some-role-bot"},
+                 "body": state["posted_body"], "created_at": "2099-01-01T00:00:01Z"},
+            ]).encode("utf-8"))
+
+        rc = git_host_api.main(
+            [
+                "--caller", "some-role",
+                "--body-env", "--verify-comment",
+                "POST", "/api/v1/repos/o/r/issues/7/comments",
+            ],
+            token_provider=_RecordingProvider(), opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_OK
+        assert state["posted_body"] == _ADVERSARIAL_REVIEW_BODY
 
 
 class TestMainBodyEnvStaleReadRegression:

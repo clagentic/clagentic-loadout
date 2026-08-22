@@ -383,9 +383,16 @@ def _review_success_opener(*, pr_number=42, comment_id=9):
 
 class TestReviewVerbCallerRoleContract:
     def _run(self, argv, tokens, monkeypatch):
+        # --body-env is now the DEFAULT body-ingestion route when neither
+        # body-ingestion flag is passed (lr-9ca25a) -- this class's tests
+        # exercise the caller/role contract, not body-ingestion, so
+        # --body-stdin is added explicitly to keep driving the mocked stdin
+        # content exactly as before the default flip.
         monkeypatch.setattr(
             "sys.stdin.buffer.read", lambda: b'{"body": "LGTM"}'
         )
+        if "--body-stdin" not in argv and "--body-env" not in argv:
+            argv = [*argv, "--body-stdin"]
         return review_verb.main(argv, token_provider=tokens, opener=_review_success_opener())
 
     def test_explicit_caller_matching_provider_succeeds(self, monkeypatch):

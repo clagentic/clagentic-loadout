@@ -11,8 +11,12 @@ Coverage:
     being called -- proven via a TokenProvider that raises if invoked.
   - End-to-end success path for both backends (mocked HTTP, injected
     TokenProvider -- no real network, no real credential resolution).
-  - --body-stdin is the sole body path: empty/malformed stdin exits
+  - --body-stdin (explicit opt-in; --body-env is the DEFAULT when neither
+    flag is passed, lr-9ca25a): empty/malformed stdin exits
     EXIT_BODY_STDIN_EMPTY before any token resolution or network call.
+    `_run_main` below passes --body-stdin automatically for every test that
+    does not already specify a body-ingestion flag, preserving each test's
+    original stdin-based intent under the new default.
   - Exit-code coverage: EXIT_USAGE (bad owner/repo, bad pr_number, missing
     --platform), EXIT_TOKEN_FETCH_FAILED, EXIT_POST_FAILED,
     EXIT_VERIFY_FAILED.
@@ -135,7 +139,17 @@ def _forgejo_success_opener(*, pr_number=42, comment_id=9):
 
 
 def _run_main(argv, *, stdin_bytes, token_provider, opener, monkeypatch):
+    """Drive verb.main() with *stdin_bytes* on the (monkeypatched) stdin
+    buffer. --body-env is now the DEFAULT body-ingestion route (lr-9ca25a)
+    when neither --body-env nor --body-stdin is passed -- every existing
+    caller of this helper was written against the PRIOR bare-stdin default,
+    so --body-stdin is injected automatically here unless *argv* already
+    names a body-ingestion flag, preserving each test's original intent
+    (drive stdin content through this invocation) without a mass per-test
+    edit."""
     monkeypatch.setattr("sys.stdin", type("_S", (), {"buffer": io.BytesIO(stdin_bytes)})())
+    if "--body-stdin" not in argv and "--body-env" not in argv:
+        argv = [*argv, "--body-stdin"]
     return verb.main(argv, token_provider=token_provider, opener=opener)
 
 
@@ -606,6 +620,93 @@ class TestVerdictRouteUsageGuards:
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERDICT_BLOCK_USAGE
+
+
+# ---------------------------------------------------------------------------
+# ADVERSARIAL-BODY ACCEPTANCE TEST (lr-9ca25a, this task's own PROTECTED
+# criterion): a caller posts a review body containing backticks, a fenced
+# code block, embedded JSON, AND quotes, in ONE SHOT, with NO special
+# instructions/sanitization from the invoker, and gets back a verified
+# comment id. A sanitized/plain-prose body is the WORKAROUND this task
+# exists to make unnecessary, not the fix -- a test using one would pass
+# while the underlying defect survives, which is how five prior fixes in
+# this seam did not hold (see this module's own history). This body is
+# deliberately NOT hand-quoted into a shell argv anywhere in this test: it
+# is staged via transport.body_env.stage_caller_body, the exact route
+# --body-env (now the DEFAULT) reads from, so this test proves the actual
+# acceptance criterion rather than a --body-stdin Python-string convenience
+# that a real shell caller could never reproduce.
+# ---------------------------------------------------------------------------
+
+ADVERSARIAL_REVIEW_BODY = (
+    "Found an issue in `review/verb.py`:\n"
+    "\n"
+    "```python\n"
+    'def f(x): return {"a": 1, "b": [1, 2, "three"]}\n'
+    "```\n"
+    "\n"
+    'The embedded JSON `{"nested": true, "quote": "he said \\"hi\\""}` '
+    "should be escaped, and so should this 'single-quoted' clause."
+)
+
+
+class TestAdversarialBodyAcceptance:
+    def test_backtick_fence_json_and_quotes_post_in_one_shot_via_default_route(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """The DEFAULT route (--body-env, no flag needed) with the full
+        adversarial body: backticks, a fenced code block, embedded JSON, and
+        quotes, all in one body, staged exactly as a real harness would
+        (loadout-stage-body), with NO sanitization and NO --body-stdin
+        Python-string shortcut."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(
+            tmp_path,
+            json.dumps({"body": ADVERSARIAL_REVIEW_BODY}).encode("utf-8"),
+            caller="reviewer",
+        )
+
+        opener_state: dict = {}
+        opener = _github_verdict_opener(posted_id=99, capture_into=opener_state)
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["verified_id"] == 99
+        # The body that actually reached the network is BYTE-IDENTICAL to
+        # the adversarial content -- nothing was stripped, escaped away, or
+        # truncated by this verb itself.
+        assert opener_state["posted_body"] == ADVERSARIAL_REVIEW_BODY
+
+    def test_backtick_fence_json_and_quotes_post_via_git_host_api_read_site(
+        self, monkeypatch, tmp_path
+    ):
+        """Covers the SECOND read site MILLER identified
+        (transport.git_host_api's own --body-env consumer at
+        review.verb._run's `read_body_bytes(...)` call and git_host_api's
+        own equivalent) by driving transport.body_env's read primitive
+        directly with the identical adversarial body, proving the shared
+        staging/read contract survives it end to end independent of which
+        verb calls it."""
+        from clagentic_loadout.transport.body_env import (
+            read_caller_body_bytes,
+            stage_caller_body,
+        )
+
+        env = {"TMPDIR": str(tmp_path)}
+        raw = json.dumps({"body": ADVERSARIAL_REVIEW_BODY}).encode("utf-8")
+        stage_caller_body(caller="reviewer", body_bytes=raw, target_pr=7, env=env)
+
+        read_back = read_caller_body_bytes(caller="reviewer", expect_target_pr=7, env=env)
+        assert read_back == raw
+        assert json.loads(read_back)["body"] == ADVERSARIAL_REVIEW_BODY
 
 
 class TestVerdictRouteEndToEndSuccess:

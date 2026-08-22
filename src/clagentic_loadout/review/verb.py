@@ -20,10 +20,15 @@ Dispatch shape:
      service is a provider implementation of that seam, not something this
      module bakes in.
   4. Build the ReviewBackend for the resolved platform.
-  5. --body-stdin is the sole body path (validated via
+  5. Body ingestion: --body-env (the DEFAULT when neither body-ingestion
+     flag is given) reads a body staged ahead of time via loadout-stage-body
+     at a fixed, caller-namespaced path — never a shell argument or pipe, so
+     content density (backticks, fenced code, embedded JSON, quotes) is a
+     non-event. --body-stdin is an explicit opt-in escape hatch for a
+     caller with its own non-shell way to hand this process raw JSON bytes.
+     Either way, content is validated via
      review.contract.validate_review_body_stdin_content before any network
-     call) — no --body-file back-compat; this verb is born correct per the
-     task's --body-stdin-only instruction.
+     call — no --body-file back-compat.
   6. backend.post_and_verify() — exactly one post, mandatory readback.
 
 Verdict-post route (lr-482c20, --verdict-review-status): MANDATORY,
@@ -156,6 +161,7 @@ from clagentic_loadout.transport.attestation import (
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
+    augment_body_contract_error,
     read_body_bytes,
     resolve_caller_body_path,
 )
@@ -261,6 +267,24 @@ def _fail(message: str, code: int) -> None:
     raise ReviewPostVerbError(message, code)
 
 
+def _maybe_augment(message: str, args: argparse.Namespace) -> str:
+    """Append the shared body-contract guidance (transport.body_env.
+    augment_body_contract_error) only when this invocation's body bytes came
+    from --body-stdin. Load-bearing, not cosmetic: --body-stdin is the ONE
+    shell-quoting-prone path -- a caller hand-building JSON inside a shell
+    command line and losing content to that shell's own quoting rules
+    experiences the failure as "this tool cannot post a multi-line/backtick-
+    bearing body," and concludes the capability is absent rather than that
+    it reached past the sanctioned --body-env route (see this module's own
+    docstring, 'Body-off-argv route'). A --body-env failure means the
+    STAGED file itself was malformed -- loadout-stage-body's own contract,
+    not a shell-quoting problem -- so the guidance is scoped to
+    args.body_stdin only, never applied unconditionally."""
+    if args.body_stdin:
+        return augment_body_contract_error(message)
+    return message
+
+
 def assert_platform_is_forgejo(owner: str, repo: str, *, explicit_platform: str) -> None:
     """Mirror-image guard for the Forgejo backend: fires BEFORE any
     credential mint or API call when the caller's own --platform value says
@@ -339,23 +363,50 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "review-post -- post exactly one review comment and verify it "
             "landed, on either Forgejo or GitHub, behind one contract. "
-            "stdin is the default body path; --body-env reads a "
-            "FIXED, statically-analyzable path instead, for a caller whose "
-            "invoking command line must carry zero per-invocation body data. "
+            "--body-env (the DEFAULT body path when neither --body-stdin nor "
+            "--body-env is given) reads a body staged ahead of time via "
+            "loadout-stage-body, at a FIXED, statically-analyzable path -- "
+            "for a caller whose invoking command line must carry zero "
+            "per-invocation body data. A review body of ANY shape -- "
+            "multi-line prose, backticks, fenced code blocks, embedded "
+            "JSON, quotes -- is fully supported via loadout-stage-body; "
+            "none of that content ever has to survive a shell argument's "
+            "quoting rules. --body-stdin is an explicit opt-in escape hatch "
+            "for a caller that has its own safe, non-shell way to hand this "
+            "process raw JSON bytes on stdin (e.g. a language runtime's "
+            "subprocess call with an in-memory pipe) -- it is never the "
+            "default, and a caller building that JSON by hand inside a "
+            "shell command line is exactly the failure mode loadout-"
+            "stage-body exists to avoid. "
             "--delete-own-comment COMMENT_ID routes a "
             "belt-and-suspenders self-delete to the resolved --platform's "
             "own backend instead of posting."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Example:\n"
+            "Example (DEFAULT route -- --body-env, no flag needed): a "
+            "harness stages the body at the CALLER-NAMESPACED fixed path "
+            "first (loadout-stage-body; e.g. an agent's own Write tool "
+            "writes the equivalent content to "
+            "$TMPDIR/clagentic-loadout/body.<caller>.json), then invokes "
+            "with a CONSTANT argv -- no per-invocation body substring, no "
+            "pipe, no shell-quoting of the body content at all, and no "
+            "ceiling on backticks/fenced code/embedded JSON/quotes:\n"
+            "  echo '{\"body\":\"LGTM\"}' | \\\n"
+            "    loadout-stage-body --caller reviewer --target-pr 42\n"
+            "  review-post --caller reviewer --platform github \\\n"
+            "    --pr-sha abc123 some-owner/some-repo 42\n"
+            "\n"
+            "Example (explicit --body-stdin opt-in, for a caller with its\n"
+            "own non-shell way to hand this process raw bytes):\n"
             "  echo '{\"body\":\"LGTM\"}' | review-post --caller reviewer "
-            "--platform github --pr-sha abc123 some-owner/some-repo 42\n"
+            "--platform github --body-stdin --pr-sha abc123 "
+            "some-owner/some-repo 42\n"
             "\n"
             "Verdict route -- tool-owned fence, NO backticks cross the shell, "
             "GitHub AND Forgejo parity:\n"
             "  echo '{\"body\":\"No issues found.\",\"review_status\":\"clean\"}' | \\\n"
-            "    review-post --caller reviewer --platform github \\\n"
+            "    review-post --caller reviewer --platform github --body-stdin \\\n"
             "      --verdict-review-status clean --verdict-head-sha abc123 \\\n"
             "      some-owner/some-repo 42\n"
             "\n"
@@ -364,16 +415,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "constructs the entire comment body (header, bullets, fence):\n"
             "  echo '{\"review_status\":\"blocking\",\"findings\":[{\"file\":\"a.py\",\\\n"
             "    \"line\":10,\"rule_id\":\"E501\",\"message\":\"line too long\"}]}' | \\\n"
-            "    review-post --caller reviewer --platform github \\\n"
+            "    review-post --caller reviewer --platform github --body-stdin \\\n"
             "      --verdict-findings --verdict-head-sha abc123 \\\n"
             "      some-owner/some-repo 42\n"
-            "\n"
-            "Body-off-argv route -- a harness stages the body at the\n"
-            "CALLER-NAMESPACED fixed path first (e.g. its own Write tool:\n"
-            "$TMPDIR/clagentic-loadout/body.<caller>.json), then invokes with a\n"
-            "CONSTANT argv -- no per-invocation body substring, no pipe, no producer:\n"
-            "    review-post --caller reviewer --platform github --body-env \\\n"
-            "      --pr-sha abc123 some-owner/some-repo 42\n"
             "\n"
             "Self-delete-own-comment route -- platform-aware, belt-and-\n"
             "suspenders: refuses unless the caller's own identity authored the\n"
@@ -396,16 +440,33 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--body-env",
         action="store_true",
-        help="BODY-OFF-ARGV-AND-PIPE route: read the review "
+        help="DEFAULT body-ingestion route (redundant, but accepted, when "
+        "neither --body-stdin nor --body-env is passed -- see --body-stdin "
+        "below): BODY-OFF-ARGV-AND-PIPE, reading the review "
         "body from a FIXED, statically-analyzable, CALLER-NAMESPACED path "
         "($TMPDIR/clagentic-loadout/body.<caller>.json, transport.body_env."
         "resolve_caller_body_path) that the caller's own harness "
-        "stages BEFORE invoking this verb, instead of stdin -- see "
+        "stages BEFORE invoking this verb, via loadout-stage-body -- see "
         "docs/integration.md. Takes NO value, so the invoking command line "
         "is a CONSTANT string with no per-invocation body substring. "
         "Namespaced by --caller so two concurrent same-TMPDIR callers can "
         "never collide on one staged file. Content is validated "
-        "identically to the stdin path. " + BODY_ENV_NOT_EPHEMERAL_NOTE,
+        "identically to the stdin path -- a multi-line body with "
+        "backticks, fenced code blocks, embedded JSON, and quotes posts "
+        "with no special handling required. " + BODY_ENV_NOT_EPHEMERAL_NOTE,
+    )
+    parser.add_argument(
+        "--body-stdin",
+        action="store_true",
+        help="OPT-IN escape hatch: read the review body as JSON bytes on "
+        "stdin, instead of the default staged-file route (--body-env). "
+        "Only sensible for a caller with its own non-shell way to hand "
+        "this process raw bytes (e.g. an in-memory pipe from a language "
+        "runtime's subprocess call) -- a caller hand-building that JSON "
+        "inside a shell command line should use loadout-stage-body + "
+        "--body-env instead, which never puts body content on an argv or "
+        "through a shell's quoting rules. Mutually exclusive with "
+        "--body-env.",
     )
     parser.add_argument(
         "--caller",
@@ -694,6 +755,23 @@ def _run(
     except (TypeError, ValueError):
         _fail(f"pr_number must be a positive integer, got: {args.pr_number!r}", code=EXIT_USAGE)
 
+    # --body-stdin / --body-env: mutually exclusive body-ingestion flags,
+    # checked BEFORE any I/O. --body-env is the DEFAULT when NEITHER is
+    # supplied -- a caller falls into the sanctioned, off-argv-and-pipe
+    # staged-file route by doing nothing, rather than into a bare-stdin
+    # read that a hand-built shell producer can mangle. --body-stdin
+    # remains available as a deliberate, explicit opt-in for a caller with
+    # its own non-shell way to hand this process raw JSON bytes.
+    if args.body_stdin and args.body_env:
+        _fail(
+            "--body-stdin and --body-env are mutually exclusive -- supply "
+            "at most one body-ingestion flag (or neither, which defaults "
+            "to --body-env's staged-file route).",
+            code=EXIT_USAGE,
+        )
+    if not args.body_stdin and not args.body_env:
+        args.body_env = True
+
     # --verdict-review-status and --verdict-findings are mutually exclusive
     # (lr-c26110): each constructs the fenced block a different way, and
     # accepting both would leave it ambiguous which construction wins.
@@ -833,13 +911,13 @@ def _run(
                 raw_bytes
             )
         except ReviewBodyStdinEmptyError as exc:
-            _fail(str(exc), code=EXIT_VERDICT_BLOCK_USAGE)
+            _fail(_maybe_augment(str(exc), args), code=EXIT_VERDICT_BLOCK_USAGE)
         body = None  # constructed below, entirely from structured fields
     elif args.verdict_review_status is not None:
         try:
             body, verdict_review_status = validate_review_verdict_body_stdin_content(raw_bytes)
         except ReviewBodyStdinEmptyError as exc:
-            _fail(str(exc), code=EXIT_VERDICT_BLOCK_USAGE)
+            _fail(_maybe_augment(str(exc), args), code=EXIT_VERDICT_BLOCK_USAGE)
         if verdict_review_status != args.verdict_review_status:
             _fail(
                 f"--verdict-review-status {args.verdict_review_status!r} "
@@ -853,7 +931,7 @@ def _run(
         try:
             body = validate_review_body_stdin_content(raw_bytes)
         except ReviewBodyStdinEmptyError as exc:
-            _fail(str(exc), code=EXIT_BODY_STDIN_EMPTY)
+            _fail(_maybe_augment(str(exc), args), code=EXIT_BODY_STDIN_EMPTY)
 
     caller = body_env_caller
 

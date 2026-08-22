@@ -252,7 +252,9 @@ from clagentic_loadout.transport.attestation import (
 )
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
+    BODY_STDIN_CONTRACT_GUIDANCE,
     BodyEnvError,
+    augment_body_contract_error,
     read_body_bytes,
 )
 from clagentic_loadout.transport.credential_provider import (
@@ -2063,6 +2065,15 @@ def _run(
                 "supply exactly one body-ingestion flag.",
                 code=EXIT_BODY_INGESTION_USAGE,
             )
+        if not args.body_stdin and not args.body_env:
+            _fail(
+                f"{method} {path_arg!r} sends a request body but neither "
+                f"--body-stdin nor --body-env was supplied -- exactly one "
+                f"body-ingestion flag is required. --body-env (staged via "
+                f"loadout-stage-body) is the recommended route." +
+                BODY_STDIN_CONTRACT_GUIDANCE,
+                code=EXIT_BODY_INGESTION_USAGE,
+            )
         if args.body_stdin:
             stdin_bytes = sys.stdin.buffer.read()
         elif args.body_env:
@@ -2084,7 +2095,21 @@ def _run(
             except BodyEnvError as exc:
                 _fail(str(exc), code=EXIT_BODY_ENV_UNREADABLE)
         if stdin_bytes is not None and args.expect_verdict_block is None:
-            validate_body_stdin_content(stdin_bytes)
+            try:
+                validate_body_stdin_content(stdin_bytes)
+            except GitHostApiError as exc:
+                # Load-bearing, not cosmetic (same rationale as review.verb's
+                # identical augmentation): a caller that hand-built this
+                # JSON inside a shell argument via --body-stdin and lost
+                # content to that shell's own quoting rules experiences the
+                # failure as "this tool cannot post a multi-line/backtick-
+                # bearing body." Only --body-stdin is shell-quoting-prone
+                # here -- a --body-env failure means the STAGED file itself
+                # was malformed, which loadout-stage-body would not be the
+                # fix for, so the guidance is scoped to args.body_stdin.
+                if args.body_stdin:
+                    _fail(augment_body_contract_error(str(exc)), code=exc.code)
+                raise
         # else (expect_verdict_block set): build_expected_verdict_body
         # (called below, once pr_number is known from the path) performs the
         # equivalent validation plus the review_status field check --
