@@ -540,6 +540,53 @@ class TestStagedForDifferentPrFailsClosed:
         )
         assert result == b'{"body": "verdict for sha-a"}'
 
+    def test_unstamped_sha_fails_closed_when_reader_expects_a_sha(self, tmp_path):
+        """lr-9ca25a hardening (MILLER comment #4/#7 residual): a stamp
+        staged WITHOUT --head-sha must not silently satisfy ANY
+        expect_head_sha the reader supplies -- this is the exact hole
+        `expect_head_sha is not None and stamp.head_sha is not None`
+        previously left open. Fails closed (BodyEnvError), and does NOT
+        consume the staged pair (a mismatch is left in place, same as
+        every other stale-read refusal in this class)."""
+        env = {"TMPDIR": str(tmp_path)}
+        body_env.stage_caller_body(
+            caller="reviewer",
+            body_bytes=b'{"body": "ordinary comment, staged with no SHA"}',
+            target_pr=1,
+            env=env,
+        )
+
+        with pytest.raises(body_env.BodyEnvError) as exc_info:
+            body_env.read_caller_body_bytes(
+                caller="reviewer", expect_target_pr=1, expect_head_sha="sha-a", env=env
+            )
+        message = str(exc_info.value)
+        assert "no head_sha" in message or "carries no head_sha" in message
+        assert "loadout-stage-body" in message
+        assert "--head-sha sha-a" in message
+
+        # Not consumed -- the mismatched pair is left in place.
+        body_path = body_env.resolve_caller_body_path(caller="reviewer", env=env)
+        assert body_path.exists()
+
+    def test_unstamped_sha_still_succeeds_when_reader_expects_no_sha(self, tmp_path):
+        """Negative control: a reader that never supplies expect_head_sha at
+        all (an ordinary, non-verdict comment post) is completely unaffected
+        by this hardening -- the check only fires when the READER asks for a
+        SHA match against a stamp that never recorded one."""
+        env = {"TMPDIR": str(tmp_path)}
+        body_env.stage_caller_body(
+            caller="reviewer",
+            body_bytes=b'{"body": "ordinary comment, staged with no SHA"}',
+            target_pr=1,
+            env=env,
+        )
+
+        result = body_env.read_caller_body_bytes(
+            caller="reviewer", expect_target_pr=1, env=env
+        )
+        assert result == b'{"body": "ordinary comment, staged with no SHA"}'
+
     def test_read_caller_body_bytes_requires_exactly_one_of_target_pr_or_create_branch(
         self, tmp_path
     ):
