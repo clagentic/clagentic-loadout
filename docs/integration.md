@@ -794,6 +794,22 @@ The read also requires a matching identity stamp (`body.<caller>.stamp.json`
 stage or a binding mismatch fails closed rather than reading stale or
 mismatched content.
 
+**BREAKING CHANGE (lr-9ca25a): a reader that expects a head SHA now requires
+the stamp to carry one.** `--head-sha` is optional at stage time
+(`loadout-stage-body --head-sha <sha>`) — it always has been, for an
+ordinary comment with no SHA to bind against. Previously, a reader that DID
+supply an expected SHA (`--verdict-head-sha` on `loadout-review-post`,
+`--pr-sha` on `loadout-git-host-api`) against a stamp staged WITHOUT
+`--head-sha` silently treated the missing stamp value as a match for
+whatever SHA the reader expected — the identity stamp's SHA half of
+provenance was effectively opt-in. This now fails closed
+(`BodyEnvError`) instead: an unstamped SHA can never satisfy an expected
+one. **Migration:** any caller that stages a body it intends to read back
+with a SHA expectation must pass `--head-sha <sha>` at stage time too — the
+same value it will later supply as `--verdict-head-sha`/`--pr-sha`. A
+caller whose read never supplies an expected SHA at all (an ordinary,
+non-verdict comment) is unaffected.
+
 This is the fix for the exact gap that motivated this section's own
 existence: an agent's Bash permission allowlist commonly admits
 `body.<caller>.json` for a raw staging write but categorically denies
