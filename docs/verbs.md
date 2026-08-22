@@ -306,8 +306,14 @@ mandatory — resolved by the caller (e.g. from a dispatch envelope's PR
 URL), never auto-detected from ambiguous input. The platform guard
 (`assert_platform_is_forgejo` / `assert_platform_is_github`) always runs
 **before** any credential is minted or any network call is made, in both
-directions. stdin is the default body path; `--body-env` (see below) reads
-the FIXED staged path instead. Outside the verdict
+directions. `--body-env` (see below) is the DEFAULT body-ingestion route
+when neither body-ingestion flag is passed — it reads a body staged ahead
+of time via `loadout-stage-body` at a fixed, caller-namespaced path,
+so a review body of any shape (multi-line prose, backticks, fenced code
+blocks, embedded JSON, quotes) never has to survive a shell argument's own
+quoting rules. `--body-stdin` is an explicit opt-in escape hatch for a
+caller with its own non-shell way to hand this process raw JSON bytes.
+Outside the verdict
 route below, this verb does not touch the fenced ` ```review-result``` `
 block that the merge gate reads — see `review.contract`'s module
 docstring.
