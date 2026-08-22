@@ -366,6 +366,41 @@ BODY_ENV_NOT_EPHEMERAL_NOTE = (
 )
 
 
+#: Shared JSON-contract-failure guidance (mirrors BODY_ENV_NOT_EPHEMERAL_NOTE's
+#: "one text, every verb" pattern immediately above): appended to a
+#: --body-stdin JSON-validation failure by every verb that exposes that flag
+#: (transport.git_host_api, review.verb). Load-bearing, not cosmetic -- a
+#: caller that hand-built this JSON inside a shell command line and lost
+#: content to that shell's own quoting rules experiences the failure as "this
+#: tool cannot post a multi-line/backtick-bearing body," and will conclude
+#: the capability is absent rather than that it reached past the sanctioned
+#: --body-env route. Naming that route, and stating explicitly that dense
+#: content (backticks, fenced code, embedded JSON, quotes) is fully
+#: supported through it, is the fix for that belief -- not tighter escaping.
+BODY_STDIN_CONTRACT_GUIDANCE = (
+    " A review/comment body of ANY shape is fully supported -- multi-line "
+    "prose, backticks, fenced code blocks, embedded JSON, and quotes all "
+    "post correctly. If this content was hand-built inside a shell command "
+    "line and lost to that shell's own quoting rules, use "
+    "loadout-stage-body to write the exact body bytes to a file first, "
+    "then invoke this command with --body-env instead of --body-stdin (no "
+    "shell quoting of the body content at all): "
+    'echo \'{"body": "<the body, any content>"}\' | '
+    "loadout-stage-body --caller <role> --target-pr <n>, then re-run this "
+    "command with --body-env (same --caller, same PR)."
+)
+
+
+def augment_body_contract_error(message: str) -> str:
+    """Append `BODY_STDIN_CONTRACT_GUIDANCE` to a JSON-contract failure
+    message exactly once. Shared by every --body-stdin call site so the
+    guidance text cannot drift between verbs or between a verb's own
+    ordinary/verdict routes -- all of them read the same shape of bytes
+    through the same JSON contract, and all of them are reachable by a
+    caller whose hand-built shell producer mangled the JSON."""
+    return f"{message}{BODY_STDIN_CONTRACT_GUIDANCE}"
+
+
 def _recovery_stage_command(
     *, caller: str, target_pr: int | None = None, create_branch: str | None = None
 ) -> str:
@@ -1143,7 +1178,9 @@ def read_caller_body_bytes(
 
 __all__ = [
     "BODY_ENV_NOT_EPHEMERAL_NOTE",
+    "BODY_STDIN_CONTRACT_GUIDANCE",
     "BodyEnvError",
+    "augment_body_contract_error",
     "read_body_bytes",
     "read_caller_body_bytes",
     "resolve_body_path",
