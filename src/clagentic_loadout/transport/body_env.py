@@ -1072,6 +1072,25 @@ def read_caller_body_bytes(
     exactly as much a mismatch as a wrong PR number/branch name -- it fails
     closed the same way, never falls back to checking the other field.
 
+    UNSTAMPED-SHA FAIL-CLOSED (lr-9ca25a hardening, BREAKING CHANGE):
+    *expect_head_sha* supplied against a stamp with NO `head_sha` at all
+    (--head-sha was omitted at stage time, which stage_body_verb.py has
+    always allowed) now RAISES BodyEnvError instead of silently treating
+    the absent stamp value as a match for any expected SHA. Before this
+    fix, `expect_head_sha is not None and stamp.head_sha is not None` meant
+    an unstamped body satisfied every possible expected SHA -- a pre-
+    existing defense-in-depth weakening (not a new exposure, since the
+    unconditional target_pr check above already binds the body to the
+    correct PR), but one that no longer holds now that the default
+    body-ingestion route pushes more traffic through this check
+    (lr-9ca25a's own default-the-staged-route change). MIGRATION: a caller
+    that stages a body it intends to read back with --verdict-head-sha/
+    --pr-sha must now also pass --head-sha at stage time
+    (`loadout-stage-body --head-sha <sha>`); a caller with a genuinely
+    SHA-less ordinary comment (no *expect_head_sha* at read time at all)
+    is completely unaffected -- this check only fires when the READER asks
+    for a SHA match against a stamp that never recorded one.
+
     Read-and-consume (lr-becdef, Axis 1 PRIMARY): once the stamp matches,
     the body is read and BOTH the body file and its stamp sidecar are
     unlinked before returning. A retried invocation of the SAME caller
@@ -1154,6 +1173,30 @@ def read_caller_body_bytes(
                 f"Fails closed: the staged file is left in place, never "
                 f"posted. Re-stage the correct body via: {recovery}"
             )
+    if expect_head_sha is not None and stamp.head_sha is None:
+        # lr-9ca25a hardening (comment #4/#7 residual): a stamp staged
+        # WITHOUT --head-sha (optional at stage time,
+        # stage_body_verb.py) previously satisfied ANY expect_head_sha
+        # silently -- the "is not None" guard on stamp.head_sha meant a
+        # missing SHA half of provenance was treated as "nothing to check"
+        # rather than "cannot confirm this was evaluated at the SHA this
+        # invocation expects." This is a COMPATIBILITY-BREAKING fail-closed
+        # change (see this module's own migration note in the docstring
+        # above `read_caller_body_bytes`): a caller that stages without
+        # --head-sha and then reads with --verdict-head-sha/--pr-sha now
+        # refuses instead of silently passing. The recovery command below
+        # already tells the caller exactly how to re-stage with the SHA
+        # bound.
+        raise BodyEnvError(
+            f"--body-env: staged body for caller {caller!r} carries no "
+            f"head_sha in its identity stamp (it was staged without "
+            f"--head-sha), but this invocation expects head_sha "
+            f"{expect_head_sha!r} -- refusing to treat an UNSTAMPED SHA as "
+            f"a match for any expected value (stale-read guard, fail-"
+            f"closed). Fails closed: the staged file is left in place, "
+            f"never posted. Re-stage with the SHA bound via: {recovery} "
+            f"--head-sha {expect_head_sha}"
+        )
     if expect_head_sha is not None and stamp.head_sha is not None and stamp.head_sha != expect_head_sha:
         raise BodyEnvError(
             f"--body-env: staged body for caller {caller!r} was staged for "

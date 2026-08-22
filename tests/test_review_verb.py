@@ -774,6 +774,113 @@ class TestVerdictRouteEndToEndSuccess:
         assert '"pr_number": 42' in posted
 
 
+# ---------------------------------------------------------------------------
+# ADVERSARIAL VERDICT-FENCE CONSTRUCTION (lr-9ca25a comment #7 fold-in):
+# the seventh false-capability recurrence happened DURING PR #28's own merge
+# -- a reviewer hand-authoring its OWN fenced block reached past the
+# sanctioned construction path. This closes the residual: the caller's own
+# review prose CONTAINS a fenced code block and backticks (the realistic
+# case a security/code review actually produces), and this verb still
+# constructs its OWN single ```review-result``` fence on top, byte-identical
+# to what the merge gate's fresh re-parse (merge.verdict.parse_verdict_block)
+# accepts. No sanitization, no plain-prose workaround.
+# ---------------------------------------------------------------------------
+
+
+class TestAdversarialProseThroughVerdictRoute:
+    def test_adversarial_prose_with_own_fenced_code_block_still_yields_one_parseable_verdict_fence(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        """The realistic case this task's history keeps re-litigating: the
+        reviewer's OWN prose contains a fenced code block (backticks,
+        embedded JSON, quotes) -- ADVERSARIAL_REVIEW_BODY, reused verbatim,
+        not a hand-rolled second fixture -- posted through the DEFAULT
+        --body-env route with --verdict-review-status. The tool-constructed
+        ```review-result``` fence must land alongside the caller's own
+        fenced code block without confusing either the constructor (no
+        double fence) or the merge gate's fresh re-parse (which must find
+        exactly the caller's requested fields)."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(
+            tmp_path,
+            json.dumps(
+                {"body": ADVERSARIAL_REVIEW_BODY, "review_status": "clean"}
+            ).encode("utf-8"),
+            caller="reviewer",
+            head_sha=_HEAD_SHA,
+        )
+
+        opener_state: dict = {}
+        opener = _github_verdict_opener(posted_id=77, capture_into=opener_state)
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["verdict_block_verified"] is True
+
+        posted = opener_state["posted_body"]
+        # The caller's own adversarial prose (including its embedded fenced
+        # code block) survived byte-for-byte.
+        assert ADVERSARIAL_REVIEW_BODY in posted
+        # Fresh re-parse via the SAME parser the merge gate uses: exactly
+        # one fenced review-result block, with the requested fields.
+        from clagentic_loadout.merge.verdict import find_all_verdict_blocks, parse_verdict_block
+
+        assert len(find_all_verdict_blocks(posted)) == 1
+        parsed = parse_verdict_block(posted)
+        assert parsed["reviewer"] == "reviewer"
+        assert parsed["review_status"] == "clean"
+        assert parsed["head_sha"] == _HEAD_SHA
+        assert parsed["pr_number"] == 42
+
+    def test_caller_supplied_fence_is_refused_not_silently_deduplicated(self, monkeypatch):
+        """The companion half of the same acceptance criterion: a caller
+        that hand-embeds its OWN fence in 'body' must NOT end up with two
+        fences in the landed comment, which would be ambiguous to the gate
+        parser (merge.verdict.parse_verdict_block takes the LAST match, so
+        a second, possibly-disagreeing fence could silently win). This verb
+        FAILS CLOSED on that shape (lr-5260f9, pre-dating this task) rather
+        than attempting to detect-and-deduplicate: the pre-existing
+        contract is "the tool builds the ONE fence; a caller-supplied one
+        is a usage error," and a caller-supplied fence that CONTRADICTS
+        --verdict-review-status is exactly as much a usage error as one
+        that agrees with it -- ambiguity is refused either way, not
+        resolved by picking a side."""
+        from clagentic_loadout.merge.verdict import build_verdict_block
+
+        # Deliberately CONTRADICTS --verdict-review-status below (blocking
+        # vs clean) -- proves this is refused, not silently resolved in
+        # either direction.
+        contradicting_fence = build_verdict_block("reviewer", "blocking", _HEAD_SHA, 42)
+        code = _run_main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "o/r", "42",
+            ],
+            stdin_bytes=json.dumps(
+                {
+                    "body": f"{ADVERSARIAL_REVIEW_BODY}\n{contradicting_fence}",
+                    "review_status": "clean",
+                }
+            ).encode("utf-8"),
+            token_provider=_RefusingTokenProvider(),
+            opener=None,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERDICT_BLOCK_USAGE
+
+
 class TestModelAttestedFlag:
     """lr-95543d: --model-attested is OPTIONAL, supplies the fenced
     verdict block's 'model_attested' field on the --verdict-review-status
