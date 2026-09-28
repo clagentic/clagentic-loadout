@@ -187,10 +187,44 @@ from the ordinary chain in two ways:
      `attestation.sidecars` may declare a `scope` key
      (`SIDECAR_ADAPTER_KEY_SCOPE`): `"per-spawn"`
      (`SIDECAR_SCOPE_PER_SPAWN`) or `"session"` (`SIDECAR_SCOPE_SESSION`).
-     An adapter with no `scope` key (or an unrecognized value) is simply
-     not eligible to answer a BOUND resolution -- it remains fully usable
-     by the ordinary `resolve_identity` chain, which does not consult
-     `scope` at all (see `_SidecarFileProvider._resolve_adapter`).
+     An adapter with no `scope` key at all is simply not eligible to answer
+     a BOUND resolution -- it remains fully usable by the ordinary
+     `resolve_identity` chain, which does not consult `scope` at all (see
+     `_SidecarFileProvider._resolve_adapter`). An adapter that DOES declare
+     a `scope` key with an unrecognized value is a hard config error (see
+     `_any_adapter_declares_recognized_scope`'s own docstring) -- never
+     silently treated the same as "no scope key."
+
+     KEPT BY DESIGN, NOT CONSULTED IN SCOPED BOUND RESOLUTION (lr-620837
+     fold-in #4, F2): once at least one adapter declares
+     a recognized `scope` (the discriminator above is active), this
+     function's per-adapter walk (`_resolve_sidecar_adapter`, called only
+     against `per_spawn_adapters`/`session_adapters`) is the ENTIRE sidecar
+     lookup for that resolution -- `_SidecarFileProvider`'s OTHER two
+     sources, the env-named single-path override
+     (`ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR`,
+     `CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_SIDECAR_PATH`) and the config
+     single-path override (`ATTESTATION_CONFIG_KEY_SIDECAR_PATH`), are
+     NEVER consulted in this scoped branch at all. This is DELIBERATE, not
+     an oversight: both of those sources are named by something the
+     INVOKING COMMAND itself controls (an env var an arbitrary command can
+     set, or a config value read at the SAME process-level trust as the
+     `attestation.sidecars` list a command cannot influence per-invocation)
+     -- see this module's earlier `HYPOTHESES TESTED AND REFUTED`-adjacent
+     finding (comment #4 on lr-620837 the task this module's own docstring
+     already cites) that any in-command assignment of the env-named path
+     overrides a harness's own stamp. Once a deployment has opted into the
+     scoped discriminator, honoring a command-settable path override here
+     would reopen exactly the redirection surface `scope` exists to close:
+     a per-spawn or session invocation could point itself at a DIFFERENT
+     identity's sidecar file simply by setting an env var or (for the
+     config-file source) by whatever wrote the config having its own,
+     separate compromise. The unscoped/legacy branch above (`resolve_
+     identity`-equivalent lookup via `_SidecarFileProvider.resolve()`,
+     "UNSCOPED-CONFIG UPGRADE SAFETY") is UNAFFECTED -- it still walks all
+     three sources exactly as `resolve_identity` always has, since that
+     branch is byte-identical-to-released-behavior BY DESIGN for a
+     deployment that has not opted into scoping at all.
 
      The discriminator itself: for every adapter declared with
      `scope: per-spawn`, check whether THAT adapter's own `session_id_env`
@@ -262,13 +296,19 @@ tests):
     `scope: session` adapter either, so the session lookup also misses.
     Under `"required"`, this is a terminal refusal. Under
     `"builtin-fallback"`, this falls through to the built-in layer.
-  - An adapter with no `scope` key, or `scope` set to something other than
-    `SIDECAR_SCOPE_PER_SPAWN`/`SIDECAR_SCOPE_SESSION`: never eligible for
-    EITHER bound-resolution branch above (treated as declining the bound
+  - An adapter with no `scope` key at all: never eligible for EITHER
+    bound-resolution branch above (treated as declining the bound
     discriminator entirely, exactly like "not declared") -- it remains
     fully eligible for the ordinary, non-bound `resolve_identity` chain,
     which walks `attestation.sidecars` in declared order with no `scope`
     check at all.
+  - An adapter that DOES declare a `scope` key, but sets it to a value
+    other than `SIDECAR_SCOPE_PER_SPAWN`/`SIDECAR_SCOPE_SESSION`: a HARD
+    `AttestationConfigError` (lr-620837 fold-in #4, F3), never silently
+    treated as "not declared" -- see
+    `_any_adapter_declares_recognized_scope`'s own docstring for why a
+    present-but-misspelled `scope` value must be loud rather than
+    quietly demoted to the legacy/unscoped shape above.
 
 UNSCOPED-CONFIG UPGRADE SAFETY (lr-620837 fold-in #3): the behavior above
 -- "an unscoped adapter is simply ineligible for bound resolution" -- is
@@ -437,10 +477,11 @@ BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK = "builtin-fallback"
 #: pending-confirmation status).
 DEFAULT_BOUND_IDENTITY_POLICY = BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK
 
-#: Every recognized `attestation.bound_identity` value -- an unrecognized
-#: string in a deployment's config is treated as unset (falls back to
-#: `DEFAULT_BOUND_IDENTITY_POLICY`), never a hard config-parse failure; see
-#: `_resolve_bound_identity_policy`'s own docstring.
+#: Every recognized `attestation.bound_identity` value. An ABSENT key falls
+#: back to `DEFAULT_BOUND_IDENTITY_POLICY`; a PRESENT but unrecognized value
+#: is a hard `AttestationConfigError` (lr-620837 fold-in #4, F1) -- see
+#: `_resolve_bound_identity_policy`'s own docstring for why those two
+#: shapes are treated differently.
 _BOUND_IDENTITY_POLICIES = frozenset(
     {BOUND_IDENTITY_POLICY_REQUIRED, BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK}
 )
@@ -484,6 +525,23 @@ class AttestationError(Exception):
     failure of the whole chain, expected only on a truly identity-less
     environment (no configured provider, no sidecar, and even
     getpass.getuser() cannot resolve anything)."""
+
+
+class AttestationConfigError(AttestationError):
+    """Raised when a deployment's `attestation:` config section itself is
+    malformed in a way that must never be silently downgraded to a default
+    (lr-620837 fold-in #4, F1/F3): an unrecognized
+    `attestation.bound_identity` value, or an unrecognized
+    `attestation.sidecars[].scope` value declared on an adapter, are both
+    HARD config errors, raised immediately -- never a quiet fall-through to
+    `DEFAULT_BOUND_IDENTITY_POLICY` or to "this adapter is simply unscoped."
+    A typo'd policy or scope string is a deployment mistake that must be
+    loud, not a shape this module tolerates by guessing the closest
+    familiar behavior; see `_resolve_bound_identity_policy` and
+    `_any_adapter_declares_recognized_scope`'s own docstrings for the two
+    specific cases this covers. Subclasses `AttestationError` so it is still
+    caught by every existing `except AttestationError` call site (all seven
+    caller-bound verbs) without each of them needing a new except clause."""
 
 
 class BoundAttestationError(AttestationError):
@@ -996,10 +1054,42 @@ def _any_adapter_declares_recognized_scope(adapters: list[dict]) -> bool:
     """True when at least one entry in *adapters* declares
     `scope: per-spawn` or `scope: session` (`SIDECAR_ADAPTER_KEY_SCOPE`).
     Drives the upgrade-safety branch in `resolve_bound_identity` (lr-620837
-    fold-in #3): a config where NO adapter declares a recognized scope is a
-    legacy/unscoped config, and bound resolution must fall back to the
-    SAME sidecar codepath the ordinary `resolve_identity` chain uses rather
-    than the scoped discriminator, which has nothing to discriminate on."""
+    fold-in #3): a config where NO adapter declares a recognized scope at
+    all is a legacy/unscoped config, and bound resolution must fall back to
+    the SAME sidecar codepath the ordinary `resolve_identity` chain uses
+    rather than the scoped discriminator, which has nothing to discriminate
+    on.
+
+    HARD CONFIG ERROR (lr-620837 fold-in #4, F3): an
+    adapter that DOES declare a `scope` key, but sets it to a value other
+    than `SIDECAR_SCOPE_PER_SPAWN`/`SIDECAR_SCOPE_SESSION`, is a deployment
+    typo (e.g. `scope: per_spawn` with an underscore, or `scope: Session`
+    mis-cased) -- NOT the same shape as an adapter that omits `scope`
+    entirely (a genuinely legacy/pre-scope config entry, still a fully
+    legitimate declaration). Silently treating a misspelled scope value as
+    "unscoped, ignore it for bound resolution" would leave that adapter
+    invisible to the discriminator with no signal to the operator that the
+    value they typed was never recognized -- exactly the fail-open-by-typo
+    shape this whole function exists to prevent elsewhere. Raises
+    `AttestationConfigError` immediately, naming the adapter's position in
+    the list (1-indexed, matching how an operator would count entries in
+    their own YAML file), the offending value, and the two allowed values."""
+    for index, adapter in enumerate(adapters):
+        if SIDECAR_ADAPTER_KEY_SCOPE not in adapter:
+            continue
+        scope_value = adapter.get(SIDECAR_ADAPTER_KEY_SCOPE)
+        if scope_value not in (SIDECAR_SCOPE_PER_SPAWN, SIDECAR_SCOPE_SESSION):
+            raise AttestationConfigError(
+                f"attestation config FAILED -- "
+                f"{ATTESTATION_CONFIG_SECTION!r}.{ATTESTATION_CONFIG_KEY_SIDECARS!r}"
+                f"[{index + 1}].{SIDECAR_ADAPTER_KEY_SCOPE!r} is set to "
+                f"{scope_value!r}, which is not a recognized scope value. "
+                f"Allowed values are {SIDECAR_SCOPE_PER_SPAWN!r} or "
+                f"{SIDECAR_SCOPE_SESSION!r} -- remove the "
+                f"{SIDECAR_ADAPTER_KEY_SCOPE!r} key entirely if this adapter "
+                f"is intentionally unscoped (legacy behavior), or correct "
+                f"the value to one of the two recognized scopes."
+            )
     return any(
         adapter.get(SIDECAR_ADAPTER_KEY_SCOPE) in (SIDECAR_SCOPE_PER_SPAWN, SIDECAR_SCOPE_SESSION)
         for adapter in adapters
@@ -1007,15 +1097,62 @@ def _any_adapter_declares_recognized_scope(adapters: list[dict]) -> bool:
 
 
 def _resolve_bound_identity_policy(*, config_root) -> str:
-    """Read `attestation.bound_identity` from config, falling back to
-    `DEFAULT_BOUND_IDENTITY_POLICY` when unset OR set to an unrecognized
-    value (never a hard config-parse failure over a typo'd policy
-    string)."""
+    """Read `attestation.bound_identity` from config.
+
+    HARD CONFIG ERROR (lr-620837 fold-in #4, F1): an
+    unrecognized, non-empty `attestation.bound_identity` value (a typo'd
+    policy string, e.g. `"requried"` or `"Required"`) now raises
+    `AttestationConfigError` immediately, naming the config key, the
+    offending value, and the two allowed values -- it is NEVER silently
+    treated as "unset" and downgraded to `DEFAULT_BOUND_IDENTITY_POLICY`.
+    A deployment that typo's this key was almost certainly trying to opt
+    INTO the stricter `"required"` policy; silently falling open to
+    `"builtin-fallback"` instead is exactly the confused-deputy shape this
+    whole policy knob exists to close, and a typo must never be the reason
+    a deployment ends up on the more permissive policy without ever
+    knowing it did. Only a genuinely ABSENT/unset key (the key is not
+    present in the `attestation:` section at all) falls back to
+    `DEFAULT_BOUND_IDENTITY_POLICY` -- that is a deployment that has not
+    yet opted into the policy knob at all, a different and legitimate
+    shape from "opted in, but misspelled the value"."""
     section = load_user_config_section(ATTESTATION_CONFIG_SECTION, config_root=config_root)
     configured = section.get(ATTESTATION_CONFIG_KEY_BOUND_IDENTITY)
+    if configured is None:
+        return DEFAULT_BOUND_IDENTITY_POLICY
     if configured in _BOUND_IDENTITY_POLICIES:
         return configured
-    return DEFAULT_BOUND_IDENTITY_POLICY
+    raise AttestationConfigError(
+        f"attestation config FAILED -- "
+        f"{ATTESTATION_CONFIG_SECTION!r}.{ATTESTATION_CONFIG_KEY_BOUND_IDENTITY!r} "
+        f"is set to {configured!r}, which is not a recognized policy value. "
+        f"Allowed values are {BOUND_IDENTITY_POLICY_REQUIRED!r} or "
+        f"{BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK!r} -- remove the key "
+        f"entirely to use the default "
+        f"({DEFAULT_BOUND_IDENTITY_POLICY!r}), or correct the value to one "
+        f"of the two recognized policies."
+    )
+
+
+#: Public alias (lr-620837 fold-in #4): `transport.caller_binding.
+#: resolve_for_binding` needs to read the effective `bound_identity` policy
+#: to decide whether an omitted --caller/--role requires attestation
+#: (`"required"`) or resolves to `DEFAULT_ROLE` with no resolution attempt
+#: at all (`"builtin-fallback"`, matching this package's originally-
+#: released omitted-caller behavior) -- see that function's own docstring.
+#: This is the SAME function `resolve_bound_identity` itself calls
+#: internally (`_resolve_bound_identity_policy`); the public name exists so
+#: a module outside this one has a stable, non-underscore-prefixed entry
+#: point rather than reaching into a private helper.
+def resolve_bound_identity_policy(*, config_root: str | Path | None = None) -> str:
+    """Return the effective `attestation.bound_identity` policy
+    (`BOUND_IDENTITY_POLICY_REQUIRED` or
+    `BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK`) for *config_root* (defaults to
+    `DEFAULT_USER_CONFIG_ROOT`, the same resolution `resolve_bound_identity`
+    itself uses). Raises `AttestationConfigError` for an unrecognized
+    non-empty value -- see `_resolve_bound_identity_policy`'s own
+    docstring, which this delegates to unchanged."""
+    resolved_config_root = config_root if config_root is not None else DEFAULT_USER_CONFIG_ROOT
+    return _resolve_bound_identity_policy(config_root=resolved_config_root)
 
 
 def resolve_bound_identity(
@@ -1213,10 +1350,12 @@ __all__ = [
     "SOURCE_SIDECAR",
     "SOURCE_SIDECAR_SESSION",
     "SOURCE_SIDECAR_SUBAGENT",
+    "AttestationConfigError",
     "AttestationError",
     "BoundAttestationError",
     "Identity",
     "IdentityProvider",
     "resolve_bound_identity",
+    "resolve_bound_identity_policy",
     "resolve_identity",
 ]

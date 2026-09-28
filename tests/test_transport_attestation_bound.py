@@ -153,9 +153,21 @@ class TestAcceptanceTopLevelSessionResolvesSessionAdapter:
             attestation.resolve_bound_identity(env={}, config_root=config_root)
         assert exc_info.value.expected_source == attestation.SOURCE_SIDECAR_SESSION
 
-    def test_session_adapter_not_reachable_via_unrecognized_scope_value_when_a_scoped_adapter_exists(
+    def test_unrecognized_scope_value_is_a_hard_config_error_not_a_silent_ignore(
         self, tmp_path
     ):
+        """lr-620837 fold-in #4 F3 (PEACHES 5879765982): an adapter that
+        DOES declare a `scope` key, but sets it to a value other than
+        `per-spawn`/`session` (a deployment typo), is a HARD
+        AttestationConfigError -- naming the adapter's position, the
+        offending value, and the two allowed values -- never silently
+        treated the same as "no scope key" (which this class's OWN sibling
+        test, `test_session_adapter_not_reachable_without_scope_key_when_a_
+        scoped_adapter_exists`, correctly keeps as a silent ineligibility).
+        Superseded, pre-fold-in-#4 revision of this test asserted the
+        OPPOSITE (a quiet `BoundAttestationError` fall-through) -- that was
+        exactly the defect this fix closes, not a behavior worth
+        preserving."""
         sidecar_dir = tmp_path / "sidecars"
         sidecar_dir.mkdir()
         (sidecar_dir / "other-synthetic-99").write_text(
@@ -179,8 +191,12 @@ class TestAcceptanceTopLevelSessionResolvesSessionAdapter:
             ],
             bound_identity=attestation.BOUND_IDENTITY_POLICY_REQUIRED,
         )
-        with pytest.raises(attestation.BoundAttestationError):
+        with pytest.raises(attestation.AttestationConfigError) as exc_info:
             attestation.resolve_bound_identity(env={}, config_root=config_root)
+        assert "not-a-real-scope" in str(exc_info.value)
+        assert "[1]" in str(exc_info.value)
+        assert attestation.SIDECAR_SCOPE_PER_SPAWN in str(exc_info.value)
+        assert attestation.SIDECAR_SCOPE_SESSION in str(exc_info.value)
 
 
 class TestAcceptanceForegroundSubagentResolvesPerSpawnAdapter:
@@ -395,6 +411,92 @@ class TestAcceptanceMissingPerSpawnSidecarRefuses:
         identity = attestation.resolve_bound_identity(env=env, config_root=config_root)
         assert identity == attestation.Identity(
             "synthetic-parent-lead", attestation.SOURCE_SIDECAR_SESSION
+        )
+
+
+class TestScopedResolutionNeverConsultsSinglePathOverrides:
+    """lr-620837 fold-in #4 F2 (PEACHES 5879765982, KEEP-BY-DESIGN,
+    DOCUMENT): once the scoped discriminator is active (at least one
+    adapter declares a recognized `scope`), `_SidecarFileProvider`'s OTHER
+    two sources -- the env-named single-path override
+    (`CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_SIDECAR_PATH`) and the config
+    file's `attestation.identity_sidecar_path` single-path key -- are NEVER
+    consulted, even when either would resolve a real file. Both are named
+    by something the INVOKING COMMAND itself can set (an env var, or a
+    value the same process-level trust as everything else in config) --
+    honoring either here would let a scoped invocation redirect itself to
+    an arbitrary identity file, exactly the confused-deputy surface `scope`
+    exists to close. See `resolve_bound_identity`'s own module docstring,
+    'KEPT BY DESIGN, NOT CONSULTED IN SCOPED BOUND RESOLUTION', for the
+    full rationale this test proves."""
+
+    def test_env_named_single_path_override_ignored_once_scoped_adapter_exists(
+        self, tmp_path, monkeypatch
+    ):
+        # The env-named override points at a file that WOULD resolve a
+        # (wrong, attacker/foreign) identity if it were ever consulted.
+        foreign_identity_path = tmp_path / "foreign-identity"
+        foreign_identity_path.write_text("should-never-resolve-env-override", encoding="utf-8")
+
+        sidecar_dir = tmp_path / "sidecars"
+        sidecar_dir.mkdir()
+        (sidecar_dir / "lore-agent-name-synthetic-session-env-test").write_text(
+            "synthetic-correct-session-identity", encoding="utf-8"
+        )
+        config_root = _sidecars_config_root(
+            tmp_path,
+            [
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "lore-agent-name-",
+                    "session_id_env": "WIDGETCO_SESSION_ID",
+                    "scope": attestation.SIDECAR_SCOPE_SESSION,
+                }
+            ],
+            bound_identity=attestation.BOUND_IDENTITY_POLICY_REQUIRED,
+        )
+        env = {
+            "WIDGETCO_SESSION_ID": "synthetic-session-env-test",
+            attestation.ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR: str(foreign_identity_path),
+        }
+        identity = attestation.resolve_bound_identity(env=env, config_root=config_root)
+        # The CORRECT scoped session adapter answered -- not the env-named
+        # override, even though the override's file exists and is readable.
+        assert identity == attestation.Identity(
+            "synthetic-correct-session-identity", attestation.SOURCE_SIDECAR_SESSION
+        )
+
+    def test_config_single_path_override_ignored_once_scoped_adapter_exists(self, tmp_path):
+        # The config file's own `identity_sidecar_path` single-path key
+        # points at a file that WOULD resolve a (wrong) identity if it were
+        # ever consulted by the scoped branch.
+        foreign_identity_path = tmp_path / "foreign-identity-config"
+        foreign_identity_path.write_text(
+            "should-never-resolve-config-override", encoding="utf-8"
+        )
+
+        sidecar_dir = tmp_path / "sidecars"
+        sidecar_dir.mkdir()
+        (sidecar_dir / "subagent-synthetic-spawn-env-test").write_text(
+            "synthetic-correct-subagent-identity", encoding="utf-8"
+        )
+        config_root = tmp_path / "cfg-root"
+        config_root.mkdir()
+        (config_root / "config.yaml").write_text(
+            "attestation:\n"
+            "  bound_identity: required\n"
+            f"  identity_sidecar_path: {foreign_identity_path}\n"
+            "  sidecars:\n"
+            f"    - dir: {sidecar_dir}\n"
+            "      file_prefix: subagent-\n"
+            "      session_id_env: WIDGETCO_SPAWN_ID\n"
+            "      scope: per-spawn\n",
+            encoding="utf-8",
+        )
+        env = {"WIDGETCO_SPAWN_ID": "synthetic-spawn-env-test"}
+        identity = attestation.resolve_bound_identity(env=env, config_root=config_root)
+        assert identity == attestation.Identity(
+            "synthetic-correct-subagent-identity", attestation.SOURCE_SIDECAR_SUBAGENT
         )
 
 
@@ -883,24 +985,31 @@ class TestBuiltinFallbackPolicyPreservesReleasedBehavior:
         assert exc_info.value.expected_source == attestation.SOURCE_SIDECAR_SUBAGENT
         assert "synthetic-parent-lead" not in str(exc_info.value)
 
-    def test_unrecognized_policy_string_falls_back_to_default(self, tmp_path, monkeypatch):
-        """A typo'd/unrecognized `attestation.bound_identity` value is
-        treated as unset -- falls back to DEFAULT_BOUND_IDENTITY_POLICY,
-        never a hard config-parse failure."""
+    def test_unrecognized_policy_string_is_a_hard_config_error(self, tmp_path):
+        """lr-620837 fold-in #4 F1 (PEACHES 5879765982): a typo'd/
+        unrecognized `attestation.bound_identity` value is a HARD
+        `AttestationConfigError` naming the config key, the offending
+        value, and the two allowed values -- NEVER silently treated as
+        unset and downgraded to `DEFAULT_BOUND_IDENTITY_POLICY` (which
+        would fail OPEN to the more permissive policy on a typo).
+        Superseded, pre-fold-in-#4 revision of this test asserted the
+        opposite (a silent fall-back, resolving via SOURCE_BUILTIN under
+        the default policy) -- that was exactly the defect this fix
+        closes, not a behavior worth preserving. A genuinely ABSENT key
+        (no `bound_identity` line at all) is unaffected and still falls
+        back to the default -- covered by
+        `TestDefaultPolicyIsBuiltinFallbackPendingOperatorConfirmation`
+        and every other test in this file that never sets the key."""
         config_root = tmp_path / "cfg-root"
         config_root.mkdir()
         (config_root / "config.yaml").write_text(
             "attestation:\n  bound_identity: not-a-real-policy\n", encoding="utf-8"
         )
-        if attestation.DEFAULT_BOUND_IDENTITY_POLICY == attestation.BOUND_IDENTITY_POLICY_REQUIRED:
-            with pytest.raises(attestation.BoundAttestationError):
-                attestation.resolve_bound_identity(env={}, config_root=config_root)
-        else:
-            monkeypatch.setattr(attestation.getpass, "getuser", lambda: "synthetic-os-user")
-            identity = attestation.resolve_bound_identity(env={}, config_root=config_root)
-            assert identity == attestation.Identity(
-                "synthetic-os-user", attestation.SOURCE_BUILTIN
-            )
+        with pytest.raises(attestation.AttestationConfigError) as exc_info:
+            attestation.resolve_bound_identity(env={}, config_root=config_root)
+        assert "not-a-real-policy" in str(exc_info.value)
+        assert attestation.BOUND_IDENTITY_POLICY_REQUIRED in str(exc_info.value)
+        assert attestation.BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK in str(exc_info.value)
 
 
 class TestDefaultPolicyIsBuiltinFallbackPendingOperatorConfirmation:
