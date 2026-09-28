@@ -452,6 +452,35 @@ class TestLandsOnBaseBranchAfterRerun:
         )
         assert rev_parse.stdout.strip() == merged_sha
 
+    def test_fail_step_still_lands_tree_on_base_branch(self, tmp_path):
+        """lr-cd3644 fold-in #3 (PR #30 re-review finding C): step 5's
+        checkout ALWAYS happens on this verb (unlike merge.verb's own
+        fetch-only branch), so a step-6 failure (on_failure: fail) must
+        still return EXIT_POST_MERGE_FAILED (the ORIGINAL failure) while
+        ALSO landing the already-checked-out tree on base_branch -- never
+        leaving --repo-path permanently detached just because the step
+        that ran against it failed."""
+        merged_sha = _init_repo_with_origin(tmp_path)
+        _write_merge_config(
+            tmp_path,
+            [{"cmd": [_PY, "-c", "import sys; sys.exit(1)"], "on_failure": "fail"}],
+        )
+        argv = _base_args(str(tmp_path))
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_POST_MERGE_FAILED
+        branch = self._current_branch(tmp_path)
+        assert branch.returncode == 0
+        assert branch.stdout.strip() == _BASE_BRANCH
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        )
+        assert rev_parse.stdout.strip() == merged_sha
+
     def test_land_failure_surfaces_exit_post_merge_failed(self, tmp_path, monkeypatch):
         _init_repo_with_origin(tmp_path)
         argv = _base_args(str(tmp_path))

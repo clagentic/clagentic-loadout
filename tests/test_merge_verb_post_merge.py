@@ -572,6 +572,39 @@ class TestOnFailurePropagation:
         )
         assert code == verb.EXIT_POST_MERGE_FAILED
 
+    def test_fail_step_still_lands_tree_on_base_branch(self, tmp_path):
+        """lr-cd3644 fold-in #3 (PR #30 re-review finding C): a
+        post_merge_steps failure (on_failure: fail) still returns
+        EXIT_POST_MERGE_FAILED (the ORIGINAL failure, unchanged), but the
+        working tree that advance_repo_to_merged_sha already checked out
+        BEFORE the failing step ran must not be left permanently detached --
+        land_on_base_branch must still run on this exit path. Before the
+        fix, an _fail() raised from run_post_merge_steps unwound straight
+        past the (then-unconditional) `if tree_checked_out:` land call,
+        leaving --repo-path DETACHED at the merged SHA with local main
+        unmoved -- exactly the observed incident's second defect, but for
+        the exception path rather than the drift-to-zero-steps path
+        fold-in #4 already covers."""
+        _init_repo_with_origin(tmp_path)
+        _write_merge_config(
+            tmp_path,
+            [{"cmd": [_PY, "-c", "import sys; sys.exit(1)"], "on_failure": "fail"}],
+        )
+        argv = _base_args(**{"--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_POST_MERGE_FAILED
+        branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=str(tmp_path),
+        )
+        assert branch.returncode == 0
+        assert branch.stdout.strip() == _BASE_BRANCH
+
 
 class TestNoConfiguredStepsIsNoop:
     def test_repo_path_with_no_config_file_is_ok(self, tmp_path):
@@ -1337,6 +1370,68 @@ def _push_malformed_tracked_config_commit_to_origin(tmp_path) -> str:
     return _push_tracked_config_text_commit_to_origin(tmp_path, "merge: [unclosed")
 
 
+def _push_deleted_tracked_config_commit_to_origin(
+    tmp_path, *, parent_sha: str | None = None
+) -> str:
+    """Advance origin's own `main` tip by one commit that DELETES the
+    ALREADY-TRACKED `.clagentic/loadout/config.yaml` path entirely (lr-cd3644
+    fold-in #3, PR #30 re-review finding B) -- built via the SAME temporary-
+    index plumbing `_push_tracked_config_text_commit_to_origin` uses, except
+    the path is removed from the new tree (`git update-index --force-remove`)
+    rather than rewritten to new content. This is the "deleted-but-tracked"
+    shape finding B distinguishes from "never tracked at all"
+    (`_init_repo_with_origin` + `_write_merge_config`'s own untracked-config
+    convention, see `test_untracked_config_repo_is_never_compared_and_never_
+    false_positives`): the config path WAS present and git-tracked at the
+    caller's pre-sync HEAD (`_init_repo_with_origin_and_tracked_config`'s own
+    seed commit), but the merged commit's own tree no longer has it at all.
+    Returns the new commit's SHA."""
+    if parent_sha is None:
+        parent_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        ).stdout.strip()
+
+    scratch_index = tmp_path.parent / f"{tmp_path.name}-scratch.index"
+    if scratch_index.exists():
+        scratch_index.unlink()
+    env = {**subprocess.os.environ, "GIT_INDEX_FILE": str(scratch_index)}
+    read_tree = subprocess.run(
+        ["git", "read-tree", parent_sha], capture_output=True, text=True, cwd=str(tmp_path), env=env
+    )
+    assert read_tree.returncode == 0, read_tree.stderr
+    config_path = ".clagentic/loadout/config.yaml"
+    remove_index = subprocess.run(
+        ["git", "update-index", "--force-remove", config_path],
+        capture_output=True, text=True, cwd=str(tmp_path), env=env,
+    )
+    assert remove_index.returncode == 0, remove_index.stderr
+    write_tree = subprocess.run(
+        ["git", "write-tree"], capture_output=True, text=True, cwd=str(tmp_path), env=env
+    )
+    assert write_tree.returncode == 0, write_tree.stderr
+    tree_sha = write_tree.stdout.strip()
+    scratch_index.unlink()
+
+    commit_tree = subprocess.run(
+        ["git", "commit-tree", tree_sha, "-p", parent_sha, "-m", "delete post_merge config"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+        env={
+            **subprocess.os.environ,
+            "GIT_AUTHOR_NAME": "test", "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "test", "GIT_COMMITTER_EMAIL": "test@example.com",
+        },
+    )
+    assert commit_tree.returncode == 0, commit_tree.stderr
+    new_sha = commit_tree.stdout.strip()
+
+    push = subprocess.run(
+        ["git", "push", "origin", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
+        capture_output=True, text=True, cwd=str(tmp_path),
+    )
+    assert push.returncode == 0, push.stderr
+    return new_sha
+
+
 def _push_tracked_config_text_commit_to_origin(
     tmp_path, config_text: str, *, parent_sha: str | None = None
 ) -> str:
@@ -1631,6 +1726,52 @@ class TestStalePreSyncConfigDriftCheck:
         # THE REGRESSION PROOF: the tree must be on base_branch, not
         # detached, even though the FINAL (post-drift-correction) step count
         # was zero.
+        branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=str(tmp_path),
+        )
+        assert branch.returncode == 0
+        assert branch.stdout.strip() == _BASE_BRANCH
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        )
+        assert rev_parse.stdout.strip() == merged_sha
+
+    def test_deleted_but_tracked_config_makes_merged_commit_authoritative_zero_steps(
+        self, tmp_path
+    ):
+        """lr-cd3644 fold-in #3 (PR #30 re-review finding B): --repo-path's
+        PRE-SYNC HEAD tracks the config with a real step (an informed
+        choice at THAT commit). The merged commit DELETES the config path
+        entirely. This is NOT the same as "never tracked at all"
+        (test_untracked_config_repo_is_never_compared_and_never_false_
+        positives below) -- the merged commit is DELETING a real,
+        previously-tracked post_merge_steps declaration, so it must be
+        treated as authoritative (zero steps, a real drift-corrected
+        result) rather than 'not comparable, keep running the stale
+        pre-sync step'. Before the fix, load_post_merge_steps_from_git_sha
+        returning None for the deleted path was indistinguishable from
+        'never tracked' at the merge.verb._run call site, so the stale
+        step from the pre-sync HEAD kept running even though the merged
+        commit had deleted its declaration."""
+        marker = tmp_path / "should-never-run.txt"
+        _init_repo_with_origin_and_tracked_config(
+            tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}]
+        )
+        merged_sha = _push_deleted_tracked_config_commit_to_origin(tmp_path)
+        argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_github_opener(merged_sha=merged_sha),
+        )
+        assert code == verb.EXIT_OK
+        # THE REGRESSION PROOF: the merged commit's deletion is
+        # authoritative -- the stale pre-sync step must NEVER run.
+        assert not marker.exists()
+        # The tree still lands on base_branch afterward, exactly like any
+        # other drift-corrected merge (fold-in #4's own contract).
         branch = subprocess.run(
             ["git", "symbolic-ref", "--short", "HEAD"],
             capture_output=True, text=True, cwd=str(tmp_path),

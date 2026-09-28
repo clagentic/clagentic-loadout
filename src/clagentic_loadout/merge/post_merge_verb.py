@@ -548,6 +548,18 @@ def _run(
     # 6. Load + run post_merge_steps -- the SAME loader/runner merge.verb's
     # own step 10 already calls. A repo with no declared steps is a no-op,
     # exactly like an ordinary merge that never configured any.
+    #
+    # lr-cd3644 fold-in #3 (PR #30 re-review finding C): step 5 above has
+    # ALREADY performed a real, verified checkout by this point (unlike
+    # merge.verb's own step 10, this verb has no fetch-only branch -- see
+    # step 7's own comment below) -- so a step-6 failure raised via `_fail()`
+    # must still land the tree on *base_branch* (step 7) before this
+    # function's error propagates, exactly like merge.verb's own step 10
+    # now does for the identical shape. Steps 6 and 7 are therefore wrapped
+    # in one try/except here: the `except` clause makes a best-effort
+    # land_on_base_branch attempt and then re-raises the ORIGINAL exception
+    # unchanged (never replaced by a land failure), and the `else` clause
+    # (step 7 proper) runs the land step on the ordinary, all-succeeded path.
     try:
         steps = load_post_merge_steps(args.repo_path)
     except PostMergeConfigError as exc:
@@ -556,79 +568,115 @@ def _run(
             code=EXIT_POST_MERGE_FAILED,
         )
     steps_run = 0
-    if not steps:
-        print(
-            f"post-merge: no post_merge_steps configured for {args.repo_path} "
-            f"-- nothing to run",
-            file=sys.stderr,
-        )
-    else:
-        print(
-            f"post-merge: running {len(steps)} post-merge step(s) in {args.repo_path}",
-            file=sys.stderr,
-        )
-        deployment_env_overrides = resolve_env_overrides()
-        # lr-d6e52b: SAME repo-tier default-timeout resolution merge.verb's
-        # own step 10 uses -- a standalone re-run gets the identical bound a
-        # merge-embedded run would have.
+    try:
+        if not steps:
+            print(
+                f"post-merge: no post_merge_steps configured for {args.repo_path} "
+                f"-- nothing to run",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"post-merge: running {len(steps)} post-merge step(s) in {args.repo_path}",
+                file=sys.stderr,
+            )
+            deployment_env_overrides = resolve_env_overrides()
+            # lr-d6e52b: SAME repo-tier default-timeout resolution merge.verb's
+            # own step 10 uses -- a standalone re-run gets the identical bound a
+            # merge-embedded run would have.
+            try:
+                default_step_timeout = resolve_post_merge_step_timeout_seconds(args.repo_path)
+            except PostMergeConfigError as exc:
+                _fail(
+                    f"post-merge config FAILED to load -- {exc}",
+                    code=EXIT_POST_MERGE_FAILED,
+                )
+            try:
+                run_post_merge_steps(
+                    steps,
+                    args.repo_path,
+                    deployment_env_overrides=deployment_env_overrides,
+                    default_timeout_seconds=default_step_timeout,
+                )
+            except (
+                PostMergeStepFailedError,
+                PostMergeStepTimeoutError,
+                PostMergeLivenessError,
+            ) as exc:
+                _fail(str(exc), code=EXIT_POST_MERGE_FAILED)
+            steps_run = len(steps)
+            print(f"post-merge: PR #{args.pr_number} in {owner}/{repo} post-merge steps completed")
+    except PostMergeVerbError:
+        # lr-cd3644 fold-in #3 (PR #30 re-review finding C): step 5 already
+        # left --repo-path detached at landed_sha before this point -- a
+        # step-6 failure here must not skip landing on base_branch. The
+        # ORIGINAL exception (and its ORIGINAL exit code) is always what
+        # gets re-raised; a land_on_base_branch failure here is logged but
+        # deliberately swallowed rather than masking the original error.
         try:
-            default_step_timeout = resolve_post_merge_step_timeout_seconds(args.repo_path)
-        except PostMergeConfigError as exc:
+            landed_branch_sha = land_on_base_branch(
+                git_tree_path,
+                base_branch=base_branch,
+                landed_sha=landed_sha,
+            )
+        except TreeSyncError as land_exc:
+            print(
+                f"post-merge: WARNING -- working tree at {git_tree_path} "
+                f"could NOT be landed on {base_branch!r} after an earlier "
+                f"post-merge failure -- {land_exc}. The tree remains "
+                f"detached at the merged commit; the ORIGINAL post-merge "
+                f"failure (reported below) is still authoritative.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                f"post-merge: working tree at {git_tree_path} landed on "
+                f"{base_branch!r} at {landed_branch_sha!r} despite an "
+                f"earlier post-merge failure (reported below)",
+                file=sys.stderr,
+            )
+        raise
+    else:
+        # 7. Land --repo-path on base_branch (lr-cd3644): step 5 above ALWAYS
+        # performs a real, detached checkout via advance_repo_to_merged_sha --
+        # unlike merge.verb's own step 10, this verb has no fetch-only branch,
+        # since its WHOLE PURPOSE is to run (or confirm there is nothing to run
+        # for) post_merge_steps against a real, populated checkout. Before this
+        # fix, that checkout was never followed by a land step at all -- this
+        # verb left --repo-path PERMANENTLY DETACHED at landed_sha, regardless of
+        # whether any steps ran, with no way for the next dispatch into this tree
+        # to land anywhere useful (the observed incident: a release-authority
+        # caller's --repo-path left detached at the merged SHA after invoking
+        # this verb standalone, while local 'main' still pointed at the prior
+        # merge). Mirrors
+        # merge.verb's own step 10 land_on_base_branch call exactly: a ref
+        # repoint (`git checkout -B`) onto the SAME landed_sha already verified
+        # above, never a merge/rebase, so it cannot diverge from what the server
+        # already decided. Runs UNCONDITIONALLY here (not gated on steps_run, the
+        # way merge.verb's own call is gated on steps_will_run) because the
+        # checkout above is itself unconditional on this verb -- there is always
+        # a detached HEAD to move off of by the time this line is reached.
+        # lr-cd3644 fold-in #3 (finding C): this `else` clause is the
+        # ALL-SUCCEEDED landing path; the exception path's OWN landing
+        # attempt lives in the `except PostMergeVerbError` clause above, so
+        # the tree is landed exactly once regardless of which path this
+        # invocation takes.
+        try:
+            landed_branch_sha = land_on_base_branch(
+                git_tree_path,
+                base_branch=base_branch,
+                landed_sha=landed_sha,
+            )
+        except TreeSyncError as exc:
             _fail(
-                f"post-merge config FAILED to load -- {exc}",
+                f"post-merge working-tree sync FAILED -- {exc}",
                 code=EXIT_POST_MERGE_FAILED,
             )
-        try:
-            run_post_merge_steps(
-                steps,
-                args.repo_path,
-                deployment_env_overrides=deployment_env_overrides,
-                default_timeout_seconds=default_step_timeout,
-            )
-        except (
-            PostMergeStepFailedError,
-            PostMergeStepTimeoutError,
-            PostMergeLivenessError,
-        ) as exc:
-            _fail(str(exc), code=EXIT_POST_MERGE_FAILED)
-        steps_run = len(steps)
-        print(f"post-merge: PR #{args.pr_number} in {owner}/{repo} post-merge steps completed")
-
-    # 7. Land --repo-path on base_branch (lr-cd3644): step 5 above ALWAYS
-    # performs a real, detached checkout via advance_repo_to_merged_sha --
-    # unlike merge.verb's own step 10, this verb has no fetch-only branch,
-    # since its WHOLE PURPOSE is to run (or confirm there is nothing to run
-    # for) post_merge_steps against a real, populated checkout. Before this
-    # fix, that checkout was never followed by a land step at all -- this
-    # verb left --repo-path PERMANENTLY DETACHED at landed_sha, regardless of
-    # whether any steps ran, with no way for the next dispatch into this tree
-    # to land anywhere useful (the observed incident: a release-authority
-    # caller's --repo-path left detached at the merged SHA after invoking
-    # this verb standalone, while local 'main' still pointed at the prior
-    # merge). Mirrors
-    # merge.verb's own step 10 land_on_base_branch call exactly: a ref
-    # repoint (`git checkout -B`) onto the SAME landed_sha already verified
-    # above, never a merge/rebase, so it cannot diverge from what the server
-    # already decided. Runs UNCONDITIONALLY here (not gated on steps_run, the
-    # way merge.verb's own call is gated on steps_will_run) because the
-    # checkout above is itself unconditional on this verb -- there is always
-    # a detached HEAD to move off of by the time this line is reached.
-    try:
-        landed_branch_sha = land_on_base_branch(
-            git_tree_path,
-            base_branch=base_branch,
-            landed_sha=landed_sha,
+        print(
+            f"post-merge: working tree at {git_tree_path} landed on "
+            f"{base_branch!r} at {landed_branch_sha!r}",
+            file=sys.stderr,
         )
-    except TreeSyncError as exc:
-        _fail(
-            f"post-merge working-tree sync FAILED -- {exc}",
-            code=EXIT_POST_MERGE_FAILED,
-        )
-    print(
-        f"post-merge: working tree at {git_tree_path} landed on "
-        f"{base_branch!r} at {landed_branch_sha!r}",
-        file=sys.stderr,
-    )
 
     print(
         json.dumps(
