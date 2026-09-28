@@ -39,6 +39,20 @@ released behavior (falling through to the built-in OS-user layer on an
 undiscriminated miss) is preserved when a deployment opts into it, while the
 per-spawn discriminator refusal itself stays unconditional under that
 policy too.
+
+`TestUnscopedConfigUpgradeSafety` (lr-620837 fold-in #3) covers a FIFTH
+shape the four acceptance cases above do not: a config where NO adapter
+declares a recognized `scope` at all (every config that predates this
+task's `scope`/`bound_identity` keys, including this package's own
+deployed host config). That shape must resolve EXACTLY as the released
+`resolve_identity` chain would -- upgrading to this code must change
+nothing for an existing config -- and only once at least one adapter
+declares a scope do the scoped-discriminator rules above take over; a
+stray unscoped adapter in that same (now-scoped) list is then correctly
+ignored, which is what the two revised tests in
+`TestAcceptanceTopLevelSessionResolvesSessionAdapter` now cover under
+their "when a scoped adapter exists" names (previously named without that
+qualifier, before the two shapes were distinguished).
 """
 
 from __future__ import annotations
@@ -101,10 +115,17 @@ class TestAcceptanceTopLevelSessionResolvesSessionAdapter:
             "synthetic-lead", attestation.SOURCE_SIDECAR_SESSION
         )
 
-    def test_session_adapter_not_reachable_without_scope_key(self, tmp_path):
-        """An adapter with NO `scope` key at all must never answer a bound
-        resolution on either branch of the discriminator -- scope is what
-        makes an adapter eligible, not merely being present in the list."""
+    def test_session_adapter_not_reachable_without_scope_key_when_a_scoped_adapter_exists(
+        self, tmp_path
+    ):
+        """MIXED CASE: once at least one OTHER adapter in the list declares
+        a recognized scope, an adapter with NO `scope` key at all is
+        ignored for bound resolution -- scope is what makes an adapter
+        eligible once the discriminator is in play, not merely being
+        present in the list. Distinct from the legacy-config case (no
+        adapter anywhere declares a scope), covered in
+        TestUnscopedConfigUpgradeSafety below, where the unscoped adapter
+        DOES answer."""
         sidecar_dir = tmp_path / "sidecars"
         sidecar_dir.mkdir()
         (sidecar_dir / "other-synthetic-99").write_text(
@@ -118,7 +139,13 @@ class TestAcceptanceTopLevelSessionResolvesSessionAdapter:
                     "file_prefix": "other-",
                     "session_id_env": "SOME_UNSCOPED_ENV",
                     # deliberately no "scope" key
-                }
+                },
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "lore-agent-name-",
+                    "session_id_env": "ACME_SESSION_TOKEN",
+                    "scope": attestation.SIDECAR_SCOPE_SESSION,
+                },
             ],
             bound_identity=attestation.BOUND_IDENTITY_POLICY_REQUIRED,
         )
@@ -126,7 +153,9 @@ class TestAcceptanceTopLevelSessionResolvesSessionAdapter:
             attestation.resolve_bound_identity(env={}, config_root=config_root)
         assert exc_info.value.expected_source == attestation.SOURCE_SIDECAR_SESSION
 
-    def test_session_adapter_not_reachable_via_unrecognized_scope_value(self, tmp_path):
+    def test_session_adapter_not_reachable_via_unrecognized_scope_value_when_a_scoped_adapter_exists(
+        self, tmp_path
+    ):
         sidecar_dir = tmp_path / "sidecars"
         sidecar_dir.mkdir()
         (sidecar_dir / "other-synthetic-99").write_text(
@@ -140,7 +169,13 @@ class TestAcceptanceTopLevelSessionResolvesSessionAdapter:
                     "file_prefix": "other-",
                     "session_id_env": "SOME_UNSCOPED_ENV",
                     "scope": "not-a-real-scope",
-                }
+                },
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "lore-agent-name-",
+                    "session_id_env": "ACME_SESSION_TOKEN",
+                    "scope": attestation.SIDECAR_SCOPE_SESSION,
+                },
             ],
             bound_identity=attestation.BOUND_IDENTITY_POLICY_REQUIRED,
         )
@@ -366,7 +401,15 @@ class TestAcceptanceMissingPerSpawnSidecarRefuses:
 class TestAcceptanceNoSidecarAtAllRefusesNeverRoot:
     """Acceptance 4 (policy: required): a caller with no sidecar at all
     (vanilla root shell, no attestation config) is REFUSED 'no attested
-    identity' -- never resolves to SOURCE_BUILTIN / the host uid."""
+    identity' -- never resolves to SOURCE_BUILTIN / the host uid.
+
+    "No attestation config at all" is also the legacy/unscoped shape
+    `TestUnscopedConfigUpgradeSafety` (lr-620837 fold-in #3) names
+    directly -- an empty/absent `sidecars` list declares no `scope`
+    anywhere, so these two tests now exercise the unscoped fallback path
+    and expect the generic SOURCE_SIDECAR expected-source label, not a
+    scoped-discriminator label there was never anything configured to
+    select between."""
 
     def test_nothing_configured_refuses_never_builtin(self, tmp_path, monkeypatch):
         # Prove the built-in layer is never reached at all, even as a
@@ -387,7 +430,7 @@ class TestAcceptanceNoSidecarAtAllRefusesNeverRoot:
         )
         with pytest.raises(attestation.BoundAttestationError) as exc_info:
             attestation.resolve_bound_identity(env={}, config_root=config_root)
-        assert exc_info.value.expected_source == attestation.SOURCE_SIDECAR_SESSION
+        assert exc_info.value.expected_source == attestation.SOURCE_SIDECAR
         assert "no attested identity" in str(exc_info.value)
 
     def test_no_config_file_at_all_refuses_under_explicit_required(self, tmp_path, monkeypatch):
@@ -419,10 +462,13 @@ class TestAcceptanceNoSidecarAtAllRefusesNeverRoot:
     def test_subagent_id_set_but_nothing_configured_refuses_naming_subagent_source(
         self, tmp_path, monkeypatch
     ):
-        """The env-unset case above drives the session-source refusal; this
-        drives the per-spawn-declared case the same way -- both branches of
-        the discriminator refuse cleanly with no adapters configured at
-        all, never the built-in layer, under the strict policy."""
+        """With no `sidecars` list configured at all, there is no adapter
+        anywhere to declare a scope -- this is the legacy/unscoped shape,
+        so an unrelated env var being set has no effect on a discriminator
+        that never activates (there is nothing configured for it to
+        activate against). Included here to document that "an env var this
+        deployment happens to also use for something else" being set does
+        not change the outcome absent any declared adapter at all."""
         monkeypatch.setattr(
             attestation.getpass,
             "getuser",
@@ -437,16 +483,175 @@ class TestAcceptanceNoSidecarAtAllRefusesNeverRoot:
         (config_root / "config.yaml").write_text(
             "attestation:\n  bound_identity: required\n", encoding="utf-8"
         )
-        # No sidecars list at all -- so _any_per_spawn_session_id_set finds
-        # nothing to check, meaning this actually exercises the SESSION
-        # branch (no per-spawn adapter -> is_per_spawn is False). Included
-        # here to document that "an env var this deployment happens to also
-        # use for something else" being set has no effect absent a declared
-        # per-spawn adapter naming it.
         env = {"SOME_RANDOM_ENV_VAR": "synthetic-spawn-1"}
         with pytest.raises(attestation.BoundAttestationError) as exc_info:
             attestation.resolve_bound_identity(env=env, config_root=config_root)
-        assert exc_info.value.expected_source == attestation.SOURCE_SIDECAR_SESSION
+        assert exc_info.value.expected_source == attestation.SOURCE_SIDECAR
+
+
+class TestUnscopedConfigUpgradeSafety:
+    """lr-620837 fold-in #3 (HOLDEN-verified defect, PEACHES 5878952070
+    missed it): a config where NO adapter declares a recognized `scope` at
+    all is a legacy config -- bound resolution must behave EXACTLY as the
+    released `resolve_identity` chain for that shape, never silently
+    downgrading to the built-in OS-user layer just because the scoped
+    discriminator has nothing configured to discriminate on."""
+
+    def test_legacy_two_adapter_config_resolves_first_declared_matching_resolve_identity(
+        self, tmp_path
+    ):
+        """A legacy unscoped TWO-adapter config under the default policy
+        resolves the FIRST-DECLARED resolving adapter -- exactly what
+        `resolve_identity` itself resolves for the identical env/config,
+        proven by comparing the two calls directly rather than merely
+        asserting a literal expected value."""
+        sidecar_dir = tmp_path / "sidecars"
+        sidecar_dir.mkdir()
+        (sidecar_dir / "subagent-synthetic-spawn-7").write_text(
+            "synthetic-builder", encoding="utf-8"
+        )
+        (sidecar_dir / "lore-agent-name-synthetic-parent-session").write_text(
+            "synthetic-parent-lead", encoding="utf-8"
+        )
+        config_root = _sidecars_config_root(
+            tmp_path,
+            [
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "subagent-",
+                    "session_id_env": "WIDGETCO_SPAWN_ID",
+                    # deliberately no "scope" key -- legacy config
+                },
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "lore-agent-name-",
+                    "session_id_env": "WIDGETCO_SESSION_ID",
+                    # deliberately no "scope" key -- legacy config
+                },
+            ],
+        )
+        env = {
+            "WIDGETCO_SPAWN_ID": "synthetic-spawn-7",
+            "WIDGETCO_SESSION_ID": "synthetic-parent-session",
+        }
+        bound_identity = attestation.resolve_bound_identity(env=env, config_root=config_root)
+        ordinary_identity = attestation.resolve_identity(env=env, config_root=config_root)
+
+        # Same subject, same source, as the ordinary (non-bound) chain --
+        # byte-identical, not merely "also resolves something."
+        assert bound_identity == ordinary_identity
+        assert bound_identity == attestation.Identity(
+            "synthetic-builder", attestation.SOURCE_SIDECAR
+        )
+        # Never the specific bound-only labels -- this is the unscoped
+        # fallback path, not a discriminator-selected scope.
+        assert bound_identity.source not in (
+            attestation.SOURCE_SIDECAR_SUBAGENT,
+            attestation.SOURCE_SIDECAR_SESSION,
+        )
+
+    def test_legacy_config_under_required_refuses_naming_missing_scope(self, tmp_path):
+        """An unscoped config under `bound_identity: required` refuses when
+        its (only) sidecar source does not resolve -- and the refusal names
+        the missing `scope` key, so the misconfiguration is loud rather
+        than reading like an ordinary per-spawn/session miss."""
+        sidecar_dir = tmp_path / "sidecars"
+        sidecar_dir.mkdir()
+        # No file written -- the unscoped adapter's composed path is absent.
+        config_root = _sidecars_config_root(
+            tmp_path,
+            [
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "lore-agent-name-",
+                    "session_id_env": "WIDGETCO_SESSION_ID",
+                    # deliberately no "scope" key -- legacy config
+                }
+            ],
+            bound_identity=attestation.BOUND_IDENTITY_POLICY_REQUIRED,
+        )
+        env = {"WIDGETCO_SESSION_ID": "no-such-session"}
+        with pytest.raises(attestation.BoundAttestationError) as exc_info:
+            attestation.resolve_bound_identity(env=env, config_root=config_root)
+        assert "scope" in str(exc_info.value)
+        assert exc_info.value.expected_source == attestation.SOURCE_SIDECAR
+
+    def test_mixed_scoped_and_unscoped_adapters_ignores_the_unscoped_one(self, tmp_path):
+        """MIXED CASE: once at least one adapter in the list declares a
+        recognized scope, the discriminator is active and an unscoped
+        adapter in that SAME list is ignored for bound resolution -- even
+        though it would otherwise resolve first if walked in declared
+        order (proving this is not merely 'first adapter that resolves')."""
+        sidecar_dir = tmp_path / "sidecars"
+        sidecar_dir.mkdir()
+        (sidecar_dir / "other-synthetic-1").write_text(
+            "should-never-resolve-mixed-case", encoding="utf-8"
+        )
+        (sidecar_dir / "lore-agent-name-synthetic-session-mixed").write_text(
+            "synthetic-lead-mixed", encoding="utf-8"
+        )
+        config_root = _sidecars_config_root(
+            tmp_path,
+            [
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "other-",
+                    "session_id_env": "SOME_UNSCOPED_ENV",
+                    # deliberately no "scope" key
+                },
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "lore-agent-name-",
+                    "session_id_env": "ACME_SESSION_TOKEN",
+                    "scope": attestation.SIDECAR_SCOPE_SESSION,
+                },
+            ],
+            bound_identity=attestation.BOUND_IDENTITY_POLICY_REQUIRED,
+        )
+        env = {
+            "SOME_UNSCOPED_ENV": "synthetic-1",
+            "ACME_SESSION_TOKEN": "synthetic-session-mixed",
+        }
+        identity = attestation.resolve_bound_identity(env=env, config_root=config_root)
+        assert identity == attestation.Identity(
+            "synthetic-lead-mixed", attestation.SOURCE_SIDECAR_SESSION
+        )
+
+    def test_upgrade_safety_explicit_caller_push_style_call_succeeds_against_legacy_config(
+        self, tmp_path
+    ):
+        """Upgrade-safety regression, end to end at the bind_caller layer:
+        an explicit --caller pushed against a legacy unscoped per-spawn
+        sidecar succeeds exactly as it did before the scope/bound_identity
+        config keys existed -- the defect this fold-in closes would have
+        refused this as 'root' the moment builtin-fallback resolved
+        instead of the sidecar."""
+        from clagentic_loadout.transport import caller_binding
+
+        sidecar_dir = tmp_path / "sidecars"
+        sidecar_dir.mkdir()
+        (sidecar_dir / "subagent-synthetic-spawn-live").write_text(
+            "amos", encoding="utf-8"
+        )
+        config_root = _sidecars_config_root(
+            tmp_path,
+            [
+                {
+                    "dir": sidecar_dir,
+                    "file_prefix": "subagent-",
+                    "session_id_env": "CLAGENTIC_SUBAGENT_ID",
+                    # deliberately no "scope" key -- this host's deployed
+                    # config, pre-migration.
+                }
+            ],
+        )
+        env = {"CLAGENTIC_SUBAGENT_ID": "synthetic-spawn-live"}
+        identity = attestation.resolve_bound_identity(env=env, config_root=config_root)
+        # No CallerBindingError -- proves the push-style --caller amos
+        # invocation is bound successfully rather than refused as an
+        # unrelated builtin-resolved identity (e.g. "root").
+        caller_binding.bind_caller("amos", caller_explicit=True, identity=identity)
+        assert identity == attestation.Identity("amos", attestation.SOURCE_SIDECAR)
 
 
 class TestLayerOnePrecedenceUnchanged:
