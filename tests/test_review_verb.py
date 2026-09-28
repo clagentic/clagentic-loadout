@@ -1303,6 +1303,36 @@ class TestBodyEnvUsageAndEndToEnd:
         )
         assert code == verb.EXIT_BODY_ENV_UNREADABLE
 
+    def test_identity_derived_caller_with_unsafe_characters_exits_cleanly(
+        self, monkeypatch, tmp_path
+    ):
+        """lr-620837 fold-in #4 F5 (PEACHES 5879765982): `caller` reaching
+        resolve_caller_body_path is not always an explicit --caller value
+        already validated by an argv-layer regex -- on an omitted --caller
+        under `bound_identity: required`, it is the ATTESTED IDENTITY'S OWN
+        subject, which this module has no control over the shape of (e.g. an
+        '@'-bearing value a real attestation source could plausibly emit).
+        Before this fix, resolve_caller_body_path's BodyEnvError (raised by
+        its own _validate_caller_or_raise, which rejects any character
+        outside [a-zA-Z0-9_-]) was UNHANDLED at this call site -- an
+        uncaught exception escaping main() entirely instead of a clean exit
+        code and message, the same shape transport.git_host_api already
+        handles for every other BodyEnvError it raises. This test injects an
+        identity_provider (an omitted --caller, so `caller` is derived from
+        `identity.subject`) whose subject contains '@' and asserts a clean,
+        catchable exit -- never an unhandled exception propagating out of
+        verb.main."""
+        from clagentic_loadout.transport.attestation import Identity, SOURCE_CONFIGURED
+
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        code = verb.main(
+            ["--platform", "github", "--body-env", "some-owner/some-repo", "42"],
+            token_provider=_RefusingTokenProvider(),
+            opener=None,
+            identity_provider=lambda: Identity("bad@identity", SOURCE_CONFIGURED),
+        )
+        assert code == verb.EXIT_BODY_ENV_UNREADABLE
+
     def test_github_backend_success_from_staged_file(self, monkeypatch, tmp_path, capsys):
         monkeypatch.setenv("TMPDIR", str(tmp_path))
         _stage_body_env(tmp_path, b'{"body": "LGTM"}', caller="some-role")
