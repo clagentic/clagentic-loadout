@@ -62,22 +62,27 @@ correct on every dispatch path because a relay/orchestration layer that
 injects credentials does so from the same provider, yielding the identical
 token.
 
---caller/attested-invoker fail-closed binding (lr-82c385, tome #700): an
-EXPLICIT --caller value is bound, in this module, to the ATTESTED invoking
-identity resolved via transport.attestation.resolve_identity (configured
-provider > sidecar adapter > built-in OS-user fallback) — see bind_caller.
-A mismatch is refused BEFORE any I/O: an identity may use only its OWN
-credential, and this refusal happens unconditionally, even where a
-named-agent allowlist configured elsewhere would otherwise admit the
-mismatched role. This is layer (1)->(2) of the three-layer trust model
-(attested invoking identity -> crew role/--caller -> credential grantor);
-credential_provider.resolve_token and merge.authority.check_authority
-remain layer (2)->(3), consuming --caller/--role as the pre-existing,
-already-attested opaque value they have always treated it as (lr-e5eeab) —
-this task does not change either of those seams. An OMITTED --caller is
-never checked against the attested identity (see bind_caller's own
-docstring for why) — this preserves the existing default-to-DEFAULT_ROLE
-behavior byte-for-byte.
+--caller/attested-invoker fail-closed binding (lr-82c385, tome #700; OMITTED
+-CALLER FIX, lr-620837 operator ruling): an EXPLICIT --caller value is
+bound, in this module, to the ATTESTED invoking identity resolved via
+transport.attestation.resolve_bound_identity (configured provider > exactly
+one discriminator-selected sidecar source, NEVER a built-in OS-user
+fallback) — see bind_caller. A mismatch is refused BEFORE any I/O: an
+identity may use only its OWN credential, and this refusal happens
+unconditionally, even where a named-agent allowlist configured elsewhere
+would otherwise admit the mismatched role. This is layer (1)->(2) of the
+three-layer trust model (attested invoking identity -> crew role/--caller ->
+credential grantor); credential_provider.resolve_token and
+merge.authority.check_authority remain layer (2)->(3), consuming
+--caller/--role as the pre-existing, already-attested opaque value they have
+always treated it as (lr-e5eeab) — this task does not change either of
+those seams. An OMITTED --caller is ALSO now bound to the attested identity
+(BEHAVIOR CHANGE, lr-620837 operator ruling, closing a pre-merge review
+finding on this fix's own first revision): the effective caller becomes the
+resolved identity's own subject, never DEFAULT_ROLE by itself — see
+transport.caller_binding's own module docstring for the full ruling and
+migration note. A process with no attested identity at all is now refused
+on an omitted --caller too, exactly as an explicit mismatch always was.
 
 Repo context (lr-ea28, GitHub-URL extraction added lr-5f7971): a repo-scoped
 minting provider (e.g. a GitHub-App-style installation-token mint) needs to
@@ -1415,12 +1420,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--caller",
         default=None,
-        help=f"Role/name whose token is resolved via the credential provider "
-        f"(default: {DEFAULT_ROLE!r}). An already attested value, consumed "
-        f"as an opaque config key -- when EXPLICITLY supplied, it must match "
-        f"this process's own attested invoking identity (transport."
-        f"attestation.resolve_identity) or the call is refused fail-closed "
-        f"before any I/O; omitted, this check does not apply.",
+        help=f"Role/name whose token is resolved via the credential provider. "
+        f"An already attested value, consumed as an opaque config key -- it "
+        f"must match this process's own attested invoking identity "
+        f"(transport.attestation.resolve_bound_identity) or the call is "
+        f"refused fail-closed before any I/O. OMITTED behaves as an "
+        f"IMPLICIT claim of 'act as my own attested identity': the "
+        f"effective caller becomes the resolved identity's own subject, "
+        f"never {DEFAULT_ROLE!r} by itself -- a process with no attested "
+        f"identity at all is refused the same way an explicit mismatch is.",
     )
     parser.add_argument(
         "--body-stdin",
@@ -1831,9 +1839,11 @@ def main(
     resolver an operator ruling requires -- never falls through to the
     built-in OS-user layer, see that function's own docstring) -- the
     injection point for the fail-closed --caller/attested-invoker binding
-    (lr-82c385, see `bind_caller`). Only actually CALLED when --caller is
-    explicit (`transport.caller_binding.resolve_for_binding` skips
-    resolution entirely on the omitted path).
+    (lr-82c385, see `bind_caller`). ALWAYS called now (lr-620837 operator
+    ruling): `transport.caller_binding.resolve_for_binding` no longer skips
+    resolution on an omitted --caller -- an omitted --caller derives its
+    effective caller from the resolved identity's own subject, so a process
+    with no attested identity at all refuses here too.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -2007,18 +2017,16 @@ def _run(
             code=EXIT_USAGE,
         )
 
-    # --caller/attested-invoker fail-closed binding (lr-82c385, tome #700),
+    # --caller/attested-invoker fail-closed binding (lr-82c385, tome #700;
+    # OMITTED-CALLER FIX, lr-620837 operator ruling),
     # checked BEFORE any I/O -- same fail-fast posture as every other
-    # precondition above. An OMITTED --caller (args.caller is None) is never
-    # checked here: bind_caller's own docstring is the single source of
-    # truth for why (it is not an identity claim, there is nothing to
-    # bind) -- this preserves the pre-existing "omitted --caller behaves
-    # exactly as before" contract unchanged. Resolution ITSELF is now also
-    # skipped on the omitted path, via caller_binding.resolve_for_binding --
-    # see that function's own docstring for why an unconditional resolve()
-    # became unsafe once _resolve_identity started meaning
-    # resolve_bound_identity (operator ruling), which never falls through
-    # to a built-in fallback.
+    # precondition above. Resolution is now UNCONDITIONAL
+    # (caller_binding.resolve_for_binding no longer skips it on an omitted
+    # --caller -- see that function's own docstring for the full ruling):
+    # an omitted --caller derives its EFFECTIVE caller from the resolved
+    # attested identity's own subject, never DEFAULT_ROLE by itself, so a
+    # process with no attested identity at all is refused here exactly like
+    # an explicit mismatched --caller always was.
     resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
     try:
         attested_identity = _caller_binding.resolve_for_binding(
@@ -2031,7 +2039,27 @@ def _run(
             f"attested-identity resolution FAILED -- {exc}",
             code=EXIT_CALLER_INVOKER_MISMATCH,
         )
-    bind_caller(caller, caller_explicit=args.caller is not None, identity=attested_identity)
+    if args.caller is None:
+        # Effective caller on the omitted path is the resolved identity's
+        # own subject (lr-620837 operator ruling) -- re-validated against
+        # the SAME _SAFE_CALLER_RE an explicit --caller value already
+        # passed above, since this value also feeds the caller-namespaced
+        # --body-env staging path (body.<caller>.json) a moment later; an
+        # attested subject is deployment-controlled, not caller-typed, but
+        # this check costs nothing and keeps the invariant "caller is
+        # always _SAFE_CALLER_RE-safe by the time it reaches body_env"
+        # unconditional rather than true-only-on-the-explicit-path.
+        caller = attested_identity.subject
+        if not _SAFE_CALLER_RE.match(caller):
+            _fail(
+                f"attested identity {caller!r} (resolved via the "
+                f"{attested_identity.source!r} attestation layer) contains "
+                f"invalid characters for use as --caller (only "
+                f"alphanumeric, hyphen, underscore; no path separators or "
+                f"traversal).",
+                code=EXIT_USAGE,
+            )
+    bind_caller(caller, caller_explicit=True, identity=attested_identity)
 
     # PR number, extracted EARLY (lr-becdef): a pure regex match against
     # path_arg, no I/O, no dependency on --verify-comment -- moved ahead of

@@ -1,6 +1,7 @@
 """transport.caller_binding — the shared layer (1)->(2) fail-closed binding
 every mutating verb that accepts --caller/--role now calls before it reaches
-a credential mint (lr-c75c9a, P1 security fix).
+a credential mint (lr-c75c9a, P1 security fix; OMITTED-CALLER ATTESTATION
+FIX below, operator ruling on lr-620837 comment #5).
 
 BACKGROUND: lr-82c385 (tome #700) introduced this binding -- "does the
 --caller/--role value on this invocation's argv actually match the identity
@@ -39,8 +40,7 @@ NEVER the built-in OS-user fallback; see that function's own docstring for
 the full rule this module's REQUIREMENT 5 below predates and no longer
 describes the default path (kept here for its historical rationale, since
 a deployment MAY still inject the general `resolve_identity` chain via
-`identity_provider=`). `caller` is the value --caller/--role resolved to
-(already defaulted to DEFAULT_ROLE when omitted, by the call site).
+`identity_provider=`).
 
 FAIL-CLOSED, BEFORE ANY I/O: `caller != identity.subject` on an EXPLICIT
 --caller/--role raises CallerBindingError -- no token mint is ever
@@ -53,12 +53,49 @@ decision a TokenProvider/AuthorityProvider would make downstream -- it
 answers a different question ("is this process who it claims to be") than
 those seams do ("is this claimed role entitled to X").
 
-`caller_explicit=False` (an OMITTED --caller/--role, defaulted to
-DEFAULT_ROLE by the call site) is NEVER checked against `identity` --
-this preserves the pre-existing, unchanged "omitted --caller behaves
-exactly as before" contract (lr-82c385's own test-matrix requirement,
-carried forward unchanged by this task). An omitted --caller/--role is not
-an identity CLAIM at all; there is nothing to bind.
+OMITTED --caller/--role IS NOW ALSO AN ATTESTED-IDENTITY REQUIREMENT
+(BEHAVIOR CHANGE, operator ruling on lr-620837 comment #5, a pre-merge
+review finding on this fix's own first revision): before this fix,
+`caller_explicit=False` short-circuited
+`resolve_for_binding` BEFORE identity resolution ever ran, returning an
+inert placeholder Identity (formerly `UNCLAIMED_SOURCE`) that `bind_caller`
+never inspected -- an omitted `--caller` therefore minted the
+DEFAULT_ROLE credential with NO attested identity behind it at all, on ANY
+process, attested or not (a "vanilla root shell with no sidecar" typing no
+flags at all sailed straight through). The ruling's acceptance is explicit
+that this is unacceptable: "a caller with no sidecar at all (vanilla root
+shell) -> REFUSED no attested identity" is not scoped to an explicit
+--caller, and this binding being pre-existing/unenforced on the omitted
+path before this fix is not an exemption from the ruling.
+
+THE FIX: `resolve_for_binding` now resolves identity UNCONDITIONALLY --
+omitted or explicit, the SAME `resolve_identity_fn()` call runs, and a
+resolution failure (`AttestationError`/`BoundAttestationError`) propagates
+to the caller exactly as it already did on the explicit path. There is no
+longer a skip-resolution branch and no placeholder Identity; every call
+site now derives its EFFECTIVE caller from the resolved identity itself on
+the omitted path (`identity.subject`, never a placeholder), then binds
+against it via `bind_caller(..., caller_explicit=True, ...)` -- omitted
+--caller now behaves as an IMPLICIT claim of "I am acting as my own
+attested identity," bound exactly like an explicit one, rather than "no
+claim, no check." A verb whose caller-bound token/authority seam is then
+handed the resolved identity subject as its role -- never DEFAULT_ROLE by
+itself, and never a role this process did not attest to. See each call
+site's own comment for the "omitted -> identity.subject" derivation; this
+module only provides the always-resolving primitive, since every one of the
+seven call sites needs the same derivation and this is the shared home for
+that shape, matching this module's whole reason for existing (reuse-first).
+
+MIGRATION NOTE for an existing deployment: an omitted `--caller`/`--role`
+invocation that previously succeeded on a host with NO attestation source
+configured (no `attestation.identity_env`, no resolving sidecar) now FAILS
+CLOSED with the same `AttestationError`/`BoundAttestationError` an explicit
+mismatched caller always raised -- there is no longer an unattested
+default-role path. A deployment that still wants the OLD (attestation-free)
+behavior can inject the general `resolve_identity` chain (whose built-in
+OS-user fallback always resolves something) via `identity_provider=` at any
+call site -- that injection seam is unchanged, only the module-level
+DEFAULT resolver's omitted-caller treatment changed.
 
 This is INDEPENDENT of, and runs strictly BEFORE,
 `transport.credential_provider.resolve_token` and
@@ -101,12 +138,6 @@ from typing import Callable
 
 from clagentic_loadout.transport.attestation import Identity
 
-#: Identity.source label for the placeholder Identity `resolve_for_binding`
-#: returns when --caller was omitted -- never compared against anything
-#: (bind_caller's own no-op path short-circuits before touching it), so its
-#: `subject`/`source` values are inert filler, not a resolved attestation.
-UNCLAIMED_SOURCE = "unclaimed"
-
 
 class CallerBindingError(Exception):
     """Raised when an EXPLICIT --caller/--role value does not match the
@@ -116,8 +147,15 @@ class CallerBindingError(Exception):
     ANY I/O -- no token mint, no authority check, no request is ever issued.
     An identity may only ever use ITS OWN credential; a caller that presents
     a role other than its own attested identity is refused unconditionally,
-    with no override. An OMITTED --caller/--role never triggers this (see
-    `bind_caller`'s own docstring) -- it is unchanged, existing behavior.
+    with no override. An OMITTED --caller/--role is bound to this SAME check
+    by every call site (see this module's own docstring, "OMITTED --caller/
+    --role IS NOW ALSO AN ATTESTED-IDENTITY REQUIREMENT"): a call site
+    derives its effective caller as `identity.subject` on the omitted path,
+    so `caller == identity.subject` there by construction and this never
+    raises on an omitted `--caller` alone -- but the resolution that
+    produced `identity` in the first place can still raise
+    `AttestationError`/`BoundAttestationError`, which is the actual refusal
+    an unattested omitted-caller invocation now hits.
 
     Carries `.caller` and `.identity` (the compared values) so a catching
     verb can render its own resolved-values error message and exit code
@@ -147,12 +185,22 @@ def bind_caller(caller: str, *, caller_explicit: bool, identity: Identity) -> No
     statement, the built-in-OS-user-fallback trade-off (requirement 5), and
     why this seam lives here rather than in transport.git_host_api.
 
-    Raises CallerBindingError when `caller_explicit` is True and `caller !=
-    identity.subject`. A no-op (returns None) when `caller_explicit` is
-    False -- an omitted --caller/--role carries no identity claim to bind.
+    Raises CallerBindingError when `caller != identity.subject`.
+
+    *caller_explicit* is accepted for call-site symmetry and audit-log
+    parity with `resolve_for_binding` (every call site passes the same
+    `args.caller is not None` value to both), but no longer changes this
+    function's own comparison behavior (operator ruling, lr-620837 comment
+    #5): both the explicit and the omitted path are bound against the
+    resolved identity now -- see this module's own docstring, "OMITTED
+    --caller/--role IS NOW ALSO AN ATTESTED-IDENTITY REQUIREMENT". On the
+    omitted path, every call site derives `caller` as `identity.subject`
+    (never a free-typed value), so this comparison is always true there by
+    construction and never itself raises for an omitted `--caller` -- the
+    actual refusal for an unattested omitted-caller invocation happens one
+    step earlier, when `resolve_for_binding`'s `resolve_identity_fn()` call
+    raises `AttestationError`/`BoundAttestationError`.
     """
-    if not caller_explicit:
-        return
     if caller != identity.subject:
         raise CallerBindingError(caller, identity)
 
@@ -163,45 +211,59 @@ def resolve_for_binding(
     caller: str,
     resolve_identity_fn: Callable[[], Identity],
 ) -> Identity:
-    """Resolve the Identity `bind_caller` needs -- SKIPPING resolution
-    entirely when *caller_explicit* is False, rather than resolving an
-    unconditionally-discarded value.
+    """Resolve the Identity `bind_caller` needs -- UNCONDITIONALLY, on both
+    the explicit and the omitted `--caller`/`--role` path (operator ruling,
+    lr-620837 comment #5, closing a pre-merge review finding on this fix's
+    own first revision).
 
-    Shared by every one of the six caller-bound verbs (`push`, `review`,
-    `acquire`, `merge`, `merge --close`, `merge --post-merge`) plus
-    `transport.git_host_api` itself, replacing what used to be an identical
-    seven-way-duplicated inline block (reuse-first, CLAUDE.md code-craft
-    rule 1/2).
+    Shared by every one of the seven caller-bound verbs (`push`, `review`,
+    `acquire`, `merge`, `merge --close`, `merge --post-merge`,
+    `transport.git_host_api` itself), replacing what used to be an
+    identical seven-way-duplicated inline block (reuse-first, CLAUDE.md
+    code-craft rule 1/2).
 
-    WHY THIS MATTERS NOW (operator ruling, resolve_bound_identity): before
-    this task, *resolve_identity_fn* was `transport.attestation.
-    resolve_identity`, whose built-in OS-user fallback (`SOURCE_BUILTIN`)
-    means it ALWAYS resolves something in a real deployment -- so calling
-    it unconditionally, even when `bind_caller`'s own no-op-on-omitted-
-    caller path was about to discard the result unused, was wasteful but
-    harmless. *resolve_identity_fn* is now `transport.attestation.
-    resolve_bound_identity` at every one of these call sites, which NEVER
-    falls through to that fallback (the whole point of the ruling this
-    task implements) -- so an unconditional call would turn every omitted-
-    `--caller` invocation on a host with no attestation source configured
-    into a hard failure for a comparison `bind_caller` was never going to
-    make anyway. Gating resolution on the SAME condition that already
-    gated the comparison (`caller_explicit`) removes that failure mode
-    without changing bind_caller's own contract at all.
+    BEHAVIOR CHANGE FROM THE PRIOR REVISION OF THIS FUNCTION (see this
+    module's own docstring for the full ruling): resolution used to be
+    SKIPPED entirely when *caller_explicit* was False, returning an inert
+    placeholder Identity `bind_caller` never inspected -- an omitted
+    `--caller` therefore minted a credential with NO attested identity
+    behind it at all. That placeholder is gone. *resolve_identity_fn* is
+    now ALWAYS called, and its result is returned directly; a resolution
+    failure (`AttestationError`/`BoundAttestationError`, the exception type
+    `transport.attestation.resolve_bound_identity` raises when no attested
+    source answers) propagates to the caller exactly as it already did on
+    the explicit path -- there is no longer a comparison-avoidance reason to
+    skip it, and skipping it was never a safety property, only an
+    optimization that stopped being safe once *resolve_identity_fn* stopped
+    being a chain that always resolves SOMETHING (see the historical
+    rationale kept below).
 
-    On the omitted-caller path (`caller_explicit=False`), returns a
-    placeholder `Identity(subject=caller, source=UNCLAIMED_SOURCE)` --
-    inert filler `bind_caller` never inspects on that path (its own no-op
-    short-circuit runs before touching `identity`), never a real resolved
-    value.
+    *caller_explicit* is still accepted (every call site passes
+    `args.caller is not None`) because it is a useful audit signal for a
+    call site's own logging, and because `bind_caller` accepts the same
+    parameter for symmetry -- but this function no longer branches on it.
+
+    HISTORICAL RATIONALE (why this function skipped resolution before this
+    fix, kept for context): *resolve_identity_fn* used to be `transport.
+    attestation.resolve_identity`, whose built-in OS-user fallback
+    (`SOURCE_BUILTIN`) means it ALWAYS resolves something in a real
+    deployment -- so calling it unconditionally, even when `bind_caller`'s
+    old no-op-on-omitted-caller short-circuit was about to discard the
+    result unused, was wasteful but harmless. Once every caller-bound call
+    site switched *resolve_identity_fn* to `transport.attestation.
+    resolve_bound_identity` (which never falls through to that fallback),
+    an unconditional call turned every omitted-`--caller` invocation on a
+    host with no attestation source configured into a hard failure -- which
+    this function's prior revision treated as a bug to route around by
+    skipping resolution. The operator ruling settles that this is not a
+    bug: an omitted `--caller` on an unattested host SHOULD fail closed,
+    exactly like an explicit one does, rather than silently minting
+    DEFAULT_ROLE with no attestation behind it.
     """
-    if not caller_explicit:
-        return Identity(subject=caller, source=UNCLAIMED_SOURCE)
     return resolve_identity_fn()
 
 
 __all__ = [
-    "UNCLAIMED_SOURCE",
     "CallerBindingError",
     "bind_caller",
     "resolve_for_binding",
