@@ -642,6 +642,88 @@ built-in OS-user layer, which `bind_caller` then compares against the
 declared caller names (the structural root cause of a real chat-agent
 `root`-attribution failure this check was added to catch).
 
+### Caller-bound resolution (`resolve_bound_identity`): `scope` and `bound_identity`
+
+Every mutating, caller-bound verb (`push`, `review`, `acquire`, `merge`,
+`merge --close`, `merge --post-merge`, `git_host_api`) resolves its default
+attested identity via `transport.attestation.resolve_bound_identity`, a
+STRICTER variant of the chain above: layer 1 (`identity_env`) is unchanged,
+but which `sidecars` adapter — if any — may answer is chosen by a
+discriminator, and whether an undiscriminated miss falls through to the
+built-in OS-user layer is a policy this deployment sets explicitly. See
+`transport.attestation`'s own module docstring ("BOUND RESOLUTION") for the
+full rule; summarized here.
+
+**`scope`** — an OPTIONAL key on each `attestation.sidecars` entry:
+
+```yaml
+attestation:
+  bound_identity: required   # or "builtin-fallback" -- see below
+  sidecars:
+    - dir: /tmp
+      file_prefix: my-harness-spawn-
+      session_id_env: MY_HARNESS_SPAWN_ID
+      scope: per-spawn
+    - dir: /tmp
+      file_prefix: my-harness-agent-name-
+      session_id_env: MY_HARNESS_SESSION_ID
+      scope: session
+```
+
+- `scope: per-spawn` — this adapter is keyed on a per-spawn (sub-agent)
+  identifier a harness's spawn wrapper stamps into every command a
+  sub-process runs.
+- `scope: session` — this adapter is keyed on a top-level session
+  identifier (a lead/director session that has no per-spawn id to stamp).
+- No `scope` key, or an unrecognized value — this adapter is simply not
+  eligible to answer a BOUND resolution at all; it remains fully usable by
+  the ordinary `resolve_identity` chain above, which does not read `scope`.
+
+The discriminator itself: does ANY `scope: per-spawn` adapter's OWN
+`session_id_env` resolve to a non-empty value in the resolving process's
+environment? If so, this invocation is treated as a per-spawn sub-agent,
+and ONLY a `scope: per-spawn` adapter may answer — a miss never falls
+through to a `scope: session` adapter, even one that would otherwise
+resolve (that fallthrough is the confused-deputy shape this discriminator
+exists to prevent: a sub-agent minting its parent session's identity). If
+no `scope: per-spawn` adapter's env var is set (including "no `scope:
+per-spawn` adapter is declared at all"), this invocation is treated as a
+top-level session, and ONLY a `scope: session` adapter may answer.
+
+This is driven entirely by the `scope` value your OWN config declares — no
+harness-specific env var name (e.g. a specific chat-agent's per-spawn id
+variable) is ever hardcoded in `clagentic: loadout` itself; you name your
+own env vars via `session_id_env` exactly as the ordinary chain already
+requires.
+
+**`bound_identity`** — an OPTIONAL top-level key in the `attestation:`
+section, one of:
+
+- `required` (recommended once `sidecars` is configured with `scope`
+  entries) — a caller-bound resolution that finds nothing on layer 1 or the
+  ONE discriminator-selected sidecar scope is a terminal refusal; the
+  built-in OS-user layer is never consulted. An omitted `--caller`/`--role`
+  requires attestation under this policy exactly like an explicit one.
+- `builtin-fallback` (the default when this key is unset) — an
+  UNDISCRIMINATED miss (no adapter of the selected scope configured or
+  resolving) falls through to the built-in OS-user layer, preserving this
+  package's previously-released behavior for an install with no `scope`-
+  tagged `sidecars` entries yet.
+
+Regardless of policy, a per-spawn-DECLARED invocation (a `scope: per-spawn`
+adapter's own `session_id_env` IS set) whose per-spawn adapter misses is
+ALWAYS refused — it never falls through to a `scope: session` adapter or to
+the built-in layer even under `builtin-fallback`; this is a correctness
+property, not something the policy relaxes.
+
+**Recommended deployment posture:** once you have deployed `scope`-tagged
+`sidecars` adapters for every attestation source your harness writes, set
+`bound_identity: required` explicitly — this closes the gap where a process
+with no attestation source configured at all silently attests as the host
+OS user. Until then, leaving `bound_identity` unset (or explicit
+`builtin-fallback`) keeps every caller-bound verb working exactly as
+before.
+
 ## Conformance
 
 This entire contract is exercised in the test suite with **synthetic role
@@ -651,4 +733,7 @@ any external task-tracking system. See `tests/test_provisioning_roles.py`,
 `tests/test_provisioning_allowlist.py`,
 `tests/test_provisioning_settings_path.py`, `tests/test_provisioning_writer.py`,
 `tests/test_provisioning_cli.py`, `tests/test_provisioning_model_routing.py`,
-`tests/test_transport_attestation.py`, and `tests/test_doctor_checks.py`.
+`tests/test_transport_attestation.py`, `tests/test_transport_attestation_bound.py`
+(caller-bound resolution: `scope` discriminator and `bound_identity` policy,
+both value parametrized over synthetic adapter configs), and
+`tests/test_doctor_checks.py`.
