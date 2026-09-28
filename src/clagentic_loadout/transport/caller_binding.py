@@ -30,13 +30,17 @@ existing test importing `git_host_api.bind_caller` keeps working with no
 signature or behavior change.
 
 THE BINDING ITSELF is unchanged from lr-82c385 in every respect that
-matters: `identity` is whatever `transport.attestation.resolve_identity` (or
-an injected equivalent) resolved for THIS process -- the configured
-provider, the sidecar adapter, or the built-in OS-user fallback, in that
-fixed order (see transport.attestation's own module docstring for the full
-three-layer trust-model statement this function is layer (1)->(2) of).
-`caller` is the value --caller/--role resolved to (already defaulted to
-DEFAULT_ROLE when omitted, by the call site).
+matters: `identity` is whatever the call site's identity resolver (or an
+injected equivalent) resolved for THIS process. Every caller-bound verb's
+default resolver is now `transport.attestation.resolve_bound_identity`
+(operator ruling, comment #5 on the task that introduced it) -- the
+configured provider, or exactly ONE discriminator-selected sidecar source,
+NEVER the built-in OS-user fallback; see that function's own docstring for
+the full rule this module's REQUIREMENT 5 below predates and no longer
+describes the default path (kept here for its historical rationale, since
+a deployment MAY still inject the general `resolve_identity` chain via
+`identity_provider=`). `caller` is the value --caller/--role resolved to
+(already defaulted to DEFAULT_ROLE when omitted, by the call site).
 
 FAIL-CLOSED, BEFORE ANY I/O: `caller != identity.subject` on an EXPLICIT
 --caller/--role raises CallerBindingError -- no token mint is ever
@@ -68,43 +72,47 @@ check in.
 
 REQUIREMENT 5 -- DOES THE BUILT-IN OS-USER FALLBACK RETAIN WRITE CAPABILITY
 (lr-c75c9a judgment call 2, named explicitly per the task rather than
-silently decided): YES, it retains write capability, unchanged from
-lr-82c385's original scope. `transport.attestation.resolve_identity`'s
-layer 3 (`_BuiltinOsUserProvider`, `getpass.getuser()`) is a REAL,
-non-degraded attested identity, not an absence of one -- a deployment that
-configures neither `attestation.identity_env` nor a sidecar adapter still
-gets a genuine attested subject (the OS-reported invoking user), and this
-binding compares --caller/--role against THAT value exactly as it would
-against a configured-provider or sidecar-resolved one. The alternative --
-treating the built-in fallback as "not really attested" and refusing every
-explicit --caller/--role that reaches it -- was rejected: every crew agent
-in a deployment with no attestation.* config wired yet pushes/merges/
-reviews through these verbs today, and that would turn this fix into an
-outage for the entire crew the moment it landed, for every deployment that
-has not yet configured layer 1/2 of transport.attestation. That is a
-strictly worse security posture than the one being fixed here: the actual
-defect (lr-c75c9a's root cause) is that the binding was UNENFORCED on six
-verbs, not that the built-in fallback layer is too permissive -- the
-fallback's own identity is exactly as trustworthy post-fix as it already
-was for the ONE verb (git_host_api) lr-82c385 originally shipped this
-check on, and that verb has run this same fallback-permits-a-match
-behavior in production since lr-82c385 landed with no reported incident
-traceable to it. A deployment that judges the OS-user fallback insufficient
-for its threat model configures `attestation.identity_env` or a sidecar
-adapter (transport.attestation's own config surface) to require a stronger
-attested source; that is a deployment-level policy choice this module does
-not make on any deployment's behalf.
+silently decided; SUPERSEDED by the operator ruling introducing
+`resolve_bound_identity` -- kept below for its historical rationale, not as
+a description of the current default): at the time lr-c75c9a shipped, YES,
+the built-in OS-user fallback retained write capability -- `transport.
+attestation.resolve_identity`'s layer 3 (`_BuiltinOsUserProvider`,
+`getpass.getuser()`) was treated as a REAL, non-degraded attested identity,
+so a deployment with no `attestation.identity_env`/sidecar configured still
+got real write access through the host uid. THE OPERATOR RULING REJECTS
+THIS for the default caller-bound path: "this computer runs on root" is not
+an attested identity, full stop -- see `transport.attestation.
+resolve_bound_identity`'s own docstring for the replacement rule (never the
+built-in fallback; a discriminator-selected sidecar source, or a terminal
+refusal naming what was expected). lr-c75c9a's original concern -- that
+refusing the fallback would outage every crew agent in a deployment with no
+attestation config wired yet -- is answered differently now: the fix is to
+land the deployed-config sidecar adapter(s) (host state, tracked
+separately, NOT this module's job), not to keep trusting a host uid as a
+crew identity. A deployment that still wants the OLD (fallback-permitted)
+behavior can inject the general `resolve_identity` chain via
+`identity_provider=` at any call site -- that seam was never removed, only
+the DEFAULT changed.
 """
 
 from __future__ import annotations
 
+from typing import Callable
+
 from clagentic_loadout.transport.attestation import Identity
+
+#: Identity.source label for the placeholder Identity `resolve_for_binding`
+#: returns when --caller was omitted -- never compared against anything
+#: (bind_caller's own no-op path short-circuits before touching it), so its
+#: `subject`/`source` values are inert filler, not a resolved attestation.
+UNCLAIMED_SOURCE = "unclaimed"
 
 
 class CallerBindingError(Exception):
     """Raised when an EXPLICIT --caller/--role value does not match the
     ATTESTED invoking identity this process's own attestation-provider chain
-    resolved (transport.attestation.resolve_identity). FAILS CLOSED BEFORE
+    resolved (transport.attestation.resolve_bound_identity by default, or an
+    injected `identity_provider=`). FAILS CLOSED BEFORE
     ANY I/O -- no token mint, no authority check, no request is ever issued.
     An identity may only ever use ITS OWN credential; a caller that presents
     a role other than its own attested identity is refused unconditionally,
@@ -149,4 +157,52 @@ def bind_caller(caller: str, *, caller_explicit: bool, identity: Identity) -> No
         raise CallerBindingError(caller, identity)
 
 
-__all__ = ["CallerBindingError", "bind_caller"]
+def resolve_for_binding(
+    *,
+    caller_explicit: bool,
+    caller: str,
+    resolve_identity_fn: Callable[[], Identity],
+) -> Identity:
+    """Resolve the Identity `bind_caller` needs -- SKIPPING resolution
+    entirely when *caller_explicit* is False, rather than resolving an
+    unconditionally-discarded value.
+
+    Shared by every one of the six caller-bound verbs (`push`, `review`,
+    `acquire`, `merge`, `merge --close`, `merge --post-merge`) plus
+    `transport.git_host_api` itself, replacing what used to be an identical
+    seven-way-duplicated inline block (reuse-first, CLAUDE.md code-craft
+    rule 1/2).
+
+    WHY THIS MATTERS NOW (operator ruling, resolve_bound_identity): before
+    this task, *resolve_identity_fn* was `transport.attestation.
+    resolve_identity`, whose built-in OS-user fallback (`SOURCE_BUILTIN`)
+    means it ALWAYS resolves something in a real deployment -- so calling
+    it unconditionally, even when `bind_caller`'s own no-op-on-omitted-
+    caller path was about to discard the result unused, was wasteful but
+    harmless. *resolve_identity_fn* is now `transport.attestation.
+    resolve_bound_identity` at every one of these call sites, which NEVER
+    falls through to that fallback (the whole point of the ruling this
+    task implements) -- so an unconditional call would turn every omitted-
+    `--caller` invocation on a host with no attestation source configured
+    into a hard failure for a comparison `bind_caller` was never going to
+    make anyway. Gating resolution on the SAME condition that already
+    gated the comparison (`caller_explicit`) removes that failure mode
+    without changing bind_caller's own contract at all.
+
+    On the omitted-caller path (`caller_explicit=False`), returns a
+    placeholder `Identity(subject=caller, source=UNCLAIMED_SOURCE)` --
+    inert filler `bind_caller` never inspects on that path (its own no-op
+    short-circuit runs before touching `identity`), never a real resolved
+    value.
+    """
+    if not caller_explicit:
+        return Identity(subject=caller, source=UNCLAIMED_SOURCE)
+    return resolve_identity_fn()
+
+
+__all__ = [
+    "UNCLAIMED_SOURCE",
+    "CallerBindingError",
+    "bind_caller",
+    "resolve_for_binding",
+]
