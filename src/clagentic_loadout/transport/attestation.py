@@ -269,6 +269,72 @@ tests):
     fully eligible for the ordinary, non-bound `resolve_identity` chain,
     which walks `attestation.sidecars` in declared order with no `scope`
     check at all.
+
+UNSCOPED-CONFIG UPGRADE SAFETY (lr-620837 fold-in #3): the behavior above
+-- "an unscoped adapter is simply ineligible for bound resolution" -- is
+correct ONLY once a deployment has started declaring `scope` on at least
+one adapter. It is
+WRONG, and was a live defect, for the far more common shape: a deployment
+that has configured `attestation.sidecars` at all, but declared `scope` on
+NONE of them (every existing config as of this fix, including this
+package's own deployed host config). Under that shape, the OLD code walked
+straight past every declared adapter (both `per_spawn_adapters` and
+`session_adapters` come back empty, since neither list has any entries)
+and went directly to the `bound_identity` policy check -- under the
+default `"builtin-fallback"` policy, that meant landing on the built-in
+OS-user layer despite a perfectly good, resolving sidecar adapter sitting
+right there in config, unread. On a shared/service host running as `root`,
+that is exactly the confused-deputy shape this whole function exists to
+prevent, self-inflicted by the upgrade itself: an existing config silently
+downgrades from sidecar identity to host uid the moment a process picks up
+this code, and every caller-bound verb that used to resolve correctly
+starts resolving as `root` instead -- before any config migration, with no
+warning.
+
+THE FIX: `resolve_bound_identity` now distinguishes two distinct "nothing
+scoped resolved" shapes, checked BEFORE the discriminator/policy logic
+above ever runs:
+
+  - **No adapter across the ENTIRE `attestation.sidecars` list declares a
+    recognized `scope` value at all** (a legacy/unscoped config -- this
+    covers both "no `sidecars` list configured" and "a `sidecars` list
+    exists but every entry omits `scope` or sets an unrecognized value"):
+    bound resolution delegates to the SAME sidecar-resolution codepath the
+    ordinary `resolve_identity` chain uses (`_SidecarFileProvider`, all
+    three of its sources -- the env single-path override, the config
+    single-path override, AND the adapter list walked in declared order
+    with no `scope` check) and reports the generic `SOURCE_SIDECAR` label
+    on success, EXACTLY as `resolve_identity` would for the same
+    env/config. A miss there still falls through to the `bound_identity`
+    policy (built-in fallback, or a terminal refusal under `"required"`)
+    -- unchanged from before. This makes upgrading to this code a NO-OP
+    for any deployment that has not yet opted into `scope`-tagged
+    adapters: the exact same identity resolves, via the exact same
+    source, whether policy is `"required"` or `"builtin-fallback"`, other
+    than a `"required"` deployment additionally losing the builtin
+    fallback it would have had anyway (working as intended, and the same
+    trade-off `"required"` always described).
+  - **At least one adapter across the list declares a recognized `scope`**
+    (the mixed case included -- some adapters scoped, some not): the
+    scoped discriminator rules from the rest of this docstring apply
+    exactly as before. Every UNSCOPED adapter in that same list is
+    ignored for bound resolution purposes ONLY -- it remains fully usable
+    by the ordinary `resolve_identity` chain, which never reads `scope`.
+    This is the one case where "no scope key" still means "ineligible":
+    once a deployment has started using the discriminator at all, a
+    stray unscoped adapter left in the list must not become a silent
+    third answer alongside the two recognized scopes.
+
+`ATTESTATION_CONFIG_KEY_BOUND_IDENTITY: "required"` behavior is
+UNCHANGED by this fix in the case that actually matters for it: a
+legacy/unscoped config under `"required"` still refuses when its sidecar
+source does not resolve -- but the refusal message now explicitly says
+resolution is unscoped and names the missing `scope` key, rather than the
+scoped-source language ("the per-spawn subagent sidecar" / "the
+session-scoped sidecar") that made no sense for a config declaring no
+scopes at all. This is what makes an unscoped config's misconfiguration
+LOUD under the strict policy rather than looking like an ordinary
+per-spawn/session refusal.
 """
 
 from __future__ import annotations
@@ -926,6 +992,20 @@ def _any_per_spawn_session_id_set(adapters: list[dict], *, env: dict[str, str]) 
     return False
 
 
+def _any_adapter_declares_recognized_scope(adapters: list[dict]) -> bool:
+    """True when at least one entry in *adapters* declares
+    `scope: per-spawn` or `scope: session` (`SIDECAR_ADAPTER_KEY_SCOPE`).
+    Drives the upgrade-safety branch in `resolve_bound_identity` (lr-620837
+    fold-in #3): a config where NO adapter declares a recognized scope is a
+    legacy/unscoped config, and bound resolution must fall back to the
+    SAME sidecar codepath the ordinary `resolve_identity` chain uses rather
+    than the scoped discriminator, which has nothing to discriminate on."""
+    return any(
+        adapter.get(SIDECAR_ADAPTER_KEY_SCOPE) in (SIDECAR_SCOPE_PER_SPAWN, SIDECAR_SCOPE_SESSION)
+        for adapter in adapters
+    )
+
+
 def _resolve_bound_identity_policy(*, config_root) -> str:
     """Read `attestation.bound_identity` from config, falling back to
     `DEFAULT_BOUND_IDENTITY_POLICY` when unset OR set to an unrecognized
@@ -968,6 +1048,18 @@ def resolve_bound_identity(
          unconfigured). The per-spawn discriminator refusal itself is
          UNCONDITIONAL regardless of policy -- see this module's own
          docstring.
+      4. UPGRADE SAFETY (lr-620837 fold-in #3): step 2's discriminator only
+         applies once at least one configured adapter declares a
+         recognized `scope`. When NO adapter in `attestation.sidecars`
+         declares one (a legacy/unscoped config -- see this module's own
+         docstring, "UNSCOPED-CONFIG UPGRADE SAFETY"), this function
+         instead delegates to the SAME sidecar codepath `resolve_identity`
+         uses (`_SidecarFileProvider`, all three of its sources) and
+         reports the generic `SOURCE_SIDECAR` label -- byte-identical to
+         what `resolve_identity` itself would resolve for the same
+         env/config, so an existing config with no `scope`-tagged adapters
+         sees NO behavior change from adopting this function. Step 3's
+         policy fallback still applies to a miss on that unscoped lookup.
 
     Args:
         env: override the environment mapping (mainly for tests). Defaults
@@ -997,6 +1089,49 @@ def resolve_bound_identity(
         return configured_identity
 
     all_sidecar_adapters = _configured_sidecar_adapters(config_root=resolved_config_root)
+
+    # UPGRADE SAFETY (lr-620837 fold-in #3): a legacy/unscoped config --
+    # NO adapter in the list declares a recognized `scope` at all -- has
+    # nothing for the discriminator below to discriminate on. Delegate to
+    # the exact same sidecar codepath the ordinary `resolve_identity`
+    # chain uses (all three sources: env single-path, config single-path,
+    # and the adapter list walked in declared order with no `scope`
+    # check) so an existing config sees byte-identical resolution to what
+    # it got before this function's scoped-discriminator behavior existed
+    # -- see this module's own docstring, "UNSCOPED-CONFIG UPGRADE
+    # SAFETY," for the full defect this closes.
+    if not _any_adapter_declares_recognized_scope(all_sidecar_adapters):
+        unscoped_identity = _SidecarFileProvider(
+            env=active_env, config_root=resolved_config_root
+        ).resolve()
+        if unscoped_identity is not None:
+            return unscoped_identity
+
+        policy = _resolve_bound_identity_policy(config_root=resolved_config_root)
+        if policy == BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK:
+            builtin_identity = _BuiltinOsUserProvider().resolve()
+            if builtin_identity is not None:
+                return builtin_identity
+
+        raise BoundAttestationError(
+            f"attestation FAILED -- no attested identity. This is a "
+            f"caller-bound resolution against an UNSCOPED "
+            f"{ATTESTATION_CONFIG_SECTION!r}.{ATTESTATION_CONFIG_KEY_SIDECARS!r} "
+            f"configuration -- no adapter in that list declares a "
+            f"recognized `{SIDECAR_ADAPTER_KEY_SCOPE}` key "
+            f"({SIDECAR_SCOPE_PER_SPAWN!r} or {SIDECAR_SCOPE_SESSION!r}), so "
+            f"the per-spawn/session discriminator has nothing to select "
+            f"between. Configure a resolving sidecar source (env "
+            f"{ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR}, config "
+            f"{ATTESTATION_CONFIG_KEY_SIDECAR_PATH!r}, or an "
+            f"{ATTESTATION_CONFIG_KEY_SIDECARS!r} adapter), or add "
+            f"`{SIDECAR_ADAPTER_KEY_SCOPE}: {SIDECAR_SCOPE_PER_SPAWN}` / "
+            f"`{SIDECAR_ADAPTER_KEY_SCOPE}: {SIDECAR_SCOPE_SESSION}` to opt "
+            f"into the stricter per-spawn/session discriminator, before "
+            f"retrying.",
+            expected_source=SOURCE_SIDECAR,
+        )
+
     per_spawn_adapters = _adapters_with_scope(all_sidecar_adapters, SIDECAR_SCOPE_PER_SPAWN)
     session_adapters = _adapters_with_scope(all_sidecar_adapters, SIDECAR_SCOPE_SESSION)
 
