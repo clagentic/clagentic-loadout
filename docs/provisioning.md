@@ -676,8 +676,24 @@ attestation:
 - `scope: session` — this adapter is keyed on a top-level session
   identifier (a lead/director session that has no per-spawn id to stamp).
 - No `scope` key, or an unrecognized value — this adapter is simply not
-  eligible to answer a BOUND resolution at all; it remains fully usable by
-  the ordinary `resolve_identity` chain above, which does not read `scope`.
+  eligible to answer a BOUND resolution at all **once at least one other
+  adapter in the same list declares a recognized `scope`**; it remains
+  fully usable by the ordinary `resolve_identity` chain above, which does
+  not read `scope`.
+
+**Existing configs keep working unchanged.** If NO adapter in your
+`attestation.sidecars` list declares a `scope` key at all — every config
+that predates this section, including one you deployed before reading
+this — bound resolution does not try to discriminate between per-spawn
+and session sources: it falls back to the exact same sidecar lookup the
+ordinary `resolve_identity` chain performs (all three sources: the env
+single-path override, the config single-path override, and the adapter
+list itself, walked in declared order). Upgrading to a `clagentic: loadout`
+release carrying this section is a no-op for that config — the same
+identity resolves, from the same source, whether `bound_identity` is left
+unset or set explicitly. Add `scope` plus `bound_identity: required` only
+when you're ready to opt into the stricter per-spawn/session discriminator
+below; until then, nothing changes.
 
 The discriminator itself: does ANY `scope: per-spawn` adapter's OWN
 `session_id_env` resolve to a non-empty value in the resolving process's
@@ -703,7 +719,12 @@ section, one of:
   entries) — a caller-bound resolution that finds nothing on layer 1 or the
   ONE discriminator-selected sidecar scope is a terminal refusal; the
   built-in OS-user layer is never consulted. An omitted `--caller`/`--role`
-  requires attestation under this policy exactly like an explicit one.
+  requires attestation under this policy exactly like an explicit one. Set
+  against a config with NO `scope`-tagged adapters at all, a miss refuses
+  naming the missing `scope` key explicitly — loud, so an unscoped config
+  someone flips to `required` without also adding `scope` entries fails
+  with a message telling you exactly what's missing, rather than reading
+  like an ordinary per-spawn/session miss.
 - `builtin-fallback` (the default when this key is unset) — an
   UNDISCRIMINATED miss (no adapter of the selected scope configured or
   resolving) falls through to the built-in OS-user layer, preserving this
