@@ -257,6 +257,46 @@ class TestResolveGitWorkingTree:
         with pytest.raises(PostMergeConfigError, match="absolute path"):
             resolve_git_working_tree(tmp_path)
 
+    def test_custom_legacy_relative_path_honored_for_wrapper_hop_root_resolution(
+        self, tmp_path
+    ):
+        """lr-cd3644 fold-in #3 (PR #30 re-review finding D): a CALLER-
+        supplied *legacy_relative_path* (mirroring every other resolver's
+        own override knob) must be honored for BOTH the config-file read
+        AND the config-ROOT re-derivation this function performs afterward
+        -- before this fix, the root re-derivation hardcoded the module-
+        level LEGACY_CONFIG_RELATIVE_PATH constant directly, ignoring a
+        caller's own override, which is observable ONLY in the lr-18f46a
+        bounded-wrapper-hop shape (resolve_repo_config_root's own hop):
+        *repo_root* itself (the inner git tree) carries NEITHER candidate,
+        so the hop must climb to the wrapper -- which carries the config
+        ONLY at a CUSTOM legacy-relative path, not the module's own default
+        legacy path. If the root re-derivation silently reverted to the
+        hardcoded default legacy constant, the hop would look for the
+        WRONG candidate at the wrapper and never find it, falling back to
+        the un-hopped repo_root and returning None instead of the correct
+        resolved working-tree path."""
+        wrapper = tmp_path / "wrapper"
+        repo = wrapper / "repo"
+        repo.mkdir(parents=True)
+        git_init = subprocess.run(
+            ["git", "init", "--quiet"], cwd=str(repo), capture_output=True, text=True
+        )
+        assert git_init.returncode == 0, git_init.stderr
+        custom_legacy = "custom/legacy-config.yaml"
+        legacy_path = wrapper / "custom" / "legacy-config.yaml"
+        legacy_path.parent.mkdir(parents=True)
+        legacy_path.write_text(
+            yaml.safe_dump({"merge": {"git_working_tree": "inner"}}),
+            encoding="utf-8",
+        )
+        resolved = resolve_git_working_tree(
+            repo,
+            config_relative_path="custom/new-config.yaml",
+            legacy_relative_path=custom_legacy,
+        )
+        assert resolved == wrapper / "inner"
+
 
 class TestResolveSyncTreeAfterMerge:
     """lr-d95cdb: the `merge.sync_tree_after_merge` config key -- defaults ON
@@ -889,25 +929,51 @@ class TestLoadPostMergeStepsFromGitSha:
         assert load_post_merge_steps_from_git_sha(tmp_path, sha) == [{"cmd": "legacy"}]
 
     def test_malformed_merged_sha_fails_loud_not_silently_absent(self, tmp_path):
-        """BOBBIE finding, lr-cd3644 fold-in #1: a *merged_sha* git cannot
-        even parse as an object name ("fatal: invalid object name") is a
-        GENUINE git failure, distinct from the path-absent-from-a-resolvable-
-        commit's-tree shape the function's own `None` return is reserved
-        for (confirmed against a real git binary: a syntactically valid but
-        unresolvable 40-hex SHA instead produces the SAME "path ... does not
-        exist in"/"exists on disk, but not in" phrasing a genuine absence
-        does -- git cannot itself distinguish "bad SHA" from "bad path" in
-        that shape, so this function correctly treats it as absence too; a
-        SHA git flags as flatly unparseable is the one case it CAN tell
-        apart, and this function must not blur that distinction away). Before
-        this fix, `_show`'s `if result.returncode != 0: return None`
-        collapsed EVERY non-zero exit into the same "not comparable, skip
-        the check" signal a genuine path-absence produces -- silently
-        disabling the lr-cd3644 drift check for a caller-side SHA defect
-        instead of surfacing it. Must raise, never return None."""
+        """BOBBIE finding, lr-cd3644 fold-in #1 (structurally hardened by
+        fold-in #3 on PR #30): a *merged_sha* that cannot even resolve to a
+        commit object is a GENUINE failure, distinct from the path-absent-
+        from-a-resolvable-commit's-tree shape the function's own `None`
+        return is reserved for. This is now verified via `git cat-file -e
+        <merged_sha>^{commit}`, checked ONCE up front before any path lookup
+        is even attempted -- never by matching `git show`'s own (localized,
+        ambiguous-with-path-absence) stderr text. A SHA that fails this
+        existence+type check can never be reinterpreted as "path absent":
+        no path has been looked up yet at the point this check runs. Must
+        raise, never return None."""
         _init_git_repo(tmp_path)
         _commit_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
-        with pytest.raises(PostMergeConfigError, match="git show"):
+        with pytest.raises(PostMergeConfigError, match="cat-file"):
+            load_post_merge_steps_from_git_sha(tmp_path, "not-a-valid-sha-at-all")
+
+    def test_unresolvable_but_sha_shaped_merged_sha_fails_loud(self, tmp_path):
+        """A syntactically valid 40-hex SHA that does not resolve to any
+        object in this tree's object database at all must ALSO fail loud
+        via the same git cat-file -e ...^{commit} existence check -- not
+        merely a malformed/non-hex string (covered above). Confirms the
+        up-front commit-existence gate catches an unknown-but-well-formed
+        SHA the same way it catches an obviously-malformed one."""
+        _init_git_repo(tmp_path)
+        _commit_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        unresolvable_sha = "a" * 40
+        with pytest.raises(PostMergeConfigError, match="cat-file"):
+            load_post_merge_steps_from_git_sha(tmp_path, unresolvable_sha)
+
+    def test_non_english_locale_still_fails_loud_on_invalid_sha(
+        self, tmp_path, monkeypatch
+    ):
+        """lr-cd3644 fold-in #3 (PEACHES re-review, PR #30): the prior
+        stderr-text-matching classifier was NOT locale-independent -- git
+        localizes its own diagnostic text under LC_ALL/LANG, so a non-English
+        spawn environment could silently misclassify a genuine invalid-SHA
+        failure as a merely-absent path. `git cat-file -e`'s exit code is
+        locale-independent by construction (no stderr text is parsed at all
+        for the classification decision) -- prove this holds under a non-
+        English LC_ALL."""
+        _init_git_repo(tmp_path)
+        _commit_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
+        monkeypatch.setenv("LANG", "fr_FR.UTF-8")
+        with pytest.raises(PostMergeConfigError, match="cat-file"):
             load_post_merge_steps_from_git_sha(tmp_path, "not-a-valid-sha-at-all")
 
     def test_genuinely_absent_path_at_a_valid_commit_still_returns_none(

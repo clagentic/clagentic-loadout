@@ -389,17 +389,6 @@ ENV_OVERRIDE_PREFIX = "CLAGENTIC_LOADOUT_POST_MERGE_ENV_"
 #: the identical variable-name shape.
 _ENV_OVERRIDE_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: Matches git's own two documented `git show <sha>:<path>` stderr phrasings
-#: for "this path is not tracked at this commit" (confirmed against a real
-#: git binary; used by `load_post_merge_steps_from_git_sha`'s `_show` helper
-#: -- lr-cd3644 fold-in #2 -- to distinguish a genuine path-absent result
-#: from every OTHER git failure, which must fail loud instead). Anchored at
-#: the start of stderr, matching `git`'s own leading `fatal: ` prefix
-#: verbatim; no trailing-punctuation assumption (confirmed against a real
-#: git binary: neither phrasing ends in a period).
-_PATH_ABSENT_FROM_TREE_RE = re.compile(
-    r"^fatal: path '.*' (does not exist in|exists on disk, but not in) '.*'$"
-)
 
 
 def _read_yaml_mapping(path: Path) -> dict:
@@ -519,12 +508,14 @@ def resolve_git_tree_relative_config_paths(
     candidates, correctly signaling "not trackable by this git tree, ever" --
     `load_post_merge_steps_from_git_sha`'s caller (`merge.verb._run`) must
     skip the git-object read entirely rather than construct an outside-the-
-    repository `git show` argument, which `git` itself refuses with a
-    DIFFERENT, non-path-absent error (`fatal: '<path>' is outside
-    repository...`) that this module's own fail-loud contract (see `_show`'s
-    `_PATH_ABSENT_FROM_TREE_RE` gate) would otherwise (correctly) raise on --
-    this function exists precisely so that call is never attempted for an
-    inherently-untrackable wrapper-layout config.
+    repository `git show`/`git cat-file` argument, which `git` itself refuses
+    with a DIFFERENT, genuine error (an "outside repository" failure, not a
+    path-absent result) that this module's own fail-loud contract (see
+    `load_post_merge_steps_from_git_sha`'s `_show` helper, which now verifies
+    path presence via `git cat-file -e <sha>:<path>` before ever calling `git
+    show`) would otherwise (correctly) raise on -- this function exists
+    precisely so that call is never attempted for an inherently-untrackable
+    wrapper-layout config.
     """
     config_root = resolve_repo_config_root(
         config_root_hint, config_relative_path, legacy_relative_path
@@ -626,53 +617,101 @@ def load_post_merge_steps_from_git_sha(
     all, silently disabling the drift check for every wrapper-layout repo
     (lr-cd3644 fold-in #3).
 
+    THE lr-cd3644 fold-in #3 STRUCTURAL FIX (LOCALE-INDEPENDENT, no stderr-text
+    matching): a prior revision of this function classified a `git show`
+    failure as "genuinely path-absent" vs. "a real git failure" by matching
+    `git`'s stderr against a regex of its two documented English phrasings
+    ("path '<p>' does not exist in '<ref>'" / "path '<p>' exists on disk, but
+    not in '<ref>'"). That collapsed TWO distinct root causes onto the same
+    stderr-matching code path (a genuinely absent path at a valid commit, and
+    an invalid/unresolvable *merged_sha* itself -- git's own phrasing for an
+    unresolvable-but-syntactically-SHA-shaped object name reuses the identical
+    "path ... does not exist in" wording, so no regex on THAT output alone can
+    ever tell the two apart) and was never locale-independent (git localizes
+    this message under `LC_ALL`/`LANG`, so a non-English-locale spawn
+    environment would silently fail every regex match and misclassify a
+    genuine absence as a hard failure).
+
+    NOW: *merged_sha* is verified ONCE, up front, via `git cat-file -e
+    <merged_sha>^{commit}` -- a locale-independent existence+type check (exit
+    code only, no stderr parsing) mirroring `tree_sync.fetch_merged_sha_object`
+    's own verification readback. A non-zero exit HERE is unconditionally a
+    genuine failure (an invalid, unresolvable, or non-commit *merged_sha*) and
+    always raises -- this can never be "path absent," because no path lookup
+    has been attempted yet. Only once the commit itself is confirmed to exist
+    does path presence get tested, via `git cat-file -e
+    <merged_sha>:<relative_path>` (again exit-code-only, no stderr text
+    matched) -- a non-zero exit at THIS stage, with the commit already
+    verified, unambiguously means the path is absent from that commit's tree,
+    so it returns `None` for that candidate rather than raising. `git show` is
+    then called only to fetch the CONTENT of a path already confirmed present.
+
     Raises:
-        PostMergeConfigError: the resolved blob content is not valid YAML,
-            its top-level document is not a mapping, the `merge:` section
-            (if present) is not a mapping, `post_merge_steps` (if present)
-            is not a list, or any individual step fails
+        PostMergeConfigError: *merged_sha* itself fails the `git cat-file -e
+            ...^{commit}` existence check (invalid, unresolvable, or
+            non-commit object -- always a genuine failure, never treated as
+            "path absent"), a confirmed-present path's `git show` content read
+            fails for any other reason, the resolved blob content is not
+            valid YAML, its top-level document is not a mapping, the `merge:`
+            section (if present) is not a mapping, `post_merge_steps` (if
+            present) is not a list, or any individual step fails
             `validate_post_merge_steps` -- mirrors `load_post_merge_steps`'s
-            own fail-fast contract exactly, so a malformed committed config
-            is caught the same way regardless of which path read it.
+            own fail-fast contract exactly, so a malformed committed config is
+            caught the same way regardless of which path read it.
     """
     git_tree_path = Path(git_tree_path)
 
+    # Verify *merged_sha* ITSELF exists and is a commit, exactly once, before
+    # any path lookup is attempted -- see docstring above. A failure here can
+    # never be reinterpreted as "path absent": no path has been looked up yet.
+    commit_check = subprocess.run(
+        ["git", "cat-file", "-e", f"{merged_sha}^{{commit}}"],
+        capture_output=True,
+        text=True,
+        cwd=str(git_tree_path),
+    )
+    if commit_check.returncode != 0:
+        raise PostMergeConfigError(
+            f"git cat-file -e {merged_sha}^{{commit}} failed (exit "
+            f"{commit_check.returncode}) in {git_tree_path} -- {merged_sha!r} "
+            f"does not resolve to a commit object in this tree's object "
+            f"database: {commit_check.stderr.strip()[:400]}"
+        )
+
     def _show(relative_path: str) -> str | None:
+        # *merged_sha* is already confirmed to exist and be a commit (above)
+        # -- a non-zero exit HERE unambiguously means *relative_path* is
+        # absent from ITS tree specifically, never a bad-SHA artifact. Tested
+        # via `cat-file -e` (exit code only) rather than parsing `git show`'s
+        # own stderr text, so this is locale-independent regardless of
+        # LC_ALL/LANG.
+        path_check = subprocess.run(
+            ["git", "cat-file", "-e", f"{merged_sha}:{relative_path}"],
+            capture_output=True,
+            text=True,
+            cwd=str(git_tree_path),
+        )
+        if path_check.returncode != 0:
+            return None
+
         result = subprocess.run(
             ["git", "show", f"{merged_sha}:{relative_path}"],
             capture_output=True,
             text=True,
             cwd=str(git_tree_path),
         )
-        if result.returncode == 0:
-            return result.stdout
-        stderr = result.stderr.strip()
-        if _PATH_ABSENT_FROM_TREE_RE.match(stderr):
-            # GENUINELY absent from *merged_sha*'s tree -- git's own two
-            # documented phrasings for "this path is not tracked at this
-            # commit" (confirmed against a real git binary): "path '<p>'
-            # does not exist in '<ref>'" (the path has never existed at any
-            # commit reachable here) and "path '<p>' exists on disk, but not
-            # in '<ref>'" (the path exists in the CALLER's working tree but
-            # was never committed at *merged_sha*). Only THESE two shapes are
-            # "not comparable, skip the check" per this function's own
-            # contract (see docstring, "RETURNS None...").
-            return None
-        # ANY OTHER non-zero exit is a genuine git failure this function
-        # must never silently reinterpret as "path absent" (review finding,
-        # see this module's own docstring): an invalid *merged_sha* object
-        # name, a corrupted object database, a git binary that failed to
-        # start, or any other subprocess-level error would previously
-        # collapse into the SAME `None` this function returns for a genuine,
-        # comparable absence -- silently disabling the drift check (the
-        # caller treats None as "not comparable, skip") rather than
-        # surfacing the failure. Fail loud instead, mirroring every other
-        # git-subprocess failure this module's callers already treat as
-        # PostMergeConfigError.
-        raise PostMergeConfigError(
-            f"git show {merged_sha}:{relative_path} failed (exit "
-            f"{result.returncode}) in {git_tree_path}: {stderr[:400]}"
-        )
+        if result.returncode != 0:
+            # The path was JUST confirmed present at a JUST-verified commit --
+            # a `git show` failure now is some OTHER genuine error (e.g. a
+            # corrupted object database), never a path-absence result this
+            # function's own `None` contract is reserved for. Fail loud.
+            raise PostMergeConfigError(
+                f"git show {merged_sha}:{relative_path} failed (exit "
+                f"{result.returncode}) in {git_tree_path} after "
+                f"cat-file -e confirmed the path present at that commit: "
+                f"{result.stderr.strip()[:400]}"
+            )
+        return result.stdout
 
     content: str | None = None
     source_label = f"{merged_sha}:{config_relative_path}"
@@ -711,6 +750,90 @@ def load_post_merge_steps_from_git_sha(
 
     validate_post_merge_steps(steps)
     return steps
+
+
+def config_path_tracked_at_git_sha(
+    git_tree_path: str | Path,
+    sha: str,
+    *,
+    config_relative_path: str | None = DEFAULT_CONFIG_RELATIVE_PATH,
+    legacy_relative_path: str | None = LEGACY_CONFIG_RELATIVE_PATH,
+) -> bool:
+    """Whether the repo-local config file (new or legacy relative path) was
+    GIT-TRACKED at *sha* -- i.e. `git cat-file -e <sha>:<relative_path>`
+    succeeds for either candidate (lr-cd3644 fold-in #3, PR #30 re-review
+    finding B).
+
+    THE DISTINCTION THIS CLOSES: `load_post_merge_steps_from_git_sha`
+    returning `None` for "config path absent at *merged_sha*" is ambiguous
+    between two different root causes a caller (`merge.verb._run`'s drift
+    check) must treat DIFFERENTLY:
+
+      1. The config file was NEVER tracked at any commit reachable here (the
+         common, deliberately-gitignored-config shape -- see that function's
+         own docstring). Genuinely NOT COMPARABLE: an untracked file cannot
+         drift relative to a commit by construction, so the drift check must
+         skip it entirely.
+      2. The config file WAS tracked at the caller's PRE-SYNC HEAD (the
+         commit `--repo-path`'s working tree was on before this merge), but
+         the merged commit's own tree no longer tracks it (deleted in, or
+         before, the commit that merged). This is NOT "not comparable" --
+         the merged commit is DELETING every post_merge_steps entry that
+         pre-sync tree declared, which is itself a real, authoritative
+         result: zero steps, not an unresolvable comparison. Treating case 2
+         the same as case 1 (skip the check, keep the stale pre-sync
+         `steps` value) would silently keep running steps a merged commit
+         has already deleted -- the merged commit's own tree is always
+         authoritative once it is known to be a comparable, tracked config
+         surface at all.
+
+    A caller passes *sha* as the PRE-SYNC HEAD (the commit `--repo-path` was
+    on before `advance_repo_to_merged_sha`/`fetch_merged_sha_object` ran) to
+    distinguish these two cases: `load_post_merge_steps_from_git_sha`
+    returning `None` for *merged_sha* AND this function returning `True` for
+    the pre-sync HEAD means case 2 (deleted-but-was-tracked, merged commit
+    authoritative, treat as `[]`); `None` and `False` means case 1 (never
+    tracked, genuinely not comparable, skip).
+
+    Tested via `git cat-file -e <sha>:<relative_path>` (exit-code only, no
+    stderr text parsed -- locale-independent, mirroring
+    `load_post_merge_steps_from_git_sha`'s own path-presence check). Checks
+    *config_relative_path* first, falling back to *legacy_relative_path* when
+    the new path is not tracked there either -- same new-path/legacy-path
+    preference order every other resolver in this module uses. A `None`
+    argument skips that candidate entirely (mirrors
+    `load_post_merge_steps_from_git_sha`'s own contract for a wrapper-layout
+    config root that sits outside the git tree, lr-cd3644 fold-in #3 --
+    `resolve_git_tree_relative_config_paths` may resolve either candidate to
+    `None`).
+
+    Returns `False` (never raises) when *sha* itself cannot be resolved to a
+    commit -- this function's job is narrowly "was the config path tracked at
+    a resolvable commit," not a second, redundant *sha*-validity gate;
+    `load_post_merge_steps_from_git_sha`'s own up-front `git cat-file -e
+    <merged_sha>^{commit}` check already owns failing loud on an invalid
+    *merged_sha* specifically. A caller with a genuinely invalid *sha* here
+    (e.g. a pre-sync HEAD from a corrupted local state) gets `False` --
+    "not tracked, not comparable" -- which is the same safe, conservative
+    answer an untracked config gets, never a silent authority claim over
+    content that could not actually be read.
+    """
+    git_tree_path = Path(git_tree_path)
+
+    def _tracked(relative_path: str) -> bool:
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{sha}:{relative_path}"],
+            capture_output=True,
+            text=True,
+            cwd=str(git_tree_path),
+        )
+        return result.returncode == 0
+
+    if config_relative_path is not None and _tracked(config_relative_path):
+        return True
+    if legacy_relative_path is not None and _tracked(legacy_relative_path):
+        return True
+    return False
 
 
 def post_merge_steps_key_declared(
@@ -852,6 +975,7 @@ def resolve_git_working_tree(
     repo_root: str | Path | None,
     *,
     config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+    legacy_relative_path: str = LEGACY_CONFIG_RELATIVE_PATH,
 ) -> Path | None:
     """Resolve the git working-tree root `merge.tree_sync.
     advance_repo_to_merged_sha` should target for *repo_root* (lr-93d718 —
@@ -893,7 +1017,9 @@ def resolve_git_working_tree(
         return None
 
     config_path = resolve_repo_config_path(
-        repo_root, config_relative_path=config_relative_path
+        repo_root,
+        config_relative_path=config_relative_path,
+        legacy_relative_path=legacy_relative_path,
     )
     raw = _read_yaml_mapping(config_path)
 
@@ -924,12 +1050,25 @@ def resolve_git_working_tree(
 
     # Re-derive the config ROOT (as opposed to config_path, the resolved
     # FILE) via the SAME resolve_repo_config_root bounded-hop resolver
-    # resolve_repo_config_path itself calls internally — this keys on the
-    # identical (new-path, legacy-path) candidate pair, so a wrapper-hop
-    # repo's config root here always agrees with load_post_merge_steps' own
-    # root for the same repo_root input, never a second/divergent walk.
+    # resolve_repo_config_path itself calls internally, using the SAME
+    # (config_relative_path, legacy_relative_path) candidate pair this
+    # function's OWN resolve_repo_config_path call above just used (lr-cd3644
+    # fold-in #3, PR #30 re-review finding D) -- this function previously
+    # hardcoded the module-level LEGACY_CONFIG_RELATIVE_PATH constant
+    # directly here instead of threading its own *legacy_relative_path*
+    # parameter through, which only happened to agree with the
+    # resolve_repo_config_path call above because no caller today overrides
+    # the legacy path from its own default. Any caller that DID override
+    # *legacy_relative_path* (mirroring the override knob every other
+    # resolver in this module already exposes) would have hit a config-root
+    # resolution here that silently used a DIFFERENT legacy candidate than
+    # the config-file resolution immediately above it -- a latent
+    # inconsistency, now closed by passing the SAME parameter through both
+    # calls, so a wrapper-hop repo's config root here always agrees with
+    # load_post_merge_steps' own root for the same *repo_root*/legacy-path
+    # input, never a second/divergent walk.
     config_root = resolve_repo_config_root(
-        repo_root, config_relative_path, LEGACY_CONFIG_RELATIVE_PATH
+        repo_root, config_relative_path, legacy_relative_path
     )
     resolved = (config_root / working_tree).resolve()
     config_root_resolved = config_root.resolve()
@@ -1380,6 +1519,7 @@ __all__ = [
     "DEFAULT_REQUIRE_MODEL_ATTESTATION",
     "DEFAULT_SYNC_TREE_AFTER_MERGE",
     "ENV_OVERRIDE_PREFIX",
+    "config_path_tracked_at_git_sha",
     "find_crew_yaml_files_declaring_post_merge_steps",
     "load_post_merge_steps",
     "load_post_merge_steps_from_git_sha",
