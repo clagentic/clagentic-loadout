@@ -1224,9 +1224,29 @@ def _init_repo_with_origin_and_tracked_config(tmp_path, steps: list[dict]) -> st
 
 
 def _push_tracked_config_commit_to_origin(tmp_path, steps: list[dict]) -> str:
+    """Advance origin's own `main` tip by one commit whose tracked
+    `.clagentic/loadout/config.yaml` declares *steps* (a well-formed
+    post_merge_steps list). See `_push_tracked_config_text_commit_to_origin`
+    for the shared plumbing this is a thin wrapper over."""
+    return _push_tracked_config_text_commit_to_origin(
+        tmp_path, yaml.safe_dump({"merge": {"post_merge_steps": steps}})
+    )
+
+
+def _push_malformed_tracked_config_commit_to_origin(tmp_path) -> str:
+    """Advance origin's own `main` tip by one commit whose tracked
+    `.clagentic/loadout/config.yaml` is INVALID YAML -- the one case
+    lr-cd3644's drift check cannot self-correct (there is no "merged
+    commit's steps" to treat as authoritative when the merged commit's own
+    config does not parse at all). See
+    `_push_tracked_config_text_commit_to_origin` for the shared plumbing."""
+    return _push_tracked_config_text_commit_to_origin(tmp_path, "merge: [unclosed")
+
+
+def _push_tracked_config_text_commit_to_origin(tmp_path, config_text: str) -> str:
     """Advance origin's own `main` tip (NOT the local clone's working tree or
     index at tmp_path) by one commit that rewrites the ALREADY-TRACKED
-    `.clagentic/loadout/config.yaml` to declare *steps* -- built via a
+    `.clagentic/loadout/config.yaml` to *config_text* verbatim -- built via a
     SEPARATE, temporary git index (`GIT_INDEX_FILE`) populated from HEAD's
     own tree (`git read-tree`), overwritten with the new blob for that one
     path (`git update-index --add --cacheinfo`), and written out
@@ -1236,8 +1256,11 @@ def _push_tracked_config_commit_to_origin(tmp_path, steps: list[dict]) -> str:
     `_init_repo_with_origin_and_tracked_config`'s original seed commit) --
     exactly the "caller's --repo-path is stale relative to what just got
     merged" shape lr-cd3644 closes. Returns the new commit's SHA (the
-    "merged_sha" a test then feeds to the opener)."""
-    config_text = yaml.safe_dump({"merge": {"post_merge_steps": steps}})
+    "merged_sha" a test then feeds to the opener). Shared by
+    `_push_tracked_config_commit_to_origin` (well-formed steps) and
+    `_push_malformed_tracked_config_commit_to_origin` (invalid YAML, the
+    fail-loud-preserved case) so the two never diverge on the underlying git
+    plumbing -- only the config TEXT differs."""
     hash_object = subprocess.run(
         ["git", "hash-object", "-w", "--stdin"],
         input=config_text, capture_output=True, text=True, cwd=str(tmp_path),
@@ -1302,26 +1325,83 @@ class TestStalePreSyncConfigDriftCheck:
     incident's own repo shape -- see
     _init_repo_with_origin_and_tracked_config's own docstring for why this
     is a SEPARATE fixture from every other test in this file): the local
-    clone stays on its original seed commit throughout (its own tracked
-    config declares ZERO steps), while origin's `main` tip (the "merged"
-    commit fed to the opener as merge_commit_sha) is advanced, via raw git
-    plumbing against the SAME object database, to a DIFFERENT commit whose
-    own committed config declares an on_failure:fail step. The merge must
-    refuse (EXIT_POST_MERGE_FAILED) rather than silently running zero
-    steps."""
+    clone stays on its original seed commit throughout, while origin's
+    `main` tip (the "merged" commit fed to the opener as merge_commit_sha)
+    is advanced, via raw git plumbing against the SAME object database, to
+    a DIFFERENT commit whose own committed config declares a different
+    post_merge_steps list.
 
-    def test_stale_repo_path_with_fewer_steps_than_merged_commit_fails_loud(self, tmp_path):
+    lr-cd3644 FOLLOWUP (HOLDEN-dispatched fold-in, same PR): the ORIGINAL
+    version of this check failed the entire merge loudly
+    (EXIT_POST_MERGE_FAILED) on ANY disagreement, even when the merged
+    commit's own config had REAL steps the stale pre-sync read never saw --
+    meaning a repo whose config gained post_merge_steps in the very commit
+    this merge lands would get those steps refused outright rather than
+    run. `merge.verb._run` now treats the merged SHA's committed config as
+    AUTHORITATIVE: on drift, the merged commit's own `post_merge_steps` are
+    what actually execute (see
+    test_stale_repo_path_with_fewer_steps_than_merged_commit_runs_the_merged_
+    commits_steps below), and the working tree still lands on base_branch
+    afterward exactly as an ordinary, non-drifted merge would. FAIL LOUD is
+    preserved for the one case the drift check cannot self-correct: the
+    merged SHA's own config cannot be READ at all (malformed YAML at that
+    commit -- see
+    test_merged_commit_config_unreadable_still_fails_loud below)."""
+
+    def test_stale_repo_path_with_fewer_steps_than_merged_commit_runs_the_merged_commits_steps(
+        self, tmp_path
+    ):
         # The LOCAL clone's own working-tree config: explicitly zero steps,
-        # TRACKED in git (an informed "no steps" choice at the STALE commit,
-        # matching the observed incident exactly -- NAOMI's tree had no
-        # post_merge_steps section on the commit it was left checked out on).
+        # TRACKED in git (an informed "no steps" choice at the STALE commit
+        # -- matching the observed incident's own repo shape, where the
+        # caller's tree had no post_merge_steps section on the commit it was
+        # left checked out on). origin's tip is then advanced, via plumbing
+        # (no working-tree mutation), to a NEW commit whose TRACKED config
+        # declares a real step. The merged commit's own step must actually
+        # RUN (its marker file must exist) -- not be refused -- and the
+        # working tree must land on base_branch afterward, exactly like any
+        # other successful post_merge_steps run.
         _init_repo_with_origin_and_tracked_config(tmp_path, [])
-        # origin's tip is advanced, via plumbing (no working-tree mutation),
-        # to a NEW commit whose TRACKED config declares a real, failing step.
+        marker = tmp_path / "installed-from-merged-commit.txt"
         merged_sha = _push_tracked_config_commit_to_origin(
             tmp_path,
-            [{"cmd": [_PY, "-c", "import sys; sys.exit(1)"], "on_failure": "fail"}],
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
         )
+        argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_github_opener(merged_sha=merged_sha),
+        )
+        assert code == verb.EXIT_OK
+        assert marker.read_text() == "ok"
+        # The tree lands on the base branch at the merged SHA afterward --
+        # the drift correction promotes the stale pre-sync fetch-only
+        # decision to a real checkout (steps_will_run flips False -> True),
+        # and land_on_base_branch still runs against that checkout exactly
+        # as it would for a non-drifted merge whose steps were known from
+        # the start.
+        branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=str(tmp_path),
+        )
+        assert branch.returncode == 0
+        assert branch.stdout.strip() == _BASE_BRANCH
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        )
+        assert rev_parse.stdout.strip() == merged_sha
+
+    def test_merged_commit_config_unreadable_still_fails_loud(self, tmp_path):
+        # FAIL LOUD is preserved for the one case the drift check cannot
+        # self-correct: the merged SHA's own committed config cannot be READ
+        # at all (malformed YAML at that exact commit) -- there is no
+        # "merged commit's steps" to treat as authoritative when the merged
+        # commit's own config does not parse. Must never silently run zero
+        # steps or fall back to the stale pre-sync list either.
+        _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        merged_sha = _push_malformed_tracked_config_commit_to_origin(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
             argv,
