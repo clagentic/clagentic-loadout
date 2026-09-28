@@ -712,38 +712,76 @@ variable) is ever hardcoded in `clagentic: loadout` itself; you name your
 own env vars via `session_id_env` exactly as the ordinary chain already
 requires.
 
+**The env-named and config-file single-path overrides are NOT consulted
+once the scoped discriminator is active.** Once at least one adapter in
+your `attestation.sidecars` list declares a recognized `scope`, a caller-
+bound resolution's ENTIRE sidecar lookup is the per-adapter walk described
+above — `CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_SIDECAR_PATH` (env) and the
+config file's own `identity_sidecar_path` single-path key are both skipped
+for this resolution, even if either would resolve a real, readable file.
+This is deliberate, not an oversight: both of those sources are named by
+something the INVOKING COMMAND itself can set (an env var a command can
+export before running a verb, or — for the config key — a value read at
+the same process-level trust as everything else in your config) — honoring
+either here, once you have opted into `scope`-tagged adapters, would let a
+per-spawn or top-level invocation redirect itself to an arbitrary
+identity's sidecar file simply by setting that env var, exactly the
+redirection surface `scope` exists to close. The unscoped/legacy lookup (no
+adapter anywhere declares a recognized `scope` — see "Existing configs keep
+working unchanged" above) is unaffected: it still walks all three sidecar
+sources, including both single-path overrides, exactly as it always has.
+
 **`bound_identity`** — an OPTIONAL top-level key in the `attestation:`
 section, one of:
 
 - `required` (recommended once `sidecars` is configured with `scope`
   entries) — a caller-bound resolution that finds nothing on layer 1 or the
   ONE discriminator-selected sidecar scope is a terminal refusal; the
-  built-in OS-user layer is never consulted. An omitted `--caller`/`--role`
-  requires attestation under this policy exactly like an explicit one. Set
-  against a config with NO `scope`-tagged adapters at all, a miss refuses
-  naming the missing `scope` key explicitly — loud, so an unscoped config
-  someone flips to `required` without also adding `scope` entries fails
-  with a message telling you exactly what's missing, rather than reading
-  like an ordinary per-spawn/session miss.
+  built-in OS-user layer is never consulted. An **omitted** `--caller`/
+  `--role` is ALSO bound under this policy: it is treated as an implicit
+  claim of "act as my own attested identity" — the same resolution an
+  explicit `--caller` triggers runs, and a process with no attested
+  identity at all is refused here too, exactly like an explicit mismatch
+  always was. Set against a config with NO `scope`-tagged adapters at all,
+  a miss refuses naming the missing `scope` key explicitly — loud, so an
+  unscoped config someone flips to `required` without also adding `scope`
+  entries fails with a message telling you exactly what's missing, rather
+  than reading like an ordinary per-spawn/session miss.
 - `builtin-fallback` (the default when this key is unset) — an
   UNDISCRIMINATED miss (no adapter of the selected scope configured or
   resolving) falls through to the built-in OS-user layer, preserving this
   package's previously-released behavior for an install with no `scope`-
-  tagged `sidecars` entries yet.
+  tagged `sidecars` entries yet. An **omitted** `--caller`/`--role` under
+  this policy behaves EXACTLY as this package has always released it: the
+  effective caller is `DEFAULT_ROLE`, no attestation is attempted at all,
+  and no refusal is possible from this path — the resolver is never even
+  called on an omitted caller under this policy. This is deliberate, not
+  an oversight: `builtin-fallback` is specifically the policy that
+  preserves pre-existing, unconfigured-install behavior, and an omitted
+  caller unconditionally requiring attestation would contradict that
+  promise for every install that has not opted into `required`.
 
 Regardless of policy, a per-spawn-DECLARED invocation (a `scope: per-spawn`
 adapter's own `session_id_env` IS set) whose per-spawn adapter misses is
 ALWAYS refused — it never falls through to a `scope: session` adapter or to
 the built-in layer even under `builtin-fallback`; this is a correctness
-property, not something the policy relaxes.
+property, not something the policy relaxes. This unconditional refusal
+applies whenever the resolver is actually called (the explicit-`--caller`
+path under either policy, and the omitted-`--caller` path under
+`required`) — it has no bearing on the omitted-`--caller` path under
+`builtin-fallback`, since that path never calls the resolver at all.
 
 **Recommended deployment posture:** once you have deployed `scope`-tagged
 `sidecars` adapters for every attestation source your harness writes, set
 `bound_identity: required` explicitly — this closes the gap where a process
 with no attestation source configured at all silently attests as the host
-OS user. Until then, leaving `bound_identity` unset (or explicit
-`builtin-fallback`) keeps every caller-bound verb working exactly as
-before.
+OS user, AND makes an omitted `--caller`/`--role` require attestation
+rather than resolving to `DEFAULT_ROLE`. Until then, leaving
+`bound_identity` unset (or explicit `builtin-fallback`) keeps every
+caller-bound verb's EXPLICIT-`--caller` behavior working exactly as
+before, and keeps an OMITTED `--caller`/`--role` resolving to
+`DEFAULT_ROLE` with no attestation required — this package's
+originally-released omitted-caller behavior, not a new relaxation.
 
 ## Conformance
 
