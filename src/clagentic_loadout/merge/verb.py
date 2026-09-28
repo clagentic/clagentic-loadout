@@ -538,9 +538,13 @@ from clagentic_loadout.review.forgejo_backend import post_and_verify_comment as 
 from clagentic_loadout.review.github_backend import post_and_verify_review as _github_post_and_verify_review
 from clagentic_loadout.transport.attestation import (
     AttestationError,
-    resolve_identity as _resolve_identity,
+    resolve_bound_identity as _resolve_identity,
 )
-from clagentic_loadout.transport.caller_binding import CallerBindingError, bind_caller
+from clagentic_loadout.transport.caller_binding import (
+    CallerBindingError,
+    bind_caller,
+    resolve_for_binding as _resolve_for_binding,
+)
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -1126,10 +1130,14 @@ def main(
 
     `identity_provider` (lr-c75c9a): a zero-arg callable returning a
     `transport.attestation.Identity` (defaults to
-    `transport.attestation.resolve_identity`) -- the injection point for the
-    fail-closed --role/attested-invoker binding (transport.caller_binding.
+    `transport.attestation.resolve_bound_identity`, the caller-BOUND
+    resolver an operator ruling requires -- never falls through to the
+    built-in OS-user layer) -- the injection point for the fail-closed
+    --role/attested-invoker binding (transport.caller_binding.
     bind_caller), mirroring the identical parameter transport.git_host_api.main
-    already carries for the same purpose.
+    already carries for the same purpose. Only actually CALLED when --role
+    is explicit (transport.caller_binding.resolve_for_binding skips
+    resolution entirely on the omitted path).
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -1211,10 +1219,18 @@ def _run(
     # (step 2), before any token mint. An OMITTED --role (args.role is None)
     # is never checked here -- see transport.caller_binding.bind_caller's own
     # docstring for why (this preserves the pre-existing "omitted --role
-    # behaves exactly as before" contract unchanged).
+    # behaves exactly as before" contract unchanged). Resolution ITSELF is
+    # also skipped on the omitted path via resolve_for_binding -- see that
+    # function's own docstring for why an unconditional resolve() became
+    # unsafe once _resolve_identity started meaning resolve_bound_identity
+    # (operator ruling), which never falls through to a built-in fallback.
     resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
     try:
-        attested_identity = resolve_identity_fn()
+        attested_identity = _resolve_for_binding(
+            caller_explicit=args.role is not None,
+            caller=role,
+            resolve_identity_fn=resolve_identity_fn,
+        )
     except AttestationError as exc:
         _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
     bind_caller(role, caller_explicit=args.role is not None, identity=attested_identity)

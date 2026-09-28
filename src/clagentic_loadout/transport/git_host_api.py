@@ -248,7 +248,7 @@ from clagentic_loadout.transport import redirect_guard
 from clagentic_loadout.transport.attestation import (
     AttestationError,
     Identity,
-    resolve_identity as _resolve_identity,
+    resolve_bound_identity as _resolve_identity,
 )
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
@@ -1827,9 +1827,13 @@ def main(
     default to the real provider/urllib path in production use.
     `identity_provider` is a zero-arg callable returning a
     `transport.attestation.Identity` (defaults to
-    `transport.attestation.resolve_identity`) -- the injection point for the
-    fail-closed --caller/attested-invoker binding (lr-82c385, see
-    `bind_caller`).
+    `transport.attestation.resolve_bound_identity`, the caller-BOUND
+    resolver an operator ruling requires -- never falls through to the
+    built-in OS-user layer, see that function's own docstring) -- the
+    injection point for the fail-closed --caller/attested-invoker binding
+    (lr-82c385, see `bind_caller`). Only actually CALLED when --caller is
+    explicit (`transport.caller_binding.resolve_for_binding` skips
+    resolution entirely on the omitted path).
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -2009,10 +2013,19 @@ def _run(
     # checked here: bind_caller's own docstring is the single source of
     # truth for why (it is not an identity claim, there is nothing to
     # bind) -- this preserves the pre-existing "omitted --caller behaves
-    # exactly as before" contract unchanged.
+    # exactly as before" contract unchanged. Resolution ITSELF is now also
+    # skipped on the omitted path, via caller_binding.resolve_for_binding --
+    # see that function's own docstring for why an unconditional resolve()
+    # became unsafe once _resolve_identity started meaning
+    # resolve_bound_identity (operator ruling), which never falls through
+    # to a built-in fallback.
     resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
     try:
-        attested_identity = resolve_identity_fn()
+        attested_identity = _caller_binding.resolve_for_binding(
+            caller_explicit=args.caller is not None,
+            caller=caller,
+            resolve_identity_fn=resolve_identity_fn,
+        )
     except AttestationError as exc:
         _fail(
             f"attested-identity resolution FAILED -- {exc}",
