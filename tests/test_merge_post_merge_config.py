@@ -17,6 +17,8 @@ from __future__ import annotations
 import pytest
 import yaml
 
+import subprocess
+
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_ENFORCE_MERGE_SHAPE,
@@ -36,9 +38,11 @@ from clagentic_loadout.merge.post_merge_config import (
     DEFAULT_SYNC_TREE_AFTER_MERGE,
     find_crew_yaml_files_declaring_post_merge_steps,
     load_post_merge_steps,
+    load_post_merge_steps_from_git_sha,
     post_merge_steps_key_declared,
     resolve_enforce_merge_shape,
     resolve_enforce_single_verdict_fence,
+    resolve_git_tree_relative_config_paths,
     resolve_git_working_tree,
     resolve_model_attestation_denylist,
     resolve_post_merge_step_timeout_seconds,
@@ -252,6 +256,46 @@ class TestResolveGitWorkingTree:
         _write_config(tmp_path, {"merge": {"git_working_tree": "/etc"}})
         with pytest.raises(PostMergeConfigError, match="absolute path"):
             resolve_git_working_tree(tmp_path)
+
+    def test_custom_legacy_relative_path_honored_for_wrapper_hop_root_resolution(
+        self, tmp_path
+    ):
+        """lr-cd3644 fold-in #3 (PR #30 re-review finding D): a CALLER-
+        supplied *legacy_relative_path* (mirroring every other resolver's
+        own override knob) must be honored for BOTH the config-file read
+        AND the config-ROOT re-derivation this function performs afterward
+        -- before this fix, the root re-derivation hardcoded the module-
+        level LEGACY_CONFIG_RELATIVE_PATH constant directly, ignoring a
+        caller's own override, which is observable ONLY in the lr-18f46a
+        bounded-wrapper-hop shape (resolve_repo_config_root's own hop):
+        *repo_root* itself (the inner git tree) carries NEITHER candidate,
+        so the hop must climb to the wrapper -- which carries the config
+        ONLY at a CUSTOM legacy-relative path, not the module's own default
+        legacy path. If the root re-derivation silently reverted to the
+        hardcoded default legacy constant, the hop would look for the
+        WRONG candidate at the wrapper and never find it, falling back to
+        the un-hopped repo_root and returning None instead of the correct
+        resolved working-tree path."""
+        wrapper = tmp_path / "wrapper"
+        repo = wrapper / "repo"
+        repo.mkdir(parents=True)
+        git_init = subprocess.run(
+            ["git", "init", "--quiet"], cwd=str(repo), capture_output=True, text=True
+        )
+        assert git_init.returncode == 0, git_init.stderr
+        custom_legacy = "custom/legacy-config.yaml"
+        legacy_path = wrapper / "custom" / "legacy-config.yaml"
+        legacy_path.parent.mkdir(parents=True)
+        legacy_path.write_text(
+            yaml.safe_dump({"merge": {"git_working_tree": "inner"}}),
+            encoding="utf-8",
+        )
+        resolved = resolve_git_working_tree(
+            repo,
+            config_relative_path="custom/new-config.yaml",
+            legacy_relative_path=custom_legacy,
+        )
+        assert resolved == wrapper / "inner"
 
 
 class TestResolveSyncTreeAfterMerge:
@@ -781,3 +825,265 @@ class TestFindCrewYamlFilesDeclaringPostMergeSteps:
             str(tmp_path / ".crew" / "amos.yaml"),
             str(tmp_path / ".crew" / "naomi.yaml"),
         ]
+
+
+def _git(args: list[str], *, cwd) -> subprocess.CompletedProcess:
+    result = subprocess.run(["git", *args], capture_output=True, text=True, cwd=str(cwd))
+    assert result.returncode == 0, f"git {args!r} failed: {result.stderr}"
+    return result
+
+
+def _init_git_repo(tmp_path) -> None:
+    _git(["init", "-b", "main"], cwd=tmp_path)
+    _git(["config", "user.email", "test@example.com"], cwd=tmp_path)
+    _git(["config", "user.name", "test"], cwd=tmp_path)
+
+
+def _commit_config(tmp_path, content: dict, *, message: str = "config") -> str:
+    config_dir = tmp_path / ".clagentic" / "loadout"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(yaml.safe_dump(content), encoding="utf-8")
+    _git(["add", "."], cwd=tmp_path)
+    _git(["commit", "-m", message], cwd=tmp_path)
+    return _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+
+
+class TestLoadPostMergeStepsFromGitSha:
+    """lr-cd3644: load_post_merge_steps_from_git_sha reads post_merge_steps
+    from the git OBJECT DATABASE at a specific commit -- via `git show
+    <sha>:<path>` -- never from the working tree, so it stays correct
+    regardless of what `git_tree_path`'s working tree currently has checked
+    out (including a tree left checked out on a DIFFERENT, earlier commit
+    than *merged_sha* itself). Returns None (not []) when the config path
+    is absent from *merged_sha*'s tree entirely -- see the function's own
+    docstring for why that distinction matters (a repo that never commits
+    this file at all must never be compared against a fabricated [])."""
+
+    def test_reads_steps_from_a_commit_even_when_working_tree_is_on_an_earlier_one(
+        self, tmp_path
+    ):
+        _init_git_repo(tmp_path)
+        _commit_config(tmp_path, {"merge": {"post_merge_steps": []}}, message="first")
+        # Advance the branch to a SECOND commit declaring real steps...
+        second_sha = _commit_config(
+            tmp_path,
+            {"merge": {"post_merge_steps": [{"cmd": "echo hi"}]}},
+            message="second",
+        )
+        # ...then move the WORKING TREE back to the first commit, so a
+        # filesystem-based read (load_post_merge_steps) would see zero
+        # steps, while this function -- reading directly from second_sha's
+        # own tree object -- must still see the one step declared there.
+        _git(["checkout", "HEAD~1"], cwd=tmp_path)
+        assert load_post_merge_steps(tmp_path) == []
+        result = load_post_merge_steps_from_git_sha(tmp_path, second_sha)
+        assert result == [{"cmd": "echo hi"}]
+
+    def test_no_config_at_that_commit_returns_none_not_empty_list(self, tmp_path):
+        # THE load-bearing distinction: absent-from-git-history is None,
+        # never a fabricated [] -- a repo that never commits this file
+        # (e.g. a gitignored config, this package's own dogfooding
+        # convention) must never look like it "declares zero steps" when
+        # compared by a caller.
+        _init_git_repo(tmp_path)
+        (tmp_path / "README.md").write_text("seed\n", encoding="utf-8")
+        _git(["add", "."], cwd=tmp_path)
+        _git(["commit", "-m", "seed, no config at all"], cwd=tmp_path)
+        sha = _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+        assert load_post_merge_steps_from_git_sha(tmp_path, sha) is None
+
+    def test_merge_section_present_but_no_steps_key_returns_empty_list(self, tmp_path):
+        # Contrast with the above: the config file IS tracked here, its
+        # merge: section just never mentions the key -- this is a REAL,
+        # comparable "declares zero steps" resolution, so it returns [],
+        # not None.
+        _init_git_repo(tmp_path)
+        sha = _commit_config(tmp_path, {"merge": {"some_other_key": True}})
+        assert load_post_merge_steps_from_git_sha(tmp_path, sha) == []
+
+    def test_malformed_steps_at_that_commit_raises(self, tmp_path):
+        _init_git_repo(tmp_path)
+        sha = _commit_config(
+            tmp_path, {"merge": {"post_merge_steps": [{"on_failure": "warn"}]}}
+        )
+        with pytest.raises(PostMergeConfigError):
+            load_post_merge_steps_from_git_sha(tmp_path, sha)
+
+    def test_merge_section_not_a_mapping_raises(self, tmp_path):
+        _init_git_repo(tmp_path)
+        sha = _commit_config(tmp_path, {"merge": ["not", "a", "mapping"]})
+        with pytest.raises(PostMergeConfigError):
+            load_post_merge_steps_from_git_sha(tmp_path, sha)
+
+    def test_legacy_path_fallback_is_read_when_new_path_absent(self, tmp_path):
+        _init_git_repo(tmp_path)
+        legacy_dir = tmp_path / ".loadout"
+        legacy_dir.mkdir()
+        (legacy_dir / "config.yaml").write_text(
+            yaml.safe_dump({"merge": {"post_merge_steps": [{"cmd": "legacy"}]}}),
+            encoding="utf-8",
+        )
+        _git(["add", "."], cwd=tmp_path)
+        _git(["commit", "-m", "legacy config only"], cwd=tmp_path)
+        sha = _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+        assert load_post_merge_steps_from_git_sha(tmp_path, sha) == [{"cmd": "legacy"}]
+
+    def test_malformed_merged_sha_fails_loud_not_silently_absent(self, tmp_path):
+        """BOBBIE finding, lr-cd3644 fold-in #1 (structurally hardened by
+        fold-in #3 on PR #30): a *merged_sha* that cannot even resolve to a
+        commit object is a GENUINE failure, distinct from the path-absent-
+        from-a-resolvable-commit's-tree shape the function's own `None`
+        return is reserved for. This is now verified via `git cat-file -e
+        <merged_sha>^{commit}`, checked ONCE up front before any path lookup
+        is even attempted -- never by matching `git show`'s own (localized,
+        ambiguous-with-path-absence) stderr text. A SHA that fails this
+        existence+type check can never be reinterpreted as "path absent":
+        no path has been looked up yet at the point this check runs. Must
+        raise, never return None."""
+        _init_git_repo(tmp_path)
+        _commit_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        with pytest.raises(PostMergeConfigError, match="cat-file"):
+            load_post_merge_steps_from_git_sha(tmp_path, "not-a-valid-sha-at-all")
+
+    def test_unresolvable_but_sha_shaped_merged_sha_fails_loud(self, tmp_path):
+        """A syntactically valid 40-hex SHA that does not resolve to any
+        object in this tree's object database at all must ALSO fail loud
+        via the same git cat-file -e ...^{commit} existence check -- not
+        merely a malformed/non-hex string (covered above). Confirms the
+        up-front commit-existence gate catches an unknown-but-well-formed
+        SHA the same way it catches an obviously-malformed one."""
+        _init_git_repo(tmp_path)
+        _commit_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        unresolvable_sha = "a" * 40
+        with pytest.raises(PostMergeConfigError, match="cat-file"):
+            load_post_merge_steps_from_git_sha(tmp_path, unresolvable_sha)
+
+    def test_non_english_locale_still_fails_loud_on_invalid_sha(
+        self, tmp_path, monkeypatch
+    ):
+        """lr-cd3644 fold-in #3 (PEACHES re-review, PR #30): the prior
+        stderr-text-matching classifier was NOT locale-independent -- git
+        localizes its own diagnostic text under LC_ALL/LANG, so a non-English
+        spawn environment could silently misclassify a genuine invalid-SHA
+        failure as a merely-absent path. `git cat-file -e`'s exit code is
+        locale-independent by construction (no stderr text is parsed at all
+        for the classification decision) -- prove this holds under a non-
+        English LC_ALL."""
+        _init_git_repo(tmp_path)
+        _commit_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        monkeypatch.setenv("LC_ALL", "fr_FR.UTF-8")
+        monkeypatch.setenv("LANG", "fr_FR.UTF-8")
+        with pytest.raises(PostMergeConfigError, match="cat-file"):
+            load_post_merge_steps_from_git_sha(tmp_path, "not-a-valid-sha-at-all")
+
+    def test_genuinely_absent_path_at_a_valid_commit_still_returns_none(
+        self, tmp_path
+    ):
+        """Negative control for the fix above: a VALID commit that genuinely
+        never tracked the config path at all must still return None (the
+        untracked-config, gitignored-by-design shape -- see
+        test_no_config_at_that_commit_returns_none_not_empty_list), never
+        raise. Proves the fix narrows to invalid-SHA/genuine-failure cases
+        specifically, without regressing the pre-existing absent-path
+        contract."""
+        _init_git_repo(tmp_path)
+        (tmp_path / "README.md").write_text("seed\n", encoding="utf-8")
+        _git(["add", "."], cwd=tmp_path)
+        _git(["commit", "-m", "seed, no config at all"], cwd=tmp_path)
+        sha = _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+        assert load_post_merge_steps_from_git_sha(tmp_path, sha) is None
+
+
+class TestResolveGitTreeRelativeConfigPaths:
+    """lr-cd3644 fold-in #3: re-expresses the SAME config root
+    `load_post_merge_steps` resolves relative to *git_tree_path*, so
+    `load_post_merge_steps_from_git_sha`'s `git show` reads the identical
+    file the pre-sync read used -- see that function's own updated
+    docstring for the wrapper-layout bug this closes."""
+
+    def test_flat_layout_config_root_equals_git_tree(self, tmp_path):
+        # The common case: no git_working_tree knob declared, config root
+        # and git tree are the SAME directory -- both candidates resolve to
+        # their own unchanged, bare relative-path defaults.
+        _write_config(tmp_path, {"merge": {"post_merge_steps": [{"cmd": "true"}]}})
+        config_rel, legacy_rel = resolve_git_tree_relative_config_paths(
+            tmp_path, tmp_path
+        )
+        assert config_rel == DEFAULT_CONFIG_RELATIVE_PATH
+        assert legacy_rel == ".loadout/config.yaml"
+
+    def test_wrapper_layout_config_root_above_git_tree_yields_none(self, tmp_path):
+        # THE lr-cd3644 fold-in #3 REGRESSION PROOF: config root (tmp_path)
+        # carries the committed config, but the git tree is a SUBDIRECTORY
+        # (tmp_path / "repo") -- the config file sits OUTSIDE that git tree
+        # entirely and can never be tracked by it. Both candidates must
+        # resolve to None (never a path load_post_merge_steps_from_git_sha
+        # would incorrectly treat as "path absent from a comparable tree").
+        _write_config(tmp_path, {"merge": {"git_working_tree": "repo"}})
+        git_tree = tmp_path / "repo"
+        git_tree.mkdir()
+        config_rel, legacy_rel = resolve_git_tree_relative_config_paths(
+            tmp_path, git_tree
+        )
+        assert config_rel is None
+        assert legacy_rel is None
+
+    def test_git_tree_nested_deeper_than_config_root_still_resolves(self, tmp_path):
+        # A declared git_working_tree of "a/b" (nested, not just one level)
+        # -- the config file still sits outside that deeper git tree, same
+        # None-None contract.
+        _write_config(tmp_path, {"merge": {"git_working_tree": "a/b"}})
+        git_tree = tmp_path / "a" / "b"
+        git_tree.mkdir(parents=True)
+        config_rel, legacy_rel = resolve_git_tree_relative_config_paths(
+            tmp_path, git_tree
+        )
+        assert config_rel is None
+        assert legacy_rel is None
+
+    def test_legacy_config_root_also_resolves_relative_to_git_tree(self, tmp_path):
+        # Config root carries ONLY the legacy path -- resolve_repo_config_root
+        # still finds it as the config-bearing root; the flat-layout case
+        # (git tree == config root) still resolves both candidates relative
+        # to that SAME root.
+        legacy_dir = tmp_path / ".loadout"
+        legacy_dir.mkdir()
+        (legacy_dir / "config.yaml").write_text(
+            yaml.safe_dump({"merge": {"post_merge_steps": [{"cmd": "true"}]}}),
+            encoding="utf-8",
+        )
+        config_rel, legacy_rel = resolve_git_tree_relative_config_paths(
+            tmp_path, tmp_path
+        )
+        assert config_rel == DEFAULT_CONFIG_RELATIVE_PATH
+        assert legacy_rel == ".loadout/config.yaml"
+
+    def test_wired_end_to_end_through_load_post_merge_steps_from_git_sha(
+        self, tmp_path
+    ):
+        # End-to-end proof (mirrors the wrapper-layout regression exactly):
+        # the config root's config.yaml is committed inside its OWN git
+        # history (not the inner git tree's) -- resolve_git_tree_relative_
+        # config_paths correctly yields (None, None) for the inner tree, and
+        # load_post_merge_steps_from_git_sha correctly treats that as "not
+        # comparable," returning None rather than raising or fabricating a
+        # path that would try to git-show outside the inner repository.
+        _write_config(tmp_path, {"merge": {"git_working_tree": "repo"}})
+        inner_tree = tmp_path / "repo"
+        inner_tree.mkdir()
+        _init_git_repo(inner_tree)
+        (inner_tree / "README.md").write_text("seed\n", encoding="utf-8")
+        _git(["add", "."], cwd=inner_tree)
+        _git(["commit", "-m", "seed"], cwd=inner_tree)
+        sha = _git(["rev-parse", "HEAD"], cwd=inner_tree).stdout.strip()
+
+        config_rel, legacy_rel = resolve_git_tree_relative_config_paths(
+            tmp_path, inner_tree
+        )
+        result = load_post_merge_steps_from_git_sha(
+            inner_tree,
+            sha,
+            config_relative_path=config_rel,
+            legacy_relative_path=legacy_rel,
+        )
+        assert result is None

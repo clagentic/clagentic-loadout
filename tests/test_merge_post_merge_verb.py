@@ -390,3 +390,155 @@ class TestPostMergeRerunAgainstAlreadyMergedPr:
         )
         assert code == post_merge_verb.EXIT_OK
         assert marker.read_text() == "ok"
+
+
+class TestLandsOnBaseBranchAfterRerun:
+    """lr-cd3644: before this fix, this verb's step 5
+    (advance_repo_to_merged_sha) ALWAYS performed a real, detached checkout,
+    but nothing ever moved --repo-path off that detached HEAD afterward --
+    every standalone `loadout-post-merge` invocation left the tree
+    PERMANENTLY DETACHED, regardless of whether any post_merge_steps ran.
+    This is the direct regression proof: after a successful re-run (with
+    steps configured, AND with none configured), --repo-path must end up ON
+    base_branch, not detached, pointed at the merged SHA."""
+
+    def _current_branch(self, repo_dir):
+        return subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=str(repo_dir),
+        )
+
+    def _assert_landed(self, repo_dir, expected_sha: str) -> None:
+        """lr-cd3644 fold-in #4 (PEACHES finding on PR #30's re-review,
+        comment 5875590535): a landing assertion that only checks
+        `git symbolic-ref --short HEAD` proves the tree is ON a branch, but
+        NOT that the branch actually points at the merged commit -- a stale
+        or wrongly-resolved `land_on_base_branch` call could repoint
+        base_branch at the WRONG sha and this style of assertion would never
+        catch it. Every landing test in this class now asserts THREE
+        independent facts: (1) the tree is on base_branch, not detached;
+        (2) the working HEAD (`git rev-parse HEAD`) resolves to the exact
+        merged sha; (3) the branch REF ITSELF (`git rev-parse
+        refs/heads/<base>`), not merely the symbolic HEAD pointer, also
+        resolves to that same sha -- `git checkout -B` moves both HEAD and
+        the ref together, but asserting the ref directly is what actually
+        proves `refs/heads/<base>` -- not merely a detached-but-crossed-
+        checkout with a matching HEAD -- is what got repointed.
+        """
+        branch = self._current_branch(repo_dir)
+        assert branch.returncode == 0
+        assert branch.stdout.strip() == _BASE_BRANCH
+        rev_parse_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(repo_dir)
+        )
+        assert rev_parse_head.stdout.strip() == expected_sha
+        rev_parse_ref = subprocess.run(
+            ["git", "rev-parse", f"refs/heads/{_BASE_BRANCH}"],
+            capture_output=True, text=True, cwd=str(repo_dir),
+        )
+        assert rev_parse_ref.returncode == 0
+        assert rev_parse_ref.stdout.strip() == expected_sha
+
+    def test_lands_on_base_branch_when_steps_ran(self, tmp_path):
+        merged_sha = _init_repo_with_origin(tmp_path)
+        marker = tmp_path / "redeployed.txt"
+        _write_merge_config(
+            tmp_path,
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
+        )
+        argv = _base_args(str(tmp_path))
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_OK
+        self._assert_landed(tmp_path, merged_sha)
+
+    def test_lands_on_base_branch_even_with_no_configured_steps(self, tmp_path):
+        # No post_merge_steps configured at all -- step 5's checkout still
+        # happens unconditionally on this verb (unlike merge.verb's own
+        # fetch-only branch), so the land step must still run afterward.
+        merged_sha = _init_repo_with_origin(tmp_path)
+        argv = _base_args(str(tmp_path))
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_OK
+        self._assert_landed(tmp_path, merged_sha)
+
+    def test_fail_step_still_lands_tree_on_base_branch(self, tmp_path):
+        """lr-cd3644 fold-in #3 (PR #30 re-review finding C): step 5's
+        checkout ALWAYS happens on this verb (unlike merge.verb's own
+        fetch-only branch), so a step-6 failure (on_failure: fail) must
+        still return EXIT_POST_MERGE_FAILED (the ORIGINAL failure) while
+        ALSO landing the already-checked-out tree on base_branch -- never
+        leaving --repo-path permanently detached just because the step
+        that ran against it failed."""
+        merged_sha = _init_repo_with_origin(tmp_path)
+        _write_merge_config(
+            tmp_path,
+            [{"cmd": [_PY, "-c", "import sys; sys.exit(1)"], "on_failure": "fail"}],
+        )
+        argv = _base_args(str(tmp_path))
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_POST_MERGE_FAILED
+        self._assert_landed(tmp_path, merged_sha)
+
+    def test_malformed_config_still_lands_tree_on_base_branch(self, tmp_path):
+        """lr-cd3644 fold-in #4 (PEACHES finding on PR #30's re-review,
+        comment 5875590535): THE PRECISE REGRESSION PROOF for the defect
+        this fold-in closes. Before this fix, `load_post_merge_steps` ran in
+        its OWN try/except BEFORE the try/except/else that only wrapped the
+        step-RUN path -- a malformed `.clagentic/loadout/config.yaml` (a
+        `PostMergeConfigError` at LOAD time, never reaching
+        `run_post_merge_steps` at all) therefore raised straight through
+        `_fail()` and unwound PAST the land call entirely, leaving
+        --repo-path PERMANENTLY DETACHED at the merged sha even though step
+        5 had already performed a real, verified checkout. This must now
+        return EXIT_POST_MERGE_FAILED (the ORIGINAL config-load failure,
+        unchanged) while STILL landing the tree on base_branch -- the exact
+        same contract `test_fail_step_still_lands_tree_on_base_branch`
+        already proves for a step-RUN failure, but for a config-LOAD
+        failure specifically."""
+        merged_sha = _init_repo_with_origin(tmp_path)
+        # Malformed YAML -- fails at load_post_merge_steps time, never
+        # reaches run_post_merge_steps.
+        config_dir = tmp_path / ".clagentic" / "loadout"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / "config.yaml").write_text("merge: [unclosed", encoding="utf-8")
+        argv = _base_args(str(tmp_path))
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_POST_MERGE_FAILED
+        self._assert_landed(tmp_path, merged_sha)
+
+    def test_land_failure_surfaces_exit_post_merge_failed(self, tmp_path, monkeypatch):
+        _init_repo_with_origin(tmp_path)
+        argv = _base_args(str(tmp_path))
+
+        def _boom(*a, **kw):
+            from clagentic_loadout.merge.tree_sync import TreeSyncError
+            raise TreeSyncError("simulated land failure")
+
+        monkeypatch.setattr(post_merge_verb, "land_on_base_branch", _boom)
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_POST_MERGE_FAILED
