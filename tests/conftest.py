@@ -36,33 +36,39 @@ always wins). `bind_caller`'s real equality check therefore runs, and
 passes, on every one of those pre-existing invocations -- the happy path is
 genuinely covered, not stubbed out.
 
-**OMITTED --caller/--role, UPDATED for lr-620837** (operator ruling: an
-omitted --caller is now ALSO bound to the attested identity -- see
-`transport.caller_binding.resolve_for_binding`'s own docstring for the full
-behavior change this fixture now accommodates): `caller_value is None`
-(an omitted `--caller`/`--role` in the test's own argv) used to leave
-`identity_provider` unset entirely, letting the wrapped `main()` fall
-through to the REAL, unwrapped `resolve_identity` chain -- correct and
-harmless under the OLD contract, where an omitted caller was never checked
-against ANY identity at all. Under the NEW contract, resolution always runs
-and its result becomes the EFFECTIVE caller (never a free pass) -- so
-leaving `identity_provider` unset now routes an omitted-caller test through
-the real, isolated (see `_isolate_real_attestation_chain` below)
+**OMITTED --caller/--role, UPDATED for lr-620837** (fold-in #4, F6
+HOLDEN-adjudicated correction; see
+`transport.caller_binding.resolve_for_binding`'s own docstring, "OMITTED
+--caller/--role IS POLICY-GATED", for the full current behavior this
+fixture accommodates): `caller_value is None` (an omitted `--caller`/
+`--role` in the test's own argv) used to leave `identity_provider` unset
+entirely, letting the wrapped `main()` fall through to the REAL, unwrapped
+`resolve_identity` chain -- correct and harmless under the ORIGINAL
+contract, where an omitted caller was never checked against ANY identity
+at all. Leaving it unset would route an omitted-caller test through the
+real, isolated (see `_isolate_real_attestation_chain` below)
 `SOURCE_BUILTIN` OS-user identity, silently changing every pre-existing
 omitted-caller test's effective caller from `DEFAULT_ROLE` to whatever OS
 user runs the suite -- exactly the kind of environment-dependent suite
 result CLAUDE.md hard rule 6 forbids, and a real behavior drift for tests
 whose actual intent (verify-comment, body-env, verdict-block composition,
-etc.) has nothing to do with attestation. `caller_value is None` now
+etc.) has nothing to do with attestation. `caller_value is None` instead
 injects `identity_provider=lambda: Identity(DEFAULT_ROLE, SOURCE_CONFIGURED)`
-instead of leaving it unset -- preserving every pre-existing omitted-caller
-test's `DEFAULT_ROLE`-resolves assumption byte-for-byte, the same "this
-test's identity always matches its own effective caller" property the
-explicit-caller branch above already provides. A test that wants the
-NEW omitted-caller-refuses-when-unattested behavior injects its own
-`identity_provider=` (a `BoundAttestationError`-raising callable) exactly
-like a mismatch test already does -- this fixture never overrides an
-explicit keyword argument.
+-- preserving every pre-existing omitted-caller test's `DEFAULT_ROLE`-
+resolves assumption byte-for-byte, the same "this test's identity always
+matches its own effective caller" property the explicit-caller branch
+above already provides. This happens to be exactly what production
+`resolve_for_binding` itself now computes on the omitted path under the
+DEFAULT `builtin-fallback` policy (a short-circuit that never even calls
+`identity_provider`) -- so this fixture's behavior is correct under both
+policies without needing to know which one is in effect. A test that wants
+the `required`-policy omitted-caller-refuses-when-unattested behavior
+injects its own `identity_provider=` (a `BoundAttestationError`-raising
+callable) exactly like a mismatch test already does, and separately
+injects a `bound_identity_policy_fn=` returning `"required"` if it is
+calling `resolve_for_binding` directly rather than through a wrapped
+verb's `main()` -- this fixture never overrides an explicit keyword
+argument.
 
 **Opt-out marker, for a test that wants a wrapped verb's UNWRAPPED default
 behavior** (i.e. the real production `transport.attestation.
@@ -166,14 +172,22 @@ def _wrap_main_with_identity_autofill(module, *, flag: str):
     docstring for the full rationale. Shared by every verb this fixture
     wraps, rather than one bespoke closure per verb.
 
-    UPDATED for lr-620837 (operator ruling; see module docstring "OMITTED
-    --caller/--role, UPDATED for lr-620837"): an omitted --caller/--role
-    (``caller_value is None``) now injects an identity_provider resolving
-    to ``DEFAULT_ROLE`` too, rather than leaving it unset and falling
-    through to the real, unwrapped attestation chain -- the real chain's
-    result is now the EFFECTIVE caller under the new contract, so leaving
-    it unset would silently change every pre-existing omitted-caller test's
-    effective caller to whatever OS user runs the suite."""
+    UPDATED for lr-620837 (see module docstring "OMITTED --caller/--role,
+    UPDATED for lr-620837"): an omitted --caller/--role (``caller_value is
+    None``) injects an identity_provider resolving to ``DEFAULT_ROLE`` too,
+    rather than leaving it unset and falling through to the real, unwrapped
+    attestation chain -- this keeps every pre-existing omitted-caller
+    test's effective caller pinned to ``DEFAULT_ROLE`` regardless of which
+    OS user runs the suite. Harmless under BOTH `bound_identity` policies
+    fold-in #4 (F6) restored: under `builtin-fallback` (the default),
+    production `resolve_for_binding` never even calls this injected
+    provider on the omitted path (it short-circuits to
+    `Identity(DEFAULT_ROLE, SOURCE_CONFIGURED)` directly) -- so this
+    fixture's injected value and the production short-circuit's value
+    happen to be identical, which is why no test needed updating for F6.
+    Under `required`, the injected provider IS called (mirroring
+    production calling `resolve_identity_fn`), and resolves to the same
+    `DEFAULT_ROLE` identity either way."""
     real_main = module.main
 
     def _wrapped_main(argv=None, **kwargs):

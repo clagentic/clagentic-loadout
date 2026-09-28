@@ -19,13 +19,15 @@ wall-clock dependence:
   1. invoker != caller -- REJECTED fail-closed, before any token resolution
      (the injected TokenProvider is never called).
   2. invoker == caller -- proceeds normally (reaches the token/HTTP layer).
-  3. OMITTED --caller IS NOW ALSO BOUND to the attested identity (BEHAVIOR
-     CHANGE, lr-620837 operator ruling, PEACHES finding 5876767198): the
-     effective caller becomes the resolved identity's own subject, and a
-     process with no attested identity at all is refused exactly like an
-     explicit mismatch always was -- see TestOmittedCallerBoundToIdentity
-     below. This SUPERSEDES the pre-fix "omitted --caller is never checked"
-     contract this file used to assert.
+  3. OMITTED --caller is POLICY-GATED (lr-620837 fold-in #4, F6): under
+     the default `attestation.bound_identity: builtin-fallback` policy, an
+     omitted --caller behaves exactly as originally released -- DEFAULT_ROLE,
+     no attestation attempted, no refusal possible (see
+     TestOmittedCallerUnderDefaultBuiltinFallbackPolicy below). Under a
+     deployment-opted-in `required` policy, the effective caller becomes
+     the resolved identity's own subject, and a process with no attested
+     identity at all is refused exactly like an explicit mismatch always
+     was (see TestOmittedCallerUnderRequiredPolicy below).
   4. a mismatched --caller is denied even where a NAMED-AGENT ALLOWLIST
      (a permissive TokenProvider that would happily mint for the
      mismatched role) would otherwise admit it -- proving this check runs
@@ -41,7 +43,7 @@ from __future__ import annotations
 
 import pytest
 
-from clagentic_loadout.transport import git_host_api
+from clagentic_loadout.transport import attestation, git_host_api
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.attestation import Identity
 
@@ -54,9 +56,17 @@ def _isolate_user_config_root(tmp_path, monkeypatch):
     injects identity_provider directly), but keeping this pinned is a
     conformance backstop against a future test in this file that forgets to
     inject one and would otherwise silently fall through to a real
-    ~/.config/clagentic/loadout/config.yaml on this host."""
+    ~/.config/clagentic/loadout/config.yaml on this host. Patches BOTH
+    `provider_config`'s copy of the name AND `attestation`'s own
+    independently-bound copy (lr-620837 fold-in #4: an omitted --caller now
+    reads `attestation.bound_identity` policy via `resolve_bound_identity_
+    policy`, which resolves against `attestation.DEFAULT_USER_CONFIG_ROOT`,
+    not `provider_config`'s -- see tests/conftest.py's own
+    `_isolate_real_attestation_chain` docstring for the same two-copies
+    caveat this mirrors)."""
     isolated_root = tmp_path / "isolated-user-config-root"
     monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
+    monkeypatch.setattr(attestation, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
 
 
 class _FakeResponse:
@@ -210,19 +220,69 @@ class TestExplicitCallerMatchingAttestedIdentityProceeds:
 # ---------------------------------------------------------------------------
 
 
-class TestOmittedCallerBoundToIdentity:
-    """SUPERSEDES the pre-fix "omitted --caller is never checked" contract:
-    an omitted --caller is no longer a free pass around attestation. The
-    effective caller becomes the resolved identity's own subject (proceeds,
-    minting a token for THAT subject, never DEFAULT_ROLE by itself), and a
-    process with no attested identity at all REFUSES on the omitted path
-    too -- exactly the fail-closed posture an explicit mismatched --caller
-    always had."""
+class TestOmittedCallerUnderDefaultBuiltinFallbackPolicy:
+    """lr-620837 fold-in #4 (F6, correcting fold-in #2's own first
+    revision): under the DEFAULT `attestation.bound_identity:
+    builtin-fallback` policy (no config written at all, matching every
+    test in this class -- see `_isolate_user_config_root` above), an
+    omitted --caller behaves EXACTLY as this package originally released
+    it, BEFORE lr-620837 existed at all: the effective caller is
+    DEFAULT_ROLE, no identity resolution is attempted, and no refusal is
+    possible. This supersedes fold-in #2's OWN first-revision tests (which
+    asserted resolution ran unconditionally on the omitted path regardless
+    of policy) -- those asserted exactly the regression this fold-in
+    fixes, not a behavior worth preserving."""
 
-    def test_omitted_caller_proceeds_as_the_resolved_identity_subject(self):
+    def test_omitted_caller_proceeds_as_default_role_identity_provider_never_consulted(self):
+        """No --caller at all, under the default policy: the injected
+        identity_provider is NEVER called (resolve_for_binding short-
+        circuits before it), and the token mint proceeds for DEFAULT_ROLE
+        -- never the (unconsulted) injected identity's subject."""
+        from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
+
+        calls = {"count": 0}
+
+        def unreachable_identity_provider():
+            calls["count"] += 1
+            return Identity(subject="synthetic-attested-subject", source="configured")
+
+        tokens = _RecordingTokenProvider()
+        rc = git_host_api.main(
+            ["/api/v1/repos/some-owner/some-repo/pulls/1.diff"],
+            token_provider=tokens,
+            opener=_forgejo_get_opener(),
+            identity_provider=unreachable_identity_provider,
+        )
+        assert rc == git_host_api.EXIT_OK
+        assert tokens.calls == [DEFAULT_ROLE]
+        assert calls["count"] == 0
+
+
+class TestOmittedCallerUnderRequiredPolicy:
+    """The `required`-policy half of the SAME lr-620837 fold-in #4 (F6)
+    contract: a deployment that has explicitly opted into
+    `attestation.bound_identity: required` (written to the isolated user
+    config root here) gets fold-in #2's original fail-closed omitted-
+    caller behavior -- the effective caller becomes the resolved
+    identity's own subject, and a process with no attested identity at all
+    REFUSES on the omitted path too, exactly the fail-closed posture an
+    explicit mismatched --caller always had."""
+
+    @staticmethod
+    def _write_required_policy_config(tmp_path, monkeypatch) -> None:
+        isolated_root = tmp_path / "isolated-user-config-root"
+        isolated_root.mkdir(exist_ok=True)
+        (isolated_root / "config.yaml").write_text(
+            "attestation:\n  bound_identity: required\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
+        monkeypatch.setattr(attestation, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
+
+    def test_omitted_caller_proceeds_as_the_resolved_identity_subject(self, tmp_path, monkeypatch):
         """No --caller at all resolves identity via the injected provider
         (a synthetic attested identity, never a no-resolve path) and mints
         a token for THAT identity's own subject -- never DEFAULT_ROLE."""
+        self._write_required_policy_config(tmp_path, monkeypatch)
         tokens = _RecordingTokenProvider()
         rc = git_host_api.main(
             ["/api/v1/repos/some-owner/some-repo/pulls/1.diff"],
@@ -233,14 +293,14 @@ class TestOmittedCallerBoundToIdentity:
         assert rc == git_host_api.EXIT_OK
         assert tokens.calls == ["synthetic-attested-subject"]
 
-    def test_omitted_caller_identity_provider_is_always_consulted(self):
-        """Updated contract (operator ruling, lr-620837 comment #5,
-        superseding the PRIOR fix's "resolution is skipped on the omitted
-        path" behavior this test used to assert): resolution now runs
-        UNCONDITIONALLY, omitted or explicit -- there is no longer a
-        skip-resolution branch at all. The identity_provider injection
-        point (a synthetic attested identity here, never real env/config/
-        file I/O) is always called exactly once."""
+    def test_omitted_caller_identity_provider_is_consulted_under_required(
+        self, tmp_path, monkeypatch
+    ):
+        """Under `required`, resolution runs on the omitted path exactly
+        like the explicit path -- the identity_provider injection point (a
+        synthetic attested identity here, never real env/config/file I/O)
+        is called exactly once."""
+        self._write_required_policy_config(tmp_path, monkeypatch)
         calls = {"count": 0}
 
         def counting_identity_provider():
@@ -256,14 +316,16 @@ class TestOmittedCallerBoundToIdentity:
         assert rc == git_host_api.EXIT_OK
         assert calls["count"] == 1
 
-    def test_omitted_caller_with_no_attested_identity_refuses(self):
+    def test_omitted_caller_with_no_attested_identity_refuses(self, tmp_path, monkeypatch):
         """No sidecar, no configured provider (a synthetic
         BoundAttestationError-raising identity_provider standing in for
         `resolve_bound_identity`'s own "no attested identity" refusal) --
-        the omitted-caller path now REFUSES, never silently proceeding as
-        DEFAULT_ROLE with no attestation behind it. This is the exact
-        vanilla-root-shell-with-no-sidecar acceptance case from the
-        operator ruling (lr-620837 comment #5)."""
+        the omitted-caller path REFUSES under `required`, never silently
+        proceeding as DEFAULT_ROLE with no attestation behind it. This is
+        the exact vanilla-root-shell-with-no-sidecar acceptance case from
+        the operator ruling (lr-620837 comment #5), scoped to the policy a
+        deployment opts into for it."""
+        self._write_required_policy_config(tmp_path, monkeypatch)
         from clagentic_loadout.transport.attestation import BoundAttestationError
 
         def refusing_identity_provider():

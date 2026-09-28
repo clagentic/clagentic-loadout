@@ -55,49 +55,78 @@ decision a TokenProvider/AuthorityProvider would make downstream -- it
 answers a different question ("is this process who it claims to be") than
 those seams do ("is this claimed role entitled to X").
 
-OMITTED --caller/--role IS NOW ALSO AN ATTESTED-IDENTITY REQUIREMENT
-(BEHAVIOR CHANGE, operator ruling on lr-620837 comment #5, a pre-merge
-review finding on this fix's own first revision): before this fix,
-`caller_explicit=False` short-circuited
+OMITTED --caller/--role IS POLICY-GATED (lr-620837 fold-in #4, F6,
+correcting fold-in #2's own first revision of this behavior):
+before lr-620837, `caller_explicit=False` short-circuited
 `resolve_for_binding` BEFORE identity resolution ever ran, returning an
 inert placeholder Identity (formerly `UNCLAIMED_SOURCE`) that `bind_caller`
-never inspected -- an omitted `--caller` therefore minted the
-DEFAULT_ROLE credential with NO attested identity behind it at all, on ANY
-process, attested or not (a "vanilla root shell with no sidecar" typing no
-flags at all sailed straight through). The ruling's acceptance is explicit
-that this is unacceptable: "a caller with no sidecar at all (vanilla root
-shell) -> REFUSED no attested identity" is not scoped to an explicit
---caller, and this binding being pre-existing/unenforced on the omitted
-path before this fix is not an exemption from the ruling.
+never inspected -- an omitted `--caller` therefore minted the DEFAULT_ROLE
+credential with NO attested identity behind it at all, on ANY process,
+attested or not (a "vanilla root shell with no sidecar" typing no flags at
+all sailed straight through). Fold-in #2's operator ruling (comment #5)
+correctly identified this as unacceptable UNDER THE STRICT POLICY -- but
+its first revision fixed it by making `resolve_for_binding` resolve
+identity UNCONDITIONALLY regardless of policy, which broke every existing
+unconfigured/`builtin-fallback` deployment's omitted-caller invocations the
+moment it shipped: `attestation.bound_identity: builtin-fallback` (this
+package's DEFAULT policy, existing before either fold-in) is specifically
+the policy that says "an install with no scoped sidecar adapters keeps
+working exactly as released" -- an omitted caller unconditionally requiring
+attestation contradicted that promise for the omitted-caller path even
+though the explicit-caller path, and the scoped/unscoped sidecar-lookup
+behavior, both correctly preserved it.
 
-THE FIX: `resolve_for_binding` now resolves identity UNCONDITIONALLY --
-omitted or explicit, the SAME `resolve_identity_fn()` call runs, and a
-resolution failure (`AttestationError`/`BoundAttestationError`) propagates
-to the caller exactly as it already did on the explicit path. There is no
-longer a skip-resolution branch and no placeholder Identity; every call
-site now derives its EFFECTIVE caller from the resolved identity itself on
-the omitted path (`identity.subject`, never a placeholder), then binds
-against it via `bind_caller(..., caller_explicit=True, ...)` -- omitted
---caller now behaves as an IMPLICIT claim of "I am acting as my own
-attested identity," bound exactly like an explicit one, rather than "no
-claim, no check." A verb whose caller-bound token/authority seam is then
-handed the resolved identity subject as its role -- never DEFAULT_ROLE by
-itself, and never a role this process did not attest to. See each call
-site's own comment for the "omitted -> identity.subject" derivation; this
-module only provides the always-resolving primitive, since every one of the
-seven call sites needs the same derivation and this is the shared home for
-that shape, matching this module's whole reason for existing (reuse-first).
+THE FIX (this revision): whether an omitted caller requires attestation is
+now the SAME `attestation.bound_identity` policy knob that already governs
+everything else about caller-bound resolution, not a separate unconditional
+rule:
+
+  - `builtin-fallback` (the default): an omitted `--caller`/`--role`
+    behaves EXACTLY as this package originally released it, before either
+    fold-in -- `resolve_identity_fn()` is never called on this path, and
+    the effective caller is `DEFAULT_ROLE`, no attestation required, no
+    refusal possible. `bind_caller` is still called (auditability,
+    consistency with the explicit path), but `caller == identity.subject`
+    is true by construction (`identity` IS
+    `Identity(DEFAULT_ROLE, SOURCE_CONFIGURED)`), so it never raises here.
+  - `required`: an omitted `--caller` remains an IMPLICIT claim of "I am
+    acting as my own attested identity" -- `resolve_identity_fn()` runs
+    exactly like the explicit path, and a process with no attested
+    identity at all is refused here exactly like an explicit mismatched
+    `--caller` always is. This is fold-in #2's original fix, now correctly
+    scoped to the policy a deployment opts into specifically to close the
+    unattested-host gap, rather than applied to every deployment
+    regardless of policy.
+
+Every call site derives its EFFECTIVE caller from the resolved identity's
+own `.subject` on the omitted path (`identity.subject` -- `DEFAULT_ROLE`
+under `builtin-fallback`, the attested subject under `required`), then
+binds against it via `bind_caller(..., caller_explicit=True, ...)`. See
+each call site's own comment for that derivation; this module only
+provides the policy-gated primitive, since every one of the seven call
+sites needs the same derivation and this is the shared home for that shape
+(reuse-first).
+
+THE PER-SPAWN-MISS DISCRIMINATOR REFUSAL STAYS UNCONDITIONAL UNDER BOTH
+POLICIES ON EVERY PATH THAT REACHES IT: `resolve_bound_identity`'s own
+per-spawn discriminator (a `scope: per-spawn` adapter's `session_id_env`
+set, but that adapter's own file misses) refuses regardless of
+`bound_identity` policy -- see that function's own docstring. This module's
+policy gate only decides WHETHER the omitted path calls
+`resolve_identity_fn()` at all; it never weakens what that function does
+once called (the explicit path, and the omitted path under `required`,
+both still hit the unconditional per-spawn refusal exactly as before).
 
 MIGRATION NOTE for an existing deployment: an omitted `--caller`/`--role`
-invocation that previously succeeded on a host with NO attestation source
-configured (no `attestation.identity_env`, no resolving sidecar) now FAILS
-CLOSED with the same `AttestationError`/`BoundAttestationError` an explicit
-mismatched caller always raised -- there is no longer an unattested
-default-role path. A deployment that still wants the OLD (attestation-free)
-behavior can inject the general `resolve_identity` chain (whose built-in
-OS-user fallback always resolves something) via `identity_provider=` at any
-call site -- that injection seam is unchanged, only the module-level
-DEFAULT resolver's omitted-caller treatment changed.
+invocation on a host with NO attestation source configured (no
+`attestation.identity_env`, no resolving sidecar) behaves EXACTLY as this
+package has always released it under the default `builtin-fallback`
+policy -- `DEFAULT_ROLE`, no refusal. A deployment that has opted into
+`attestation.bound_identity: required` (see `transport.attestation.
+resolve_bound_identity`'s own docstring, and `docs/provisioning.md`'s
+"Caller-bound resolution" section) gets the stricter fail-closed omitted-
+caller behavior this section originally described -- that is the intended
+trade-off of opting into `required`, not a universal default.
 
 This is INDEPENDENT of, and runs strictly BEFORE,
 `transport.credential_provider.resolve_token` and
@@ -138,7 +167,13 @@ from __future__ import annotations
 
 from typing import Callable
 
-from clagentic_loadout.transport.attestation import Identity
+from clagentic_loadout.transport.attestation import (
+    BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK,
+    Identity,
+    SOURCE_CONFIGURED,
+    resolve_bound_identity_policy,
+)
+from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
 
 
 class CallerBindingError(Exception):
@@ -150,14 +185,18 @@ class CallerBindingError(Exception):
     An identity may only ever use ITS OWN credential; a caller that presents
     a role other than its own attested identity is refused unconditionally,
     with no override. An OMITTED --caller/--role is bound to this SAME check
-    by every call site (see this module's own docstring, "OMITTED --caller/
-    --role IS NOW ALSO AN ATTESTED-IDENTITY REQUIREMENT"): a call site
-    derives its effective caller as `identity.subject` on the omitted path,
-    so `caller == identity.subject` there by construction and this never
-    raises on an omitted `--caller` alone -- but the resolution that
-    produced `identity` in the first place can still raise
+    by every call site (see this module's own docstring, "OMITTED
+    --caller/--role IS POLICY-GATED"): a call site derives its effective
+    caller as `identity.subject` on the omitted path, so
+    `caller == identity.subject` there by construction and this never
+    raises on an omitted `--caller` alone -- but under
+    `attestation.bound_identity: required`, the resolution that produced
+    `identity` in the first place can still raise
     `AttestationError`/`BoundAttestationError`, which is the actual refusal
-    an unattested omitted-caller invocation now hits.
+    an unattested omitted-caller invocation hits under that policy. Under
+    the default `builtin-fallback` policy, an omitted caller's `identity`
+    is always `Identity(DEFAULT_ROLE, SOURCE_CONFIGURED)` and no resolution
+    is attempted at all -- see `resolve_for_binding`'s own docstring.
 
     Carries `.caller` and `.identity` (the compared values) so a catching
     verb can render its own resolved-values error message and exit code
@@ -212,11 +251,58 @@ def resolve_for_binding(
     caller_explicit: bool,
     caller: str,
     resolve_identity_fn: Callable[[], Identity],
+    bound_identity_policy_fn: Callable[[], str] = resolve_bound_identity_policy,
 ) -> Identity:
-    """Resolve the Identity `bind_caller` needs -- UNCONDITIONALLY, on both
-    the explicit and the omitted `--caller`/`--role` path (operator ruling,
-    lr-620837 comment #5, closing a pre-merge review finding on this fix's
-    own first revision).
+    """Resolve the Identity `bind_caller` needs.
+
+    EXPLICIT `--caller`/`--role` (*caller_explicit* True): *resolve_identity_fn*
+    is ALWAYS called, and its result is returned directly; a resolution
+    failure (`AttestationError`/`BoundAttestationError`, the exception type
+    `transport.attestation.resolve_bound_identity` raises when no attested
+    source answers) propagates to the caller. Unchanged since lr-c75c9a.
+
+    OMITTED `--caller`/`--role` (*caller_explicit* False) IS POLICY-GATED
+    (lr-620837 fold-in #4, F6, correcting fold-in #2's first revision): the
+    effective `attestation.bound_identity` policy
+    -- read via *bound_identity_policy_fn* -- decides what an omitted
+    caller means, mirroring this package's ORIGINALLY-RELEASED semantics
+    under the permissive policy rather than unconditionally requiring
+    attestation on every deployment regardless of policy:
+
+      - `BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK` (the default): an omitted
+        caller behaves EXACTLY as this package originally released it --
+        *resolve_identity_fn* is NEVER called, and this returns
+        `Identity(DEFAULT_ROLE, SOURCE_CONFIGURED)` unconditionally. No
+        attestation is required, no resolution is attempted, and no
+        `AttestationError`/`BoundAttestationError` can ever propagate from
+        this path under this policy. A caller that types no `--caller`/
+        `--role` flag at all gets DEFAULT_ROLE, full stop -- the same
+        behavior every pre-lr-620837 release of this package always had.
+      - `BOUND_IDENTITY_POLICY_REQUIRED`: an omitted caller is an IMPLICIT
+        claim of "act as my own attested identity" -- *resolve_identity_fn*
+        is called (exactly like the explicit path), and its result is
+        returned directly. A process with no attested identity at all is
+        refused here exactly like an explicit mismatched `--caller` always
+        is. This is the behavior lr-620837 fold-in #2 introduced
+        UNCONDITIONALLY (a defect this fold-in corrects): it is now
+        scoped to `required` only, the policy a
+        deployment opts into specifically to close the "unattested host
+        silently acts as DEFAULT_ROLE" gap.
+
+    THE PER-SPAWN-MISS REFUSAL STAYS UNCONDITIONAL UNDER BOTH POLICIES,
+    unaffected by anything in this function: `resolve_bound_identity`'s own
+    discriminator refuses a per-spawn-declared invocation whose per-spawn
+    sidecar adapter misses regardless of `bound_identity` policy (see that
+    function's own docstring, "THE SUBAGENT-DISCRIMINATOR REFUSAL IS
+    UNCONDITIONAL"). That refusal fires INSIDE *resolve_identity_fn* itself
+    on the EXPLICIT path (always called) and on the omitted path ONLY under
+    `required` (the only omitted-path branch that calls
+    *resolve_identity_fn* at all) -- there is no omitted-path shape under
+    `builtin-fallback` that could ever reach the per-spawn discriminator,
+    because that policy never calls the resolver on the omitted path in the
+    first place; a per-spawn subagent that wants the discriminator's
+    protection while running unattested-by-default elsewhere in the
+    deployment must still pass an EXPLICIT `--caller`/`--role`.
 
     Shared by every one of the seven caller-bound verbs (`push`, `review`,
     `acquire`, `merge`, `merge --close`, `merge --post-merge`,
@@ -224,44 +310,39 @@ def resolve_for_binding(
     identical seven-way-duplicated inline block (reuse-first, CLAUDE.md
     code-craft rule 1/2).
 
-    BEHAVIOR CHANGE FROM THE PRIOR REVISION OF THIS FUNCTION (see this
-    module's own docstring for the full ruling): resolution used to be
-    SKIPPED entirely when *caller_explicit* was False, returning an inert
-    placeholder Identity `bind_caller` never inspected -- an omitted
-    `--caller` therefore minted a credential with NO attested identity
-    behind it at all. That placeholder is gone. *resolve_identity_fn* is
-    now ALWAYS called, and its result is returned directly; a resolution
-    failure (`AttestationError`/`BoundAttestationError`, the exception type
-    `transport.attestation.resolve_bound_identity` raises when no attested
-    source answers) propagates to the caller exactly as it already did on
-    the explicit path -- there is no longer a comparison-avoidance reason to
-    skip it, and skipping it was never a safety property, only an
-    optimization that stopped being safe once *resolve_identity_fn* stopped
-    being a chain that always resolves SOMETHING (see the historical
-    rationale kept below).
+    *bound_identity_policy_fn* is an injection point (mirrors
+    *resolve_identity_fn*'s own purpose) -- defaults to `transport.
+    attestation.resolve_bound_identity_policy` (reads the live
+    `attestation.bound_identity` config key), overridable by a caller (or a
+    test) that wants a specific policy without writing a config file. Only
+    ever called on the omitted-caller path -- the explicit path never reads
+    policy at all, matching the "explicit --caller always requires a match"
+    invariant that predates this policy knob entirely.
+
+    HISTORICAL RATIONALE (why this function's PRIOR revision resolved
+    identity unconditionally on the omitted path too, kept for context):
+    lr-620837 fold-in #2's first revision made *resolve_identity_fn* ALWAYS
+    called, reasoning that skipping resolution on the omitted path was
+    never a safety property, only an optimization that stopped being safe
+    once every call site's default *resolve_identity_fn* switched from
+    `resolve_identity` (whose built-in-OS-user fallback always resolves
+    SOMETHING in a real deployment) to `resolve_bound_identity` (which can
+    refuse outright). That reasoning held for the `required` policy but
+    over-applied it to `builtin-fallback` too, breaking every existing
+    unconfigured install's omitted-caller invocations the moment they
+    upgraded (F6) -- this revision narrows the unconditional-resolution
+    behavior back to the `required` policy only,
+    where an unattested omitted caller SHOULD fail closed, while restoring
+    the original DEFAULT_ROLE-no-refusal behavior under the default,
+    released `builtin-fallback` policy.
 
     *caller_explicit* is still accepted (every call site passes
     `args.caller is not None`) because it is a useful audit signal for a
     call site's own logging, and because `bind_caller` accepts the same
-    parameter for symmetry -- but this function no longer branches on it.
-
-    HISTORICAL RATIONALE (why this function skipped resolution before this
-    fix, kept for context): *resolve_identity_fn* used to be `transport.
-    attestation.resolve_identity`, whose built-in OS-user fallback
-    (`SOURCE_BUILTIN`) means it ALWAYS resolves something in a real
-    deployment -- so calling it unconditionally, even when `bind_caller`'s
-    old no-op-on-omitted-caller short-circuit was about to discard the
-    result unused, was wasteful but harmless. Once every caller-bound call
-    site switched *resolve_identity_fn* to `transport.attestation.
-    resolve_bound_identity` (which never falls through to that fallback),
-    an unconditional call turned every omitted-`--caller` invocation on a
-    host with no attestation source configured into a hard failure -- which
-    this function's prior revision treated as a bug to route around by
-    skipping resolution. The operator ruling settles that this is not a
-    bug: an omitted `--caller` on an unattested host SHOULD fail closed,
-    exactly like an explicit one does, rather than silently minting
-    DEFAULT_ROLE with no attestation behind it.
+    parameter for symmetry.
     """
+    if not caller_explicit and bound_identity_policy_fn() == BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK:
+        return Identity(DEFAULT_ROLE, SOURCE_CONFIGURED)
     return resolve_identity_fn()
 
 

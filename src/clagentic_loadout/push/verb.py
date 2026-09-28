@@ -1553,11 +1553,15 @@ def main(
     the injection point for the fail-closed --caller/attested-invoker
     binding (transport.caller_binding.bind_caller), mirroring the identical
     parameter transport.git_host_api.main already carries for the same
-    purpose. ALWAYS called now: transport.caller_binding.resolve_for_binding
-    no longer skips resolution on an omitted --caller -- an omitted
-    --caller derives its effective caller from the resolved identity's own
-    subject, so a process with no attested identity at all can refuse here
-    too (contingent on the effective `attestation.bound_identity` policy).
+    purpose. Called on the omitted-caller path CONTINGENT on the effective
+    `attestation.bound_identity` policy (lr-620837 fold-in #4): under
+    `required`, `transport.caller_binding.resolve_for_binding` calls this
+    resolver even on an omitted --caller, deriving the effective caller
+    from the resolved identity's own subject, so a process with no
+    attested identity at all can refuse here too; under `builtin-fallback`
+    (the default), an omitted --caller never reaches this resolver at all
+    and derives `DEFAULT_ROLE` directly -- see that function's own
+    docstring for the full policy-gated rule.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -1666,15 +1670,18 @@ def _run(
     #
     # --caller/attested-invoker fail-closed binding (lr-c75c9a, mirrors
     # transport.git_host_api's identical check; OMITTED-CALLER FIX,
-    # lr-620837 operator ruling): checked BEFORE any
-    # I/O -- before project_root/branch resolution, before any body read,
-    # before any token mint. Resolution is now UNCONDITIONAL
-    # (resolve_for_binding no longer skips it on an omitted --caller -- see
-    # that function's own docstring for the full ruling): an omitted
-    # --caller derives its EFFECTIVE caller from the resolved attested
-    # identity's own subject, never DEFAULT_ROLE by itself, so a process
-    # with no attested identity at all is refused here exactly like an
-    # explicit mismatched --caller always was.
+    # lr-620837 fold-in #4 -- see caller_binding.resolve_for_binding's own
+    # docstring, "OMITTED --caller/--role IS POLICY-GATED"): checked
+    # BEFORE any I/O -- before project_root/branch resolution, before any
+    # body read, before any token mint. Whether an omitted --caller
+    # requires attestation is now the effective attestation.bound_identity
+    # policy: under the default "builtin-fallback", an omitted --caller
+    # derives DEFAULT_ROLE with no resolution attempted and no refusal
+    # possible (this package's originally-released behavior); under
+    # "required", an omitted --caller derives the resolved attested
+    # identity's own subject, and a process with no attested identity at
+    # all is refused here exactly like an explicit mismatched --caller
+    # always was.
     resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
     try:
         attested_identity = _resolve_for_binding(

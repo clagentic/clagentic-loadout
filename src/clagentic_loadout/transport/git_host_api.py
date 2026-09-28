@@ -1842,12 +1842,16 @@ def main(
     the `attestation.bound_identity` policy governing whether an
     undiscriminated miss falls through to the built-in OS-user layer) --
     the injection point for the fail-closed --caller/attested-invoker
-    binding (lr-82c385, see `bind_caller`). ALWAYS called now:
-    `transport.caller_binding.resolve_for_binding` no longer skips
-    resolution on an omitted --caller -- an omitted --caller derives its
-    effective caller from the resolved identity's own subject, so a process
-    with no attested identity at all can refuse here too (contingent on the
-    effective `attestation.bound_identity` policy).
+    binding (lr-82c385, see `bind_caller`). Called on the omitted-caller
+    path CONTINGENT on the effective `attestation.bound_identity` policy
+    (lr-620837 fold-in #4): under `required`,
+    `transport.caller_binding.resolve_for_binding` calls this resolver
+    even on an omitted --caller, deriving the effective caller from the
+    resolved identity's own subject, so a process with no attested
+    identity at all can refuse here too; under `builtin-fallback` (the
+    default), an omitted --caller never reaches this resolver at all and
+    derives `DEFAULT_ROLE` directly -- see that function's own docstring
+    for the full policy-gated rule.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -2022,15 +2026,17 @@ def _run(
         )
 
     # --caller/attested-invoker fail-closed binding (lr-82c385, tome #700;
-    # OMITTED-CALLER FIX, lr-620837 operator ruling),
-    # checked BEFORE any I/O -- same fail-fast posture as every other
-    # precondition above. Resolution is now UNCONDITIONAL
-    # (caller_binding.resolve_for_binding no longer skips it on an omitted
-    # --caller -- see that function's own docstring for the full ruling):
-    # an omitted --caller derives its EFFECTIVE caller from the resolved
-    # attested identity's own subject, never DEFAULT_ROLE by itself, so a
-    # process with no attested identity at all is refused here exactly like
-    # an explicit mismatched --caller always was.
+    # OMITTED-CALLER FIX, lr-620837 fold-in #4 -- see caller_binding.
+    # resolve_for_binding's own docstring, "OMITTED --caller/--role IS
+    # POLICY-GATED"), checked BEFORE any I/O -- same fail-fast posture as
+    # every other precondition above. Whether an omitted --caller requires
+    # attestation is now the effective attestation.bound_identity policy:
+    # under the default "builtin-fallback", an omitted --caller derives
+    # DEFAULT_ROLE with no resolution attempted and no refusal possible
+    # (this package's originally-released behavior); under "required", an
+    # omitted --caller derives the resolved attested identity's own
+    # subject, and a process with no attested identity at all is refused
+    # here exactly like an explicit mismatched --caller always was.
     resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
     try:
         attested_identity = _caller_binding.resolve_for_binding(
@@ -2045,9 +2051,12 @@ def _run(
         )
     if args.caller is None:
         # Effective caller on the omitted path is the resolved identity's
-        # own subject (lr-620837 operator ruling) -- re-validated against
-        # the SAME _SAFE_CALLER_RE an explicit --caller value already
-        # passed above, since this value also feeds the caller-namespaced
+        # own subject -- DEFAULT_ROLE under "builtin-fallback" (the
+        # identity resolve_for_binding returns without calling
+        # resolve_identity_fn at all), or the attested subject under
+        # "required" (lr-620837 fold-in #4) -- re-validated against the
+        # SAME _SAFE_CALLER_RE an explicit --caller value already passed
+        # above, since this value also feeds the caller-namespaced
         # --body-env staging path (body.<caller>.json) a moment later; an
         # attested subject is deployment-controlled, not caller-typed, but
         # this check costs nothing and keeps the invariant "caller is
