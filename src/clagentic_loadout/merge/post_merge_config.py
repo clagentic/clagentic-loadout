@@ -216,6 +216,7 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -446,6 +447,132 @@ def load_post_merge_steps(
         raise PostMergeConfigError(
             f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
             f"got {type(merge_section).__name__}."
+        )
+
+    steps = merge_section.get(CONFIG_KEY_POST_MERGE_STEPS)
+    if steps is None:
+        return []
+
+    validate_post_merge_steps(steps)
+    return steps
+
+
+def load_post_merge_steps_from_git_sha(
+    git_tree_path: str | Path,
+    merged_sha: str,
+    *,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+    legacy_relative_path: str = LEGACY_CONFIG_RELATIVE_PATH,
+) -> list[dict] | None:
+    """Resolve the post_merge_steps list AS COMMITTED at *merged_sha* --
+    read directly from the git object database via `git show
+    <merged_sha>:<path>`, never from `git_tree_path`'s WORKING TREE (lr-cd3644
+    -- see `merge.verb`'s own module docstring, "STALE PRE-SYNC CONFIG DRIFT
+    CHECK", for the call site this exists to correct).
+
+    RETURNS `None`, NOT `[]`, WHEN THE CONFIG PATH IS ABSENT FROM
+    *merged_sha*'S TREE ENTIRELY -- this is the load-bearing distinction this
+    function makes that `load_post_merge_steps` does not need to (that
+    function's caller always wants "no steps configured" collapsed to a
+    single `[]`; THIS function's caller, the lr-cd3644 drift check, must be
+    able to tell "the merged commit's tree has no config file at all" apart
+    from "the merged commit's tree HAS a config file, and it declares zero
+    steps"). The reason: `.clagentic/loadout/config.yaml` is, BY DESIGN,
+    sometimes GITIGNORED and never committed at all (this repo's own
+    `.gitignore` does exactly this for its OWN dogfooding config -- see that
+    file's comment) -- a perfectly valid, common deployment shape where the
+    config lives purely on disk, is never touched by `git checkout`, and
+    therefore CANNOT drift relative to the merged SHA by construction (a
+    `git checkout --detach` never modifies an untracked file). Returning `[]`
+    for "absent from git" in that shape would make every ordinary merge of
+    an untracked-config repo look like `steps` "disagrees" with a fabricated
+    empty list, even though the ACTUAL config the caller correctly resolved
+    from disk is perfectly current. Only a repo that DOES commit this file
+    (the observed incident's own repo, clagentic-triage — confirmed by its
+    `git diff --stat <old-sha> <new-sha> -- .clagentic/loadout/config.yaml`
+    showing a real diff between two commits, i.e. the file IS tracked there)
+    can ever produce a genuine, comparable git-object reading here; the
+    caller (see merge.verb._run) treats a `None` return as "not comparable,
+    skip the check" and a `list` return (even an empty one) as "comparable,
+    diff it against the pre-sync `load_post_merge_steps` resolution."
+
+    THE FIX: this function reads the SAME config file `load_post_merge_steps`
+    reads (new path, falling back to the legacy path -- identical resolution
+    order), but pulls its CONTENT from the git object database at
+    *merged_sha* specifically, via `git show <merged_sha>:<relative_path>`,
+    never from whatever the working tree happens to have checked out. This
+    needs no checkout of its own -- `git show` reads a blob directly -- so
+    calling this is safe even on the lr-173768 no-checkout (fetch-only) path,
+    where `git_tree_path`'s working tree is deliberately left untouched.
+
+    Resolution order (mirrors `resolve_repo_config_path`'s own new-path/
+    legacy-path preference, but keyed on git-tree-object presence at
+    *merged_sha* rather than filesystem presence):
+      1. `git show <merged_sha>:<config_relative_path>` -- if this exits 0,
+         its stdout is parsed as the config file's content.
+      2. Otherwise, `git show <merged_sha>:<legacy_relative_path>` -- if THIS
+         exits 0, its stdout is parsed instead (no deprecation warning here;
+         this is a read-only drift check, not a caller-facing config load).
+      3. Neither path exists in *merged_sha*'s tree: returns `None` (see
+         above -- distinct from an empty-but-present `post_merge_steps: []`).
+
+    Unlike `resolve_repo_config_path`, this performs NO wrapper-hop
+    discovery: *git_tree_path* is already resolved to the actual git working
+    tree by the caller (either `--repo-path` directly, or the
+    `merge.git_working_tree`-declared subdirectory -- see
+    `resolve_git_working_tree`), and a git blob lookup has no filesystem
+    ancestor-walk equivalent to perform -- there is exactly one tree object
+    at *merged_sha* to look inside.
+
+    Raises:
+        PostMergeConfigError: the resolved blob content is not valid YAML,
+            its top-level document is not a mapping, the `merge:` section
+            (if present) is not a mapping, `post_merge_steps` (if present)
+            is not a list, or any individual step fails
+            `validate_post_merge_steps` -- mirrors `load_post_merge_steps`'s
+            own fail-fast contract exactly, so a malformed committed config
+            is caught the same way regardless of which path read it.
+    """
+    git_tree_path = Path(git_tree_path)
+
+    def _show(relative_path: str) -> str | None:
+        result = subprocess.run(
+            ["git", "show", f"{merged_sha}:{relative_path}"],
+            capture_output=True,
+            text=True,
+            cwd=str(git_tree_path),
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout
+
+    content = _show(config_relative_path)
+    source_label = f"{merged_sha}:{config_relative_path}"
+    if content is None:
+        content = _show(legacy_relative_path)
+        source_label = f"{merged_sha}:{legacy_relative_path}"
+    if content is None:
+        return None
+
+    try:
+        raw = yaml.safe_load(content)
+    except yaml.YAMLError as exc:
+        raise PostMergeConfigError(f"{source_label}: could not be read as YAML: {exc}.") from exc
+    if raw is None:
+        return []
+    if not isinstance(raw, dict):
+        raise PostMergeConfigError(
+            f"{source_label}: top-level document must be a mapping, got "
+            f"{type(raw).__name__}."
+        )
+
+    merge_section = raw.get(CONFIG_SECTION_MERGE)
+    if merge_section is None:
+        return []
+    if not isinstance(merge_section, dict):
+        raise PostMergeConfigError(
+            f"{source_label}: {CONFIG_SECTION_MERGE!r} section must be a "
+            f"mapping, got {type(merge_section).__name__}."
         )
 
     steps = merge_section.get(CONFIG_KEY_POST_MERGE_STEPS)
@@ -1125,6 +1252,7 @@ __all__ = [
     "ENV_OVERRIDE_PREFIX",
     "find_crew_yaml_files_declaring_post_merge_steps",
     "load_post_merge_steps",
+    "load_post_merge_steps_from_git_sha",
     "post_merge_steps_key_declared",
     "resolve_enforce_merge_shape",
     "resolve_enforce_single_verdict_fence",

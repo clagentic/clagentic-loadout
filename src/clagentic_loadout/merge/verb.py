@@ -278,6 +278,46 @@ it did between lr-d95cdb and lr-173768; a repo that wants to suppress even
 the FETCH (not just the checkout) sets `merge.sync_tree_after_merge: false`
 in its own config instead.
 
+STALE PRE-SYNC CONFIG DRIFT CHECK (lr-cd3644): `steps` (and therefore
+`steps_will_run`, the checkout-vs-fetch-only decision above) is resolved from
+`--repo-path`'s WORKING TREE exactly as the caller left it checked out --
+BEFORE this step ever advances that tree to the merged commit. A caller whose
+`--repo-path` was left on a STALE local ref (e.g. still on an EARLIER merge's
+SHA, itself lacking a `post_merge_steps` key a LATER merge to the same base
+branch added) therefore resolves `steps` against config that does not match
+what is actually being merged THIS invocation -- silently running fewer (or
+different) steps than the repo's own live config declares, with no signal at
+all (the observed incident this closes: a configured `on_failure: fail`
+deploy step skipped entirely because the caller's `--repo-path` was still on
+the PRIOR merge's commit -- confirmed by a real `git diff --stat <old> <new>
+-- .clagentic/loadout/config.yaml` showing the file differs between the two
+commits in that repo). Immediately after `landed_sha` is resolved (either
+branch above), `merge.post_merge_config.load_post_merge_steps_from_git_sha`
+re-reads the SAME `post_merge_steps` key directly from the git object
+database AT `landed_sha` (a `git show`, no checkout -- safe to call
+regardless of which branch above ran) and compares it against the pre-sync
+`steps` value: any disagreement is FAIL LOUD (EXIT_POST_MERGE_FAILED), never
+a silent run against the stale list -- this is the task's own explicitly
+named alternative to resolving `post_merge_steps` post-sync from the start,
+chosen because resolving it post-sync FIRST would need to know `landed_sha`
+before deciding whether a checkout happens at all, which is exactly the
+chicken-and-egg lr-173768's checkout-vs-fetch-only gating was designed to
+avoid.
+
+NOT EVERY REPO COMMITS THIS FILE -- THE CHECK ONLY FIRES WHEN IT CAN COMPARE
+SOMETHING REAL: `.clagentic/loadout/config.yaml` is, by design, sometimes
+GITIGNORED and never committed at all (this very package's own dogfooding
+config is -- see this repo's own `.gitignore`) -- a valid, common deployment
+shape where the file lives purely on disk and, because `git checkout` never
+touches an untracked file, literally cannot drift relative to a commit.
+`load_post_merge_steps_from_git_sha` returns `None` (never a fabricated `[]`)
+when the config path is absent from `landed_sha`'s tree entirely, and the
+comparison above is skipped whenever that happens -- the check fires ONLY
+for a repo that actually commits this file (like the observed incident's own
+repo), never for the gitignored-config shape, where every merge would
+otherwise look like a spurious mismatch against a `[]` that was never a real
+resolution of anything.
+
 CONFIG-ROOT VS GIT-TREE-ROOT (lr-93d718): --repo-path is not always a git
 working tree. A wrapper-layout repo keeps `.clagentic/loadout/config.yaml`
 at a wrapper directory (alongside other non-git tooling state) while its
@@ -420,6 +460,7 @@ from clagentic_loadout.merge.post_merge_config import (
     DEFAULT_CONFIG_RELATIVE_PATH as DEFAULT_POST_MERGE_CONFIG_RELATIVE_PATH,
     find_crew_yaml_files_declaring_post_merge_steps,
     load_post_merge_steps,
+    load_post_merge_steps_from_git_sha,
     post_merge_steps_key_declared,
     resolve_enforce_merge_shape,
     resolve_enforce_single_verdict_fence,
@@ -1733,6 +1774,67 @@ def _run(
                     f"{git_tree_path} (no post_merge_steps to run -- "
                     f"working tree left untouched, no checkout performed)",
                     file=sys.stderr,
+                )
+
+            # lr-cd3644: STALE PRE-SYNC CONFIG DRIFT CHECK. `steps` above was
+            # resolved from `args.repo_path`'s WORKING TREE, BEFORE this
+            # function knew whether that tree was actually on the merged
+            # commit -- resolving it any later would create a chicken-and-egg
+            # with the lr-173768 checkout-vs-fetch-only decision immediately
+            # above, which itself depends on knowing `steps_will_run` first.
+            # A caller whose --repo-path was left on a STALE local ref (e.g.
+            # an earlier merge's commit) can therefore have resolved `steps`
+            # against config that does not match what actually landed at
+            # `landed_sha` -- silently running too few (or the wrong) steps,
+            # exactly the observed incident. Re-resolve the SAME
+            # `post_merge_steps` key directly from the git object database at
+            # `landed_sha` (load_post_merge_steps_from_git_sha -- a `git
+            # show`, no checkout, safe to call regardless of which branch
+            # above ran).
+            #
+            # ONLY COMPARABLE WHEN THE CONFIG FILE IS ACTUALLY GIT-TRACKED AT
+            # THAT COMMIT: `load_post_merge_steps_from_git_sha` returns `None`
+            # (never `[]`) when the config path is absent from *landed_sha*'s
+            # tree entirely -- the common, equally-valid shape where a repo's
+            # `.clagentic/loadout/config.yaml` is deliberately GITIGNORED
+            # (this package's own dogfooding config included -- see this
+            # repo's own .gitignore) and therefore can never drift relative
+            # to a commit at all (a `git checkout` never touches an untracked
+            # file). Comparing against a fabricated `[]` for that shape would
+            # make EVERY merge of an untracked-config repo look like a
+            # mismatch. The check below is therefore skipped entirely when
+            # `landed_steps` is `None`; it fires ONLY when the merged
+            # commit's tree genuinely HAS a committed config (even an empty
+            # `post_merge_steps: []`) that disagrees with the pre-sync
+            # working-tree read -- any such disagreement is FAIL LOUD, never
+            # a silent run against the stale list.
+            try:
+                landed_steps = load_post_merge_steps_from_git_sha(
+                    git_tree_path, landed_sha
+                )
+            except PostMergeConfigError as exc:
+                _fail(
+                    f"post-merge config FAILED to load from merged commit "
+                    f"{landed_sha!r} -- {exc}",
+                    code=EXIT_POST_MERGE_FAILED,
+                )
+            if landed_steps is not None and landed_steps != steps:
+                _fail(
+                    f"post-merge config MISMATCH -- {args.repo_path}'s "
+                    f"pre-sync working tree resolved {len(steps)} "
+                    f"post_merge_steps entr{'y' if len(steps) == 1 else 'ies'}, "
+                    f"but the merged commit {landed_sha!r} actually being "
+                    f"merged declares a DIFFERENT, git-tracked "
+                    f"post_merge_steps list "
+                    f"({len(landed_steps)} entr{'y' if len(landed_steps) == 1 else 'ies'}). "
+                    f"This means --repo-path was stale (not yet advanced to "
+                    f"the commit this merge landed) at the moment its "
+                    f"config was read. Refusing to run post-merge steps "
+                    f"against a config that does not match what was "
+                    f"actually merged -- re-sync --repo-path to "
+                    f"{base_branch!r} and re-run, or use loadout-post-merge "
+                    f"to re-fire post_merge_steps for this already-merged PR.",
+                    code=EXIT_POST_MERGE_FAILED,
                 )
 
             # lr-14f704 item 3: surface a requested-vs-actual merge-shape

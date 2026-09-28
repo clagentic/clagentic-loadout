@@ -17,6 +17,8 @@ from __future__ import annotations
 import pytest
 import yaml
 
+import subprocess
+
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_ENFORCE_MERGE_SHAPE,
@@ -36,6 +38,7 @@ from clagentic_loadout.merge.post_merge_config import (
     DEFAULT_SYNC_TREE_AFTER_MERGE,
     find_crew_yaml_files_declaring_post_merge_steps,
     load_post_merge_steps,
+    load_post_merge_steps_from_git_sha,
     post_merge_steps_key_declared,
     resolve_enforce_merge_shape,
     resolve_enforce_single_verdict_fence,
@@ -781,3 +784,105 @@ class TestFindCrewYamlFilesDeclaringPostMergeSteps:
             str(tmp_path / ".crew" / "amos.yaml"),
             str(tmp_path / ".crew" / "naomi.yaml"),
         ]
+
+
+def _git(args: list[str], *, cwd) -> subprocess.CompletedProcess:
+    result = subprocess.run(["git", *args], capture_output=True, text=True, cwd=str(cwd))
+    assert result.returncode == 0, f"git {args!r} failed: {result.stderr}"
+    return result
+
+
+def _init_git_repo(tmp_path) -> None:
+    _git(["init", "-b", "main"], cwd=tmp_path)
+    _git(["config", "user.email", "test@example.com"], cwd=tmp_path)
+    _git(["config", "user.name", "test"], cwd=tmp_path)
+
+
+def _commit_config(tmp_path, content: dict, *, message: str = "config") -> str:
+    config_dir = tmp_path / ".clagentic" / "loadout"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.yaml").write_text(yaml.safe_dump(content), encoding="utf-8")
+    _git(["add", "."], cwd=tmp_path)
+    _git(["commit", "-m", message], cwd=tmp_path)
+    return _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+
+
+class TestLoadPostMergeStepsFromGitSha:
+    """lr-cd3644: load_post_merge_steps_from_git_sha reads post_merge_steps
+    from the git OBJECT DATABASE at a specific commit -- via `git show
+    <sha>:<path>` -- never from the working tree, so it stays correct
+    regardless of what `git_tree_path`'s working tree currently has checked
+    out (including a tree left checked out on a DIFFERENT, earlier commit
+    than *merged_sha* itself). Returns None (not []) when the config path
+    is absent from *merged_sha*'s tree entirely -- see the function's own
+    docstring for why that distinction matters (a repo that never commits
+    this file at all must never be compared against a fabricated [])."""
+
+    def test_reads_steps_from_a_commit_even_when_working_tree_is_on_an_earlier_one(
+        self, tmp_path
+    ):
+        _init_git_repo(tmp_path)
+        _commit_config(tmp_path, {"merge": {"post_merge_steps": []}}, message="first")
+        # Advance the branch to a SECOND commit declaring real steps...
+        second_sha = _commit_config(
+            tmp_path,
+            {"merge": {"post_merge_steps": [{"cmd": "echo hi"}]}},
+            message="second",
+        )
+        # ...then move the WORKING TREE back to the first commit, so a
+        # filesystem-based read (load_post_merge_steps) would see zero
+        # steps, while this function -- reading directly from second_sha's
+        # own tree object -- must still see the one step declared there.
+        _git(["checkout", "HEAD~1"], cwd=tmp_path)
+        assert load_post_merge_steps(tmp_path) == []
+        result = load_post_merge_steps_from_git_sha(tmp_path, second_sha)
+        assert result == [{"cmd": "echo hi"}]
+
+    def test_no_config_at_that_commit_returns_none_not_empty_list(self, tmp_path):
+        # THE load-bearing distinction: absent-from-git-history is None,
+        # never a fabricated [] -- a repo that never commits this file
+        # (e.g. a gitignored config, this package's own dogfooding
+        # convention) must never look like it "declares zero steps" when
+        # compared by a caller.
+        _init_git_repo(tmp_path)
+        (tmp_path / "README.md").write_text("seed\n", encoding="utf-8")
+        _git(["add", "."], cwd=tmp_path)
+        _git(["commit", "-m", "seed, no config at all"], cwd=tmp_path)
+        sha = _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+        assert load_post_merge_steps_from_git_sha(tmp_path, sha) is None
+
+    def test_merge_section_present_but_no_steps_key_returns_empty_list(self, tmp_path):
+        # Contrast with the above: the config file IS tracked here, its
+        # merge: section just never mentions the key -- this is a REAL,
+        # comparable "declares zero steps" resolution, so it returns [],
+        # not None.
+        _init_git_repo(tmp_path)
+        sha = _commit_config(tmp_path, {"merge": {"some_other_key": True}})
+        assert load_post_merge_steps_from_git_sha(tmp_path, sha) == []
+
+    def test_malformed_steps_at_that_commit_raises(self, tmp_path):
+        _init_git_repo(tmp_path)
+        sha = _commit_config(
+            tmp_path, {"merge": {"post_merge_steps": [{"on_failure": "warn"}]}}
+        )
+        with pytest.raises(PostMergeConfigError):
+            load_post_merge_steps_from_git_sha(tmp_path, sha)
+
+    def test_merge_section_not_a_mapping_raises(self, tmp_path):
+        _init_git_repo(tmp_path)
+        sha = _commit_config(tmp_path, {"merge": ["not", "a", "mapping"]})
+        with pytest.raises(PostMergeConfigError):
+            load_post_merge_steps_from_git_sha(tmp_path, sha)
+
+    def test_legacy_path_fallback_is_read_when_new_path_absent(self, tmp_path):
+        _init_git_repo(tmp_path)
+        legacy_dir = tmp_path / ".loadout"
+        legacy_dir.mkdir()
+        (legacy_dir / "config.yaml").write_text(
+            yaml.safe_dump({"merge": {"post_merge_steps": [{"cmd": "legacy"}]}}),
+            encoding="utf-8",
+        )
+        _git(["add", "."], cwd=tmp_path)
+        _git(["commit", "-m", "legacy config only"], cwd=tmp_path)
+        sha = _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+        assert load_post_merge_steps_from_git_sha(tmp_path, sha) == [{"cmd": "legacy"}]
