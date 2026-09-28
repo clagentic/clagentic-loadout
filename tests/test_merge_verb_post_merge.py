@@ -937,6 +937,94 @@ class TestGitWorkingTreeConfigRootSplit:
         )
         assert code == verb.EXIT_POST_MERGE_FAILED
 
+    def test_drift_check_never_false_positives_in_wrapper_layout(self, tmp_path):
+        """BOBBIE finding, lr-cd3644 fold-in #3: the config root (the
+        wrapper) and the git tree (its `repo` subdirectory) are DIFFERENT
+        directories here -- the committed config the drift check would need
+        to compare against lives OUTSIDE the inner git tree entirely (never
+        tracked by IT at any commit), so `load_post_merge_steps_from_git_sha`
+        must correctly resolve "not comparable" (None) for this split, same
+        as the plain untracked-config case. The regression proof: a
+        wrapper-layout merge with post_merge_steps configured must still
+        exit OK and actually run its step -- proving the drift check's own
+        git-tree-relative resolution never interferes with the wrapper-layout
+        path it was already supposed to support (lr-93d718)."""
+        wrapper_dir = tmp_path
+        git_tree_dir = wrapper_dir / "repo"
+        git_tree_dir.mkdir()
+        _init_repo_with_origin(git_tree_dir)
+
+        marker = wrapper_dir / "installed.txt"
+        _write_merge_config(
+            wrapper_dir,
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
+            git_working_tree="repo",
+        )
+        argv = _base_args(**{"--repo-path": str(wrapper_dir)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        assert marker.read_text() == "ok"
+
+    def test_drift_check_does_not_compare_against_an_unrelated_inner_tree_file(
+        self, tmp_path
+    ):
+        """BOBBIE finding, lr-cd3644 fold-in #3, THE PRECISE REGRESSION
+        PROOF: the INNER git tree happens to ALSO track a file at the exact
+        same relative path (`.clagentic/loadout/config.yaml`) the wrapper's
+        REAL config lives at -- an entirely UNRELATED file, coincidentally
+        same-named, declaring a DIFFERENT step (a distinct marker). Before
+        this fix, `load_post_merge_steps_from_git_sha` ran `git show
+        <sha>:.clagentic/loadout/config.yaml` with cwd=git_tree_path using
+        the BARE default relative path (as if git_tree_path were the config
+        root) -- which this fixture makes SUCCEED (that path genuinely
+        exists in the inner tree), so the drift check would compare the
+        wrapper's real pre-sync steps against this UNRELATED inner-tree
+        file's steps and could fire a bogus drift correction, running the
+        WRONG step. `resolve_git_tree_relative_config_paths` must resolve
+        (None, None) here instead (the wrapper's REAL config sits outside
+        the inner tree entirely), so the inner tree's own unrelated tracked
+        file at the same path is NEVER read as if it were the wrapper's
+        config -- only the wrapper's own real, pre-sync-resolved step must
+        run."""
+        wrapper_dir = tmp_path
+        git_tree_dir = wrapper_dir / "repo"
+        git_tree_dir.mkdir()
+        # The inner tree tracks its OWN, UNRELATED config.yaml at the same
+        # relative path the wrapper's real config lives at (a coincidence a
+        # correct implementation must never conflate with the wrapper's own
+        # config).
+        wrong_marker = wrapper_dir / "wrong-step-ran.txt"
+        merged_sha = _init_repo_with_origin_and_tracked_config(
+            git_tree_dir,
+            [{"cmd": [_PY, "-c", f"open(r'{wrong_marker}', 'w').write('WRONG')"]}],
+        )
+
+        # The wrapper's REAL config (outside the inner tree) declares a
+        # DIFFERENT step.
+        right_marker = wrapper_dir / "right-step-ran.txt"
+        _write_merge_config(
+            wrapper_dir,
+            [{"cmd": [_PY, "-c", f"open(r'{right_marker}', 'w').write('right')"]}],
+            git_working_tree="repo",
+        )
+        argv = _base_args(**{"--repo-path": str(wrapper_dir), "--platform": "github"})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_github_opener(merged_sha=merged_sha),
+        )
+        assert code == verb.EXIT_OK
+        # The wrapper's OWN real step ran -- never the inner tree's
+        # unrelated, coincidentally-same-path tracked file.
+        assert right_marker.read_text() == "right"
+        assert not wrong_marker.exists()
+
     def test_malformed_git_working_tree_value_surfaces_exit_post_merge_failed(self, tmp_path):
         _init_repo_with_origin(tmp_path)
         config_dir = tmp_path / ".clagentic" / "loadout"
@@ -1223,13 +1311,19 @@ def _init_repo_with_origin_and_tracked_config(tmp_path, steps: list[dict]) -> st
     return rev_parse.stdout.strip()
 
 
-def _push_tracked_config_commit_to_origin(tmp_path, steps: list[dict]) -> str:
+def _push_tracked_config_commit_to_origin(
+    tmp_path, steps: list[dict], *, parent_sha: str | None = None
+) -> str:
     """Advance origin's own `main` tip by one commit whose tracked
     `.clagentic/loadout/config.yaml` declares *steps* (a well-formed
     post_merge_steps list). See `_push_tracked_config_text_commit_to_origin`
-    for the shared plumbing this is a thin wrapper over."""
+    for the shared plumbing this is a thin wrapper over, including the
+    *parent_sha* override (needed to chain a SECOND pushed commit on top of
+    a FIRST one -- see that function's own docstring)."""
     return _push_tracked_config_text_commit_to_origin(
-        tmp_path, yaml.safe_dump({"merge": {"post_merge_steps": steps}})
+        tmp_path,
+        yaml.safe_dump({"merge": {"post_merge_steps": steps}}),
+        parent_sha=parent_sha,
     )
 
 
@@ -1243,7 +1337,9 @@ def _push_malformed_tracked_config_commit_to_origin(tmp_path) -> str:
     return _push_tracked_config_text_commit_to_origin(tmp_path, "merge: [unclosed")
 
 
-def _push_tracked_config_text_commit_to_origin(tmp_path, config_text: str) -> str:
+def _push_tracked_config_text_commit_to_origin(
+    tmp_path, config_text: str, *, parent_sha: str | None = None
+) -> str:
     """Advance origin's own `main` tip (NOT the local clone's working tree or
     index at tmp_path) by one commit that rewrites the ALREADY-TRACKED
     `.clagentic/loadout/config.yaml` to *config_text* verbatim -- built via a
@@ -1260,7 +1356,18 @@ def _push_tracked_config_text_commit_to_origin(tmp_path, config_text: str) -> st
     `_push_tracked_config_commit_to_origin` (well-formed steps) and
     `_push_malformed_tracked_config_commit_to_origin` (invalid YAML, the
     fail-loud-preserved case) so the two never diverge on the underlying git
-    plumbing -- only the config TEXT differs."""
+    plumbing -- only the config TEXT differs.
+
+    *parent_sha*: defaults to the local clone's own HEAD (unchanged from
+    before this parameter existed) -- correct for the common case of a
+    single pushed commit built on the seed. A caller chaining a SECOND
+    pushed commit on top of a FIRST one (lr-cd3644 fold-in #2's regression
+    test -- simulating origin advancing twice before a promoted checkout
+    ever runs) passes the first call's own returned SHA here explicitly,
+    since the LOCAL clone's HEAD never moves (this function never touches
+    tmp_path's own working tree or index) and would otherwise always branch
+    a second call off the SAME seed commit, producing a non-fast-forward
+    push rejection against origin's already-advanced tip."""
     hash_object = subprocess.run(
         ["git", "hash-object", "-w", "--stdin"],
         input=config_text, capture_output=True, text=True, cwd=str(tmp_path),
@@ -1268,9 +1375,10 @@ def _push_tracked_config_text_commit_to_origin(tmp_path, config_text: str) -> st
     assert hash_object.returncode == 0, hash_object.stderr
     blob_sha = hash_object.stdout.strip()
 
-    parent_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
-    ).stdout.strip()
+    if parent_sha is None:
+        parent_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        ).stdout.strip()
 
     scratch_index = tmp_path.parent / f"{tmp_path.name}-scratch.index"
     if scratch_index.exists():
@@ -1427,6 +1535,112 @@ class TestStalePreSyncConfigDriftCheck:
             opener=_make_github_opener(merged_sha=merged_sha),
         )
         assert code == verb.EXIT_OK
+
+    def test_forgejo_promotion_passes_landed_sha_as_known_merged_sha(
+        self, tmp_path, monkeypatch
+    ):
+        """BOBBIE finding, lr-cd3644 fold-in #2: on the FORGEJO platform the
+        merge backend's own API response never carries the merged SHA (see
+        merge.tree_sync's module docstring, "TRADE-OFF NAMED") -- `merged_sha`
+        in merge.verb._run stays None for the whole invocation. Before this
+        fix, the drift-promoted `advance_repo_to_merged_sha` call passed
+        `known_merged_sha=merged_sha` (None on this platform), which falls
+        into that function's base-branch-FALLBACK resolution: re-fetch
+        *base_branch* and check out whatever ITS CURRENT remote tip is AT
+        PROMOTION TIME -- not necessarily `landed_sha`, the exact commit
+        `fetch_merged_sha_object` already fetched and independently verified
+        earlier in the SAME invocation. A real-git-timing reproduction would
+        need origin's tip to move DURING the single synchronous merge.verb
+        invocation, which a local bare-repo fixture cannot express -- this
+        test instead asserts the call-site CONTRACT directly: monkeypatch
+        `merge.verb.advance_repo_to_merged_sha` to a recording spy and
+        assert the drift-promoted call's own `known_merged_sha` kwarg equals
+        `landed_sha` (the value `fetch_merged_sha_object` already resolved
+        and verified), never `None`/`merged_sha`. This is the exact
+        precondition the base-branch-fallback divergence needs -- proving
+        the call site never reaches it closes the defect regardless of
+        whether any given test run's real git timing happens to expose it."""
+        _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        merged_sha = _push_tracked_config_commit_to_origin(
+            tmp_path,
+            [{"cmd": [_PY, "-c", "pass"]}],
+        )
+
+        recorded_calls: list[dict] = []
+        real_advance = verb.advance_repo_to_merged_sha
+
+        def _recording_advance(*args, **kwargs):
+            recorded_calls.append(kwargs)
+            return real_advance(*args, **kwargs)
+
+        monkeypatch.setattr(verb, "advance_repo_to_merged_sha", _recording_advance)
+
+        argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "forgejo"})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            # Forgejo's own merge response never carries a SHA -- merged_sha
+            # stays None for the whole invocation, the exact precondition
+            # this regression needs (see docstring above).
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        # Exactly one promoted checkout call (the fetch-only path never ran
+        # advance_repo_to_merged_sha; only the drift promotion did).
+        assert len(recorded_calls) == 1
+        assert recorded_calls[0]["known_merged_sha"] == merged_sha
+        assert recorded_calls[0]["known_merged_sha"] is not None
+
+    def test_drift_correction_to_empty_list_still_lands_on_base_branch(
+        self, tmp_path
+    ):
+        """BOBBIE finding, lr-cd3644 fold-in #4: the pre-sync `--repo-path`
+        HAD real, non-empty post_merge_steps (steps_will_run True from the
+        start -- a REAL, verified checkout happens BEFORE the drift check
+        ever runs), but the MERGED commit's own tracked config declares
+        ZERO steps -- a legitimate drift-correction result, not an error
+        (see test_merged_commit_config_unreadable_still_fails_loud for the
+        one case that DOES fail loud; this is not that case). Before this
+        fix, land_on_base_branch was gated on `steps_will_run` -- which the
+        drift check correctly re-derives to False here (zero steps actually
+        ran) -- leaving a REAL, VERIFIED, DETACHED checkout on disk with no
+        signal to the next dispatch. The tree must land on base_branch
+        whenever the sync actually advanced/checked it out
+        (`tree_checked_out`), regardless of the final step count."""
+        # Pre-sync (stale) config: one real step. This makes steps_will_run
+        # True from the START, so tree_sync takes the REAL-checkout branch
+        # (advance_repo_to_merged_sha, tree_checked_out=True) rather than
+        # the fetch-only branch -- exactly the precondition this defect
+        # needs (a checkout that already happened before drift corrects
+        # steps_will_run back down).
+        _init_repo_with_origin_and_tracked_config(
+            tmp_path, [{"cmd": [_PY, "-c", "pass"]}]
+        )
+        # Merged commit's own TRACKED config: explicitly zero steps -- an
+        # informed choice at the commit actually being merged.
+        merged_sha = _push_tracked_config_commit_to_origin(tmp_path, [])
+        argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_github_opener(merged_sha=merged_sha),
+        )
+        assert code == verb.EXIT_OK
+        # THE REGRESSION PROOF: the tree must be on base_branch, not
+        # detached, even though the FINAL (post-drift-correction) step count
+        # was zero.
+        branch = subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=str(tmp_path),
+        )
+        assert branch.returncode == 0
+        assert branch.stdout.strip() == _BASE_BRANCH
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        )
+        assert rev_parse.stdout.strip() == merged_sha
 
     def test_untracked_config_repo_is_never_compared_and_never_false_positives(
         self, tmp_path
