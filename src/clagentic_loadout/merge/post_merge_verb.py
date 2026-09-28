@@ -549,26 +549,39 @@ def _run(
     # own step 10 already calls. A repo with no declared steps is a no-op,
     # exactly like an ordinary merge that never configured any.
     #
-    # lr-cd3644 fold-in #3 (PR #30 re-review finding C): step 5 above has
+    # lr-cd3644 fold-in #4 (PR #30 re-review finding): step 5 above has
     # ALREADY performed a real, verified checkout by this point (unlike
     # merge.verb's own step 10, this verb has no fetch-only branch -- see
-    # step 7's own comment below) -- so a step-6 failure raised via `_fail()`
-    # must still land the tree on *base_branch* (step 7) before this
-    # function's error propagates, exactly like merge.verb's own step 10
-    # now does for the identical shape. Steps 6 and 7 are therefore wrapped
-    # in one try/except here: the `except` clause makes a best-effort
-    # land_on_base_branch attempt and then re-raises the ORIGINAL exception
-    # unchanged (never replaced by a land failure), and the `else` clause
-    # (step 7 proper) runs the land step on the ordinary, all-succeeded path.
-    try:
-        steps = load_post_merge_steps(args.repo_path)
-    except PostMergeConfigError as exc:
-        _fail(
-            f"post-merge config FAILED to load -- {exc}",
-            code=EXIT_POST_MERGE_FAILED,
-        )
+    # step 7's own comment below) -- so EVERY
+    # statement between that checkout and the land call must run inside the
+    # SAME guard, including config load itself. The prior shape called
+    # `load_post_merge_steps` in its own try/except BEFORE the try/except/
+    # else that wrapped only the run step -- a `PostMergeConfigError` there
+    # raised straight through `_fail()` and unwound past the land call
+    # entirely, leaving a malformed-config invocation with --repo-path
+    # PERMANENTLY DETACHED at landed_sha, the exact "no signal to the next
+    # dispatch" defect class this task already closed for a step-run
+    # failure. `load_post_merge_steps`, `resolve_post_merge_step_timeout_
+    # seconds`, and `run_post_merge_steps` are therefore now ALL inside one
+    # `try`, landed via a single `finally` clause (the task's own preferred
+    # shape): `land_on_base_branch` runs exactly once, on EVERY exit path
+    # from the try body -- success, a config-load failure, or a step
+    # failure -- and a land failure is logged but never allowed to replace
+    # an already-in-flight ORIGINAL exception (Python re-raises the
+    # original on an uncaught exception from `finally` only if the finally
+    # block itself doesn't raise; this catches TreeSyncError explicitly
+    # inside `finally` so it can never mask or replace the original error).
     steps_run = 0
+    original_exc: BaseException | None = None
     try:
+        try:
+            steps = load_post_merge_steps(args.repo_path)
+        except PostMergeConfigError as exc:
+            _fail(
+                f"post-merge config FAILED to load -- {exc}",
+                code=EXIT_POST_MERGE_FAILED,
+            )
+
         if not steps:
             print(
                 f"post-merge: no post_merge_steps configured for {args.repo_path} "
@@ -606,13 +619,27 @@ def _run(
                 _fail(str(exc), code=EXIT_POST_MERGE_FAILED)
             steps_run = len(steps)
             print(f"post-merge: PR #{args.pr_number} in {owner}/{repo} post-merge steps completed")
-    except PostMergeVerbError:
-        # lr-cd3644 fold-in #3 (PR #30 re-review finding C): step 5 already
-        # left --repo-path detached at landed_sha before this point -- a
-        # step-6 failure here must not skip landing on base_branch. The
-        # ORIGINAL exception (and its ORIGINAL exit code) is always what
-        # gets re-raised; a land_on_base_branch failure here is logged but
-        # deliberately swallowed rather than masking the original error.
+    except PostMergeVerbError as exc:
+        original_exc = exc
+        raise
+    finally:
+        # 7. Land --repo-path on base_branch (lr-cd3644, hardened fold-in
+        # #4): step 5 above ALWAYS performs a real, detached checkout via
+        # advance_repo_to_merged_sha -- unlike merge.verb's own step 10,
+        # this verb has no fetch-only branch, since its WHOLE PURPOSE is to
+        # run (or confirm there is nothing to run for) post_merge_steps
+        # against a real, populated checkout. Before the original fix, that
+        # checkout was never followed by a land step at all; before THIS
+        # fix, a config-load failure specifically still skipped it (see the
+        # comment above the outer `try`). Mirrors merge.verb's own step 10
+        # land_on_base_branch call exactly: a ref repoint (`git checkout
+        # -B`) onto the SAME landed_sha already verified above, never a
+        # merge/rebase, so it cannot diverge from what the server already
+        # decided. Runs UNCONDITIONALLY here (not gated on steps_run, the
+        # way merge.verb's own call is gated on steps_will_run) because the
+        # checkout above is itself unconditional on this verb -- there is
+        # always a detached HEAD to move off of by the time this `finally`
+        # runs, on EVERY exit path (return or raise) from the try body.
         try:
             landed_branch_sha = land_on_base_branch(
                 git_tree_path,
@@ -620,63 +647,41 @@ def _run(
                 landed_sha=landed_sha,
             )
         except TreeSyncError as land_exc:
-            print(
-                f"post-merge: WARNING -- working tree at {git_tree_path} "
-                f"could NOT be landed on {base_branch!r} after an earlier "
-                f"post-merge failure -- {land_exc}. The tree remains "
-                f"detached at the merged commit; the ORIGINAL post-merge "
-                f"failure (reported below) is still authoritative.",
-                file=sys.stderr,
-            )
+            if original_exc is not None:
+                # A post-merge failure (config load or step run) already
+                # occurred -- the ORIGINAL exception (and its ORIGINAL exit
+                # code) is always what gets reported; a land failure here
+                # is logged but deliberately swallowed rather than masking
+                # the original error or replacing it via an exception
+                # raised out of `finally`.
+                print(
+                    f"post-merge: WARNING -- working tree at {git_tree_path} "
+                    f"could NOT be landed on {base_branch!r} after an "
+                    f"earlier post-merge failure -- {land_exc}. The tree "
+                    f"remains detached at the merged commit; the ORIGINAL "
+                    f"post-merge failure (reported below) is still "
+                    f"authoritative.",
+                    file=sys.stderr,
+                )
+            else:
+                _fail(
+                    f"post-merge working-tree sync FAILED -- {land_exc}",
+                    code=EXIT_POST_MERGE_FAILED,
+                )
         else:
-            print(
-                f"post-merge: working tree at {git_tree_path} landed on "
-                f"{base_branch!r} at {landed_branch_sha!r} despite an "
-                f"earlier post-merge failure (reported below)",
-                file=sys.stderr,
-            )
-        raise
-    else:
-        # 7. Land --repo-path on base_branch (lr-cd3644): step 5 above ALWAYS
-        # performs a real, detached checkout via advance_repo_to_merged_sha --
-        # unlike merge.verb's own step 10, this verb has no fetch-only branch,
-        # since its WHOLE PURPOSE is to run (or confirm there is nothing to run
-        # for) post_merge_steps against a real, populated checkout. Before this
-        # fix, that checkout was never followed by a land step at all -- this
-        # verb left --repo-path PERMANENTLY DETACHED at landed_sha, regardless of
-        # whether any steps ran, with no way for the next dispatch into this tree
-        # to land anywhere useful (the observed incident: a release-authority
-        # caller's --repo-path left detached at the merged SHA after invoking
-        # this verb standalone, while local 'main' still pointed at the prior
-        # merge). Mirrors
-        # merge.verb's own step 10 land_on_base_branch call exactly: a ref
-        # repoint (`git checkout -B`) onto the SAME landed_sha already verified
-        # above, never a merge/rebase, so it cannot diverge from what the server
-        # already decided. Runs UNCONDITIONALLY here (not gated on steps_run, the
-        # way merge.verb's own call is gated on steps_will_run) because the
-        # checkout above is itself unconditional on this verb -- there is always
-        # a detached HEAD to move off of by the time this line is reached.
-        # lr-cd3644 fold-in #3 (finding C): this `else` clause is the
-        # ALL-SUCCEEDED landing path; the exception path's OWN landing
-        # attempt lives in the `except PostMergeVerbError` clause above, so
-        # the tree is landed exactly once regardless of which path this
-        # invocation takes.
-        try:
-            landed_branch_sha = land_on_base_branch(
-                git_tree_path,
-                base_branch=base_branch,
-                landed_sha=landed_sha,
-            )
-        except TreeSyncError as exc:
-            _fail(
-                f"post-merge working-tree sync FAILED -- {exc}",
-                code=EXIT_POST_MERGE_FAILED,
-            )
-        print(
-            f"post-merge: working tree at {git_tree_path} landed on "
-            f"{base_branch!r} at {landed_branch_sha!r}",
-            file=sys.stderr,
-        )
+            if original_exc is not None:
+                print(
+                    f"post-merge: working tree at {git_tree_path} landed on "
+                    f"{base_branch!r} at {landed_branch_sha!r} despite an "
+                    f"earlier post-merge failure (reported below)",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"post-merge: working tree at {git_tree_path} landed on "
+                    f"{base_branch!r} at {landed_branch_sha!r}",
+                    file=sys.stderr,
+                )
 
     print(
         json.dumps(

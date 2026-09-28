@@ -56,6 +56,35 @@ def _run_git(args: list[str], *, cwd) -> None:
     assert result.returncode == 0, f"git {args!r} failed: {result.stderr}"
 
 
+def _assert_landed_on_base_branch(repo_dir, expected_sha: str) -> None:
+    """lr-cd3644 fold-in #4 (PEACHES finding on PR #30's re-review, comment
+    5875590535): `git symbolic-ref --short HEAD` alone proves the tree is ON
+    a branch, but not that the branch actually points at the merged commit.
+    Asserts THREE independent facts: (1) the tree is on _BASE_BRANCH, not
+    detached; (2) the working HEAD (`git rev-parse HEAD`) resolves to
+    *expected_sha*; (3) the branch REF ITSELF
+    (`git rev-parse refs/heads/<base>`), not merely the symbolic HEAD
+    pointer, also resolves to *expected_sha* -- proving `land_on_base_branch`
+    repointed the correct ref at the correct commit, not merely that the
+    tree ended up on SOME branch named _BASE_BRANCH."""
+    branch = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"],
+        capture_output=True, text=True, cwd=str(repo_dir),
+    )
+    assert branch.returncode == 0
+    assert branch.stdout.strip() == _BASE_BRANCH
+    rev_parse_head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(repo_dir)
+    )
+    assert rev_parse_head.stdout.strip() == expected_sha
+    rev_parse_ref = subprocess.run(
+        ["git", "rev-parse", f"refs/heads/{_BASE_BRANCH}"],
+        capture_output=True, text=True, cwd=str(repo_dir),
+    )
+    assert rev_parse_ref.returncode == 0
+    assert rev_parse_ref.stdout.strip() == expected_sha
+
+
 def _init_repo_with_origin(tmp_path):
     """Build a REAL local git repo at *tmp_path* (the --repo-path under
     test) with a bare 'origin' remote sharing the same base branch content --
@@ -584,8 +613,18 @@ class TestOnFailurePropagation:
         leaving --repo-path DETACHED at the merged SHA with local main
         unmoved -- exactly the observed incident's second defect, but for
         the exception path rather than the drift-to-zero-steps path
-        fold-in #4 already covers."""
-        _init_repo_with_origin(tmp_path)
+        fold-in #4 already covers.
+
+        lr-cd3644 fold-in #4 (PEACHES finding on PR #30's re-review, comment
+        5875590535): `git symbolic-ref --short HEAD` alone proves the tree
+        is ON a branch, but not that the branch actually points at the
+        merged commit -- asserting `git rev-parse HEAD` AND
+        `git rev-parse refs/heads/<base>` (the ref itself, not merely the
+        symbolic HEAD pointer) both equal the merged sha is what actually
+        proves `land_on_base_branch` repointed the correct ref at the
+        correct commit, not merely that the tree ended up on SOME branch
+        named base_branch."""
+        merged_sha = _init_repo_with_origin(tmp_path)
         _write_merge_config(
             tmp_path,
             [{"cmd": [_PY, "-c", "import sys; sys.exit(1)"], "on_failure": "fail"}],
@@ -598,12 +637,7 @@ class TestOnFailurePropagation:
             opener=_make_opener(),
         )
         assert code == verb.EXIT_POST_MERGE_FAILED
-        branch = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            capture_output=True, text=True, cwd=str(tmp_path),
-        )
-        assert branch.returncode == 0
-        assert branch.stdout.strip() == _BASE_BRANCH
+        _assert_landed_on_base_branch(tmp_path, merged_sha)
 
 
 class TestNoConfiguredStepsIsNoop:
@@ -648,7 +682,7 @@ class TestSyncTreeAfterMergeDefaultOn:
     def test_default_on_with_post_merge_steps_configured_lands_on_base_branch(
         self, tmp_path
     ):
-        _init_repo_with_origin(tmp_path)
+        merged_sha = _init_repo_with_origin(tmp_path)
         marker = tmp_path / "installed.txt"
         _write_merge_config(
             tmp_path,
@@ -663,9 +697,11 @@ class TestSyncTreeAfterMergeDefaultOn:
         )
         assert code == verb.EXIT_OK
         assert marker.read_text() == "ok"
-        branch = self._current_branch(tmp_path)
-        assert branch.returncode == 0
-        assert branch.stdout.strip() == _BASE_BRANCH
+        # lr-cd3644 fold-in #4: assert the working HEAD AND the branch ref
+        # itself (refs/heads/<base>), not only the symbolic-ref pointer --
+        # see _assert_landed_on_base_branch's own docstring for why
+        # symbolic-ref alone is insufficient.
+        _assert_landed_on_base_branch(tmp_path, merged_sha)
 
     def test_default_on_without_any_post_merge_steps_configured_fetches_but_never_checks_out(
         self, tmp_path
@@ -762,12 +798,7 @@ class TestSyncTreeAfterMergeDefaultOn:
             opener=_make_opener(),
         )
         assert code == verb.EXIT_OK
-        branch = self._current_branch(tmp_path)
-        assert branch.stdout.strip() == _BASE_BRANCH
-        rev_parse = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
-        )
-        assert rev_parse.stdout.strip() == merged_sha
+        _assert_landed_on_base_branch(tmp_path, merged_sha)
 
     def test_github_platform_known_sha_resolution_lands_on_base_branch(self, tmp_path):
         # GitHub's merge response DOES carry the merged SHA -- tree_sync's
@@ -785,12 +816,7 @@ class TestSyncTreeAfterMergeDefaultOn:
             opener=_make_github_opener(merged_sha=merged_sha),
         )
         assert code == verb.EXIT_OK
-        branch = self._current_branch(tmp_path)
-        assert branch.stdout.strip() == _BASE_BRANCH
-        rev_parse = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
-        )
-        assert rev_parse.stdout.strip() == merged_sha
+        _assert_landed_on_base_branch(tmp_path, merged_sha)
 
     def test_github_platform_missing_sha_falls_back_to_base_branch_resolution(
         self, tmp_path
@@ -811,12 +837,7 @@ class TestSyncTreeAfterMergeDefaultOn:
             opener=_make_github_opener(merged_sha=None),
         )
         assert code == verb.EXIT_OK
-        branch = self._current_branch(tmp_path)
-        assert branch.stdout.strip() == _BASE_BRANCH
-        rev_parse = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
-        )
-        assert rev_parse.stdout.strip() == merged_sha
+        _assert_landed_on_base_branch(tmp_path, merged_sha)
 
 
 class TestDeploymentEnvOverrideSeamWiring:
@@ -1585,16 +1606,7 @@ class TestStalePreSyncConfigDriftCheck:
         # and land_on_base_branch still runs against that checkout exactly
         # as it would for a non-drifted merge whose steps were known from
         # the start.
-        branch = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            capture_output=True, text=True, cwd=str(tmp_path),
-        )
-        assert branch.returncode == 0
-        assert branch.stdout.strip() == _BASE_BRANCH
-        rev_parse = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
-        )
-        assert rev_parse.stdout.strip() == merged_sha
+        _assert_landed_on_base_branch(tmp_path, merged_sha)
 
     def test_merged_commit_config_unreadable_still_fails_loud(self, tmp_path):
         # FAIL LOUD is preserved for the one case the drift check cannot
@@ -1726,16 +1738,7 @@ class TestStalePreSyncConfigDriftCheck:
         # THE REGRESSION PROOF: the tree must be on base_branch, not
         # detached, even though the FINAL (post-drift-correction) step count
         # was zero.
-        branch = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            capture_output=True, text=True, cwd=str(tmp_path),
-        )
-        assert branch.returncode == 0
-        assert branch.stdout.strip() == _BASE_BRANCH
-        rev_parse = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
-        )
-        assert rev_parse.stdout.strip() == merged_sha
+        _assert_landed_on_base_branch(tmp_path, merged_sha)
 
     def test_deleted_but_tracked_config_makes_merged_commit_authoritative_zero_steps(
         self, tmp_path
@@ -1772,16 +1775,7 @@ class TestStalePreSyncConfigDriftCheck:
         assert not marker.exists()
         # The tree still lands on base_branch afterward, exactly like any
         # other drift-corrected merge (fold-in #4's own contract).
-        branch = subprocess.run(
-            ["git", "symbolic-ref", "--short", "HEAD"],
-            capture_output=True, text=True, cwd=str(tmp_path),
-        )
-        assert branch.returncode == 0
-        assert branch.stdout.strip() == _BASE_BRANCH
-        rev_parse = subprocess.run(
-            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
-        )
-        assert rev_parse.stdout.strip() == merged_sha
+        _assert_landed_on_base_branch(tmp_path, merged_sha)
 
     def test_untracked_config_repo_is_never_compared_and_never_false_positives(
         self, tmp_path
