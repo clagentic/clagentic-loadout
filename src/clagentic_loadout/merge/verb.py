@@ -594,8 +594,13 @@ EXIT_MERGE_READBACK_FAILED = 32
 #: binding transport.git_host_api's EXIT_CALLER_INVOKER_MISMATCH already
 #: enforced; this verb now enforces it too). FAILS CLOSED BEFORE ANY I/O --
 #: no token mint, no authority check, no merge is ever attempted. An
-#: OMITTED --role never triggers this (see bind_caller's own docstring) --
-#: it is unchanged, existing behavior.
+#: OMITTED --role is ALSO bound to the attested identity now (lr-620837
+#: operator ruling): this code also fires when NO attested identity can be
+#: resolved at all for an omitted --role (transport.attestation.
+#: AttestationError / BoundAttestationError propagating through
+#: resolve_for_binding), not only on an explicit mismatch -- see
+#: transport.caller_binding's own module docstring for the full behavior
+#: change.
 EXIT_CALLER_INVOKER_MISMATCH = 33
 #: A branch commit subject introduced by the PR matched the deployment's own
 #: configured task_id_guard_pattern in mode="block"
@@ -851,17 +856,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--role",
         default=None,
         help=f"Role whose merge authority is checked and whose token is "
-        f"resolved via the credential provider (default: {DEFAULT_ROLE!r}). "
-        f"Which role may authorize a merge is config (see --authorized-role "
-        f"/ an AuthorityProvider), never a hardcoded identity. "
-        f"Already-attested, opaque config key downstream (the credential "
-        f"provider, the authority check never re-authenticate it "
-        f"themselves -- see merge.authority's module docstring). When "
-        f"EXPLICITLY supplied, it must ALSO match this process's own "
-        f"already attested invoking identity (transport.attestation."
-        f"resolve_identity) or the call is refused fail-closed before any "
-        f"I/O (transport.caller_binding.bind_caller); omitted, this check "
-        f"does not apply.",
+        f"resolved via the credential provider. Which role may authorize a "
+        f"merge is config (see --authorized-role / an AuthorityProvider), "
+        f"never a hardcoded identity. Already-attested, opaque config key "
+        f"downstream (the credential provider, the authority check never "
+        f"re-authenticate it themselves -- see merge.authority's module "
+        f"docstring). It must match this process's own already attested "
+        f"invoking identity (transport.attestation.resolve_bound_identity) "
+        f"or the call is refused fail-closed before any I/O (transport."
+        f"caller_binding.bind_caller). OMITTED behaves as an IMPLICIT claim "
+        f"of 'act as my own attested identity': the effective role becomes "
+        f"the resolved identity's own subject, never {DEFAULT_ROLE!r} by "
+        f"itself -- a process with no attested identity at all is refused "
+        f"the same way an explicit mismatch is.",
     )
     parser.add_argument(
         "--authorized-role",
@@ -1135,9 +1142,11 @@ def main(
     built-in OS-user layer) -- the injection point for the fail-closed
     --role/attested-invoker binding (transport.caller_binding.
     bind_caller), mirroring the identical parameter transport.git_host_api.main
-    already carries for the same purpose. Only actually CALLED when --role
-    is explicit (transport.caller_binding.resolve_for_binding skips
-    resolution entirely on the omitted path).
+    already carries for the same purpose. ALWAYS called now (lr-620837
+    operator ruling): transport.caller_binding.resolve_for_binding no
+    longer skips resolution on an omitted --role -- an omitted --role
+    derives its effective role from the resolved identity's own subject,
+    so a process with no attested identity at all refuses here too.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -1211,29 +1220,28 @@ def _run(
     # flagged) -- see merge.repo_path_consistency's module docstring.
     assert_repo_path_consistent(args.repo, args.repo_path)
 
-    role = args.role or DEFAULT_ROLE
-
     # --role/attested-invoker fail-closed binding (lr-c75c9a, mirrors
-    # transport.git_host_api's identical check): checked BEFORE any I/O --
-    # before the namespace guard (step 1), before the merge-authority check
-    # (step 2), before any token mint. An OMITTED --role (args.role is None)
-    # is never checked here -- see transport.caller_binding.bind_caller's own
-    # docstring for why (this preserves the pre-existing "omitted --role
-    # behaves exactly as before" contract unchanged). Resolution ITSELF is
-    # also skipped on the omitted path via resolve_for_binding -- see that
-    # function's own docstring for why an unconditional resolve() became
-    # unsafe once _resolve_identity started meaning resolve_bound_identity
-    # (operator ruling), which never falls through to a built-in fallback.
+    # transport.git_host_api's identical check; OMITTED-CALLER FIX,
+    # lr-620837 operator ruling): checked BEFORE any
+    # I/O -- before the namespace guard (step 1), before the merge-authority
+    # check (step 2), before any token mint. Resolution is now
+    # UNCONDITIONAL (resolve_for_binding no longer skips it on an omitted
+    # --role -- see that function's own docstring for the full ruling): an
+    # omitted --role derives its EFFECTIVE role from the resolved attested
+    # identity's own subject, never DEFAULT_ROLE by itself, so a process
+    # with no attested identity at all is refused here exactly like an
+    # explicit mismatched --role always was.
     resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
     try:
         attested_identity = _resolve_for_binding(
             caller_explicit=args.role is not None,
-            caller=role,
+            caller=args.role or DEFAULT_ROLE,
             resolve_identity_fn=resolve_identity_fn,
         )
     except AttestationError as exc:
         _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
-    bind_caller(role, caller_explicit=args.role is not None, identity=attested_identity)
+    role = args.role if args.role is not None else attested_identity.subject
+    bind_caller(role, caller_explicit=True, identity=attested_identity)
 
     required_reviewers = _parse_required_reviewers(args.required_reviewers, args.platform)
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
