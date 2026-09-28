@@ -33,14 +33,16 @@ signature or behavior change.
 THE BINDING ITSELF is unchanged from lr-82c385 in every respect that
 matters: `identity` is whatever the call site's identity resolver (or an
 injected equivalent) resolved for THIS process. Every caller-bound verb's
-default resolver is now `transport.attestation.resolve_bound_identity`
-(operator ruling, comment #5 on the task that introduced it) -- the
-configured provider, or exactly ONE discriminator-selected sidecar source,
-NEVER the built-in OS-user fallback; see that function's own docstring for
-the full rule this module's REQUIREMENT 5 below predates and no longer
-describes the default path (kept here for its historical rationale, since
-a deployment MAY still inject the general `resolve_identity` chain via
-`identity_provider=`).
+default resolver is now `transport.attestation.resolve_bound_identity` --
+the configured provider, or exactly ONE discriminator-selected sidecar
+source; whether an undiscriminated miss on those may still fall through to
+the built-in OS-user layer is governed by that function's own
+`attestation.bound_identity` config policy (`"required"` never falls
+through; `"builtin-fallback"`, the current default, does) -- see that
+function's own docstring for the full rule this module's REQUIREMENT 5
+below predates and no longer describes the default path (kept here for its
+historical rationale, since a deployment MAY still inject the general
+`resolve_identity` chain via `identity_provider=`).
 
 FAIL-CLOSED, BEFORE ANY I/O: `caller != identity.subject` on an EXPLICIT
 --caller/--role raises CallerBindingError -- no token mint is ever

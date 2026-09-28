@@ -62,27 +62,29 @@ correct on every dispatch path because a relay/orchestration layer that
 injects credentials does so from the same provider, yielding the identical
 token.
 
---caller/attested-invoker fail-closed binding (lr-82c385, tome #700; OMITTED
--CALLER FIX, lr-620837 operator ruling): an EXPLICIT --caller value is
-bound, in this module, to the ATTESTED invoking identity resolved via
+--caller/attested-invoker fail-closed binding (lr-82c385, tome #700;
+OMITTED-CALLER FIX): an EXPLICIT --caller value is bound, in this module, to
+the ATTESTED invoking identity resolved via
 transport.attestation.resolve_bound_identity (configured provider > exactly
-one discriminator-selected sidecar source, NEVER a built-in OS-user
-fallback) — see bind_caller. A mismatch is refused BEFORE any I/O: an
-identity may use only its OWN credential, and this refusal happens
-unconditionally, even where a named-agent allowlist configured elsewhere
-would otherwise admit the mismatched role. This is layer (1)->(2) of the
-three-layer trust model (attested invoking identity -> crew role/--caller ->
-credential grantor); credential_provider.resolve_token and
-merge.authority.check_authority remain layer (2)->(3), consuming
---caller/--role as the pre-existing, already-attested opaque value they have
-always treated it as (lr-e5eeab) — this task does not change either of
-those seams. An OMITTED --caller is ALSO now bound to the attested identity
-(BEHAVIOR CHANGE, lr-620837 operator ruling, closing a pre-merge review
-finding on this fix's own first revision): the effective caller becomes the
-resolved identity's own subject, never DEFAULT_ROLE by itself — see
-transport.caller_binding's own module docstring for the full ruling and
-migration note. A process with no attested identity at all is now refused
-on an omitted --caller too, exactly as an explicit mismatch always was.
+one discriminator-selected sidecar source; whether an undiscriminated miss
+on those falls through to the built-in OS-user layer is a deployment-set
+`attestation.bound_identity` policy — see that function's own docstring) —
+see bind_caller. A mismatch is refused BEFORE any I/O: an identity may use
+only its OWN credential, and this refusal happens unconditionally, even
+where a named-agent allowlist configured elsewhere would otherwise admit
+the mismatched role. This is layer (1)->(2) of the three-layer trust model
+(attested invoking identity -> crew role/--caller -> credential grantor);
+credential_provider.resolve_token and merge.authority.check_authority
+remain layer (2)->(3), consuming --caller/--role as the pre-existing,
+already-attested opaque value they have always treated it as (lr-e5eeab) —
+this task does not change either of those seams. An OMITTED --caller is
+ALSO bound to the attested identity (BEHAVIOR CHANGE, closing a pre-merge
+review finding on an earlier revision of this fix): the effective caller
+becomes the resolved identity's own subject, never DEFAULT_ROLE by itself —
+see transport.caller_binding's own module docstring for the full rule and
+migration note. A process with no attested identity at all is refused on an
+omitted --caller too, exactly as an explicit mismatch always was, contingent
+on the effective `attestation.bound_identity` policy.
 
 Repo context (lr-ea28, GitHub-URL extraction added lr-5f7971): a repo-scoped
 minting provider (e.g. a GitHub-App-style installation-token mint) needs to
@@ -1836,14 +1838,16 @@ def main(
     `identity_provider` is a zero-arg callable returning a
     `transport.attestation.Identity` (defaults to
     `transport.attestation.resolve_bound_identity`, the caller-BOUND
-    resolver an operator ruling requires -- never falls through to the
-    built-in OS-user layer, see that function's own docstring) -- the
-    injection point for the fail-closed --caller/attested-invoker binding
-    (lr-82c385, see `bind_caller`). ALWAYS called now (lr-620837 operator
-    ruling): `transport.caller_binding.resolve_for_binding` no longer skips
+    resolver -- see that function's own docstring for the discriminator and
+    the `attestation.bound_identity` policy governing whether an
+    undiscriminated miss falls through to the built-in OS-user layer) --
+    the injection point for the fail-closed --caller/attested-invoker
+    binding (lr-82c385, see `bind_caller`). ALWAYS called now:
+    `transport.caller_binding.resolve_for_binding` no longer skips
     resolution on an omitted --caller -- an omitted --caller derives its
     effective caller from the resolved identity's own subject, so a process
-    with no attested identity at all refuses here too.
+    with no attested identity at all can refuse here too (contingent on the
+    effective `attestation.bound_identity` policy).
     """
     if argv is None:
         argv = sys.argv[1:]

@@ -632,15 +632,17 @@ def main(
     `identity_provider` (lr-c75c9a): a zero-arg callable returning a
     `transport.attestation.Identity` (defaults to
     `transport.attestation.resolve_bound_identity`, the caller-BOUND
-    resolver an operator ruling requires -- never falls through to the
-    built-in OS-user layer) -- the injection point for the fail-closed
-    --caller/attested-invoker binding (transport.caller_binding.
-    bind_caller), mirroring the identical parameter transport.git_host_api.main
-    already carries for the same purpose. ALWAYS called now (lr-620837
-    operator ruling): transport.caller_binding.resolve_for_binding no
-    longer skips resolution on an omitted --caller -- an omitted --caller
-    derives its effective caller from the resolved identity's own subject,
-    so a process with no attested identity at all refuses here too.
+    resolver -- see that function's own docstring for the discriminator and
+    the `attestation.bound_identity` policy governing whether an
+    undiscriminated miss falls through to the built-in OS-user layer) --
+    the injection point for the fail-closed --caller/attested-invoker
+    binding (transport.caller_binding.bind_caller), mirroring the identical
+    parameter transport.git_host_api.main already carries for the same
+    purpose. ALWAYS called now: transport.caller_binding.resolve_for_binding
+    no longer skips resolution on an omitted --caller -- an omitted
+    --caller derives its effective caller from the resolved identity's own
+    subject, so a process with no attested identity at all can refuse here
+    too (contingent on the effective `attestation.bound_identity` policy).
     """
     if argv is None:
         argv = sys.argv[1:]
