@@ -143,8 +143,7 @@ that binding-and-refusal decision is `transport.git_host_api.bind_caller`'s
 job (see that function's docstring for the fail-closed comparison and its
 own module docstring's "layer (1)->(2) binding" note).
 
-BOUND RESOLUTION -- `resolve_bound_identity` (operator ruling, comment #5 on
-the task tracked by this fix; mirrors clagentic-gatekeeper's
+BOUND RESOLUTION -- `resolve_bound_identity` (mirrors clagentic-gatekeeper's
 `DomainLocalSubagent`, `internal/attestation/domain_policy.go`, READ-ONLY
 prior art, not imported across the language boundary):
 
@@ -153,79 +152,123 @@ caller-BOUND verb (`push`, `review`, `acquire`, `merge`, `merge --close`,
 `merge --post-merge`, and `git_host_api` itself) that feeds its result
 straight into `transport.caller_binding.bind_caller`, and (2) a handful of
 non-binding, presence-only callers (`doctor.checks`) that never make a
-trust decision from the result. Shape (1) is the one an operator ruling
-found unsafe: the built-in OS-user layer (`_BuiltinOsUserProvider`,
+trust decision from the result. Shape (1) is the one a fail-closed policy
+targets: the built-in OS-user layer (`_BuiltinOsUserProvider`,
 `SOURCE_BUILTIN`) answers with the literal host uid whenever layers 1/2
 have nothing to offer -- on a shared/service host running as `root`, THAT
-uid is not an attested identity at all, and `bind_caller` was comparing
-`--caller`/`--role` against it as though it were one (a top-level session
-naming itself explicitly gets refused as "not root," while an
-unauthenticated process typing any name at all that happens to equal the
-host uid would be silently admitted -- the "this computer runs on root"
-ruling, verbatim intent: root is never a caller-bound answer, full stop).
+uid is not an attested identity at all, and `bind_caller` comparing
+`--caller`/`--role` against it as though it were one is a confused-deputy
+shape (a top-level session naming itself explicitly gets refused as "not
+root," while an unauthenticated process typing any name at all that
+happens to equal the host uid would be silently admitted).
 
 `resolve_bound_identity` is the caller-bound entry point every `bind_caller`
-call site now uses INSTEAD of the bare `resolve_identity()` call. It
-differs from the ordinary chain in exactly two ways, both enforced in code
-here (never by reordering `_default_chain` or by adapter position in a
-deployment's config file, per the ruling: a discriminator implemented as
-"whichever adapter happens to be declared first" is not verifiable from the
-refusal alone, and silently degrades the moment a deployment's config
-drifts):
+call site uses INSTEAD of the bare `resolve_identity()` call. It differs
+from the ordinary chain in two ways:
 
-  1. **The built-in layer never answers.** `resolve_bound_identity` does
-     not include `_BuiltinOsUserProvider` in its chain at all. A process
-     with no configured-provider identity (layer 1) and no resolving
-     sidecar (layer 2) gets a terminal `BoundAttestationError` ("no
-     attested identity"), never a host uid standing in for one.
+  1. **WHETHER the built-in layer may answer is a POLICY, not a constant**
+     -- see `ATTESTATION_CONFIG_KEY_BOUND_IDENTITY` /
+     `BOUND_IDENTITY_POLICY_REQUIRED` / `BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK`
+     below. Under `"required"`, `resolve_bound_identity` never includes
+     `_BuiltinOsUserProvider` in its chain at all -- a process with no
+     configured-provider identity (layer 1) and no resolving sidecar
+     (layer 2) gets a terminal `BoundAttestationError` ("no attested
+     identity"), never a host uid standing in for one. Under
+     `"builtin-fallback"`, a miss on layers 1/2 falls through to the
+     built-in OS-user layer exactly as the general `resolve_identity`
+     chain does -- preserving this package's previously-released behavior
+     for a deployment that has not yet configured any sidecar adapters.
+     `DEFAULT_BOUND_IDENTITY_POLICY` (a single module constant) decides
+     which applies when a deployment's config sets no explicit
+     `attestation.bound_identity` value.
   2. **A discriminator chooses WHICH sidecar source may answer, not "the
-     first one that has a file."** Exactly one env var decides:
-     `CLAGENTIC_SUBAGENT_ID` (`SUBAGENT_SESSION_ID_ENV_VAR`) -- the
-     per-spawn id a harness's spawn wrapper stamps into every command a
-     subagent runs, referenced in the ruling this function implements.
+     first one that has a file" -- driven entirely by CONFIG, never a
+     hardcoded harness-specific env var name.** Each entry in
+     `attestation.sidecars` may declare a `scope` key
+     (`SIDECAR_ADAPTER_KEY_SCOPE`): `"per-spawn"`
+     (`SIDECAR_SCOPE_PER_SPAWN`) or `"session"` (`SIDECAR_SCOPE_SESSION`).
+     An adapter with no `scope` key (or an unrecognized value) is simply
+     not eligible to answer a BOUND resolution -- it remains fully usable
+     by the ordinary `resolve_identity` chain, which does not consult
+     `scope` at all (see `_SidecarFileProvider._resolve_adapter`).
 
-       - **Set (non-empty):** this invocation is a per-spawn subagent by
-         the harness's own declaration. ONLY a sidecar adapter whose
-         configured `session_id_env` equals `CLAGENTIC_SUBAGENT_ID` may
-         resolve. A miss (no such adapter configured, or the adapter
-         declines -- unset elsewhere is impossible since this branch only
-         runs when it IS set, but a genuinely absent composed file still
-         counts as a miss) is a terminal `BoundAttestationError` naming the
-         per-spawn subagent sidecar as the expected, unmet source -- it
-         never falls through to a session-keyed adapter, even one that
+     The discriminator itself: for every adapter declared with
+     `scope: per-spawn`, check whether THAT adapter's own `session_id_env`
+     is set (non-empty) in this process's environment.
+
+       - **Any per-spawn-scoped adapter's `session_id_env` is set:** this
+         invocation declares itself a per-spawn subagent (whatever
+         mechanism the deployment's harness uses to stamp that env var
+         into a per-spawn command's environment -- this module never
+         hardcodes the var's NAME). ONLY a `scope: per-spawn` adapter may
+         resolve. A miss (no such adapter configured at all, or every
+         per-spawn adapter with a set env var still declines -- e.g. its
+         composed file is absent) is a terminal `BoundAttestationError`
+         naming the per-spawn sidecar as the expected, unmet source -- it
+         never falls through to a `scope: session` adapter, even one that
          WOULD resolve, because that fallthrough is the exact
          confused-deputy shape (a subagent minting its parent's identity)
-         this whole task is fixing.
-       - **Unset:** this invocation is a top-level session by the same
-         declaration (a lead/director session has no per-spawn id to
-         stamp). ONLY a sidecar adapter whose configured `session_id_env`
-         equals `CLAUDE_CODE_SESSION_ID` (`SESSION_SCOPED_SESSION_ID_ENV_VAR`)
-         may resolve, keyed by that session's own `SessionStart`-written
-         sidecar file. A miss is a terminal `BoundAttestationError` naming
-         the session-scoped sidecar as the expected, unmet source.
+         this discriminator exists to prevent.
+       - **No per-spawn-scoped adapter's `session_id_env` is set (this
+         also covers the case where NO adapter is declared `scope:
+         per-spawn` at all):** this invocation is a top-level session.
+         ONLY a `scope: session` adapter may resolve. A miss is a terminal
+         `BoundAttestationError` naming the session-scoped sidecar as the
+         expected, unmet source.
+
+     This is a HARD requirement, enforced by CODE against the declared
+     `scope` value, never by adapter list ORDER in a deployment's config
+     file -- a discriminator implemented as "whichever adapter happens to
+     be declared first" is not verifiable from the refusal alone, and
+     silently degrades the moment a deployment's config drifts.
 
      Layer 1 (the configured-provider env var, `SOURCE_CONFIGURED`) is
      UNCHANGED and still takes precedence over either sidecar source when
      it resolves -- it is a real, deployment-declared attested identity,
-     not the built-in fallback the ruling targets, and narrowing it here
+     not the built-in fallback this policy targets, and narrowing it here
      was never in scope.
+
+     THE SUBAGENT-DISCRIMINATOR REFUSAL IS UNCONDITIONAL, REGARDLESS OF
+     POLICY: a per-spawn-declared invocation (a set `session_id_env` on a
+     `scope: per-spawn` adapter) whose per-spawn adapter misses is REFUSED
+     even under `"builtin-fallback"` -- it never falls through to a
+     `scope: session` adapter NOR to the built-in layer. This is a
+     correctness fix (closing the confused-deputy shape above), not a
+     policy choice the `bound_identity` knob is meant to relax; only "may
+     an UNDISCRIMINATED miss (no adapter of any scope resolves, or no
+     `attestation.sidecars` configured at all) fall through to the
+     built-in layer" is what the policy controls.
 
   Refusal messages and the `Identity.source` value a successful bound
   resolution returns both NAME which source answered or was expected
   (`SOURCE_SIDECAR_SUBAGENT` / `SOURCE_SIDECAR_SESSION`, new and more
-  specific than the general chain's single `SOURCE_SIDECAR` label) --
-  acceptance 3 of the ruling: the pre-fix `caller_binding.
-  CallerBindingError` message rendered `identity.source` as the bare string
-  `'sidecar'` for all three sidecar-shaped sources, which is exactly what
-  cost the 2026-08-31 investigation its decisive evidence (see this
-  module's own git history / the task thread for the incident this
-  ambiguity caused).
+  specific than the general chain's single `SOURCE_SIDECAR` label) -- the
+  pre-fix `caller_binding.CallerBindingError` message rendered
+  `identity.source` as the bare string `'sidecar'` for all three
+  sidecar-shaped sources, which made a past incident harder to diagnose
+  than it needed to be.
 
   `resolve_identity`'s own three-layer chain, `Identity.source`'s existing
   `SOURCE_SIDECAR` value on THAT path, and every non-bound caller of
   `resolve_identity` (e.g. `doctor.checks`, which never makes a trust
   decision from the result) are UNCHANGED by any of this -- this is a
   second, bound-specific entry point, not a rewrite of the general chain.
+
+ADAPTER-LESS AND UNSCOPED-ADAPTER BEHAVIOR (well-defined, exercised by
+tests):
+  - No `attestation.sidecars` list configured at all (or an empty list):
+    the discriminator finds no per-spawn-scoped adapter with a set env
+    var, so this resolves as a top-level session; there is no
+    `scope: session` adapter either, so the session lookup also misses.
+    Under `"required"`, this is a terminal refusal. Under
+    `"builtin-fallback"`, this falls through to the built-in layer.
+  - An adapter with no `scope` key, or `scope` set to something other than
+    `SIDECAR_SCOPE_PER_SPAWN`/`SIDECAR_SCOPE_SESSION`: never eligible for
+    EITHER bound-resolution branch above (treated as declining the bound
+    discriminator entirely, exactly like "not declared") -- it remains
+    fully eligible for the ordinary, non-bound `resolve_identity` chain,
+    which walks `attestation.sidecars` in declared order with no `scope`
+    check at all.
 """
 
 from __future__ import annotations
@@ -272,6 +315,70 @@ SIDECAR_ADAPTER_KEY_DIR = "dir"
 SIDECAR_ADAPTER_KEY_FILE_PREFIX = "file_prefix"
 SIDECAR_ADAPTER_KEY_SESSION_ID_ENV = "session_id_env"
 
+#: OPTIONAL per-adapter config key declaring this adapter's scope for
+#: BOUND resolution only (`resolve_bound_identity` -- the ordinary
+#: `resolve_identity` chain never reads this key). A deployment supplies
+#: `SIDECAR_SCOPE_PER_SPAWN` or `SIDECAR_SCOPE_SESSION`; an adapter with no
+#: `scope` key, or an unrecognized value, is simply ineligible to answer a
+#: bound resolution (see this module's own docstring, "ADAPTER-LESS AND
+#: UNSCOPED-ADAPTER BEHAVIOR") -- it remains fully usable by the ordinary
+#: chain. No harness-specific env var name is ever hardcoded here; a
+#: deployment names its OWN `session_id_env` value per adapter, and this
+#: key only says which of the two bound-resolution roles that adapter
+#: plays.
+SIDECAR_ADAPTER_KEY_SCOPE = "scope"
+
+#: `attestation.sidecars[].scope` value for an adapter keyed on a per-spawn
+#: (subagent) identifier -- see `SIDECAR_ADAPTER_KEY_SCOPE`.
+SIDECAR_SCOPE_PER_SPAWN = "per-spawn"
+
+#: `attestation.sidecars[].scope` value for an adapter keyed on a
+#: top-level-session identifier -- see `SIDECAR_ADAPTER_KEY_SCOPE`.
+SIDECAR_SCOPE_SESSION = "session"
+
+#: Config-file key (within the `attestation` section) naming the BOUND-
+#: RESOLUTION fallback policy: `BOUND_IDENTITY_POLICY_REQUIRED` or
+#: `BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK`. See `resolve_bound_identity`'s
+#: own docstring, "BOUND RESOLUTION," item 1, for the full behavior each
+#: value selects.
+ATTESTATION_CONFIG_KEY_BOUND_IDENTITY = "bound_identity"
+
+#: Strict policy: a caller-bound resolution that finds nothing on layer 1
+#: or the ONE discriminator-selected sidecar source is a terminal refusal
+#: -- the built-in OS-user layer is never consulted. Omitted `--caller`
+#: still requires attestation under this policy.
+BOUND_IDENTITY_POLICY_REQUIRED = "required"
+
+#: Compatibility policy: an UNDISCRIMINATED miss (no per-spawn-scoped
+#: adapter's env var set, and no matching session-scoped adapter resolves
+#: either -- i.e. neither branch of the discriminator produces an answer)
+#: falls through to the built-in OS-user layer, preserving this package's
+#: previously-released behavior for a deployment with no sidecar adapters
+#: configured yet. The subagent-discriminator refusal itself (a per-spawn-
+#: declared invocation whose per-spawn adapter misses) stays unconditional
+#: even under this policy -- see `resolve_bound_identity`'s own docstring,
+#: "THE SUBAGENT-DISCRIMINATOR REFUSAL IS UNCONDITIONAL, REGARDLESS OF
+#: POLICY."
+BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK = "builtin-fallback"
+
+#: The DEFAULT bound-identity policy applied when a deployment's config
+#: sets no explicit `attestation.bound_identity` value. A SINGLE constant
+#: so the default can be flipped in one line once an operator confirms the
+#: stricter default is safe to roll out; currently
+#: `BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK` (non-breaking for an existing
+#: install with no `attestation.sidecars` configured yet -- see this
+#: package's release notes / the PR that introduced this constant for the
+#: pending-confirmation status).
+DEFAULT_BOUND_IDENTITY_POLICY = BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK
+
+#: Every recognized `attestation.bound_identity` value -- an unrecognized
+#: string in a deployment's config is treated as unset (falls back to
+#: `DEFAULT_BOUND_IDENTITY_POLICY`), never a hard config-parse failure; see
+#: `_resolve_bound_identity_policy`'s own docstring.
+_BOUND_IDENTITY_POLICIES = frozenset(
+    {BOUND_IDENTITY_POLICY_REQUIRED, BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK}
+)
+
 #: Env var naming the env var that carries the configured-provider identity
 #: value (layer 1) -- env-tier equivalent of ATTESTATION_CONFIG_KEY_IDENTITY_ENV,
 #: takes precedence over the config-file key per this module's resolution
@@ -302,21 +409,6 @@ SOURCE_BUILTIN = "builtin"
 SOURCE_SIDECAR_SUBAGENT = "sidecar-subagent"
 SOURCE_SIDECAR_SESSION = "sidecar-session"
 
-#: The discriminator env var (operator ruling, comment #5): when set and
-#: non-empty, THIS invocation is a per-spawn subagent by the harness's own
-#: declaration (the deploying harness's spawn wrapper stamps this into
-#: every per-spawn command) -- only a sidecar adapter configured with this
-#: exact `session_id_env` may answer a bound resolution. Same literal value
-#: the deployed config's `attestation.sidecars` adapter list already keys
-#: its per-spawn entry on (see this module's own docstring, "BOUND
-#: RESOLUTION").
-SUBAGENT_SESSION_ID_ENV_VAR = "CLAGENTIC_SUBAGENT_ID"
-
-#: When SUBAGENT_SESSION_ID_ENV_VAR is unset, this invocation is a
-#: top-level session by the same declaration -- only a sidecar adapter
-#: configured with THIS `session_id_env` may answer a bound resolution,
-#: keyed by that session's own SessionStart-written sidecar file.
-SESSION_SCOPED_SESSION_ID_ENV_VAR = "CLAUDE_CODE_SESSION_ID"
 
 
 class AttestationError(Exception):
@@ -801,26 +893,49 @@ def resolve_identity(
     )
 
 
-def _bound_sidecar_adapters(
-    *, env: dict[str, str], config_root, required_session_id_env: str
-) -> list[dict]:
-    """Return every entry of the configured `attestation.sidecars` list
-    whose `session_id_env` equals *required_session_id_env* exactly --
-    the discriminator match `resolve_bound_identity` requires. Config-shape
-    problems (no `attestation:` section, no `sidecars` key, a non-list
-    value) all resolve to "no matching adapters," a plain empty list, never
-    an error here -- the caller (`resolve_bound_identity`) is the one that
-    decides a miss is a hard refusal, not this lookup."""
+def _configured_sidecar_adapters(*, config_root) -> list[dict]:
+    """Return the configured `attestation.sidecars` list verbatim (every
+    dict entry, regardless of `scope`) -- config-shape problems (no
+    `attestation:` section, no `sidecars` key, a non-list value) all
+    resolve to a plain empty list, never an error here."""
     section = load_user_config_section(ATTESTATION_CONFIG_SECTION, config_root=config_root)
     adapters = section.get(ATTESTATION_CONFIG_KEY_SIDECARS)
     if not isinstance(adapters, list):
         return []
-    return [
-        adapter
-        for adapter in adapters
-        if isinstance(adapter, dict)
-        and adapter.get(SIDECAR_ADAPTER_KEY_SESSION_ID_ENV) == required_session_id_env
-    ]
+    return [adapter for adapter in adapters if isinstance(adapter, dict)]
+
+
+def _adapters_with_scope(adapters: list[dict], scope: str) -> list[dict]:
+    """Filter *adapters* to those declaring `scope: <scope>` exactly (see
+    `SIDECAR_ADAPTER_KEY_SCOPE`) -- an adapter with no `scope` key, or a
+    value other than *scope*, is excluded."""
+    return [adapter for adapter in adapters if adapter.get(SIDECAR_ADAPTER_KEY_SCOPE) == scope]
+
+
+def _any_per_spawn_session_id_set(adapters: list[dict], *, env: dict[str, str]) -> bool:
+    """The discriminator itself: True when at least one `scope: per-spawn`
+    adapter's OWN `session_id_env` is set (non-empty) in *env*. Config
+    supplies the env-var NAME per adapter; this module never hardcodes
+    one."""
+    for adapter in adapters:
+        session_id_env = adapter.get(SIDECAR_ADAPTER_KEY_SESSION_ID_ENV)
+        if not session_id_env:
+            continue
+        if (env.get(session_id_env) or "").strip():
+            return True
+    return False
+
+
+def _resolve_bound_identity_policy(*, config_root) -> str:
+    """Read `attestation.bound_identity` from config, falling back to
+    `DEFAULT_BOUND_IDENTITY_POLICY` when unset OR set to an unrecognized
+    value (never a hard config-parse failure over a typo'd policy
+    string)."""
+    section = load_user_config_section(ATTESTATION_CONFIG_SECTION, config_root=config_root)
+    configured = section.get(ATTESTATION_CONFIG_KEY_BOUND_IDENTITY)
+    if configured in _BOUND_IDENTITY_POLICIES:
+        return configured
+    return DEFAULT_BOUND_IDENTITY_POLICY
 
 
 def resolve_bound_identity(
@@ -829,24 +944,30 @@ def resolve_bound_identity(
     config_root: str | Path | None = None,
 ) -> Identity:
     """Resolve the attested identity for a caller-BOUND verb -- every
-    `bind_caller` call site (operator ruling, comment #5) uses this INSTEAD
-    of `resolve_identity`. See this module's own docstring, "BOUND
-    RESOLUTION," for the full rationale; summarized here:
+    `bind_caller` call site uses this INSTEAD of `resolve_identity`. See
+    this module's own docstring, "BOUND RESOLUTION," for the full
+    rationale; summarized here:
 
-      1. The built-in OS-user layer (`_BuiltinOsUserProvider`) is NEVER
-         part of this chain -- a host uid is not an attested identity for
-         a caller-bound verb, full stop.
-      2. Layer 1 (the configured-provider env var) still takes precedence,
+      1. Layer 1 (the configured-provider env var) still takes precedence,
          unchanged -- a real, deployment-declared identity, not the
          built-in fallback this function narrows.
-      3. Otherwise, exactly ONE sidecar source may answer, chosen by
-         SUBAGENT_SESSION_ID_ENV_VAR's presence in *env*: the per-spawn
-         subagent adapter when set, the session-scoped adapter when unset.
-         This is a HARD requirement, enforced by CODE (which
-         `session_id_env` value the discriminator selects), never by
-         adapter list ORDER in a deployment's config file -- a deployment
-         that declares its per-spawn adapter second, or omits the other
-         adapter entirely, gets the identical refusal-or-resolve outcome.
+      2. Otherwise, exactly ONE sidecar scope may answer, chosen by the
+         discriminator: whether any `scope: per-spawn` adapter's own
+         `session_id_env` is set in *env*. Set -> only `scope: per-spawn`
+         adapters may resolve. Unset (including "no per-spawn adapter
+         configured at all") -> only `scope: session` adapters may
+         resolve. This is a HARD requirement, enforced by CODE against the
+         declared `scope` value, never by adapter list ORDER in a
+         deployment's config file.
+      3. An undiscriminated miss (the selected scope's adapters all
+         decline, or none are configured) is a terminal
+         `BoundAttestationError` under `attestation.bound_identity:
+         required`, or falls through to the built-in OS-user layer under
+         `attestation.bound_identity: builtin-fallback` (see
+         `DEFAULT_BOUND_IDENTITY_POLICY` for which applies when
+         unconfigured). The per-spawn discriminator refusal itself is
+         UNCONDITIONAL regardless of policy -- see this module's own
+         docstring.
 
     Args:
         env: override the environment mapping (mainly for tests). Defaults
@@ -857,93 +978,106 @@ def resolve_bound_identity(
             that name, same as `resolve_identity`).
 
     Raises:
-        BoundAttestationError: layer 1 declined AND the ONE sidecar source
-            this invocation's discriminator selected did not resolve
-            (either because no adapter in `attestation.sidecars` is
-            configured with the expected `session_id_env`, or because the
-            expected adapter's composed file is absent/empty/unreadable).
-            `.expected_source` names which source was required
-            (SOURCE_SIDECAR_SUBAGENT or SOURCE_SIDECAR_SESSION).
+        BoundAttestationError: layer 1 declined, the ONE sidecar scope
+            this invocation's discriminator selected did not resolve, AND
+            the effective policy is `"required"` (or the effective policy
+            is `"builtin-fallback"` but this was a per-spawn-declared miss
+            -- see above). `.expected_source` names which source was
+            required (SOURCE_SIDECAR_SUBAGENT or SOURCE_SIDECAR_SESSION).
     """
     active_env = env if env is not None else dict(os.environ)
     resolved_config_root = config_root if config_root is not None else DEFAULT_USER_CONFIG_ROOT
 
     # Layer 1 -- unchanged precedence, a real attested identity, not the
-    # built-in fallback this function exists to remove.
+    # built-in fallback this function narrows.
     configured_identity = _ConfiguredEnvProvider(
         env=active_env, config_root=resolved_config_root
     ).resolve()
     if configured_identity is not None:
         return configured_identity
 
-    # Discriminator (operator ruling): CLAGENTIC_SUBAGENT_ID set -> this
-    # invocation is a per-spawn subagent, ONLY the per-spawn sidecar may
-    # answer. Unset -> this invocation is a top-level session, ONLY the
-    # session-keyed sidecar may answer. Never both, never "whichever
-    # resolves first."
-    subagent_session_id = (active_env.get(SUBAGENT_SESSION_ID_ENV_VAR) or "").strip()
-    if subagent_session_id:
-        required_session_id_env = SUBAGENT_SESSION_ID_ENV_VAR
+    all_sidecar_adapters = _configured_sidecar_adapters(config_root=resolved_config_root)
+    per_spawn_adapters = _adapters_with_scope(all_sidecar_adapters, SIDECAR_SCOPE_PER_SPAWN)
+    session_adapters = _adapters_with_scope(all_sidecar_adapters, SIDECAR_SCOPE_SESSION)
+
+    # Discriminator: does ANY scope:per-spawn adapter's own session_id_env
+    # resolve to a non-empty value in this process's environment? Set ->
+    # per-spawn subagent by this deployment's own declaration. Unset
+    # (including "no per-spawn adapter declared at all") -> top-level
+    # session. Never both, never "whichever resolves first."
+    is_per_spawn = _any_per_spawn_session_id_set(per_spawn_adapters, env=active_env)
+
+    if is_per_spawn:
+        candidate_adapters = per_spawn_adapters
         bound_source = SOURCE_SIDECAR_SUBAGENT
         expected_description = (
             f"the per-spawn subagent sidecar (an `attestation.sidecars` "
-            f"adapter configured with session_id_env: "
-            f"{SUBAGENT_SESSION_ID_ENV_VAR}) -- this invocation declared "
-            f"itself a per-spawn subagent by setting "
-            f"{SUBAGENT_SESSION_ID_ENV_VAR}, so ONLY that adapter may "
-            f"answer; it never falls through to the session-keyed adapter "
-            f"(that fallthrough is the parent-identity confused-deputy "
-            f"shape this refusal exists to prevent)"
+            f"adapter configured with `{SIDECAR_ADAPTER_KEY_SCOPE}: "
+            f"{SIDECAR_SCOPE_PER_SPAWN}`) -- this invocation declared itself "
+            f"a per-spawn subagent (a configured per-spawn adapter's own "
+            f"session_id_env is set), so ONLY that adapter may answer; it "
+            f"never falls through to a session-scoped adapter (that "
+            f"fallthrough is the parent-identity confused-deputy shape this "
+            f"refusal exists to prevent)"
         )
     else:
-        required_session_id_env = SESSION_SCOPED_SESSION_ID_ENV_VAR
+        candidate_adapters = session_adapters
         bound_source = SOURCE_SIDECAR_SESSION
         expected_description = (
-            f"the session-scoped sidecar (an `attestation.sidecars` "
-            f"adapter configured with session_id_env: "
-            f"{SESSION_SCOPED_SESSION_ID_ENV_VAR}) -- {SUBAGENT_SESSION_ID_ENV_VAR} "
-            f"is unset, so this invocation is a top-level session and ONLY "
-            f"that adapter may answer"
+            f"the session-scoped sidecar (an `attestation.sidecars` adapter "
+            f"configured with `{SIDECAR_ADAPTER_KEY_SCOPE}: "
+            f"{SIDECAR_SCOPE_SESSION}`) -- no configured per-spawn adapter's "
+            f"session_id_env is set, so this invocation is a top-level "
+            f"session and ONLY that adapter may answer"
         )
 
-    for adapter in _bound_sidecar_adapters(
-        env=active_env,
-        config_root=resolved_config_root,
-        required_session_id_env=required_session_id_env,
-    ):
+    for adapter in candidate_adapters:
         identity = _resolve_sidecar_adapter(adapter, env=active_env, source=bound_source)
         if identity is not None:
             return identity
 
+    # UNCONDITIONAL: a per-spawn-declared invocation whose per-spawn
+    # adapter misses is refused regardless of policy -- see this module's
+    # own docstring, "THE SUBAGENT-DISCRIMINATOR REFUSAL IS UNCONDITIONAL."
+    policy = _resolve_bound_identity_policy(config_root=resolved_config_root)
+    if policy == BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK and not is_per_spawn:
+        builtin_identity = _BuiltinOsUserProvider().resolve()
+        if builtin_identity is not None:
+            return builtin_identity
+
     raise BoundAttestationError(
         f"attestation FAILED -- no attested identity. This is a caller-bound "
-        f"resolution (operator ruling): the built-in OS-user layer is never "
-        f"consulted here, and the expected source for this invocation is "
+        f"resolution: the expected source for this invocation is "
         f"{expected_description}. Configure that adapter in this "
         f"deployment's {ATTESTATION_CONFIG_SECTION!r}.{ATTESTATION_CONFIG_KEY_SIDECARS!r} "
         f"list, or ensure its harness has written the expected sidecar "
-        f"file, before retrying -- there is no fallback.",
+        f"file, before retrying.",
         expected_source=bound_source,
     )
 
 
 __all__ = [
+    "ATTESTATION_CONFIG_KEY_BOUND_IDENTITY",
     "ATTESTATION_CONFIG_KEY_IDENTITY_ENV",
     "ATTESTATION_CONFIG_KEY_SIDECAR_PATH",
     "ATTESTATION_CONFIG_KEY_SIDECARS",
     "ATTESTATION_CONFIG_SECTION",
     "ATTESTED_IDENTITY_ENV_VAR",
     "ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR",
-    "SESSION_SCOPED_SESSION_ID_ENV_VAR",
+    "BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK",
+    "BOUND_IDENTITY_POLICY_REQUIRED",
+    "DEFAULT_BOUND_IDENTITY_POLICY",
     "SIDECAR_ADAPTER_KEY_DIR",
     "SIDECAR_ADAPTER_KEY_FILE_PREFIX",
+    "SIDECAR_ADAPTER_KEY_SCOPE",
     "SIDECAR_ADAPTER_KEY_SESSION_ID_ENV",
+    "SIDECAR_SCOPE_PER_SPAWN",
+    "SIDECAR_SCOPE_SESSION",
     "SOURCE_BUILTIN",
     "SOURCE_CONFIGURED",
     "SOURCE_SIDECAR",
     "SOURCE_SIDECAR_SESSION",
     "SOURCE_SIDECAR_SUBAGENT",
-    "SUBAGENT_SESSION_ID_ENV_VAR",
     "AttestationError",
     "BoundAttestationError",
     "Identity",
