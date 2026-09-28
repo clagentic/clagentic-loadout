@@ -36,6 +36,34 @@ always wins). `bind_caller`'s real equality check therefore runs, and
 passes, on every one of those pre-existing invocations -- the happy path is
 genuinely covered, not stubbed out.
 
+**OMITTED --caller/--role, UPDATED for lr-620837** (operator ruling: an
+omitted --caller is now ALSO bound to the attested identity -- see
+`transport.caller_binding.resolve_for_binding`'s own docstring for the full
+behavior change this fixture now accommodates): `caller_value is None`
+(an omitted `--caller`/`--role` in the test's own argv) used to leave
+`identity_provider` unset entirely, letting the wrapped `main()` fall
+through to the REAL, unwrapped `resolve_identity` chain -- correct and
+harmless under the OLD contract, where an omitted caller was never checked
+against ANY identity at all. Under the NEW contract, resolution always runs
+and its result becomes the EFFECTIVE caller (never a free pass) -- so
+leaving `identity_provider` unset now routes an omitted-caller test through
+the real, isolated (see `_isolate_real_attestation_chain` below)
+`SOURCE_BUILTIN` OS-user identity, silently changing every pre-existing
+omitted-caller test's effective caller from `DEFAULT_ROLE` to whatever OS
+user runs the suite -- exactly the kind of environment-dependent suite
+result CLAUDE.md hard rule 6 forbids, and a real behavior drift for tests
+whose actual intent (verify-comment, body-env, verdict-block composition,
+etc.) has nothing to do with attestation. `caller_value is None` now
+injects `identity_provider=lambda: Identity(DEFAULT_ROLE, SOURCE_CONFIGURED)`
+instead of leaving it unset -- preserving every pre-existing omitted-caller
+test's `DEFAULT_ROLE`-resolves assumption byte-for-byte, the same "this
+test's identity always matches its own effective caller" property the
+explicit-caller branch above already provides. A test that wants the
+NEW omitted-caller-refuses-when-unattested behavior injects its own
+`identity_provider=` (a `BoundAttestationError`-raising callable) exactly
+like a mismatch test already does -- this fixture never overrides an
+explicit keyword argument.
+
 **Opt-out marker, for a test that wants a wrapped verb's UNWRAPPED default
 behavior** (i.e. the real production `transport.attestation.
 resolve_identity`, reading this process's actual env/config/OS user):
@@ -122,8 +150,9 @@ def _parse_flag_value_from_argv(argv: list[str], flag: str) -> str | None:
     """Extract the value following a literal *flag* token in *argv*, exactly
     mirroring how ``argparse`` (via each verb's own ``_build_arg_parser``)
     would bind it -- ``None`` when *flag* is absent (an omitted --caller/
-    --role is never checked by ``bind_caller`` regardless, per its own
-    docstring, so returning ``None`` here is always safe)."""
+    --role; see ``_wrap_main_with_identity_autofill``'s own docstring for
+    how the caller of THIS function now handles that case under the
+    lr-620837 fix)."""
     for index, token in enumerate(argv):
         if token == flag and index + 1 < len(argv):
             return argv[index + 1]
@@ -135,7 +164,16 @@ def _wrap_main_with_identity_autofill(module, *, flag: str):
     ``identity_provider=`` matching *flag*'s (``--caller`` or ``--role``)
     argv value whenever a test call omits one -- see this module's own
     docstring for the full rationale. Shared by every verb this fixture
-    wraps, rather than one bespoke closure per verb."""
+    wraps, rather than one bespoke closure per verb.
+
+    UPDATED for lr-620837 (operator ruling; see module docstring "OMITTED
+    --caller/--role, UPDATED for lr-620837"): an omitted --caller/--role
+    (``caller_value is None``) now injects an identity_provider resolving
+    to ``DEFAULT_ROLE`` too, rather than leaving it unset and falling
+    through to the real, unwrapped attestation chain -- the real chain's
+    result is now the EFFECTIVE caller under the new contract, so leaving
+    it unset would silently change every pre-existing omitted-caller test's
+    effective caller to whatever OS user runs the suite."""
     real_main = module.main
 
     def _wrapped_main(argv=None, **kwargs):
@@ -143,14 +181,16 @@ def _wrap_main_with_identity_autofill(module, *, flag: str):
             caller_value = _parse_flag_value_from_argv(
                 list(argv) if argv is not None else [], flag
             )
-            if caller_value is not None:
-                identity = attestation.Identity(caller_value, attestation.SOURCE_CONFIGURED)
-                kwargs["identity_provider"] = lambda: identity
-            # caller_value is None (an omitted --caller/--role): bind_caller
-            # never checks the identity on that path anyway (see its own
-            # docstring), so leaving identity_provider unset here and
-            # letting main() fall through to the REAL resolve_identity is
-            # correct and harmless -- there is nothing to compare against.
+            # None (an omitted --caller/--role) resolves to DEFAULT_ROLE --
+            # matching the SAME value each verb's own `args.caller or
+            # DEFAULT_ROLE` substitution would compute, so "this test's
+            # identity always matches its own effective caller" holds on
+            # BOTH branches now, not just the explicit one.
+            from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
+
+            effective_subject = caller_value if caller_value is not None else DEFAULT_ROLE
+            identity = attestation.Identity(effective_subject, attestation.SOURCE_CONFIGURED)
+            kwargs["identity_provider"] = lambda: identity
         return real_main(argv, **kwargs)
 
     return _wrapped_main

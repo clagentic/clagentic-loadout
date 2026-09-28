@@ -1,7 +1,7 @@
 """test_git_host_api_caller_attested_invoker_binding.py — lr-82c385 (tome
 #700): native --caller fail-closed binding to the ATTESTED invoking
 identity, in loadout's own transport (transport.git_host_api.bind_caller +
-transport.attestation.resolve_identity).
+transport.attestation.resolve_bound_identity).
 
 This is the NEW layer (1)->(2) binding this task adds -- distinct from and
 complementary to the pre-existing lr-e5eeab contract (--caller/--role is an
@@ -19,8 +19,13 @@ wall-clock dependence:
   1. invoker != caller -- REJECTED fail-closed, before any token resolution
      (the injected TokenProvider is never called).
   2. invoker == caller -- proceeds normally (reaches the token/HTTP layer).
-  3. omitted --caller -- unchanged (never checked against the attested
-     identity at all; defaults to DEFAULT_ROLE exactly as before this task).
+  3. OMITTED --caller IS NOW ALSO BOUND to the attested identity (BEHAVIOR
+     CHANGE, lr-620837 operator ruling, PEACHES finding 5876767198): the
+     effective caller becomes the resolved identity's own subject, and a
+     process with no attested identity at all is refused exactly like an
+     explicit mismatch always was -- see TestOmittedCallerBoundToIdentity
+     below. This SUPERSEDES the pre-fix "omitted --caller is never checked"
+     contract this file used to assert.
   4. a mismatched --caller is denied even where a NAMED-AGENT ALLOWLIST
      (a permissive TokenProvider that would happily mint for the
      mismatched role) would otherwise admit it -- proving this check runs
@@ -200,51 +205,47 @@ class TestExplicitCallerMatchingAttestedIdentityProceeds:
 
 
 # ---------------------------------------------------------------------------
-# (3) omitted --caller -- unchanged: never checked against attested identity
+# (3) omitted --caller IS NOW ALSO bound to the attested identity
+# (BEHAVIOR CHANGE, lr-620837 operator ruling, PEACHES finding 5876767198)
 # ---------------------------------------------------------------------------
 
 
-class TestOmittedCallerUnchanged:
-    def test_omitted_caller_never_compared_to_attested_identity(self):
-        """No --caller at all defaults to DEFAULT_ROLE and proceeds exactly
-        as before this task, REGARDLESS of what the attested identity
-        resolves to -- an omitted --caller carries no identity claim for
-        bind_caller to check."""
+class TestOmittedCallerBoundToIdentity:
+    """SUPERSEDES the pre-fix "omitted --caller is never checked" contract:
+    an omitted --caller is no longer a free pass around attestation. The
+    effective caller becomes the resolved identity's own subject (proceeds,
+    minting a token for THAT subject, never DEFAULT_ROLE by itself), and a
+    process with no attested identity at all REFUSES on the omitted path
+    too -- exactly the fail-closed posture an explicit mismatched --caller
+    always had."""
+
+    def test_omitted_caller_proceeds_as_the_resolved_identity_subject(self):
+        """No --caller at all resolves identity via the injected provider
+        (a synthetic attested identity, never a no-resolve path) and mints
+        a token for THAT identity's own subject -- never DEFAULT_ROLE."""
         tokens = _RecordingTokenProvider()
         rc = git_host_api.main(
             ["/api/v1/repos/some-owner/some-repo/pulls/1.diff"],
             token_provider=tokens,
             opener=_forgejo_get_opener(),
-            # Attested identity is deliberately something that would NOT
-            # match DEFAULT_ROLE -- proving the omitted-caller path never
-            # even reaches the comparison.
-            identity_provider=_identity_provider("someone-else-entirely"),
+            identity_provider=_identity_provider("synthetic-attested-subject"),
         )
         assert rc == git_host_api.EXIT_OK
-        from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
+        assert tokens.calls == ["synthetic-attested-subject"]
 
-        assert tokens.calls == [DEFAULT_ROLE]
-
-    def test_omitted_caller_identity_provider_never_consulted(self):
-        """Updated contract (operator ruling, comment #5 on the task this
-        fix implements): resolution is now SKIPPED entirely on the omitted-
-        caller path, not merely uncompared. Previously resolve_identity()
-        was still called unconditionally, its result simply never reaching
-        bind_caller's comparison (bind_caller's own no-op-on-omitted-caller
-        short-circuit ran AFTER resolution) -- harmless before because the
-        old chain always resolved SOMETHING via its built-in OS-user
-        fallback. The bound resolver this task introduces
-        (resolve_bound_identity) never falls through to that fallback, so
-        an unconditional resolve() would turn every omitted-caller
-        invocation on a host with no attestation source configured into a
-        hard failure for a comparison that was never going to happen
-        anyway -- resolution is now gated on args.caller is not None, the
-        same condition that already gated the comparison."""
+    def test_omitted_caller_identity_provider_is_always_consulted(self):
+        """Updated contract (operator ruling, lr-620837 comment #5,
+        superseding the PRIOR fix's "resolution is skipped on the omitted
+        path" behavior this test used to assert): resolution now runs
+        UNCONDITIONALLY, omitted or explicit -- there is no longer a
+        skip-resolution branch at all. The identity_provider injection
+        point (a synthetic attested identity here, never real env/config/
+        file I/O) is always called exactly once."""
         calls = {"count": 0}
 
         def counting_identity_provider():
             calls["count"] += 1
-            return Identity(subject="whatever", source="configured")
+            return Identity(subject="synthetic-whoever", source="configured")
 
         rc = git_host_api.main(
             ["/api/v1/repos/some-owner/some-repo/pulls/1.diff"],
@@ -253,7 +254,35 @@ class TestOmittedCallerUnchanged:
             identity_provider=counting_identity_provider,
         )
         assert rc == git_host_api.EXIT_OK
-        assert calls["count"] == 0
+        assert calls["count"] == 1
+
+    def test_omitted_caller_with_no_attested_identity_refuses(self):
+        """No sidecar, no configured provider (a synthetic
+        BoundAttestationError-raising identity_provider standing in for
+        `resolve_bound_identity`'s own "no attested identity" refusal) --
+        the omitted-caller path now REFUSES, never silently proceeding as
+        DEFAULT_ROLE with no attestation behind it. This is the exact
+        vanilla-root-shell-with-no-sidecar acceptance case from the
+        operator ruling (lr-620837 comment #5)."""
+        from clagentic_loadout.transport.attestation import BoundAttestationError
+
+        def refusing_identity_provider():
+            raise BoundAttestationError(
+                "attestation FAILED -- no attested identity (synthetic, test-injected).",
+                expected_source="sidecar-session",
+            )
+
+        tokens = _RecordingTokenProvider()
+        rc = git_host_api.main(
+            ["/api/v1/repos/some-owner/some-repo/pulls/1.diff"],
+            token_provider=tokens,
+            opener=_forgejo_get_opener(),
+            identity_provider=refusing_identity_provider,
+        )
+        assert rc == git_host_api.EXIT_CALLER_INVOKER_MISMATCH
+        # No token is ever minted for an unattested process, omitted
+        # --caller or not.
+        assert tokens.calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -314,12 +343,36 @@ class TestBindCallerUnit:
             )
         assert exc_info.value.code == git_host_api.EXIT_CALLER_INVOKER_MISMATCH
 
-    def test_omitted_caller_never_raises_regardless_of_identity(self):
+    def test_caller_explicit_no_longer_changes_comparison_behavior(self):
+        """SUPERSEDES the pre-fix "caller_explicit=False short-circuits
+        unconditionally" contract (lr-620837 operator ruling): bind_caller
+        no longer branches on caller_explicit at all -- it always compares
+        caller to identity.subject. `caller_explicit=False` with a
+        mismatched caller/identity pair (a shape no real call site produces
+        anymore, since every call site now derives `caller` from
+        `identity.subject` on the omitted path -- see transport.
+        caller_binding.resolve_for_binding's own docstring) still raises,
+        proving there is no remaining special case for the flag value
+        itself."""
+        with pytest.raises(git_host_api.GitHostApiError) as exc_info:
+            git_host_api.bind_caller(
+                "release-dispatcher",
+                caller_explicit=False,
+                identity=Identity("totally-different-identity", "builtin"),
+            )
+        assert exc_info.value.code == git_host_api.EXIT_CALLER_INVOKER_MISMATCH
+
+    def test_omitted_caller_derived_from_identity_subject_no_raise(self):
+        """The REAL omitted-caller shape every call site now produces:
+        caller == identity.subject BY CONSTRUCTION (the call site derives
+        it that way), so this never raises -- matching TestOmittedCaller
+        BoundToIdentity's CLI-level proof in
+        test_git_host_api_caller_attested_invoker_binding.py."""
         git_host_api.bind_caller(
-            "release-dispatcher",
-            caller_explicit=False,
-            identity=Identity("totally-different-identity", "builtin"),
-        )  # no raise -- caller_explicit=False short-circuits unconditionally
+            "resolved-attested-subject",
+            caller_explicit=True,
+            identity=Identity("resolved-attested-subject", "sidecar-session"),
+        )  # no raise -- caller equals identity.subject by construction
 
 
 if __name__ == "__main__":
