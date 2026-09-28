@@ -168,6 +168,7 @@ from clagentic_loadout.transport.body_env import (
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
     bind_caller,
+    describe_omitted_caller_behavior as _describe_omitted_caller,
     resolve_for_binding as _resolve_for_binding,
 )
 from clagentic_loadout.transport.credential_provider import (
@@ -486,12 +487,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"module docstring). It must match this process's own already "
         f"attested invoking identity (transport.attestation."
         f"resolve_bound_identity) or the call is refused fail-closed before "
-        f"any I/O (transport.caller_binding.bind_caller). OMITTED behaves "
-        f"as an IMPLICIT claim "
-        f"of 'act as my own attested identity': the effective caller "
-        f"becomes the resolved identity's own subject, never "
-        f"{DEFAULT_ROLE!r} by itself -- a process with no attested identity "
-        f"at all is refused the same way an explicit mismatch is.",
+        f"any I/O (transport.caller_binding.bind_caller). "
+        f"{_describe_omitted_caller()}",
     )
     parser.add_argument(
         "--platform",

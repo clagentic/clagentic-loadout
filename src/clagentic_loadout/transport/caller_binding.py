@@ -176,6 +176,39 @@ from clagentic_loadout.transport.attestation import (
 from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
 
 
+def describe_omitted_caller_behavior(*, flag_name: str = "--caller") -> str:
+    """Return the ONE accurate, policy-complete description of what an
+    OMITTED *flag_name* does, shared verbatim by every caller-bound verb's
+    argparse `help=` text (lr-620837 fold-in #5): before this function
+    existed, all seven caller-bound verbs (`push`,
+    `review`, `acquire`, `merge`, `merge close`, `merge post-merge`,
+    `transport.git_host_api`) duplicated an inline help string asserting an
+    omitted caller is "never DEFAULT_ROLE by itself" -- true only under
+    `attestation.bound_identity: required`, and FALSE under this package's
+    own DEFAULT policy, `builtin-fallback`, where an omitted caller becomes
+    exactly `DEFAULT_ROLE` with no attestation check at all (see this
+    module's own docstring, "OMITTED --caller/--role IS POLICY-GATED", and
+    `resolve_for_binding`'s docstring for the full policy-gated rule this
+    text summarizes).
+
+    *flag_name* lets a `--role`-named verb (the three merge verbs) get
+    grammatically correct text ("an omitted --role") without a second
+    hand-maintained copy of the surrounding sentence.
+    """
+    return (
+        f"OMITTED is policy-gated on this deployment's "
+        f"attestation.bound_identity setting: under the default "
+        f"'builtin-fallback' policy, an omitted {flag_name} resolves to "
+        f"{DEFAULT_ROLE!r} with no attestation check and no possible "
+        f"refusal (this package's originally-released behavior); under "
+        f"'required', an omitted {flag_name} is an IMPLICIT claim of 'act "
+        f"as my own attested identity' -- it must resolve to that "
+        f"identity's own subject via the same attested-identity resolver "
+        f"the explicit path uses, and a process with no attested identity "
+        f"at all is refused the same way an explicit mismatch always is."
+    )
+
+
 class CallerBindingError(Exception):
     """Raised when an EXPLICIT --caller/--role value does not match the
     ATTESTED invoking identity this process's own attestation-provider chain
@@ -349,5 +382,6 @@ def resolve_for_binding(
 __all__ = [
     "CallerBindingError",
     "bind_caller",
+    "describe_omitted_caller_behavior",
     "resolve_for_binding",
 ]

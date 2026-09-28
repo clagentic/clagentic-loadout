@@ -61,7 +61,10 @@ from typing import Callable
 import pytest
 
 from clagentic_loadout.transport import attestation
-from clagentic_loadout.transport.caller_binding import CallerBindingError
+from clagentic_loadout.transport.caller_binding import (
+    CallerBindingError,
+    describe_omitted_caller_behavior,
+)
 
 _PYPROJECT_PATH = Path(__file__).resolve().parent.parent / "pyproject.toml"
 
@@ -283,6 +286,92 @@ def _caller_role_flag(parser) -> str | None:
     if _declares_flag(parser, "--role"):
         return "--role"
     return None
+
+
+class TestCallerRoleHelpTextIsShared:
+    """lr-620837 fold-in #5 (PEACHES 5880599415): every caller-bound verb's
+    --caller/--role argparse help= text must describe the OMITTED behavior
+    via transport.caller_binding.describe_omitted_caller_behavior -- the ONE
+    accurate, policy-complete description -- rather than a hand-duplicated
+    inline string. Before this fix, all seven verbs independently asserted
+    an omitted flag is "never DEFAULT_ROLE by itself", which is FALSE under
+    this package's own default attestation.bound_identity policy
+    (builtin-fallback): see describe_omitted_caller_behavior's own
+    docstring. Enumeration reuses TestEveryScriptsCallerRoleVerbIsEnumerated's
+    mechanical discovery (pyproject.toml's [project.scripts] + argparse
+    introspection), never a hand-maintained "these verbs have --caller"
+    list -- a future verb that adds --caller/--role and forgets to reuse the
+    shared help text is caught here automatically.
+    """
+
+    @pytest.fixture(scope="class")
+    def caller_role_verbs(self) -> list[tuple[str, str, str]]:
+        """The SAME seven caller-bound verbs
+        TestBoundVerbsRefuseMismatchedIdentity exercises -- excludes
+        loadout-stage-body (declares --caller, but as a pure namespacing key
+        for a staged file, never a transport.caller_binding.bind_caller
+        attestation check; see _NO_MINT_NO_AUTHORITY_ENTRY_POINTS's own
+        comment) and any other non-credential entry point."""
+        result = []
+        for script_name, module_path in _load_verb_entry_points():
+            if script_name in _NON_CREDENTIAL_ENTRY_POINTS:
+                continue
+            if script_name in _NO_MINT_NO_AUTHORITY_ENTRY_POINTS:
+                continue
+            parser = _build_arg_parser_for(module_path)
+            flag = _caller_role_flag(parser)
+            if flag is not None:
+                result.append((script_name, module_path, flag))
+        return result
+
+    def test_at_least_the_seven_known_verbs_are_covered(self, caller_role_verbs):
+        """Sanity floor mirroring TestEveryScriptsCallerRoleVerbIsEnumerated's
+        own floor check -- proves the enumeration is not vacuous."""
+        covered = {script_name for script_name, _module_path, _flag in caller_role_verbs}
+        expected_floor = {
+            "loadout-push",
+            "loadout-review-post",
+            "loadout-acquire",
+            "loadout-merge",
+            "loadout-close-pr",
+            "loadout-post-merge",
+            "loadout-git-host-api",
+        }
+        missing = expected_floor - covered
+        assert not missing, (
+            f"mechanical --caller/--role scan did not find: {sorted(missing)} "
+            f"-- either the scan is broken, or one of these verbs stopped "
+            f"declaring the flag it is expected to still declare."
+        )
+
+    def test_every_caller_role_help_text_carries_the_shared_omitted_description(
+        self, caller_role_verbs
+    ):
+        for script_name, module_path, flag in caller_role_verbs:
+            parser = _build_arg_parser_for(module_path)
+            [action] = [a for a in parser._actions if flag in a.option_strings]
+            expected = describe_omitted_caller_behavior(flag_name=flag)
+            assert expected in action.help, (
+                f"{script_name} ({module_path})'s {flag!r} help text does not "
+                f"contain the shared, policy-complete "
+                f"describe_omitted_caller_behavior({flag!r}) text -- got: "
+                f"{action.help!r}. Every caller-bound verb must reuse this "
+                f"shared description rather than a hand-duplicated inline "
+                f"string (lr-620837 fold-in #5)."
+            )
+
+    def test_shared_help_text_never_claims_omitted_is_never_default_role(self):
+        """Regression guard for the exact stale claim this fold-in removes:
+        the shared text must never assert an omitted flag is unconditionally
+        refused/never-DEFAULT_ROLE -- that was only ever true under the
+        non-default 'required' policy."""
+        text = describe_omitted_caller_behavior()
+        assert "never" not in text or "no possible" in text, (
+            f"describe_omitted_caller_behavior's text appears to have "
+            f"regressed toward the stale unconditional claim: {text!r}"
+        )
+        assert "builtin-fallback" in text
+        assert "required" in text
 
 
 class _RefusingTokenProvider:

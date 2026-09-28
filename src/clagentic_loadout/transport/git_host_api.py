@@ -77,14 +77,18 @@ the mismatched role. This is layer (1)->(2) of the three-layer trust model
 credential_provider.resolve_token and merge.authority.check_authority
 remain layer (2)->(3), consuming --caller/--role as the pre-existing,
 already-attested opaque value they have always treated it as (lr-e5eeab) —
-this task does not change either of those seams. An OMITTED --caller is
-ALSO bound to the attested identity (BEHAVIOR CHANGE, closing a pre-merge
-review finding on an earlier revision of this fix): the effective caller
-becomes the resolved identity's own subject, never DEFAULT_ROLE by itself —
-see transport.caller_binding's own module docstring for the full rule and
-migration note. A process with no attested identity at all is refused on an
-omitted --caller too, exactly as an explicit mismatch always was, contingent
-on the effective `attestation.bound_identity` policy.
+this task does not change either of those seams. Whether an OMITTED
+--caller is ALSO bound to the attested identity is POLICY-GATED on the
+effective `attestation.bound_identity` setting (see
+transport.caller_binding's own module docstring, "OMITTED --caller/--role
+IS POLICY-GATED", for the full rule and migration note): under the default
+`builtin-fallback` policy, an omitted --caller resolves to DEFAULT_ROLE with
+no attestation check and no possible refusal (this package's
+originally-released behavior); under `required`, an omitted --caller is an
+IMPLICIT claim of "act as my own attested identity" — the effective caller
+becomes the resolved identity's own subject, and a process with no attested
+identity at all is refused there exactly as an explicit mismatch always
+was.
 
 Repo context (lr-ea28, GitHub-URL extraction added lr-5f7971): a repo-scoped
 minting provider (e.g. a GitHub-App-style installation-token mint) needs to
@@ -1426,11 +1430,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"An already attested value, consumed as an opaque config key -- it "
         f"must match this process's own attested invoking identity "
         f"(transport.attestation.resolve_bound_identity) or the call is "
-        f"refused fail-closed before any I/O. OMITTED behaves as an "
-        f"IMPLICIT claim of 'act as my own attested identity': the "
-        f"effective caller becomes the resolved identity's own subject, "
-        f"never {DEFAULT_ROLE!r} by itself -- a process with no attested "
-        f"identity at all is refused the same way an explicit mismatch is.",
+        f"refused fail-closed before any I/O. "
+        f"{_caller_binding.describe_omitted_caller_behavior()}",
     )
     parser.add_argument(
         "--body-stdin",
