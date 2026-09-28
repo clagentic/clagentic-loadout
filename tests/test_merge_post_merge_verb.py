@@ -390,3 +390,81 @@ class TestPostMergeRerunAgainstAlreadyMergedPr:
         )
         assert code == post_merge_verb.EXIT_OK
         assert marker.read_text() == "ok"
+
+
+class TestLandsOnBaseBranchAfterRerun:
+    """lr-cd3644: before this fix, this verb's step 5
+    (advance_repo_to_merged_sha) ALWAYS performed a real, detached checkout,
+    but nothing ever moved --repo-path off that detached HEAD afterward --
+    every standalone `loadout-post-merge` invocation left the tree
+    PERMANENTLY DETACHED, regardless of whether any post_merge_steps ran.
+    This is the direct regression proof: after a successful re-run (with
+    steps configured, AND with none configured), --repo-path must end up ON
+    base_branch, not detached, pointed at the merged SHA."""
+
+    def _current_branch(self, repo_dir):
+        return subprocess.run(
+            ["git", "symbolic-ref", "--short", "HEAD"],
+            capture_output=True, text=True, cwd=str(repo_dir),
+        )
+
+    def test_lands_on_base_branch_when_steps_ran(self, tmp_path):
+        merged_sha = _init_repo_with_origin(tmp_path)
+        marker = tmp_path / "redeployed.txt"
+        _write_merge_config(
+            tmp_path,
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
+        )
+        argv = _base_args(str(tmp_path))
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_OK
+        branch = self._current_branch(tmp_path)
+        assert branch.returncode == 0
+        assert branch.stdout.strip() == _BASE_BRANCH
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        )
+        assert rev_parse.stdout.strip() == merged_sha
+
+    def test_lands_on_base_branch_even_with_no_configured_steps(self, tmp_path):
+        # No post_merge_steps configured at all -- step 5's checkout still
+        # happens unconditionally on this verb (unlike merge.verb's own
+        # fetch-only branch), so the land step must still run afterward.
+        merged_sha = _init_repo_with_origin(tmp_path)
+        argv = _base_args(str(tmp_path))
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_OK
+        branch = self._current_branch(tmp_path)
+        assert branch.returncode == 0
+        assert branch.stdout.strip() == _BASE_BRANCH
+        rev_parse = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+        )
+        assert rev_parse.stdout.strip() == merged_sha
+
+    def test_land_failure_surfaces_exit_post_merge_failed(self, tmp_path, monkeypatch):
+        _init_repo_with_origin(tmp_path)
+        argv = _base_args(str(tmp_path))
+
+        def _boom(*a, **kw):
+            from clagentic_loadout.merge.tree_sync import TreeSyncError
+            raise TreeSyncError("simulated land failure")
+
+        monkeypatch.setattr(post_merge_verb, "land_on_base_branch", _boom)
+        code = post_merge_verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_POST_MERGE_FAILED
