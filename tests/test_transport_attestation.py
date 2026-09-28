@@ -719,21 +719,27 @@ class TestAttestedInvokingIdentityParityWithCrewPush:
         # (distinct from EXIT_TOKEN_FETCH_FAILED / EXIT_CONFIG_ERROR) gives.
         assert exc_info.value.code == git_host_api.EXIT_CALLER_INVOKER_MISMATCH
 
-    def test_omitted_caller_is_never_checked_against_attested_identity(self):
-        """Mirrors crew_push.py's own contract: resolve_attested_identity()
-        is consulted for a mismatch check ONLY when --agent was explicitly
-        passed (see crew_push.py's `if args.agent is None: ... else:
-        _attested_identity = resolve_attested_identity() ...` branching --
-        the omitted-flag branch never calls the mismatch-check function at
-        all). loadout's bind_caller mirrors this exactly via
-        caller_explicit=False: even a wildly different attested identity
-        must never raise when the caller value was defaulted, not claimed."""
+    def test_omitted_caller_is_now_bound_to_attested_identity(self):
+        """SUPERSEDES the pre-lr-620837 "omitted --caller is never checked"
+        contract this test used to assert (crew_push.py's own --agent
+        parity is no longer the governing model here -- see the operator
+        ruling on lr-620837 comment #5, transport.caller_binding's own
+        module docstring). Every call site now derives its EFFECTIVE caller
+        from the resolved identity's own subject on the omitted path
+        (never a free-typed value that could mismatch), so `bind_caller`
+        with `caller_explicit=False` and a caller that genuinely does NOT
+        equal `identity.subject` (a shape no real call site produces
+        anymore) still raises -- there is no remaining short-circuit on
+        `caller_explicit` at all. See
+        tests/test_git_host_api_caller_attested_invoker_binding.py::
+        TestOmittedCallerBoundToIdentity for the CLI-level, end-to-end
+        proof of the real (never-mismatching-by-construction) shape."""
         from clagentic_loadout.transport import git_host_api
 
         identity = attestation.Identity("some-other-identity", attestation.SOURCE_BUILTIN)
-        # No exception -- caller_explicit=False short-circuits before the
-        # comparison is even made.
-        git_host_api.bind_caller("builder", caller_explicit=False, identity=identity)
+        with pytest.raises(git_host_api.GitHostApiError) as exc_info:
+            git_host_api.bind_caller("builder", caller_explicit=False, identity=identity)
+        assert exc_info.value.code == git_host_api.EXIT_CALLER_INVOKER_MISMATCH
 
     def test_resolve_identity_never_returns_a_credential_only_a_subject_string(self):
         """Class E parity (lr-8e77, named explicitly in crew's own

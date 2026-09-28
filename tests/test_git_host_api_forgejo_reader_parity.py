@@ -35,19 +35,24 @@ and cross-checked against loadout's implementation:
      to the attested invoking identity (resolve_attested_identity(), a
      4-path chain topped by a per-spawn sidecar file and falling back to
      an ambient env var) -- a mismatch REFUSES fail-closed, BEFORE any
-     self-fetch or network I/O (EXIT_CALLER_MISMATCH=11); an unattested
-     invocation (chain resolves nothing) is not a mismatch and proceeds.
-     loadout's transport.git_host_api.bind_caller enforces the identical
-     shape against transport.attestation.resolve_identity's own 3-layer
-     chain (configured env -> sidecar file -> built-in OS-user fallback).
-     This EXACT property (explicit mismatch fails closed before I/O,
-     omitted caller never checked) is ALREADY fully proven by
+     self-fetch or network I/O (EXIT_CALLER_MISMATCH=11). loadout's
+     transport.git_host_api.bind_caller enforces the identical shape
+     against transport.attestation.resolve_bound_identity's own chain
+     (configured env -> exactly one discriminator-selected sidecar source,
+     NEVER a built-in OS-user fallback for a caller-bound verb). An
+     OMITTED --caller is ALSO bound now (BEHAVIOR CHANGE, operator ruling
+     lr-620837 comment #5, superseding this section's earlier "omitted
+     caller never checked" framing): the effective caller becomes the
+     resolved identity's own subject, and an unattested invocation
+     refuses rather than proceeding as DEFAULT_ROLE. This EXACT property
+     (explicit mismatch fails closed before I/O, omitted caller now bound
+     too) is ALREADY fully proven by
      tests/test_git_host_api_caller_attested_invoker_binding.py -- this
      file does not re-prove it, it CITES it as the reader-parity evidence
      (see docs/reader-parity.md) and adds only the one property that file
-     does not cover: that bind_caller/resolve_identity are reached on an
-     ordinary READ (GET), not only on the write/comment-post paths that
-     file's own fixtures happen to exercise most heavily.
+     does not cover: that bind_caller/resolve_bound_identity are reached
+     on an ordinary READ (GET), not only on the write/comment-post paths
+     that file's own fixtures happen to exercise most heavily.
 
   3. GET SEMANTICS: both tools issue an authenticated GET with the token in
      an Authorization header (never in the URL/query string), and BOTH
@@ -96,7 +101,7 @@ from pathlib import Path
 
 import pytest
 
-from clagentic_loadout.transport import git_host_api
+from clagentic_loadout.transport import attestation, git_host_api
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.attestation import Identity
 from clagentic_loadout.transport.credential_provider import CommandTokenProvider
@@ -106,9 +111,15 @@ from clagentic_loadout.transport.credential_provider import CommandTokenProvider
 def _isolate_user_config_root(tmp_path, monkeypatch):
     """Same isolation rationale as test_transport_git_host_api.py's own
     autouse fixture (lr-396f) -- a real ~/.config/clagentic/loadout/
-    config.yaml on this host must never leak into a parity assertion."""
+    config.yaml on this host must never leak into a parity assertion.
+    Patches BOTH `provider_config`'s copy of the name AND `attestation`'s
+    own independently-bound copy (lr-620837 fold-in #4: an omitted
+    --caller now reads `attestation.bound_identity` policy via
+    `resolve_bound_identity_policy`, which resolves against `attestation.
+    DEFAULT_USER_CONFIG_ROOT`, not `provider_config`'s)."""
     isolated_root = tmp_path / "isolated-user-config-root"
     monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
+    monkeypatch.setattr(attestation, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
 
 
 class _FakeResponse:
@@ -322,15 +333,19 @@ class TestForgejoReaderCallerAttestationBindingOnGet:
         assert rc == git_host_api.EXIT_CALLER_INVOKER_MISMATCH
         assert opener_called["n"] is False
 
-    def test_omitted_caller_on_get_unaffected_by_attestation(self, tmp_path):
-        """forgejo-curl: an unattested/omitted --caller is not a mismatch
-        and proceeds using the resolved ambient default. loadout: an
-        omitted --caller on an ordinary GET proceeds to DEFAULT_ROLE
-        regardless of what the attested identity resolves to -- the same
-        "nothing to bind" contract test_git_host_api_caller_attested_
-        invoker_binding.py::TestOmittedCallerUnchanged already proves at
-        the fixture level; this asserts it survives end-to-end through the
-        real self-fetch command seam."""
+    def test_omitted_caller_on_get_proceeds_as_default_role_under_default_policy(self, tmp_path):
+        """lr-620837 fold-in #4 (F6, correcting fold-in #2's own first
+        revision): under the DEFAULT `attestation.bound_identity:
+        builtin-fallback` policy (no config written for this test), an
+        omitted --caller on an ordinary GET behaves exactly as this
+        package originally released it -- the effective caller is
+        DEFAULT_ROLE, and identity resolution is never attempted (the
+        injected identity_provider is not consulted). See
+        tests/test_git_host_api_caller_attested_invoker_binding.py::
+        TestOmittedCallerUnderDefaultBuiltinFallbackPolicy for the
+        fixture-level proof this end-to-end test mirrors."""
+        from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
+
         argv = _write_fake_self_fetch_script(tmp_path, behavior="success")
         provider = CommandTokenProvider(argv)
 
@@ -340,8 +355,6 @@ class TestForgejoReaderCallerAttestationBindingOnGet:
             captured["headers"] = dict(req.header_items())
             return _FakeResponse(200, b"{}")
 
-        from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
-
         rc = git_host_api.main(
             ["/api/v1/repos/o/r/pulls/1.diff"],
             token_provider=provider,
@@ -350,6 +363,47 @@ class TestForgejoReaderCallerAttestationBindingOnGet:
         )
         assert rc == git_host_api.EXIT_OK
         assert captured["headers"]["Authorization"] == f"token tok-for-{DEFAULT_ROLE}"
+
+    def test_omitted_caller_on_get_proceeds_as_the_attested_identity_under_required_policy(
+        self, tmp_path, monkeypatch
+    ):
+        """The `required`-policy half of the SAME lr-620837 fold-in #4
+        (F6) contract: a deployment that has opted into `attestation.
+        bound_identity: required` gets fold-in #2's original fail-closed
+        omitted-caller behavior on an ordinary GET too -- it resolves
+        identity via the SAME chain an explicit --caller would, and the
+        EFFECTIVE caller becomes that identity's own subject, proceeding
+        to mint a token for THAT subject, never DEFAULT_ROLE by itself.
+        This asserts the contract survives end-to-end through the real
+        self-fetch command seam. See tests/
+        test_git_host_api_caller_attested_invoker_binding.py::
+        TestOmittedCallerUnderRequiredPolicy for the fixture-level proof
+        this end-to-end test mirrors."""
+        isolated_root = tmp_path / "isolated-user-config-root"
+        isolated_root.mkdir(exist_ok=True)
+        (isolated_root / "config.yaml").write_text(
+            "attestation:\n  bound_identity: required\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
+        monkeypatch.setattr(attestation, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
+
+        argv = _write_fake_self_fetch_script(tmp_path, behavior="success")
+        provider = CommandTokenProvider(argv)
+
+        captured = {}
+
+        def fake_opener(req, timeout=15):
+            captured["headers"] = dict(req.header_items())
+            return _FakeResponse(200, b"{}")
+
+        rc = git_host_api.main(
+            ["/api/v1/repos/o/r/pulls/1.diff"],
+            token_provider=provider,
+            opener=fake_opener,
+            identity_provider=lambda: Identity("someone-else-entirely", "configured"),
+        )
+        assert rc == git_host_api.EXIT_OK
+        assert captured["headers"]["Authorization"] == "token tok-for-someone-else-entirely"
 
 
 # ---------------------------------------------------------------------------

@@ -666,9 +666,27 @@ def test_product_code_patterns_do_not_include_task_id_pattern() -> None:
 #: reuse-not-duplicate design note above: a bare `lr-NNNNNN` in a raised
 #: string or a --help line is exactly the same class of leak as one in a
 #: public-facing doc.
+#: "operator ruling"/"operator-ruled"/"operator decision" is internal-
+#: process framing (this deployment's own approval workflow), never
+#: something an external CLI user reading a raised message, --help string,
+#: or print() line has any way to resolve or act on — the SAME class of
+#: leak PRODUCT_CODE_PATTERNS's other entries guard against, but this one
+#: is deliberately AST-guard-only (not PRODUCT_CODE_PATTERNS itself): a
+#: docstring is explicitly allowed to keep this kind of process provenance
+#: (CLAUDE.md rule 8's docstring exemption), so adding it to the line-based
+#: PRODUCT_CODE_PATTERNS would fail on every legitimate docstring mention
+#: across this package rather than the narrower "does a USER actually read
+#: this string" question the AST guard already answers precisely.
+_OPERATOR_RULING_PATTERN: dict[str, re.Pattern[str]] = {
+    "internal process framing (operator ruling)": re.compile(
+        r"operator[\s-]?ruling|operator[\s-]?decision", re.IGNORECASE
+    ),
+}
+
 USER_FACING_AST_PATTERNS: dict[str, re.Pattern[str]] = {
     **PRODUCT_CODE_PATTERNS,
     "internal task id (lr-NNNNNN)": PUBLIC_FACING_EXTRA_PATTERNS["internal task id (lr-NNNNNN)"],
+    **_OPERATOR_RULING_PATTERN,
 }
 
 
@@ -794,6 +812,27 @@ def test_user_facing_ast_guard_catches_print_and_argparse_help(tmp_path: Path) -
         f"expected the print(), ArgumentParser(description=...), and "
         f"add_argument(help=...) strings all to be caught, got: {violations}"
     )
+
+
+def test_user_facing_ast_guard_catches_operator_ruling_in_raised_message(
+    tmp_path: Path,
+) -> None:
+    """Regression test: "operator ruling"/"operator decision" is internal-
+    process framing that must never leak into a string a CLI user reads
+    (raised message, print(), argparse help) -- the SAME class of leak as a
+    bare task id, but a phrase rather than an identifier pattern. A
+    docstring mentioning the same phrase two lines above stays exempt,
+    mirroring the task-id docstring/user-facing split above."""
+    bad_file = tmp_path / "synthetic_operator_ruling_bad.py"
+    bad_file.write_text(
+        '"""Module docstring citing an operator ruling -- exempt, never '
+        'checked here."""\n'
+        "def f():\n"
+        '    raise ValueError("refused per an operator ruling")\n'
+    )
+    violations = _check_user_facing_ast(bad_file)
+    assert violations, "expected the raised operator-ruling phrase to be flagged"
+    assert not any("docstring" in v for v in violations)
 
 
 def test_user_facing_ast_guard_ignores_docstrings(tmp_path: Path) -> None:

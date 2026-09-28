@@ -156,7 +156,7 @@ from clagentic_loadout.review.github_backend import (
 )
 from clagentic_loadout.transport.attestation import (
     AttestationError,
-    resolve_identity as _resolve_identity,
+    resolve_bound_identity as _resolve_identity,
 )
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
@@ -165,7 +165,12 @@ from clagentic_loadout.transport.body_env import (
     read_body_bytes,
     resolve_caller_body_path,
 )
-from clagentic_loadout.transport.caller_binding import CallerBindingError, bind_caller
+from clagentic_loadout.transport.caller_binding import (
+    CallerBindingError,
+    bind_caller,
+    describe_omitted_caller_behavior as _describe_omitted_caller,
+    resolve_for_binding as _resolve_for_binding,
+)
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -249,8 +254,12 @@ EXIT_DELETE_OWN_COMMENT_REFUSED = 11
 #: binding transport.git_host_api's EXIT_CALLER_INVOKER_MISMATCH already
 #: enforced; this verb now enforces it too). FAILS CLOSED BEFORE ANY I/O --
 #: no token mint, no post, no verify readback is ever attempted. An OMITTED
-#: --caller never triggers this (see bind_caller's own docstring) -- it is
-#: unchanged, existing behavior.
+#: --caller is ALSO bound to the attested identity now (lr-620837 operator
+#: ruling): this code also fires when NO attested identity can be resolved
+#: at all for an omitted --caller (transport.attestation.AttestationError /
+#: BoundAttestationError propagating through resolve_for_binding), not only
+#: on an explicit mismatch -- see transport.caller_binding's own module
+#: docstring for the full behavior change.
 EXIT_CALLER_INVOKER_MISMATCH = 12
 
 
@@ -471,16 +480,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--caller",
         default=None,
-        help=f"Role/name whose token is resolved via the credential provider "
-        f"(default: {DEFAULT_ROLE!r}). A role/caller, never a hardcoded "
-        f"agent name. Already-attested, opaque config key downstream (the "
-        f"credential provider never re-authenticates it itself -- see "
-        f"transport.credential_provider's module docstring). When "
-        f"EXPLICITLY supplied, it must ALSO match this process's own "
-        f"already attested invoking identity (transport.attestation."
-        f"resolve_identity) or the call is refused fail-closed before any "
-        f"I/O (transport.caller_binding.bind_caller); omitted, this check "
-        f"does not apply.",
+        help=f"Role/name whose token is resolved via the credential provider. "
+        f"A role/caller, never a hardcoded agent name. Already-attested, "
+        f"opaque config key downstream (the credential provider never "
+        f"re-authenticates it itself -- see transport.credential_provider's "
+        f"module docstring). It must match this process's own already "
+        f"attested invoking identity (transport.attestation."
+        f"resolve_bound_identity) or the call is refused fail-closed before "
+        f"any I/O (transport.caller_binding.bind_caller). "
+        f"{_describe_omitted_caller()}",
     )
     parser.add_argument(
         "--platform",
@@ -620,10 +628,22 @@ def main(
 
     `identity_provider` (lr-c75c9a): a zero-arg callable returning a
     `transport.attestation.Identity` (defaults to
-    `transport.attestation.resolve_identity`) -- the injection point for the
-    fail-closed --caller/attested-invoker binding (transport.caller_binding.
-    bind_caller), mirroring the identical parameter transport.git_host_api.main
-    already carries for the same purpose.
+    `transport.attestation.resolve_bound_identity`, the caller-BOUND
+    resolver -- see that function's own docstring for the discriminator and
+    the `attestation.bound_identity` policy governing whether an
+    undiscriminated miss falls through to the built-in OS-user layer) --
+    the injection point for the fail-closed --caller/attested-invoker
+    binding (transport.caller_binding.bind_caller), mirroring the identical
+    parameter transport.git_host_api.main already carries for the same
+    purpose. Called on the omitted-caller path CONTINGENT on the effective
+    `attestation.bound_identity` policy (lr-620837 fold-in #4): under
+    `required`, `transport.caller_binding.resolve_for_binding` calls this
+    resolver even on an omitted --caller, deriving the effective caller
+    from the resolved identity's own subject, so a process with no
+    attested identity at all can refuse here too; under `builtin-fallback`
+    (the default), an omitted --caller never reaches this resolver at all
+    and derives `DEFAULT_ROLE` directly -- see that function's own
+    docstring for the full policy-gated rule.
     """
     if argv is None:
         argv = sys.argv[1:]
@@ -656,6 +676,7 @@ def _run_delete_own_comment(
     *,
     owner: str,
     repo: str,
+    caller: str,
     token_provider: TokenProvider | None,
     opener,
 ) -> int:
@@ -664,6 +685,12 @@ def _run_delete_own_comment(
     --platform, mirroring build_backend's own platform-guard-before-mint
     ordering. Not PR-scoped -- comment_id alone identifies the target, so
     this never touches pr_number, body ingestion, or the verdict routes.
+
+    `caller` (lr-620837 operator ruling) is the EFFECTIVE caller `_run`
+    already resolved and bound against the attested identity, BEFORE this
+    short-circuit ever runs -- passed through rather than re-derived here
+    via a second `args.caller or DEFAULT_ROLE`, which would have bypassed
+    the omitted-caller attestation requirement for this one dispatch path.
 
     COMMENT_ID digit-only constraint (lr-f43c4b security-review hardening
     finding, lr-26f774 finding class): validated BEFORE build_backend -- and
@@ -691,7 +718,7 @@ def _run_delete_own_comment(
             args.platform,
             owner=owner,
             repo=repo,
-            caller=args.caller or DEFAULT_ROLE,
+            caller=caller,
             git_host_base=_resolve_git_host_base(args.git_host_base_url),
             expected_pr_sha=None,
             token_provider=token_provider,
@@ -721,21 +748,33 @@ def _run(
     owner, repo = _parse_owner_repo(args.owner_repo)
 
     # --caller/attested-invoker fail-closed binding (lr-c75c9a, mirrors
-    # transport.git_host_api's identical check): checked BEFORE any I/O --
-    # before the --delete-own-comment short-circuit, before any body
-    # ingestion, before any token mint. An OMITTED --caller (args.caller is
-    # None) is never checked here -- see transport.caller_binding.bind_caller's
-    # own docstring for why (this preserves the pre-existing "omitted
-    # --caller behaves exactly as before" contract unchanged).
+    # transport.git_host_api's identical check; OMITTED-CALLER FIX,
+    # lr-620837 fold-in #4 -- see caller_binding.resolve_for_binding's own
+    # docstring, "OMITTED --caller/--role IS POLICY-GATED"): checked
+    # BEFORE any I/O -- before the --delete-own-comment short-circuit,
+    # before any body ingestion, before any token mint. Whether an omitted
+    # --caller requires attestation is now the effective
+    # attestation.bound_identity policy: under the default
+    # "builtin-fallback", an omitted --caller derives DEFAULT_ROLE with no
+    # resolution attempted and no refusal possible (this package's
+    # originally-released behavior); under "required", an omitted --caller
+    # derives the resolved attested identity's own subject, and a process
+    # with no attested identity at all is refused here exactly like an
+    # explicit mismatched --caller always was. `caller` is resolved ONCE
+    # here and reused for the rest of this function (body-env namespacing,
+    # token mint, verdict-fence `reviewer` field) -- no second
+    # `args.caller or DEFAULT_ROLE` re-derivation (reuse-first).
     resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
     try:
-        attested_identity = resolve_identity_fn()
+        attested_identity = _resolve_for_binding(
+            caller_explicit=args.caller is not None,
+            caller=args.caller or DEFAULT_ROLE,
+            resolve_identity_fn=resolve_identity_fn,
+        )
     except AttestationError as exc:
         _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
-    bind_caller(
-        args.caller or DEFAULT_ROLE, caller_explicit=args.caller is not None,
-        identity=attested_identity,
-    )
+    caller = args.caller if args.caller is not None else attested_identity.subject
+    bind_caller(caller, caller_explicit=True, identity=attested_identity)
 
     # --delete-own-comment (lr-f43c4b) short-circuits here, BEFORE pr_number
     # is parsed/required and BEFORE any body-ingestion/verdict-route
@@ -745,7 +784,8 @@ def _run(
     # --delete-own-comment short-circuit ordering).
     if args.delete_own_comment is not None:
         return _run_delete_own_comment(
-            args, owner=owner, repo=repo, token_provider=token_provider, opener=opener
+            args, owner=owner, repo=repo, caller=caller,
+            token_provider=token_provider, opener=opener,
         )
 
     try:
@@ -851,17 +891,32 @@ def _run(
     # identically for --body-stdin (no staged file exists in that mode at
     # all -- TestBodyStdinIsSoleBodyPath's own "no mint before a content-
     # validation failure" contract is the sibling of this same principle).
-    body_env_caller = args.caller or DEFAULT_ROLE
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
     backend: ReviewBackend | None = None
-    _staged_body_path = resolve_caller_body_path(caller=body_env_caller)
+    # `caller` here may be an IDENTITY-DERIVED value (the attested subject,
+    # on an omitted --caller under `bound_identity: required` -- see the
+    # binding block above), not always a value already validated against
+    # _SAFE_CALLER_RE the way an explicit --caller argv value would be
+    # elsewhere in this package. resolve_caller_body_path's own
+    # _validate_caller_or_raise refuses a caller shape it cannot safely
+    # compose into a filesystem path (e.g. an '@' or other character an
+    # attested identity string might legitimately carry) by raising
+    # BodyEnvError -- lr-620837 fold-in #4 F5: that error was previously
+    # UNHANDLED here, an uncaught exception escaping this verb's main()
+    # entirely instead of a clean exit code and message. Caught the same
+    # shape transport.git_host_api uses for every other BodyEnvError this
+    # verb (and that one) raises.
+    try:
+        _staged_body_path = resolve_caller_body_path(caller=caller)
+    except BodyEnvError as exc:
+        _fail(str(exc), code=EXIT_BODY_ENV_UNREADABLE)
     if args.body_env and _staged_body_path.exists() and _staged_body_path.stat().st_size > 0:
         try:
             backend = build_backend(
                 args.platform,
                 owner=owner,
                 repo=repo,
-                caller=body_env_caller,
+                caller=caller,
                 git_host_base=git_host_base,
                 expected_pr_sha=args.pr_sha,
                 token_provider=token_provider,
@@ -875,13 +930,11 @@ def _run(
     # single shared fixed path -- two concurrent same-TMPDIR callers with
     # different --caller values can never collide on one physical file, and
     # a caller that never staged its own body fails closed rather than
-    # risking a foreign caller's staged content). --caller is resolved here,
-    # BEFORE the body-ingestion block, specifically so this namespacing can
-    # happen -- see the `caller = args.caller or DEFAULT_ROLE` assignment
-    # this used to do further down; it is now duplicated to this earlier
-    # point intentionally, not accidentally advanced. Its absence
-    # (--body-env not supplied) keeps the existing stdin-only behavior
-    # byte-for-byte.
+    # risking a foreign caller's staged content). `caller` was already
+    # resolved above, at the attested-invoker binding block, specifically so
+    # this namespacing can reuse it directly -- no second
+    # `args.caller or DEFAULT_ROLE` re-derivation. Its absence (--body-env
+    # not supplied) keeps the existing stdin-only behavior byte-for-byte.
     #
     # The read is bound to THIS invocation's own pr_number (already resolved
     # above, before any body ingestion) and, when supplied, its
@@ -892,7 +945,7 @@ def _run(
     if args.body_env:
         try:
             raw_bytes = read_body_bytes(
-                caller=body_env_caller,
+                caller=caller,
                 expect_target_pr=pr_number,
                 expect_head_sha=args.verdict_head_sha,
             )
@@ -932,8 +985,6 @@ def _run(
             body = validate_review_body_stdin_content(raw_bytes)
         except ReviewBodyStdinEmptyError as exc:
             _fail(_maybe_augment(str(exc), args), code=EXIT_BODY_STDIN_EMPTY)
-
-    caller = body_env_caller
 
     print(
         f"review-post: platform={args.platform!r} caller={caller!r} "
