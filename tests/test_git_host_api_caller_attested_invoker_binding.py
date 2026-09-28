@@ -225,13 +225,21 @@ class TestOmittedCallerUnchanged:
 
         assert tokens.calls == [DEFAULT_ROLE]
 
-    def test_omitted_caller_identity_provider_never_even_consulted_is_not_required(self):
-        """Documents the actual contract precisely: resolve_identity() IS
-        still called (bind_caller's own no-op-on-omitted-caller path runs
-        after resolution, not instead of it) -- what's asserted is that its
-        result is never COMPARED against anything on the omitted-caller
-        path, which the prior test already proves via a deliberately
-        non-matching identity still reaching EXIT_OK."""
+    def test_omitted_caller_identity_provider_never_consulted(self):
+        """Updated contract (operator ruling, comment #5 on the task this
+        fix implements): resolution is now SKIPPED entirely on the omitted-
+        caller path, not merely uncompared. Previously resolve_identity()
+        was still called unconditionally, its result simply never reaching
+        bind_caller's comparison (bind_caller's own no-op-on-omitted-caller
+        short-circuit ran AFTER resolution) -- harmless before because the
+        old chain always resolved SOMETHING via its built-in OS-user
+        fallback. The bound resolver this task introduces
+        (resolve_bound_identity) never falls through to that fallback, so
+        an unconditional resolve() would turn every omitted-caller
+        invocation on a host with no attestation source configured into a
+        hard failure for a comparison that was never going to happen
+        anyway -- resolution is now gated on args.caller is not None, the
+        same condition that already gated the comparison."""
         calls = {"count": 0}
 
         def counting_identity_provider():
@@ -245,7 +253,7 @@ class TestOmittedCallerUnchanged:
             identity_provider=counting_identity_provider,
         )
         assert rc == git_host_api.EXIT_OK
-        assert calls["count"] == 1
+        assert calls["count"] == 0
 
 
 # ---------------------------------------------------------------------------
