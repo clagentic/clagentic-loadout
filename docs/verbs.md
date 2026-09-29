@@ -151,9 +151,10 @@ invocation of the SAME caller silently re-reading a leftover staged body
 from a prior PR/review (a real foreign-body incident: a stale review body
 got re-POSTed onto an unrelated PR). The staged body is now
 consumed (unlinked) after a successful read, and bound to an identity
-stamp (`target_pr`, optional `head_sha`, `staged_at`) the read must match —
-`read_body_bytes(caller=...)` requires `expect_target_pr`; a mismatch or a
-second read with no re-staging fails closed (`BodyEnvError`,
+stamp (`target_pr`, optional `head_sha`, `staged_at`, `carries_review_status`
+— see "Verdict-intent check" under `loadout-review-post` below) the read
+must match — `read_body_bytes(caller=...)` requires `expect_target_pr`; a
+mismatch or a second read with no re-staging fails closed (`BodyEnvError`,
 `EXIT_BODY_ENV_UNREADABLE`) rather than ever silently posting stale
 content. See `transport.body_env`'s module docstring and
 `stage_caller_body` for the write-side contract.
@@ -315,6 +316,19 @@ Body content is validated with the same `validate_body_stdin_content` every
 other body-ingesting verb in this package uses, BEFORE anything is staged —
 malformed content is refused here, not later at `--body-env` read time.
 
+**Verdict-intent is derived automatically, never a separate flag to set:**
+this verb inspects the staged JSON body itself for a top-level
+`review_status` field (`"clean"` or `"blocking"`) and records that as the
+stamp's `carries_review_status` field — there is no `--intent`/`--verdict`
+flag to remember or get out of sync with the body's own content. A caller
+staging `{"body": "...", "review_status": "clean"}` is automatically bound
+to the verdict route; a caller staging `{"body": "..."}` alone is
+automatically bound to the plain route. `loadout-review-post`'s
+`--body-env` read compares this signal against whether the READING
+invocation actually requests `--verdict-review-status`/`--verdict-findings`
+— see "Verdict-intent check on `--body-env`" under `loadout-review-post`
+below for the fail-closed, non-consuming contract this enables.
+
 ### `loadout-review-post` — post-and-verify a review comment
 
 `clagentic_loadout.review.verb`. Posts exactly one review comment and
@@ -335,6 +349,28 @@ Outside the verdict
 route below, this verb does not touch the fenced ` ```review-result``` `
 block that the merge gate reads — see `review.contract`'s module
 docstring.
+
+**Verdict-intent check on `--body-env` (staged body vs. invocation route,
+fail-closed, non-consuming):** a body staged via `loadout-stage-body`
+carries a derived, platform-computed `carries_review_status` signal in its
+identity stamp — whether the staged JSON itself has a `review_status`
+field — recorded at STAGE time, never a second caller-typed assertion. On
+read, this verb compares that signal against whether THIS invocation
+actually supplies `--verdict-review-status`/`--verdict-findings`. A
+mismatch — most commonly, a body staged carrying `review_status` (intended
+as a verdict) reaching an invocation that omits both verdict flags — fails
+closed with `EXIT_VERDICT_ROUTE_INTENT_MISMATCH` (`13`) **before** any
+network call, and leaves BOTH the staged body and its stamp in place: the
+caller corrects the invocation (adds or drops the verdict flags) and
+retries without re-staging. This closes the repeated seam defect where a
+staged verdict body posted through the plain, non-verdict route succeeded
+silently with no fence and no warning — the failure only surfaced later, at
+the merge gate. A body staged with NO `review_status` field, read by a
+plain-route invocation (the ordinary, non-verdict case), matches cleanly
+and is completely unaffected — this check only fires on the actual
+intent/content mismatch, never on an ordinary plain comment. `--body-stdin`
+carries no staged, platform-computed provenance to check against and is
+unaffected by this check either way.
 
 **`--verdict-review-status <clean|blocking>` — MANDATORY, fail-closed
 emit-and-verify verdict route, Forgejo AND GitHub parity:**

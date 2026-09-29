@@ -968,6 +968,33 @@ same value it will later supply as `--verdict-head-sha`/`--pr-sha`. A
 caller whose read never supplies an expected SHA at all (an ordinary,
 non-verdict comment) is unaffected.
 
+**Verdict-intent stamp check (`loadout-review-post` only, non-breaking for
+a plain comment):** `loadout-stage-body` derives a `carries_review_status`
+signal from the staged JSON body ITSELF — whether it carries a top-level
+`review_status` field — and records it in the identity stamp alongside
+`target_pr`/`create_branch`/`head_sha`. There is no separate flag to set;
+this is read off the same content the caller is already staging, exactly
+like every other stamp field. `loadout-review-post`'s `--body-env` read
+compares that signal against whether the invocation actually supplies
+`--verdict-review-status`/`--verdict-findings`, BEFORE the body is read or
+either staged file is consumed. This closes a repeated seam defect: a body
+staged as a verdict (carrying `review_status`) but posted through an
+invocation that forgot the verdict flags previously succeeded silently as
+a plain, fenceless comment — no signal at stage time, no signal at post
+time, only a later, opaque merge-gate refusal. After this fix, that exact
+shape fails closed (`EXIT_VERDICT_ROUTE_INTENT_MISMATCH`) with a message
+naming what is missing, and — like every other stamp mismatch documented
+above — leaves the staged body and stamp in place so the caller can retry
+with a corrected invocation without re-staging. A plain comment staged with
+no `review_status`, read by a plain-route invocation (the ordinary,
+overwhelmingly common case), is completely unaffected: this check only
+fires on an actual content/intent disagreement, never as a blanket
+requirement that every comment be a verdict. `--body-stdin` carries no
+staged, platform-computed provenance and is unaffected by this check
+either way. See [docs/verbs.md](verbs.md)'s `loadout-review-post` section,
+"Verdict-intent check on `--body-env`", for the full exit-code and
+error-message contract.
+
 This is the fix for the exact gap that motivated this section's own
 existence: an agent's Bash permission allowlist commonly admits
 `body.<caller>.json` for a raw staging write but categorically denies
