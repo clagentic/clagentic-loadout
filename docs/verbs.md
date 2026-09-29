@@ -372,6 +372,40 @@ intent/content mismatch, never on an ordinary plain comment. `--body-stdin`
 carries no staged, platform-computed provenance to check against and is
 unaffected by this check either way.
 
+**Verdict-required-role check (`review.verdict_required_roles`, BOTH
+`--body-env` AND `--body-stdin`, fail-closed, non-consuming):** the
+verdict-intent check above only catches a MISMATCH between staged content
+and invocation intent — it cannot catch a genuinely prose-only body (no
+`review_status` field anywhere) posted with no verdict flags, because
+content and route agree ("plain") and the stamp comparison passes cleanly.
+A deployment closes that residual gap by declaring
+`review.verdict_required_roles` — a list of role/caller-name strings — in
+the **user-level** `<config_root>/config.yaml` (the same
+`load_user_config_section` loader/config-root convention
+`loadout-git-host-api`'s "Host restriction" mechanism (see
+integration.md's "Host restriction (git-host-api read verb)" section)
+already uses; absent or empty by default — fully non-breaking). When the EFFECTIVE caller
+(the attested, caller-bound identity, not a raw `--caller` argv string) is
+a member of that list, and the invocation supplies NEITHER
+`--verdict-review-status` NOR `--verdict-findings`, this refuses with
+`EXIT_VERDICT_ROUTE_INTENT_MISMATCH` (`13`, the SAME code the stamp check
+above uses — both mean "this would have posted a fenceless comment where a
+verdict was required/intended") **before** any `--body-env` staged file is
+read/consumed and **before** any network call — a `--body-env` caller's
+staged pair survives untouched, and a corrected retry (adding one of the
+two verdict flags, and, if the originally staged content itself was
+genuinely prose-only with no `review_status` field, supplying verdict
+content via `--body-stdin` instead, since a prose-only body can never
+satisfy either verdict route's own content contract without a fresh stage)
+needs no restaging of what already exists. Unlike the stamp check, this one
+runs identically on `--body-stdin` — a role-declared reviewer's fenceless
+post is exactly as wrong there as via `--body-env`, since this check
+depends only on the caller's role and the invocation's own flags, never on
+staged provenance. A **malformed** config value (not a list of non-empty
+strings, or an explicit `verdict_required_roles: null`) is a hard config
+error, never silently treated as "no roles declared" — mirrors
+`transport.read_host_guard`'s own fail-closed config pattern.
+
 **`--verdict-review-status <clean|blocking>` — MANDATORY, fail-closed
 emit-and-verify verdict route, Forgejo AND GitHub parity:**
 the sibling of `loadout-git-host-api`'s Forgejo-only

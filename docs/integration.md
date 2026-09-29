@@ -566,6 +566,74 @@ ceiling against the operator's real, un-redirected credential root — there
 is exactly one root to redirect, and redirecting it redirects the
 credential the ceiling exists to protect right along with it.
 
+### Verdict-required roles (`review-post`)
+
+`review-post`'s stamp/intent check (see "`--body-env`: the harness-side
+staging process" below, "Verdict-intent check") compares a staged body's
+own derived content signal against the posting invocation's own flags, and
+refuses on a MISMATCH. It cannot catch the sibling shape where content and
+invocation AGREE that a post is plain: a genuinely prose-only staged body
+(no `review_status` field anywhere), posted with neither
+`--verdict-review-status` nor `--verdict-findings`. That agreement gives no
+signal, at either stage time or post time, that a verdict was actually
+required — the failure surfaces only later, at the merge gate, as an opaque
+refusal after the comment is already public.
+
+A deployment closes that residual gap by declaring which CALLER ROLES must
+never be allowed to post a fenceless `review-post` comment at all, via
+`review.verdict_required_roles` — a list of role/caller-name strings — in
+the SAME user-level `~/.config/clagentic/loadout/config.yaml` the
+`read_host_guard`/`credentials` tiers above already read (same
+`load_user_config_section` loader, same config root, no second config
+file):
+
+```yaml
+review:
+  verdict_required_roles:
+    - "reviewer"
+    - "security"
+```
+
+**Checked BEFORE any body is read/consumed on EITHER `--body-env` or
+`--body-stdin`, and BEFORE any network call.** When the EFFECTIVE caller
+(the attested, caller-bound identity `review-post` has already resolved —
+never a raw `--caller` argv string taken at face value) is a member of the
+configured list, and the invocation supplies neither verdict flag, this
+refuses with `EXIT_VERDICT_ROUTE_INTENT_MISMATCH` (`13` — the SAME code the
+stamp/intent check above uses; both report the identical incident class,
+"this invocation would have posted a fenceless comment where a verdict was
+required/intended," so a caller/harness that already handles that exit code
+from the stamp check handles this refusal with no new code to write). A
+`--body-env` caller's staged pair is never touched by this refusal — the
+check runs before `read_body_bytes` is ever called — so a retry that adds
+one of the two verdict flags needs no restaging, PROVIDED the originally
+staged content can actually satisfy the verdict route's own content
+contract (both verdict flags independently require a `review_status` field
+in the staged JSON itself — see `review.contract`). A genuinely prose-only
+body has no `review_status` field to satisfy that contract regardless of
+which flag is added; in that specific case, "no restaging" still holds in
+the sense that matters (the ORIGINAL `--body-env` pair is never destroyed
+or overwritten by the refusal), and the caller supplies corrected verdict
+content directly via the separate `--body-stdin` route instead of
+restaging the `--body-env` file.
+
+**Applies identically on `--body-stdin`, unlike the stamp/intent check
+above.** The stamp check only exists on `--body-env` because only that
+route produces staged provenance to compare against; this check depends
+only on the caller's role and the invocation's own flags, both known before
+either body-ingestion route is even touched, so a role-declared reviewer's
+fenceless post is refused the same way regardless of which route reaches
+this verb.
+
+**Default: absent or empty means no roles are verdict-required — fully
+non-breaking.** No existing `review-post` caller sees any behavior change
+until an operator explicitly opts a role into this list. **A malformed
+value (not a list of non-empty strings, or an explicit
+`verdict_required_roles: null`) is a hard config error**, never silently
+treated as "no roles declared" — the same fail-closed, ABSENT-vs-
+PRESENT-null pattern `read_host_guard.allowed_hosts` above already
+establishes, reused here rather than re-invented.
+
 ## Minimal spawn-env checklist
 
 For a role that only calls Forgejo-path verbs with the `static` credential
