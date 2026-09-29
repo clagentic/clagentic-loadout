@@ -206,6 +206,23 @@ TWO DEFECTS + FIX (lr-4ebce1 fold-in #2, pre-merge security review finding):
      read_host_guard.allowed_hosts key in the user-level config file
      instead, and says explicitly that the flag/env var alone cannot
      widen past it.
+
+ABSENT-VS-PRESENT-NULL FIX (lr-4ebce1 fold-in #3, pre-merge security review
+finding): fold-in #2 above stated the "Only an ABSENT key means
+'unconfigured'" rule
+but did not fully implement it: _load_configured_allowed_hosts read the
+config value via a bare `section.get(READ_HOST_CONFIG_KEY)`, which returns
+None for BOTH "key not in the section" (unconfigured, correctly permissive)
+AND "key in the section with an explicit `allowed_hosts: null` (or
+`allowed_hosts:` with no value)" (an operator-authored value that collapsed
+to the SAME permissive None return as never having written the key at all
+-- the exact fail-open shape fold-in #2 exists to close, one layer up).
+FIXED: _load_configured_allowed_hosts now checks
+`READ_HOST_CONFIG_KEY in section` explicitly before reading the value, so a
+genuinely absent key is the only way to reach the permissive None return; a
+present-but-null value falls through to the same InvalidReadHostConfigError
+every other malformed-value case raises, fail-closed before any credential
+is minted.
 """
 
 from __future__ import annotations
@@ -326,15 +343,35 @@ def _load_configured_allowed_hosts(config_root: str | Path | None) -> frozenset[
     ZERO enforcement instead, with no error anywhere. A config parse/shape
     problem must never resolve to "no restriction" -- it must refuse loudly,
     the same fail-closed posture check_host_allowed itself already applies
-    to a denied host. Only an ABSENT key (raw is None, checked above) means
-    "unconfigured"; every PRESENT-but-malformed value is a hard config
-    error, raised as InvalidReadHostConfigError, never degraded to
-    permissive.
+    to a denied host. Only an ABSENT key means "unconfigured"; every
+    PRESENT-but-malformed value -- INCLUDING an explicit `allowed_hosts:
+    null` -- is a hard config error, raised as InvalidReadHostConfigError,
+    never degraded to permissive.
+
+    ABSENT-VS-PRESENT-NULL FIX (lr-4ebce1 fold-in #3, pre-merge security
+    review finding): `dict.get(key)` returns None for BOTH "key not in the
+    mapping" and "key in the mapping with value None" -- a bare `raw =
+    section.get(...)` could not tell an operator's genuinely absent key
+    apart from an operator who wrote `allowed_hosts: null` (or `allowed_hosts:`
+    with no value, which YAML also parses as None) and believed that
+    explicitly enabled/configured the key. Both collapsed to the SAME
+    permissive None return, mismatching this function's own docstring
+    contract above ("Only an ABSENT key ... means unconfigured") and,
+    per `resolve_allowed_hosts`'s "Config UNSET" precedence, silently
+    re-opening the caller-widening path (env var/--allowed-host winning
+    outright) the fold-in #1 fix exists to close, for a value an operator
+    wrote deliberately. FIXED: membership is checked explicitly via
+    `READ_HOST_CONFIG_KEY in section` BEFORE reading the value -- a genuinely
+    ABSENT key returns None (config UNSET, unchanged); a PRESENT key whose
+    value is None (or any other type `isinstance(raw, (str, list))` does not
+    accept) falls through to the same InvalidReadHostConfigError every other
+    malformed-value case already raises, mint-free, exit EXIT_HOST_CONFIG_INVALID
+    (21) at the CLI boundary.
     """
     section = load_user_config_section(READ_HOST_CONFIG_SECTION, config_root=config_root)
-    raw = section.get(READ_HOST_CONFIG_KEY)
-    if raw is None:
+    if READ_HOST_CONFIG_KEY not in section:
         return None
+    raw = section.get(READ_HOST_CONFIG_KEY)
     if isinstance(raw, str):
         return _parse_comma_separated(raw)
     if isinstance(raw, list):

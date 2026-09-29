@@ -37,6 +37,11 @@ Coverage:
     HostDeniedError message names the env var/flag when config is UNSET,
     and names the read_host_guard.allowed_hosts config key (never the env
     var/flag) when config IS SET.
+  - TestAbsentVsPresentNullConfig (lr-4ebce1 fold-in #3, PEACHES 5891801221
+    BLOCKING): an explicit `allowed_hosts: null` (or `allowed_hosts:` with
+    no value) in the config file must NOT be treated as "unconfigured" --
+    both raise InvalidReadHostConfigError, mint-free, distinct from a
+    genuinely ABSENT key (which stays permissive, config UNSET).
 """
 
 from __future__ import annotations
@@ -648,3 +653,184 @@ class TestCorrectiveMessageMode:
         msg = str(exc_info.value)
         assert ALLOWED_HOSTS_ENV_VAR in msg
         assert "--allowed-host" in msg
+
+
+class TestAbsentVsPresentNullConfig:
+    """lr-4ebce1 fold-in #3 (PEACHES 5891801221 BLOCKING): the pre-fix
+    _load_configured_allowed_hosts read the config value via a bare
+    `section.get(READ_HOST_CONFIG_KEY)`, which returns None for BOTH "key
+    not in the section" (genuinely unconfigured -- correctly permissive)
+    AND "key in the section with an explicit `null` value" (an
+    operator-authored value that collapsed to the SAME permissive None
+    return as never having written the key at all). An operator who wrote
+    `allowed_hosts: null` (or `allowed_hosts:` with no value -- PyYAML
+    parses both identically) believing they had referenced/acknowledged
+    the key got ZERO enforcement, with no error anywhere -- the exact
+    fail-open shape fold-in #2 already closed for every OTHER malformed
+    value (int, mapping, list-with-non-string-entry), but missed for this
+    one shape because `dict.get` cannot distinguish absent from
+    present-null. See read_host_guard's own module docstring,
+    "ABSENT-VS-PRESENT-NULL FIX", for the full argument."""
+
+    def test_explicit_null_value_raises_not_permissive(self, tmp_path):
+        """`allowed_hosts: null` is a PRESENT key with a null value -- this
+        must raise InvalidReadHostConfigError, never resolve to the
+        permissive "unconfigured" None."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="null",
+        )
+        with pytest.raises(InvalidReadHostConfigError) as exc_info:
+            resolve_allowed_hosts(None, env={}, config_root=config_root)
+        msg = str(exc_info.value)
+        assert str(config_root / provider_config.USER_CONFIG_FILENAME) in msg
+        assert READ_HOST_CONFIG_SECTION in msg
+        assert READ_HOST_CONFIG_KEY in msg
+        assert "NoneType" in msg
+
+    def test_key_present_with_no_value_raises_same_as_explicit_null(self, tmp_path):
+        """`allowed_hosts:` with nothing after the colon parses to the SAME
+        None value PyYAML gives `allowed_hosts: null` -- must raise
+        identically, exercising the YAML-authoring shape an operator is
+        actually likely to type by hand (a trailing colon with no value,
+        rather than the literal word `null`)."""
+        config_root = tmp_path / "config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+        config_path = config_root / provider_config.USER_CONFIG_FILENAME
+        config_path.write_text(
+            f"{READ_HOST_CONFIG_SECTION}:\n  {READ_HOST_CONFIG_KEY}:\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(InvalidReadHostConfigError) as exc_info:
+            resolve_allowed_hosts(None, env={}, config_root=config_root)
+        msg = str(exc_info.value)
+        assert READ_HOST_CONFIG_KEY in msg
+
+    def test_explicit_null_never_mints_a_token_no_call_reaches_check_host_allowed(
+        self, tmp_path
+    ):
+        """Same "fires before any credential is resolved" invariant every
+        other malformed-value case already proves (TestConfigListForm) --
+        the error propagates out of resolve_allowed_hosts itself, before
+        check_host_allowed (and therefore any token mint) is ever
+        reached."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="null",
+        )
+        with pytest.raises(InvalidReadHostConfigError):
+            resolve_allowed_hosts(None, env={}, config_root=config_root)
+
+    def test_read_host_config_is_set_also_raises_on_explicit_null(self, tmp_path):
+        """read_host_config_is_set shares the same fail-closed contract --
+        it never silently reports False (which transport.git_host_api._run
+        would read as "config UNSET", the wrong corrective-message mode)
+        for a present-but-null value."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="null",
+        )
+        with pytest.raises(InvalidReadHostConfigError):
+            read_host_config_is_set(config_root)
+
+    def test_genuinely_absent_key_stays_permissive(self, tmp_path):
+        """Control case, proving the fix did not overcorrect: a config file
+        that writes the SECTION but never mentions the KEY at all (the
+        section exists for some other reason, or is simply empty) is
+        genuinely UNCONFIGURED and must stay permissive (None), exactly
+        like an entirely absent config file -- only a PRESENT null/empty
+        value is the hard-error case above."""
+        config_root = tmp_path / "config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+        config_path = config_root / provider_config.USER_CONFIG_FILENAME
+        config_path.write_text(f"{READ_HOST_CONFIG_SECTION}: {{}}\n", encoding="utf-8")
+        result = resolve_allowed_hosts(None, env={}, config_root=config_root)
+        assert result is None
+        assert read_host_config_is_set(config_root) is False
+
+
+class TestSharedUserConfigRoot:
+    """lr-4ebce1 fold-in #3, item 3: read_host_guard's config-file tier and
+    provider_config's `credentials:` tier must resolve from the SAME
+    user-level config root -- otherwise a caller could pair a
+    caller-controlled, narrower read_host_guard ceiling against the
+    operator's real credential root, defeating the ceiling's own purpose
+    (a redirected HOME/XDG_CONFIG_HOME would then widen/narrow the read
+    allowlist without touching which credential actually gets minted).
+    Both tiers read through the ONE shared loader,
+    provider_config.load_user_config_section (see docs/integration.md,
+    "This allowlist's config tier and the credentials tier share the SAME
+    user-level config root" for the full argument) -- proven here by
+    writing BOTH sections into ONE physical file under one root and
+    confirming each tier's own public reader sees the value the OTHER
+    tier's section carries when given the identical root, i.e. there is
+    exactly one file/root in play, not two independently-resolved ones."""
+
+    def test_read_host_guard_and_credentials_section_share_one_config_file(self, tmp_path):
+        config_root = tmp_path / "config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+        config_path = config_root / provider_config.USER_CONFIG_FILENAME
+        config_path.write_text(
+            "credentials:\n"
+            "  token_provider_forgejo: command\n"
+            "  token_command_forgejo: \"echo real-operator-token\"\n"
+            f"{READ_HOST_CONFIG_SECTION}:\n"
+            f"  {READ_HOST_CONFIG_KEY}: \"forgejo.example.com:3000\"\n",
+            encoding="utf-8",
+        )
+
+        # read_host_guard's own tier, resolved via THIS root.
+        allowed = resolve_allowed_hosts(None, env={}, config_root=config_root)
+        assert allowed == frozenset({"forgejo.example.com:3000"})
+
+        # provider_config's `credentials:` tier, resolved via the SAME root
+        # value passed the SAME way (config_root=...) -- if the two tiers
+        # ever resolved from independently-computed roots, this would be
+        # the seam that could diverge; it reads the value the fixture wrote
+        # into the SAME physical file the allowlist read above came from.
+        kind, command = provider_config.resolve_provider_kind_and_command(
+            provider_config.PLATFORM_FORGEJO,
+            env={},
+            config_root=config_root,
+        )
+        assert kind == provider_config.PROVIDER_KIND_COMMAND
+        assert command == "echo real-operator-token"
+
+    def test_omitted_config_root_resolves_both_tiers_to_the_same_live_default(
+        self, monkeypatch, tmp_path
+    ):
+        """Both loaders fall back to provider_config.DEFAULT_USER_CONFIG_ROOT
+        when config_root is OMITTED -- load_user_config_section (the ONE
+        shared loader both read_host_guard and provider_config's
+        credentials tier call through) reads that constant live from
+        provider_config's OWN module namespace at call time
+        (provider_config.py's `Path(config_root) if config_root is not
+        None else DEFAULT_USER_CONFIG_ROOT`), so redirecting
+        provider_config.DEFAULT_USER_CONFIG_ROOT redirects BOTH tiers in
+        lock-step even with config_root never passed explicitly -- proven
+        here by monkeypatching that one constant and confirming
+        read_host_guard's own omitted-config_root call observes a config
+        file written under the redirected root."""
+        isolated_root = tmp_path / "isolated-live-default"
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
+        isolated_root.mkdir(parents=True, exist_ok=True)
+        config_path = isolated_root / provider_config.USER_CONFIG_FILENAME
+        config_path.write_text(
+            f"{READ_HOST_CONFIG_SECTION}:\n  {READ_HOST_CONFIG_KEY}: \"forgejo.example.com:3000\"\n",
+            encoding="utf-8",
+        )
+        # config_root OMITTED here (unlike every other test in this file,
+        # which pins it explicitly) -- this is the exact call shape that
+        # depends on read_host_guard's loader and provider_config's loader
+        # sharing one live default.
+        result = resolve_allowed_hosts(None, env={})
+        assert result == frozenset({"forgejo.example.com:3000"})

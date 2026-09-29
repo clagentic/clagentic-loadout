@@ -1419,6 +1419,53 @@ class TestMainReadHostGuard:
             "http://forgejo.example.com:3000/api/v1/repos/some-owner/some-repo/pulls/42.diff"
         )
 
+    def test_single_resolve_guard_and_request_see_the_same_host(self, monkeypatch, capsys):
+        """lr-4ebce1 fold-in #3 (HOLDEN-directed hardening, not a live
+        bypass -- all three call sites already invoked the SAME
+        deterministic resolver with the SAME arguments, so this could not
+        presently disagree at runtime; resolving once and threading the one
+        value through removes the possibility BY CONSTRUCTION rather than
+        by three call sites happening to agree today).
+
+        Wraps _resolve_git_host_base to (a) COUNT calls -- exactly one for
+        this non-GitHub, non-absolute-URL-PATH, repo-scoped call, where the
+        pre-fix code called it twice (once for the guard, once for the
+        request build) -- and (b) records what it returned, then asserts
+        the BUILT REQUEST's own host (req.full_url's netloc) is byte-equal
+        to that recorded value. The guard already proved (via EXIT_OK in
+        the other tests in this class) that it checked the resolved base;
+        this test closes the loop by proving the REQUEST was built against
+        that exact same value, never a second, independently-resolved one."""
+        calls = []
+        real_resolve = git_host_api._resolve_git_host_base
+
+        def counting_resolve(explicit, **kwargs):
+            resolved = real_resolve(explicit, **kwargs)
+            calls.append(resolved)
+            return resolved
+
+        monkeypatch.setattr(git_host_api, "_resolve_git_host_base", counting_resolve)
+
+        captured = {}
+
+        def fake_opener(req, timeout=15):
+            captured["url"] = req.full_url
+            return _FakeResponse(200, b"{}")
+
+        rc = git_host_api.main(
+            [
+                "--git-host-base-url", "http://forgejo.example.com:3000",
+                "--allowed-host", "http://forgejo.example.com:3000",
+                "GET", "/api/v1/repos/some-owner/some-repo/pulls/42.diff",
+            ],
+            token_provider=_PlatformRecordingProvider("forgejo-tok"),
+            opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_OK
+        assert calls == ["http://forgejo.example.com:3000"]
+        request_authority = urllib.parse.urlsplit(captured["url"]).netloc
+        assert request_authority == urllib.parse.urlsplit(calls[0]).netloc
+
     def test_relative_path_with_hostile_base_url_refuses(self, capsys):
         """The defect this task closes: a RELATIVE path (the overwhelming
         majority of calls) never reaches _absolute_url_host_matches_git_host_base
@@ -1447,7 +1494,7 @@ class TestMainReadHostGuard:
         assert provider.calls == []
         assert not opener_called
 
-    def test_permissive_default_no_allowlist_configured(self, capsys):
+    def test_permissive_default_no_allowlist_configured(self, monkeypatch, capsys):
         """Default posture: with NO --allowed-host and no
         CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS set, an explicit
         --git-host-base-url pointed at an arbitrary host is UNCHANGED from
@@ -1455,6 +1502,9 @@ class TestMainReadHostGuard:
         this flag keeps working with no new config (see
         transport.read_host_guard's module docstring for the full default-
         posture argument)."""
+        # This test's own precondition ("no env var set") must not depend
+        # on the ambient host environment (lr-4ebce1 fold-in #3 nit).
+        monkeypatch.delenv("CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS", raising=False)
         captured = {}
 
         def fake_opener(req, timeout=15):
@@ -1480,6 +1530,10 @@ class TestMainReadHostGuard:
         CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS (comma-separated) when the flag
         is omitted entirely -- mirrors push.host_guard's own env-var
         precedence contract, on this verb's OWN (not shared) env var."""
+        # Clear first (lr-4ebce1 fold-in #3 nit): this test exercises the
+        # config/env resolution path and must not depend on whatever the
+        # ambient host environment happens to carry for this var.
+        monkeypatch.delenv("CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS", raising=False)
         monkeypatch.setenv(
             "CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS",
             "http://other.example.com:3000,http://forgejo.example.com:3000",
@@ -1578,6 +1632,10 @@ class TestMainReadHostGuardConfigWiden:
         tier)."""
         config_root = provider_config.DEFAULT_USER_CONFIG_ROOT
         self._write_config(config_root, allowed_hosts="http://forgejo.example.com:3000")
+        # Clear first (lr-4ebce1 fold-in #3 nit): this test exercises the
+        # config-widen resolution path via the env var and must not depend
+        # on whatever the ambient host environment happens to carry for it.
+        monkeypatch.delenv("CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS", raising=False)
         monkeypatch.setenv(
             "CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS", "http://attacker.example.net:3000"
         )
@@ -1626,9 +1684,12 @@ class TestMainReadHostGuardConfigWiden:
             "http://forgejo.example.com:3000/api/v1/repos/some-owner/some-repo/pulls/42.diff"
         )
 
-    def test_config_only_path_no_flag_no_env_still_enforces(self, capsys):
+    def test_config_only_path_no_flag_no_env_still_enforces(self, monkeypatch, capsys):
         """The config-only path: neither --allowed-host nor the env var
         supplied at all -- the configured ceiling alone is enforced."""
+        # This test's own precondition ("no env var supplied") must not
+        # depend on the ambient host environment (lr-4ebce1 fold-in #3 nit).
+        monkeypatch.delenv("CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS", raising=False)
         config_root = provider_config.DEFAULT_USER_CONFIG_ROOT
         self._write_config(config_root, allowed_hosts="http://forgejo.example.com:3000")
 
@@ -1648,12 +1709,15 @@ class TestMainReadHostGuardConfigWiden:
         assert rc == git_host_api.EXIT_HOST_DENIED
         assert provider.calls == []
 
-    def test_config_unset_back_compat_flag_alone_still_permits(self, capsys):
+    def test_config_unset_back_compat_flag_alone_still_permits(self, monkeypatch, capsys):
         """Back-compat: with NO config file/section written at all (this
         test's isolated config_root, per the autouse fixture, stays empty),
         --allowed-host alone still resolves and permits its own value,
         byte-for-byte the pre-fix contract -- an unconfigured deployment
         sees no change."""
+        # This test's own back-compat precondition must not depend on the
+        # ambient host environment (lr-4ebce1 fold-in #3 nit).
+        monkeypatch.delenv("CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS", raising=False)
         captured = {}
 
         def fake_opener(req, timeout=15):
@@ -1747,11 +1811,31 @@ class TestGithubTargetHostSafetyAgainstHostileBaseUrl:
         assert built_host == "api.github.com"
         assert built_host != "evil.example.net"
 
-    def test_github_target_uses_github_token_not_forgejo_token(self, capsys):
+    def test_github_target_uses_github_token_not_forgejo_token(self, monkeypatch, capsys):
         """Belt-and-suspenders on the same safety property from the auth
         side: the Authorization header on the built request carries the
         GitHub reader token, never a token that would have been minted for
-        the hostile/forgejo role."""
+        the hostile/forgejo role.
+
+        lr-4ebce1 fold-in #3 nit: also asserts on the PLATFORM actually
+        requested from resolve_platform_provider, not merely on the
+        resulting token value -- a bare Authorization-header assertion
+        alone would pass even if platform selection were hardcoded/wrong,
+        as long as the (here directly-injected) provider happened to
+        return the GitHub-shaped token regardless of platform. No
+        token_provider is injected here (unlike the other two tests in
+        this class) specifically so resolve_platform_provider is the real
+        dispatch path this test can observe."""
+        seen_platforms = []
+
+        def fake_resolve_platform_provider(platform, **kwargs):
+            seen_platforms.append(platform)
+            return _PlatformRecordingProvider("gh-reader-tok")
+
+        monkeypatch.setattr(
+            git_host_api, "resolve_platform_provider", fake_resolve_platform_provider
+        )
+
         captured = {}
 
         def fake_opener(req, timeout=15):
@@ -1763,11 +1847,11 @@ class TestGithubTargetHostSafetyAgainstHostileBaseUrl:
                 "--git-host-base-url", "https://evil.example.net",
                 "GET", "https://api.github.com/repos/some-owner/some-repo/pulls/42/reviews",
             ],
-            token_provider=_PlatformRecordingProvider("gh-reader-tok"),
             opener=fake_opener,
         )
         assert rc == git_host_api.EXIT_OK
         assert captured["headers"]["Authorization"] == "token gh-reader-tok"
+        assert seen_platforms == [git_host_api.PLATFORM_GITHUB]
 
 
 # ---------------------------------------------------------------------------

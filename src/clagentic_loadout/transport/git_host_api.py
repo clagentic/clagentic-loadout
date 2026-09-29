@@ -1940,6 +1940,24 @@ def _run(
 ) -> int:
     method, path_arg = _split_method_and_path(args)
 
+    # Single-resolve, guard-then-request (lr-4ebce1 fold-in #3, hardening
+    # requested during PR review -- not a live bypass; all three call sites
+    # already invoke the SAME deterministic resolver with the SAME
+    # arguments, so this cannot presently disagree at runtime, but resolving
+    # once and threading the one value through removes the possibility BY
+    # CONSTRUCTION rather than by three call sites happening to agree
+    # today). Resolved once, here,
+    # for a non-GitHub target only -- the resolved Forgejo base is unused on
+    # the GitHub branch (git_host_base = "" below), so resolving it there
+    # would do work with no consumer; matches the pre-fix behavior of
+    # skipping resolution entirely for a GitHub target. Every later use in
+    # this function (the guard immediately below, the cross-platform
+    # URL-shape corrective error, and the request-building git_host_base
+    # itself) reads THIS SAME LOCAL, never re-calls _resolve_git_host_base.
+    resolved_git_host_base = (
+        _resolve_git_host_base(args.git_host_base_url) if not _is_github_target(path_arg) else None
+    )
+
     # Host anchoring for the resolved git-host base (lr-4ebce1), checked
     # FIRST -- before any other precondition, and BEFORE any credential is
     # resolved or request issued. --git-host-base-url unconditionally wins
@@ -1951,8 +1969,7 @@ def _run(
     # for that branch (git_host_base = "" below) and never used to build the
     # credentialed request -- see --git-host-base-url's own --help
     # ("unused on a GitHub-targeted call").
-    if not _is_github_target(path_arg):
-        resolved_git_host_base_for_guard = _resolve_git_host_base(args.git_host_base_url)
+    if resolved_git_host_base is not None:
         try:
             allowed_hosts = resolve_allowed_hosts(
                 frozenset(args.allowed_hosts) if args.allowed_hosts is not None else None
@@ -1962,7 +1979,7 @@ def _run(
             _fail(str(exc), code=EXIT_HOST_CONFIG_INVALID)
         try:
             check_host_allowed(
-                resolved_git_host_base_for_guard,
+                resolved_git_host_base,
                 allowed_hosts=allowed_hosts,
                 config_is_set=config_is_set,
             )
@@ -2297,7 +2314,17 @@ def _run(
     # URL rather than proceeding to a token mint that will refuse opaquely.
     if call_repo is None:
         _check_cross_platform_url_shape_mistake(
-            path_arg, target_platform, git_host_base=_resolve_git_host_base(args.git_host_base_url)
+            path_arg,
+            target_platform,
+            # Single-resolve (lr-4ebce1 fold-in #3): reuse the SAME value
+            # already resolved once above for the guard, rather than a
+            # second _resolve_git_host_base call -- see that call site's own
+            # comment. On a GitHub target resolved_git_host_base is None
+            # (never resolved -- see above); this corrective message is only
+            # reachable for a Forgejo-shaped path-mismatch, so an empty
+            # string here (rather than re-resolving) is the correct "no
+            # git-host base applies" value for that branch.
+            git_host_base=resolved_git_host_base if resolved_git_host_base is not None else "",
         )
 
     print(
@@ -2354,8 +2381,13 @@ def _run(
     # absolute URL pointed somewhere other than the configured git host) is
     # never masked as either a routing success or an opaque transport
     # failure.
+    # Single-resolve (lr-4ebce1 fold-in #3): resolved_git_host_base is the
+    # SAME value already resolved once above (before the guard ran) -- this
+    # site no longer calls _resolve_git_host_base a second/third time. On a
+    # GitHub target it is None (never resolved -- unused on that branch, see
+    # the resolution site's own comment); the branch below never reads it in
+    # that case, matching the pre-fix behavior byte-for-byte.
     path_arg_is_absolute_url = urllib.parse.urlsplit(path_arg).scheme in ("http", "https")
-    resolved_git_host_base = _resolve_git_host_base(args.git_host_base_url)
     if target_platform == PLATFORM_GITHUB:
         git_host_base = ""
     elif path_arg_is_absolute_url:

@@ -500,15 +500,22 @@ read_host_guard:
 ```
 
 **Any other value is a hard config error, never a silent fallback to
-permissive** — an int, a mapping, or a list containing a non-string entry
-refuses at load time (before any credential is resolved), naming the config
-file, the `read_host_guard`/`allowed_hosts` section/key, the received type,
-and the two accepted forms above. Only an ABSENT key means "unconfigured";
-a PRESENT but malformed value is always a refusal, never treated as if the
-key had not been set — this closes a prior gap where any non-string value,
-including the YAML list shape above, was silently treated as "not
-configured," leaving an operator who had just written a list-shaped
-`allowed_hosts` with zero enforcement and no error to say so.
+permissive** — an int, a mapping, a list containing a non-string entry, OR
+an explicit `null`/empty value (`allowed_hosts: null`, or `allowed_hosts:`
+with no value at all — PyYAML parses both the same way) refuses at load
+time (before any credential is resolved), naming the config file, the
+`read_host_guard`/`allowed_hosts` section/key, the received type, and the
+two accepted forms above. Only a GENUINELY ABSENT key (the `read_host_guard`
+section exists but never mentions `allowed_hosts` at all, or the section
+itself is absent) means "unconfigured"; a PRESENT value of any other shape —
+including an operator-authored `null` — is always a refusal, never treated
+as if the key had not been set. This closes two gaps at the same root cause
+(a bare `dict.get(key)` cannot tell "key absent" apart from "key present
+with value `None`"): any non-string value, including the YAML list shape
+above, was once silently treated as "not configured" (leaving an operator
+who had just written a list-shaped `allowed_hosts` with zero enforcement and
+no error to say so); and an explicit `allowed_hosts: null` was, for the same
+reason, once indistinguishable from never having written the key at all.
 
 Once this key is set, it becomes the CEILING: `--allowed-host`/the env var
 can only NARROW it (the effective set is the overlap between the configured
@@ -535,6 +542,29 @@ accurate in that mode. Once the config key IS set, that advice would be
 FALSE (the flag/env var can only narrow the ceiling, never widen it) — the
 message instead names the `read_host_guard.allowed_hosts` key in the
 user-level config file as the only thing that actually permits the host.
+
+**This allowlist's config tier and the `credentials:` tier share the SAME
+user-level config root, by construction.** `read_host_guard`'s config-file
+tier (`_load_configured_allowed_hosts`,
+`src/clagentic_loadout/transport/read_host_guard.py:334`) and
+`provider_config`'s credentials tier (`_load_credentials_section`,
+`src/clagentic_loadout/transport/provider_config.py:220-226`) both resolve
+through the same one function —
+`provider_config.load_user_config_section(section_name, config_root=...)`
+(`src/clagentic_loadout/transport/provider_config.py:192-217`) — which in
+turn resolves the config-file path as `Path(config_root) if config_root is
+not None else DEFAULT_USER_CONFIG_ROOT` before reading `<root>/config.yaml`
+(`provider_config.py:214-215`). Neither section has its own, independently
+computed root. Practically: this ceiling allowlist can never be widened
+from one root while the real git-host token is minted against a
+credentials tier resolved from a DIFFERENT root — redirecting `HOME` (or
+`XDG_CONFIG_HOME`, wherever `DEFAULT_USER_CONFIG_ROOT` itself is anchored)
+redirects BOTH tiers identically, in lock-step, because both read through
+the identical `config_root` parameter and the identical fallback constant.
+A caller cannot pair a caller-controlled, narrower `read_host_guard`
+ceiling against the operator's real, un-redirected credential root — there
+is exactly one root to redirect, and redirecting it redirects the
+credential the ceiling exists to protect right along with it.
 
 ## Minimal spawn-env checklist
 
