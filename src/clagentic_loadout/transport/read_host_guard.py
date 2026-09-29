@@ -1,6 +1,7 @@
 """transport.read_host_guard — config-driven allowed-host anchoring for the
 git-host-api (read) verb's credentialed call (lr-4ebce1, WIDEN/NARROW fix
-lr-4ebce1 fold-in #1).
+lr-4ebce1 fold-in #1; FAIL-OPEN-ON-CONFIG + MISLEADING-MESSAGE fix lr-4ebce1
+fold-in #2).
 
 BACKGROUND: unlike `push` (whose credentialed api_base is derived exclusively
 from the live git remote and never consults `--git-host-base-url` at all --
@@ -170,6 +171,41 @@ THIS caller sets READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY in the
 user-level config file -- see docs/integration.md's "Host restriction
 (git-host-api read verb)" section for the operator-facing statement of this
 same rule.
+
+TWO DEFECTS + FIX (lr-4ebce1 fold-in #2, pre-merge security review finding):
+
+  1. FAIL-OPEN ON A NON-STRING CONFIG VALUE. The pre-fix
+     _load_configured_allowed_hosts treated ANY non-string
+     READ_HOST_CONFIG_KEY value -- including the natural YAML list shape
+     `allowed_hosts: [a.example, b.example]` an operator would reach for
+     first when authoring this key by hand -- as "not configured" and
+     returned None (PERMISSIVE). An operator who wrote that YAML list,
+     believing they had just turned host restriction ON, silently got ZERO
+     enforcement, with no error anywhere to say so. FIXED: the key now
+     accepts EITHER a comma-separated string OR a YAML list of strings; any
+     OTHER type (an int, a mapping, a list containing a non-string entry)
+     is a hard config error -- InvalidReadHostConfigError, naming the
+     config file, section, key, received type, and the two accepted forms
+     -- raised BEFORE any credential is resolved, never degraded to
+     permissive. Only an ABSENT key means "unconfigured" now; a PRESENT
+     malformed value never does.
+  2. MISLEADING REFUSAL MESSAGE. check_host_allowed's pre-fix HostDeniedError
+     always told the caller to set ALLOWED_HOSTS_ENV_VAR or pass
+     --allowed-host to permit the denied host -- true only in the
+     config-UNSET mode. Once READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY
+     is set, that text is FALSE: per this module's own "CALLER-WIDENING
+     DEFECT + FIX" above, the env var/flag can only NARROW the configured
+     ceiling, never widen past it -- an operator who followed the pre-fix
+     message's advice in config-SET mode would edit the wrong thing and
+     stay denied, with no clue why. FIXED: check_host_allowed now takes a
+     `config_is_set` parameter (see read_host_config_is_set, which the
+     caller -- transport.git_host_api._run -- uses to compute it) and
+     builds the corrective text for whichever mode actually produced
+     *allowed_hosts*: config-UNSET keeps the original env-var/flag text
+     (still accurate there); config-SET points at the
+     read_host_guard.allowed_hosts key in the user-level config file
+     instead, and says explicitly that the flag/env var alone cannot
+     widen past it.
 """
 
 from __future__ import annotations
@@ -178,7 +214,11 @@ import os
 from pathlib import Path
 
 from clagentic_loadout.transport.host_match import host_matches
-from clagentic_loadout.transport.provider_config import load_user_config_section
+from clagentic_loadout.transport.provider_config import (
+    DEFAULT_USER_CONFIG_ROOT,
+    USER_CONFIG_FILENAME,
+    load_user_config_section,
+)
 
 #: Env var carrying a comma-separated allowed-host list for the git-host-api
 #: (read) verb's resolved git-host base (each entry a bare "host[:port]"
@@ -206,6 +246,46 @@ READ_HOST_CONFIG_SECTION = "read_host_guard"
 READ_HOST_CONFIG_KEY = "allowed_hosts"
 
 
+class InvalidReadHostConfigError(Exception):
+    """Raised when READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY in the
+    user-level config file holds a value that is not one of the two
+    accepted shapes (a comma-separated string, or a YAML list of strings) --
+    see _load_configured_allowed_hosts's "FAIL-OPEN FIX" for why this is a
+    hard refusal rather than a silent "treat as unconfigured" degrade.
+
+    Fires BEFORE any credential is resolved or request issued -- a
+    malformed config value must never let a call proceed as if no
+    restriction were configured (lr-4ebce1 fold-in #2). The message names
+    the config FILE, SECTION, KEY, the RECEIVED type, and the ACCEPTED
+    forms, so an operator can fix the value without reading this module's
+    source.
+    """
+
+    def __init__(self, config_path: Path, *, received: object, detail: str | None = None) -> None:
+        received_type = type(received).__name__
+        message = (
+            f"{config_path}: [{READ_HOST_CONFIG_SECTION}].{READ_HOST_CONFIG_KEY} "
+            f"holds a {received_type} ({received!r}), which is not a valid "
+            f"read-host allowlist value"
+        )
+        if detail:
+            message += f" ({detail})"
+        message += (
+            ". Accepted forms: a comma-separated string "
+            '(e.g. "a.example.com,b.example.com:3000"), or a YAML list of '
+            'strings (e.g. ["a.example.com", "b.example.com:3000"]). Fix '
+            f"the {READ_HOST_CONFIG_KEY!r} value under the "
+            f"{READ_HOST_CONFIG_SECTION!r} section in {config_path}. "
+            "Refusing before any credential is resolved or request is "
+            "issued -- a malformed config value is never treated as "
+            "'unconfigured' (which would silently disable the restriction "
+            "the operator was trying to set)."
+        )
+        super().__init__(message)
+        self.config_path = config_path
+        self.received = received
+
+
 def _parse_comma_separated(raw: str) -> frozenset[str]:
     """Shared comma-separated-list parse for the env var and config-file
     values -- same whitespace-trim/empty-entry-drop rule for both, so the
@@ -215,25 +295,61 @@ def _parse_comma_separated(raw: str) -> frozenset[str]:
     return frozenset(part.strip() for part in raw.split(",") if part.strip())
 
 
+def _config_file_path(config_root: str | Path | None) -> Path:
+    """Resolve the on-disk path of the user-level config file *config_root*
+    (or DEFAULT_USER_CONFIG_ROOT when None) points at -- used only to name
+    the offending file in InvalidReadHostConfigError's message; never opened
+    directly here (load_user_config_section/_read_yaml_mapping own the
+    actual read)."""
+    root = Path(config_root) if config_root is not None else DEFAULT_USER_CONFIG_ROOT
+    return root / USER_CONFIG_FILENAME
+
+
 def _load_configured_allowed_hosts(config_root: str | Path | None) -> frozenset[str] | None:
     """Read READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY from the
-    user-level config file. Returns None when the section/key is absent
-    (config UNSET -- the pre-fix, caller-settable-only precedence applies),
-    or a frozenset (possibly empty, an operator's real choice to restrict to
-    nothing) when the key IS present.
+    user-level config file. Returns None when the section/key is ABSENT
+    (config UNSET -- the pre-fix, caller-settable-only precedence applies).
+
+    Returns a frozenset (possibly empty, an operator's real choice to
+    restrict to nothing) when the key IS present and holds a value in one of
+    the TWO accepted shapes:
+      - a comma-separated STRING (the original, back-compat shape), or
+      - a YAML LIST of strings (the natural YAML authoring shape for a
+        multi-entry allowlist, e.g. `allowed_hosts: [a.example, b.example]`).
+
+    FAIL-OPEN FIX (lr-4ebce1 fold-in #2): the pre-fix
+    version of this function treated ANY non-string value -- including the
+    natural YAML list shape an operator configuring this key for the first
+    time would reach for -- as "not configured" and silently returned None
+    (PERMISSIVE). An operator who wrote `allowed_hosts: [a.example,
+    b.example]`, believing they had just turned host restriction ON, got
+    ZERO enforcement instead, with no error anywhere. A config parse/shape
+    problem must never resolve to "no restriction" -- it must refuse loudly,
+    the same fail-closed posture check_host_allowed itself already applies
+    to a denied host. Only an ABSENT key (raw is None, checked above) means
+    "unconfigured"; every PRESENT-but-malformed value is a hard config
+    error, raised as InvalidReadHostConfigError, never degraded to
+    permissive.
     """
     section = load_user_config_section(READ_HOST_CONFIG_SECTION, config_root=config_root)
     raw = section.get(READ_HOST_CONFIG_KEY)
     if raw is None:
         return None
-    if not isinstance(raw, str):
-        # A malformed (non-string) value is treated as "not configured"
-        # rather than raised -- this module never fails startup over a
-        # section it merely reads (matches provider_config._read_yaml_mapping's
-        # own degrade-to-default contract for every other config tier in
-        # this package).
-        return None
-    return _parse_comma_separated(raw)
+    if isinstance(raw, str):
+        return _parse_comma_separated(raw)
+    if isinstance(raw, list):
+        non_string_entries = [entry for entry in raw if not isinstance(entry, str)]
+        if non_string_entries:
+            raise InvalidReadHostConfigError(
+                _config_file_path(config_root),
+                received=raw,
+                detail=(
+                    f"list entry {non_string_entries[0]!r} "
+                    f"(type {type(non_string_entries[0]).__name__}) is not a string"
+                ),
+            )
+        return frozenset(entry.strip() for entry in raw if entry.strip())
+    raise InvalidReadHostConfigError(_config_file_path(config_root), received=raw)
 
 
 def resolve_allowed_hosts(
@@ -332,7 +448,34 @@ class HostDeniedError(Exception):
     push.errors.HostDeniedError's own posture for the sibling guard."""
 
 
-def check_host_allowed(git_host_base: str, *, allowed_hosts: frozenset[str] | None) -> None:
+def read_host_config_is_set(config_root: str | Path | None = None) -> bool:
+    """True iff READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY is PRESENT in
+    the user-level config file *config_root* (or DEFAULT_USER_CONFIG_ROOT
+    when None) points at -- i.e. the config-file tier is the ceiling for
+    this resolution (see resolve_allowed_hosts's "Config SET" precedence).
+
+    Lets a caller (transport.git_host_api._run) build a corrective refusal
+    message that names the RIGHT remediation for the mode actually in
+    effect (lr-4ebce1 fold-in #2, MISLEADING REFUSAL MESSAGE fix -- see
+    check_host_allowed's own docstring, "mode" parameter): telling an
+    operator who already set this config key to set --allowed-host/the env
+    var instead is false -- those can only NARROW the configured ceiling,
+    never widen past it. Raises InvalidReadHostConfigError under the same
+    condition _load_configured_allowed_hosts itself would (a malformed
+    configured value) -- this function does not shield that call from its
+    own fail-closed contract; a caller wanting the boolean also accepts the
+    error propagating on a malformed config value, exactly like every other
+    caller of the config-file tier.
+    """
+    return _load_configured_allowed_hosts(config_root) is not None
+
+
+def check_host_allowed(
+    git_host_base: str,
+    *,
+    allowed_hosts: frozenset[str] | None,
+    config_is_set: bool = False,
+) -> None:
     """Refuse *git_host_base* if an allowlist is configured and no entry in
     it matches *git_host_base*'s host:port (via
     transport.host_match.host_matches).
@@ -350,6 +493,26 @@ def check_host_allowed(git_host_base: str, *, allowed_hosts: frozenset[str] | No
     falsy value would silently re-permit every host on exactly the
     caller-widening path this fix (lr-4ebce1 fold-in #1) closes.
 
+    *config_is_set* (lr-4ebce1 fold-in #2, MISLEADING REFUSAL MESSAGE fix):
+    tells the refusal message construction which MODE produced
+    *allowed_hosts*, so the corrective text is accurate in both --
+    see read_host_config_is_set, which the caller (transport.git_host_api.
+    _run) uses to compute this value. Defaults to False (the caller-settable
+    corrective text) for back-compat with any direct caller that predates
+    this parameter and still only ever runs in the config-UNSET mode where
+    that text was always accurate.
+
+      - config_is_set=False (config UNSET): --allowed-host / the env var ARE
+        the thing that would have let this host through -- the ORIGINAL
+        corrective text (set the env var, or pass --allowed-host) is
+        accurate here and is kept.
+      - config_is_set=True (config SET): --allowed-host / the env var can
+        only NARROW the configured ceiling, never widen past it (see
+        resolve_allowed_hosts's "Config SET" precedence) -- telling the
+        operator to set either of those to permit this host would be FALSE;
+        only editing the read_host_guard.allowed_hosts key in the
+        user-level config file actually widens the effective set.
+
     Raises HostDeniedError BEFORE any credential is resolved or request
     issued -- a host refusal is deterministic and must never partially
     execute, mirroring push.host_guard.check_host_allowed's own
@@ -363,15 +526,29 @@ def check_host_allowed(git_host_base: str, *, allowed_hosts: frozenset[str] | No
         return
     if any(host_matches(git_host_base, entry) for entry in allowed_hosts):
         return
+    if config_is_set:
+        corrective = (
+            f"This deployment has {READ_HOST_CONFIG_SECTION!r}.{READ_HOST_CONFIG_KEY!r} "
+            f"configured in the user-level config file -- that key is the "
+            f"CEILING for this allowlist. Add this host to it to permit "
+            f"this call; --allowed-host and {ALLOWED_HOSTS_ENV_VAR} can "
+            f"only NARROW the configured ceiling and can NEVER widen past "
+            f"it, so setting either alone will not permit this host."
+        )
+    else:
+        corrective = (
+            f"Set {ALLOWED_HOSTS_ENV_VAR} (comma-separated) or pass an "
+            f"explicit --allowed-host value (repeatable) to permit this "
+            f"host."
+        )
     raise HostDeniedError(
         f"git-host-api target host {git_host_base!r} (the resolved "
         f"git-host base -- see --git-host-base-url) is not in the "
-        f"configured allowed-host set ({sorted(allowed_hosts)!r}). Set "
-        f"{ALLOWED_HOSTS_ENV_VAR} (comma-separated) or pass an explicit "
-        f"--allowed-host value (repeatable) to permit this host. Refusing "
-        f"before any credential is resolved or request is issued -- this "
-        f"refusal is deterministic; do not retry without changing the "
-        f"configured allowlist or the resolved git-host base."
+        f"configured allowed-host set ({sorted(allowed_hosts)!r}). "
+        f"{corrective} Refusing before any credential is resolved or "
+        f"request is issued -- this refusal is deterministic; do not "
+        f"retry without changing the configured allowlist or the resolved "
+        f"git-host base."
     )
 
 
@@ -380,6 +557,8 @@ __all__ = [
     "READ_HOST_CONFIG_KEY",
     "READ_HOST_CONFIG_SECTION",
     "HostDeniedError",
+    "InvalidReadHostConfigError",
     "check_host_allowed",
+    "read_host_config_is_set",
     "resolve_allowed_hosts",
 ]

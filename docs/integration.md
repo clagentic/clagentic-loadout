@@ -481,13 +481,34 @@ operator-controlled config key, immune to per-call argv/env.** Set
 `allowed_hosts` under a `read_host_guard:` section in the USER-LEVEL
 `~/.config/clagentic/loadout/config.yaml` (same file, same
 `load_user_config_section` loader every other user-level config tier in this
-package already uses — see `credentials:`/`forgejo:` above), comma-separated,
-same entry shape (`host[:port]` or `scheme://host[:port]`) as the env var:
+package already uses — see `credentials:`/`forgejo:` above). Two shapes are
+accepted, same entry shape (`host[:port]` or `scheme://host[:port]`) as the
+env var for each entry: a comma-separated STRING (the original shape), or a
+YAML LIST of strings (the more natural authoring shape for a multi-entry
+allowlist):
 
 ```yaml
 read_host_guard:
   allowed_hosts: "forgejo.example.com:3000,other-forgejo.example.org:3000"
 ```
+
+```yaml
+read_host_guard:
+  allowed_hosts:
+    - "forgejo.example.com:3000"
+    - "other-forgejo.example.org:3000"
+```
+
+**Any other value is a hard config error, never a silent fallback to
+permissive** — an int, a mapping, or a list containing a non-string entry
+refuses at load time (before any credential is resolved), naming the config
+file, the `read_host_guard`/`allowed_hosts` section/key, the received type,
+and the two accepted forms above. Only an ABSENT key means "unconfigured";
+a PRESENT but malformed value is always a refusal, never treated as if the
+key had not been set — this closes a prior gap where any non-string value,
+including the YAML list shape above, was silently treated as "not
+configured," leaving an operator who had just written a list-shaped
+`allowed_hosts` with zero enforcement and no error to say so.
 
 Once this key is set, it becomes the CEILING: `--allowed-host`/the env var
 can only NARROW it (the effective set is the overlap between the configured
@@ -506,6 +527,14 @@ which still wins over the permissive (no-restriction) default, with no
 forced config write for a deployment that has not opted into the config-file
 ceiling. This is the DEFAULT shape, and it carries the "does not protect
 against the same caller" caveat above.
+
+**The refusal message matches whichever mode is actually in effect**: when
+the config key is UNSET, a denied host's error still tells you to set
+`CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS` or pass `--allowed-host`, which is
+accurate in that mode. Once the config key IS set, that advice would be
+FALSE (the flag/env var can only narrow the ceiling, never widen it) — the
+message instead names the `read_host_guard.allowed_hosts` key in the
+user-level config file as the only thing that actually permits the host.
 
 ## Minimal spawn-env checklist
 

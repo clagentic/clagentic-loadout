@@ -283,7 +283,9 @@ from clagentic_loadout.transport.provider_config import (
 from clagentic_loadout.transport.read_host_guard import (
     ALLOWED_HOSTS_ENV_VAR as READ_ALLOWED_HOSTS_ENV_VAR,
     HostDeniedError,
+    InvalidReadHostConfigError,
     check_host_allowed,
+    read_host_config_is_set,
     resolve_allowed_hosts,
 )
 
@@ -421,6 +423,18 @@ EXIT_CALLER_INVOKER_MISMATCH = 19
 #: posture argument and for why this verb's allowlist is deliberately NOT
 #: shared with push's own CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS.
 EXIT_HOST_DENIED = 20
+#: The user-level config file's READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY
+#: (transport.read_host_guard) holds a value that is not one of the two
+#: accepted shapes -- a comma-separated string, or a YAML list of strings
+#: (lr-4ebce1 fold-in #2, FAIL-OPEN-ON-CONFIG fix). FAILS CLOSED BEFORE ANY
+#: I/O -- no token mint, no request is ever issued. Distinct from
+#: EXIT_HOST_DENIED so an operator can tell "the allowlist config itself is
+#: malformed" apart from "a real host was refused" -- a malformed config
+#: value is NEVER treated as "unconfigured" (which would silently disable
+#: the restriction the operator was trying to set); see
+#: transport.read_host_guard.InvalidReadHostConfigError for the full
+#: argument.
+EXIT_HOST_CONFIG_INVALID = 21
 
 # HTTP methods that mutate server state and require fail-on-HTTP-error
 # enforcement. GET/HEAD are read-only.
@@ -1939,12 +1953,18 @@ def _run(
     # ("unused on a GitHub-targeted call").
     if not _is_github_target(path_arg):
         resolved_git_host_base_for_guard = _resolve_git_host_base(args.git_host_base_url)
-        allowed_hosts = resolve_allowed_hosts(
-            frozenset(args.allowed_hosts) if args.allowed_hosts is not None else None
-        )
+        try:
+            allowed_hosts = resolve_allowed_hosts(
+                frozenset(args.allowed_hosts) if args.allowed_hosts is not None else None
+            )
+            config_is_set = read_host_config_is_set()
+        except InvalidReadHostConfigError as exc:
+            _fail(str(exc), code=EXIT_HOST_CONFIG_INVALID)
         try:
             check_host_allowed(
-                resolved_git_host_base_for_guard, allowed_hosts=allowed_hosts
+                resolved_git_host_base_for_guard,
+                allowed_hosts=allowed_hosts,
+                config_is_set=config_is_set,
             )
         except HostDeniedError as exc:
             _fail(str(exc), code=EXIT_HOST_DENIED)

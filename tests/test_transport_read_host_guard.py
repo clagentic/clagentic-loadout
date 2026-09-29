@@ -1,6 +1,7 @@
 """test_transport_read_host_guard.py — tests for
 clagentic_loadout.transport.read_host_guard (lr-4ebce1, WIDEN/NARROW fix
-lr-4ebce1 fold-in #1).
+lr-4ebce1 fold-in #1; FAIL-OPEN-ON-CONFIG + MISLEADING-MESSAGE fix lr-4ebce1
+fold-in #2).
 
 Coverage:
   - resolve_allowed_hosts precedence: explicit > env var > empty (permissive)
@@ -23,6 +24,19 @@ Coverage:
     the config-only path (neither explicit nor env supplied) works; and
     config UNSET reproduces the pre-fix, caller-settable-only precedence
     byte-for-byte (back-compat).
+  - TestConfigListForm (lr-4ebce1 fold-in #2, defect 1): a YAML list of
+    strings is accepted alongside the comma-separated string; a malformed
+    value (int, mapping, list containing a non-string) raises
+    InvalidReadHostConfigError rather than silently degrading to
+    permissive -- and no test in this class ever reaches a token mint
+    (resolve_allowed_hosts/read_host_config_is_set raise BEFORE
+    check_host_allowed is even called, mirroring the "provider never
+    reached" invariant TestConfigWidenGuard already established for a
+    denied call).
+  - TestCorrectiveMessageMode (lr-4ebce1 fold-in #2, defect 2): the
+    HostDeniedError message names the env var/flag when config is UNSET,
+    and names the read_host_guard.allowed_hosts config key (never the env
+    var/flag) when config IS SET.
 """
 
 from __future__ import annotations
@@ -36,7 +50,9 @@ from clagentic_loadout.transport.read_host_guard import (
     READ_HOST_CONFIG_KEY,
     READ_HOST_CONFIG_SECTION,
     HostDeniedError,
+    InvalidReadHostConfigError,
     check_host_allowed,
+    read_host_config_is_set,
     resolve_allowed_hosts,
 )
 
@@ -70,6 +86,17 @@ def _write_config(config_root, *, section: str, key: str, value: str) -> None:
     config_root.mkdir(parents=True, exist_ok=True)
     config_path = config_root / provider_config.USER_CONFIG_FILENAME
     config_path.write_text(f"{section}:\n  {key}: \"{value}\"\n", encoding="utf-8")
+
+
+def _write_raw_config(config_root, *, section: str, key: str, raw_yaml_value: str) -> None:
+    """Write <config_root>/config.yaml with one section/key whose VALUE is
+    the raw YAML text *raw_yaml_value* (e.g. a flow-sequence list, or a bare
+    scalar of a non-string type) -- unlike _write_config, this does not wrap
+    the value in quotes, so the caller controls exactly what YAML shape
+    PyYAML's safe_load parses it as (a list, an int, a mapping, ...)."""
+    config_root.mkdir(parents=True, exist_ok=True)
+    config_path = config_root / provider_config.USER_CONFIG_FILENAME
+    config_path.write_text(f"{section}:\n  {key}: {raw_yaml_value}\n", encoding="utf-8")
 
 
 def test_env_var_is_not_shared_with_push():
@@ -371,3 +398,253 @@ class TestConfigWidenGuard:
             config_root=config_root,
         )
         assert result == frozenset()
+
+
+class TestConfigListForm:
+    """lr-4ebce1 fold-in #2, defect 1: FAIL-OPEN ON A
+    NON-STRING CONFIG VALUE. The pre-fix _load_configured_allowed_hosts
+    treated ANY non-string value -- including the natural YAML list shape
+    `allowed_hosts: [a.example, b.example]` -- as "not configured" and
+    silently returned None (permissive). A config parse/shape problem must
+    never resolve to "no restriction"; it must refuse loudly. See
+    read_host_guard's own module docstring, "TWO DEFECTS + FIX", for the
+    full argument."""
+
+    def test_yaml_list_form_is_accepted(self, tmp_path):
+        """The natural YAML list-authoring shape now resolves exactly like
+        the equivalent comma-separated string would -- an operator is no
+        longer punished (with silent permissiveness) for reaching for the
+        list form first."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="[forgejo.example.com:3000, other.example.com:3000]",
+        )
+        result = resolve_allowed_hosts(None, env={}, config_root=config_root)
+        assert result == frozenset(
+            {"forgejo.example.com:3000", "other.example.com:3000"}
+        )
+
+    def test_yaml_list_form_is_enforced_not_permissive(self, tmp_path):
+        """End-to-end: a list-configured allowlist actually DENIES a host
+        absent from it -- proving the list form is a real enforced
+        restriction, not merely "parsed but still permissive" (the exact
+        pre-fix failure mode: parsing would have returned None and every
+        host would have passed)."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="[forgejo.example.com:3000]",
+        )
+        allowed_hosts = resolve_allowed_hosts(None, env={}, config_root=config_root)
+        with pytest.raises(HostDeniedError):
+            check_host_allowed(
+                "https://attacker.example.net", allowed_hosts=allowed_hosts
+            )
+
+    def test_string_form_still_accepted_back_compat(self, tmp_path):
+        """The original comma-separated-string shape keeps working
+        unchanged alongside the new list shape."""
+        config_root = tmp_path / "config-root"
+        _write_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            value="forgejo.example.com:3000,other.example.com:3000",
+        )
+        result = resolve_allowed_hosts(None, env={}, config_root=config_root)
+        assert result == frozenset(
+            {"forgejo.example.com:3000", "other.example.com:3000"}
+        )
+
+    def test_int_value_raises_not_permissive(self, tmp_path):
+        """A bare int (e.g. an operator's typo, or a YAML authoring
+        mistake) is a hard config error -- never silently treated as
+        'unconfigured' (which would be permissive)."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="42",
+        )
+        with pytest.raises(InvalidReadHostConfigError) as exc_info:
+            resolve_allowed_hosts(None, env={}, config_root=config_root)
+        msg = str(exc_info.value)
+        assert str(config_root / provider_config.USER_CONFIG_FILENAME) in msg
+        assert READ_HOST_CONFIG_SECTION in msg
+        assert READ_HOST_CONFIG_KEY in msg
+        assert "int" in msg
+
+    def test_int_value_never_mints_a_token_no_call_reaches_check_host_allowed(
+        self, tmp_path
+    ):
+        """The config error fires INSIDE resolve_allowed_hosts, before
+        check_host_allowed (and therefore before any token mint) is ever
+        reached -- asserted here by confirming resolve_allowed_hosts itself
+        never returns a value check_host_allowed could act on."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="42",
+        )
+        with pytest.raises(InvalidReadHostConfigError):
+            resolve_allowed_hosts(None, env={}, config_root=config_root)
+        # No allowed_hosts value was ever produced for check_host_allowed to
+        # consume -- the exception propagates out of resolve_allowed_hosts
+        # itself, so a caller (transport.git_host_api._run) can never reach
+        # the check_host_allowed/token-resolution steps that follow it.
+
+    def test_mapping_value_raises_not_permissive(self, tmp_path):
+        """A YAML mapping (e.g. a copy-paste/indentation mistake nesting
+        another section under this key) is a hard config error, not
+        'unconfigured'."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="{nested: true}",
+        )
+        with pytest.raises(InvalidReadHostConfigError) as exc_info:
+            resolve_allowed_hosts(None, env={}, config_root=config_root)
+        msg = str(exc_info.value)
+        assert "dict" in msg
+
+    def test_list_with_an_int_entry_raises_not_permissive(self, tmp_path):
+        """A list that LOOKS like the accepted list-of-strings shape but
+        contains one non-string entry (e.g. an unquoted numeric-looking
+        hostname parsed as an int by YAML) is a hard config error -- never
+        silently coerced or dropped."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="[forgejo.example.com:3000, 12345]",
+        )
+        with pytest.raises(InvalidReadHostConfigError) as exc_info:
+            resolve_allowed_hosts(None, env={}, config_root=config_root)
+        msg = str(exc_info.value)
+        assert "12345" in msg
+
+    def test_read_host_config_is_set_also_raises_on_malformed_value(self, tmp_path):
+        """read_host_config_is_set shares _load_configured_allowed_hosts's
+        own fail-closed contract -- it never silently reports False (which
+        transport.git_host_api._run would otherwise read as 'config UNSET',
+        the wrong corrective-message mode) for a malformed value."""
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            raw_yaml_value="42",
+        )
+        with pytest.raises(InvalidReadHostConfigError):
+            read_host_config_is_set(config_root)
+
+
+class TestCorrectiveMessageMode:
+    """lr-4ebce1 fold-in #2, defect 2: MISLEADING REFUSAL
+    MESSAGE. check_host_allowed's pre-fix HostDeniedError always pointed at
+    --allowed-host/the env var, even when the operator-configured
+    READ_HOST_CONFIG_SECTION ceiling was the actual reason those two could
+    never have permitted the host (they can only narrow the ceiling, never
+    widen past it). See read_host_guard's own module docstring, "TWO
+    DEFECTS + FIX", for the full argument."""
+
+    def test_config_unset_message_names_env_var_and_flag(self):
+        """config_is_set=False (the default, and the only mode that existed
+        pre-fix): the message still tells the caller to set the env var or
+        pass --allowed-host -- accurate in this mode, unchanged text."""
+        with pytest.raises(HostDeniedError) as exc_info:
+            check_host_allowed(
+                "https://attacker.example.net",
+                allowed_hosts=frozenset({"https://git-host.example.com"}),
+                config_is_set=False,
+            )
+        msg = str(exc_info.value)
+        assert ALLOWED_HOSTS_ENV_VAR in msg
+        assert "--allowed-host" in msg
+
+    def test_config_set_message_names_config_key_not_env_var_advice(self):
+        """config_is_set=True: the message must point at the
+        read_host_guard.allowed_hosts config key, and must NOT tell the
+        caller that setting the env var or --allowed-host alone will permit
+        the host (false in this mode -- both can only narrow the
+        configured ceiling)."""
+        with pytest.raises(HostDeniedError) as exc_info:
+            check_host_allowed(
+                "https://attacker.example.net",
+                allowed_hosts=frozenset(),
+                config_is_set=True,
+            )
+        msg = str(exc_info.value)
+        assert READ_HOST_CONFIG_SECTION in msg
+        assert READ_HOST_CONFIG_KEY in msg
+        assert "user-level config file" in msg
+        assert "can only NARROW" in msg
+
+    def test_config_set_end_to_end_via_resolve_and_check(self, tmp_path):
+        """Realistic end-to-end shape: config IS set (narrowing an
+        attacker-supplied --allowed-host to nothing), and the resulting
+        HostDeniedError message reflects the config-SET mode -- exercised
+        through both resolve_allowed_hosts and read_host_config_is_set,
+        the same two calls transport.git_host_api._run itself makes."""
+        config_root = tmp_path / "config-root"
+        _write_config(
+            config_root,
+            section=READ_HOST_CONFIG_SECTION,
+            key=READ_HOST_CONFIG_KEY,
+            value="forgejo.example.com:3000",
+        )
+        allowed_hosts = resolve_allowed_hosts(
+            frozenset({"https://attacker.example.net"}),
+            env={},
+            config_root=config_root,
+        )
+        config_is_set = read_host_config_is_set(config_root)
+        assert config_is_set is True
+        with pytest.raises(HostDeniedError) as exc_info:
+            check_host_allowed(
+                "https://attacker.example.net",
+                allowed_hosts=allowed_hosts,
+                config_is_set=config_is_set,
+            )
+        msg = str(exc_info.value)
+        assert READ_HOST_CONFIG_SECTION in msg
+        assert READ_HOST_CONFIG_KEY in msg
+
+    def test_config_unset_end_to_end_via_resolve_and_check(self, tmp_path):
+        """Same shape, config UNSET: read_host_config_is_set is False and
+        the message keeps the original env-var/flag corrective text."""
+        config_root = tmp_path / "config-root"
+        resolved = resolve_allowed_hosts(
+            frozenset({"https://attacker.example.net"}),
+            env={},
+            config_root=config_root,
+        )
+        # Config UNSET -- explicit still wins outright (byte-for-byte the
+        # pre-fix precedence, see TestConfigWidenGuard's back-compat tests).
+        assert resolved == frozenset({"https://attacker.example.net"})
+        config_is_set = read_host_config_is_set(config_root)
+        assert config_is_set is False
+        # An unconfigured deployment is permissive by default (see
+        # TestResolveAllowedHosts) -- to exercise the denial message in
+        # this mode, supply an explicit allowed_hosts set directly instead
+        # of relying on resolve_allowed_hosts's permissive None here.
+        with pytest.raises(HostDeniedError) as exc_info:
+            check_host_allowed(
+                "https://attacker.example.net",
+                allowed_hosts=frozenset({"https://git-host.example.com"}),
+                config_is_set=config_is_set,
+            )
+        msg = str(exc_info.value)
+        assert ALLOWED_HOSTS_ENV_VAR in msg
+        assert "--allowed-host" in msg
