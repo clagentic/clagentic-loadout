@@ -794,7 +794,7 @@ The read also requires a matching identity stamp (`body.<caller>.stamp.json`
 stage or a binding mismatch fails closed rather than reading stale or
 mismatched content.
 
-**BREAKING CHANGE (lr-9ca25a): a reader that expects a head SHA now requires
+**BREAKING CHANGE: a reader that expects a head SHA now requires
 the stamp to carry one.** `--head-sha` is optional at stage time
 (`loadout-stage-body --head-sha <sha>`) — it always has been, for an
 ordinary comment with no SHA to bind against. Previously, a reader that DID
