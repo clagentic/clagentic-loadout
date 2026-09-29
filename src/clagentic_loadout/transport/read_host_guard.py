@@ -243,7 +243,9 @@ import os
 from pathlib import Path
 
 from clagentic_loadout.transport.host_guard_resolve import (
+    HostCeilingResolution,
     config_is_set as _config_is_set,
+    resolve_ceiling as _resolve_ceiling,
     resolve_ceiling_hosts as _resolve_ceiling_hosts,
 )
 from clagentic_loadout.transport.host_match import host_matches
@@ -385,6 +387,43 @@ class HostDeniedError(Exception):
     push.errors.HostDeniedError's own posture for the sibling guard."""
 
 
+def resolve_host_ceiling(
+    explicit: frozenset[str] | None = None,
+    *,
+    env: dict[str, str] | None = None,
+    config_root: str | Path | None = None,
+) -> HostCeilingResolution:
+    """Resolve BOTH the effective allowed-host set and whether the
+    config-file ceiling produced it, in ONE read of the user-level config
+    file (lr-57573e fold-in #1, F2: transport.git_host_api._run previously
+    called `resolve_allowed_hosts` and `read_host_config_is_set`
+    SEPARATELY, each independently re-reading and re-parsing the same
+    `read_host_guard.allowed_hosts` config key).
+
+    A caller (transport.git_host_api._run) that needs both `allowed_hosts`
+    (for enforcement) and `config_is_set` (for the mode-aware refusal
+    message) should call THIS function instead of `resolve_allowed_hosts`
+    plus `read_host_config_is_set` -- see `transport.host_guard_resolve.
+    HostCeilingResolution`'s own docstring for the full argument, and
+    `push.host_guard.resolve_host_ceiling` for the sibling guard's identical
+    fix. `resolve_allowed_hosts`/`read_host_config_is_set` stay available
+    for a caller that only ever needs one of the two values.
+
+    *env*/*config_root* have the same meaning as `resolve_allowed_hosts`'s
+    own parameters.
+    """
+    active_env = env if env is not None else os.environ
+    return _resolve_ceiling(
+        explicit,
+        env=active_env,
+        env_var=ALLOWED_HOSTS_ENV_VAR,
+        config_root=config_root,
+        config_section=READ_HOST_CONFIG_SECTION,
+        config_key=READ_HOST_CONFIG_KEY,
+        invalid_config_error=InvalidReadHostConfigError,
+    )
+
+
 def read_host_config_is_set(config_root: str | Path | None = None) -> bool:
     """True iff READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY is PRESENT in
     the user-level config file *config_root* (or DEFAULT_USER_CONFIG_ROOT
@@ -503,4 +542,5 @@ __all__ = [
     "check_host_allowed",
     "read_host_config_is_set",
     "resolve_allowed_hosts",
+    "resolve_host_ceiling",
 ]

@@ -140,7 +140,9 @@ from pathlib import Path
 
 from clagentic_loadout.push.errors import HostDeniedError, InvalidPushHostConfigError
 from clagentic_loadout.transport.host_guard_resolve import (
+    HostCeilingResolution,
     config_is_set as _config_is_set,
+    resolve_ceiling as _resolve_ceiling,
     resolve_ceiling_hosts as _resolve_ceiling_hosts,
 )
 from clagentic_loadout.transport.host_match import host_matches
@@ -224,6 +226,42 @@ def resolve_allowed_hosts(
     """
     active_env = env if env is not None else os.environ
     return _resolve_ceiling_hosts(
+        explicit,
+        env=active_env,
+        env_var=ALLOWED_HOSTS_ENV_VAR,
+        config_root=config_root,
+        config_section=PUSH_HOST_CONFIG_SECTION,
+        config_key=PUSH_HOST_CONFIG_KEY,
+        invalid_config_error=InvalidPushHostConfigError,
+    )
+
+
+def resolve_host_ceiling(
+    explicit: frozenset[str] | None = None,
+    *,
+    env: dict[str, str] | None = None,
+    config_root: str | Path | None = None,
+) -> HostCeilingResolution:
+    """Resolve BOTH the effective allowed-host set and whether the
+    config-file ceiling produced it, in ONE read of the user-level config
+    file (lr-57573e fold-in #1, F2: push.verb previously called
+    `resolve_allowed_hosts` and `push_host_config_is_set` SEPARATELY, each
+    independently re-reading and re-parsing the same
+    `push_host_guard.allowed_hosts` config key).
+
+    A caller (push.verb) that needs both `allowed_hosts` (for enforcement)
+    and `config_is_set` (for the mode-aware refusal message) should call
+    THIS function instead of `resolve_allowed_hosts` plus
+    `push_host_config_is_set` -- see `transport.host_guard_resolve.
+    HostCeilingResolution`'s own docstring for the full argument.
+    `resolve_allowed_hosts`/`push_host_config_is_set` stay available for a
+    caller that only ever needs one of the two values.
+
+    *env*/*config_root* have the same meaning as `resolve_allowed_hosts`'s
+    own parameters.
+    """
+    active_env = env if env is not None else os.environ
+    return _resolve_ceiling(
         explicit,
         env=active_env,
         env_var=ALLOWED_HOSTS_ENV_VAR,
@@ -346,4 +384,5 @@ __all__ = [
     "check_host_allowed",
     "push_host_config_is_set",
     "resolve_allowed_hosts",
+    "resolve_host_ceiling",
 ]
