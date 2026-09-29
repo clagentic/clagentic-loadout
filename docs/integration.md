@@ -462,6 +462,51 @@ users beyond this deployment. Opt-in matches every sibling guard in this
 package (`push.namespace_guard`, `push.host_guard`,
 `transport.git_host_api`'s own `known_bad_owners`).
 
+**A CALLER-SETTABLE ALLOWLIST DOES NOT PROTECT AGAINST THAT SAME CALLER —
+READ THIS BEFORE RELYING ON `--allowed-host`/THE ENV VAR FOR SECURITY.**
+Both `--allowed-host` and `CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS` are set by
+the SAME process invocation that also supplies `--git-host-base-url`. A
+caller able to pass a hostile `--git-host-base-url` is, by construction,
+equally able to pass a matching `--allowed-host` (or export a matching
+`CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS`) in that identical command line or its
+own spawn environment — an "allowlist" set by the same actor it is meant to
+restrict approves its own redirect and protects against nothing. The flag
+and env var remain useful for restricting a DIFFERENT, less-trusted caller
+(e.g. a sub-process this one spawns with a scrubbed environment) or for
+documenting intent to a human reading the invocation — but they are NOT a
+security boundary against the invoking caller itself.
+
+**The only source that WIDENS the effective allowlist is an
+operator-controlled config key, immune to per-call argv/env.** Set
+`allowed_hosts` under a `read_host_guard:` section in the USER-LEVEL
+`~/.config/clagentic/loadout/config.yaml` (same file, same
+`load_user_config_section` loader every other user-level config tier in this
+package already uses — see `credentials:`/`forgejo:` above), comma-separated,
+same entry shape (`host[:port]` or `scheme://host[:port]`) as the env var:
+
+```yaml
+read_host_guard:
+  allowed_hosts: "forgejo.example.com:3000,other-forgejo.example.org:3000"
+```
+
+Once this key is set, it becomes the CEILING: `--allowed-host`/the env var
+can only NARROW it (the effective set is the overlap between the configured
+ceiling and whatever the caller supplied), never widen it — a caller can no
+longer add a host absent from the operator's own configured list, regardless
+of what it passes on the command line or in its own environment. Supplying
+neither flag nor env var, with the config key set, enforces the full
+configured set. An operator who genuinely needs protection against a
+caller that can set its own `--git-host-base-url`/`--allowed-host` MUST set
+this config key — the flag/env var alone, no matter how it is populated,
+never provides that protection.
+
+**Back-compat: leaving the config key unset reproduces the pre-fix
+precedence byte-for-byte** — `--allowed-host` still wins over the env var,
+which still wins over the permissive (no-restriction) default, with no
+forced config write for a deployment that has not opted into the config-file
+ceiling. This is the DEFAULT shape, and it carries the "does not protect
+against the same caller" caveat above.
+
 ## Minimal spawn-env checklist
 
 For a role that only calls Forgejo-path verbs with the `static` credential
