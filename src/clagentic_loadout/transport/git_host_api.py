@@ -280,6 +280,14 @@ from clagentic_loadout.transport.provider_config import (
     load_user_config_section,
     resolve_platform_provider,
 )
+from clagentic_loadout.transport.read_host_guard import (
+    ALLOWED_HOSTS_ENV_VAR as READ_ALLOWED_HOSTS_ENV_VAR,
+    HostDeniedError,
+    InvalidReadHostConfigError,
+    check_host_allowed,
+    read_host_config_is_set,
+    resolve_allowed_hosts,
+)
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -404,6 +412,29 @@ EXIT_CROSS_PLATFORM_URL_SHAPE_MISMATCH = 18
 #: of those. An OMITTED --caller never triggers this check (see
 #: bind_caller's own docstring) -- it is unchanged, existing behavior.
 EXIT_CALLER_INVOKER_MISMATCH = 19
+#: The resolved git-host base (--git-host-base-url flag, its env-var tiers,
+#: or the user-level config file -- see _resolve_git_host_base) is not
+#: present in the caller-configured allowed-host set (transport.
+#: read_host_guard, lr-4ebce1). FAILS CLOSED BEFORE ANY I/O -- no token
+#: mint, no request is ever issued. Permissive by default (an unconfigured
+#: deployment enforces no restriction here, matching push.host_guard's own
+#: EXIT_HOST_DENIED precedent for a different call site) -- see
+#: transport.read_host_guard's own module docstring for the full default-
+#: posture argument and for why this verb's allowlist is deliberately NOT
+#: shared with push's own CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS.
+EXIT_HOST_DENIED = 20
+#: The user-level config file's READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY
+#: (transport.read_host_guard) holds a value that is not one of the two
+#: accepted shapes -- a comma-separated string, or a YAML list of strings
+#: (lr-4ebce1 fold-in #2, FAIL-OPEN-ON-CONFIG fix). FAILS CLOSED BEFORE ANY
+#: I/O -- no token mint, no request is ever issued. Distinct from
+#: EXIT_HOST_DENIED so an operator can tell "the allowlist config itself is
+#: malformed" apart from "a real host was refused" -- a malformed config
+#: value is NEVER treated as "unconfigured" (which would silently disable
+#: the restriction the operator was trying to set); see
+#: transport.read_host_guard.InvalidReadHostConfigError for the full
+#: argument.
+EXIT_HOST_CONFIG_INVALID = 21
 
 # HTTP methods that mutate server state and require fail-on-HTTP-error
 # enforcement. GET/HEAD are read-only.
@@ -1547,6 +1578,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"Forgejo-only plumbing: it is unused on a GitHub-targeted call.",
     )
     parser.add_argument(
+        "--allowed-host",
+        action="append",
+        dest="allowed_hosts",
+        default=None,
+        help="Restrict the resolved git-host base (--git-host-base-url, its "
+        "env-var tiers, or the user-level config file -- see that flag's "
+        "own help) this invocation will attach a credential to. Repeatable; "
+        "each value is a bare 'host[:port]' or a full 'scheme://host[:port]' "
+        "URL. When omitted, falls back to "
+        f"{READ_ALLOWED_HOSTS_ENV_VAR} (comma-separated); when neither is "
+        f"set, no host restriction is enforced. A mismatch exits "
+        f"{EXIT_HOST_DENIED} ({EXIT_HOST_DENIED}=EXIT_HOST_DENIED), before "
+        "any credential is resolved. This is a SEPARATE allowlist from "
+        "push's --allowed-host/CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS -- see "
+        "transport.read_host_guard's module docstring for why the two are "
+        "not shared. Ignored on a GitHub-targeted call (the resolved "
+        "git-host base is unused there -- see --git-host-base-url).",
+    )
+    parser.add_argument(
         "method_or_path",
         help="HTTP method (GET/POST/PATCH/PUT/DELETE, defaults to GET when "
         "the first positional is the path) or the API PATH itself.",
@@ -1890,6 +1940,52 @@ def _run(
 ) -> int:
     method, path_arg = _split_method_and_path(args)
 
+    # Single-resolve, guard-then-request (lr-4ebce1 fold-in #3, hardening
+    # requested during PR review -- not a live bypass; all three call sites
+    # already invoke the SAME deterministic resolver with the SAME
+    # arguments, so this cannot presently disagree at runtime, but resolving
+    # once and threading the one value through removes the possibility BY
+    # CONSTRUCTION rather than by three call sites happening to agree
+    # today). Resolved once, here,
+    # for a non-GitHub target only -- the resolved Forgejo base is unused on
+    # the GitHub branch (git_host_base = "" below), so resolving it there
+    # would do work with no consumer; matches the pre-fix behavior of
+    # skipping resolution entirely for a GitHub target. Every later use in
+    # this function (the guard immediately below, the cross-platform
+    # URL-shape corrective error, and the request-building git_host_base
+    # itself) reads THIS SAME LOCAL, never re-calls _resolve_git_host_base.
+    resolved_git_host_base = (
+        _resolve_git_host_base(args.git_host_base_url) if not _is_github_target(path_arg) else None
+    )
+
+    # Host anchoring for the resolved git-host base (lr-4ebce1), checked
+    # FIRST -- before any other precondition, and BEFORE any credential is
+    # resolved or request issued. --git-host-base-url unconditionally wins
+    # over every other resolution tier (_resolve_git_host_base's own
+    # docstring, "always wins when non-empty") and the minted token does NOT
+    # follow the host it is destined for (see transport.read_host_guard's
+    # module docstring for the full defect this closes). Skipped for a
+    # GitHub target: the resolved Forgejo base is discarded unconditionally
+    # for that branch (git_host_base = "" below) and never used to build the
+    # credentialed request -- see --git-host-base-url's own --help
+    # ("unused on a GitHub-targeted call").
+    if resolved_git_host_base is not None:
+        try:
+            allowed_hosts = resolve_allowed_hosts(
+                frozenset(args.allowed_hosts) if args.allowed_hosts is not None else None
+            )
+            config_is_set = read_host_config_is_set()
+        except InvalidReadHostConfigError as exc:
+            _fail(str(exc), code=EXIT_HOST_CONFIG_INVALID)
+        try:
+            check_host_allowed(
+                resolved_git_host_base,
+                allowed_hosts=allowed_hosts,
+                config_is_set=config_is_set,
+            )
+        except HostDeniedError as exc:
+            _fail(str(exc), code=EXIT_HOST_DENIED)
+
     path_owner_match = _REPOS_PATH_RE.match(path_arg)
     if path_owner_match:
         _validate_owner(path_owner_match.group(1), known_bad_owners=known_bad_owners)
@@ -2218,7 +2314,17 @@ def _run(
     # URL rather than proceeding to a token mint that will refuse opaquely.
     if call_repo is None:
         _check_cross_platform_url_shape_mistake(
-            path_arg, target_platform, git_host_base=_resolve_git_host_base(args.git_host_base_url)
+            path_arg,
+            target_platform,
+            # Single-resolve (lr-4ebce1 fold-in #3): reuse the SAME value
+            # already resolved once above for the guard, rather than a
+            # second _resolve_git_host_base call -- see that call site's own
+            # comment. On a GitHub target resolved_git_host_base is None
+            # (never resolved -- see above); this corrective message is only
+            # reachable for a Forgejo-shaped path-mismatch, so an empty
+            # string here (rather than re-resolving) is the correct "no
+            # git-host base applies" value for that branch.
+            git_host_base=resolved_git_host_base if resolved_git_host_base is not None else "",
         )
 
     print(
@@ -2275,8 +2381,13 @@ def _run(
     # absolute URL pointed somewhere other than the configured git host) is
     # never masked as either a routing success or an opaque transport
     # failure.
+    # Single-resolve (lr-4ebce1 fold-in #3): resolved_git_host_base is the
+    # SAME value already resolved once above (before the guard ran) -- this
+    # site no longer calls _resolve_git_host_base a second/third time. On a
+    # GitHub target it is None (never resolved -- unused on that branch, see
+    # the resolution site's own comment); the branch below never reads it in
+    # that case, matching the pre-fix behavior byte-for-byte.
     path_arg_is_absolute_url = urllib.parse.urlsplit(path_arg).scheme in ("http", "https")
-    resolved_git_host_base = _resolve_git_host_base(args.git_host_base_url)
     if target_platform == PLATFORM_GITHUB:
         git_host_base = ""
     elif path_arg_is_absolute_url:

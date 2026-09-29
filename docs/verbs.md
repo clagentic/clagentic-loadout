@@ -22,7 +22,18 @@ succeeded. Token is always resolved through the credential-provider seam
 (see "Credentials" below) — never read from an inherited environment
 variable. Base URL resolution (the `--git-host-base-url` flag, its env
 vars, and the config-file tier) is the runtime contract documented in
-[docs/integration.md](integration.md).
+[docs/integration.md](integration.md). The resolved base can be restricted
+to a configured allowlist via `--allowed-host`/`CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS`
+(permissive by default) — see integration.md's "Host restriction
+(git-host-api read verb)" section for the full contract and the reasoning
+behind the default posture. **`--allowed-host`/the env var are BOTH
+caller-settable in the same invocation that also sets `--git-host-base-url`
+and therefore do NOT protect against that same caller** — only the
+operator-controlled `read_host_guard.allowed_hosts` key in the user-level
+`~/.config/clagentic/loadout/config.yaml` can WIDEN the effective allowlist;
+once set, the flag/env var can only narrow it. See integration.md's "Host
+restriction (git-host-api read verb)" section for the full precedence and
+the security rationale.
 
 **`--body-env` — body-off-argv-and-pipe:**
 see the dedicated section below (shared by `loadout-git-host-api` and
