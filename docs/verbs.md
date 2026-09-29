@@ -151,9 +151,10 @@ invocation of the SAME caller silently re-reading a leftover staged body
 from a prior PR/review (a real foreign-body incident: a stale review body
 got re-POSTed onto an unrelated PR). The staged body is now
 consumed (unlinked) after a successful read, and bound to an identity
-stamp (`target_pr`, optional `head_sha`, `staged_at`) the read must match —
-`read_body_bytes(caller=...)` requires `expect_target_pr`; a mismatch or a
-second read with no re-staging fails closed (`BodyEnvError`,
+stamp (`target_pr`, optional `head_sha`, `staged_at`, `carries_review_status`
+— see "Verdict-intent check" under `loadout-review-post` below) the read
+must match — `read_body_bytes(caller=...)` requires `expect_target_pr`; a
+mismatch or a second read with no re-staging fails closed (`BodyEnvError`,
 `EXIT_BODY_ENV_UNREADABLE`) rather than ever silently posting stale
 content. See `transport.body_env`'s module docstring and
 `stage_caller_body` for the write-side contract.
@@ -315,6 +316,19 @@ Body content is validated with the same `validate_body_stdin_content` every
 other body-ingesting verb in this package uses, BEFORE anything is staged —
 malformed content is refused here, not later at `--body-env` read time.
 
+**Verdict-intent is derived automatically, never a separate flag to set:**
+this verb inspects the staged JSON body itself for a top-level
+`review_status` field (`"clean"` or `"blocking"`) and records that as the
+stamp's `carries_review_status` field — there is no `--intent`/`--verdict`
+flag to remember or get out of sync with the body's own content. A caller
+staging `{"body": "...", "review_status": "clean"}` is automatically bound
+to the verdict route; a caller staging `{"body": "..."}` alone is
+automatically bound to the plain route. `loadout-review-post`'s
+`--body-env` read compares this signal against whether the READING
+invocation actually requests `--verdict-review-status`/`--verdict-findings`
+— see "Verdict-intent check on `--body-env`" under `loadout-review-post`
+below for the fail-closed, non-consuming contract this enables.
+
 ### `loadout-review-post` — post-and-verify a review comment
 
 `clagentic_loadout.review.verb`. Posts exactly one review comment and
@@ -335,6 +349,62 @@ Outside the verdict
 route below, this verb does not touch the fenced ` ```review-result``` `
 block that the merge gate reads — see `review.contract`'s module
 docstring.
+
+**Verdict-intent check on `--body-env` (staged body vs. invocation route,
+fail-closed, non-consuming):** a body staged via `loadout-stage-body`
+carries a derived, platform-computed `carries_review_status` signal in its
+identity stamp — whether the staged JSON itself has a `review_status`
+field — recorded at STAGE time, never a second caller-typed assertion. On
+read, this verb compares that signal against whether THIS invocation
+actually supplies `--verdict-review-status`/`--verdict-findings`. A
+mismatch — most commonly, a body staged carrying `review_status` (intended
+as a verdict) reaching an invocation that omits both verdict flags — fails
+closed with `EXIT_VERDICT_ROUTE_INTENT_MISMATCH` (`13`) **before** any
+network call, and leaves BOTH the staged body and its stamp in place: the
+caller corrects the invocation (adds or drops the verdict flags) and
+retries without re-staging. This closes the repeated seam defect where a
+staged verdict body posted through the plain, non-verdict route succeeded
+silently with no fence and no warning — the failure only surfaced later, at
+the merge gate. A body staged with NO `review_status` field, read by a
+plain-route invocation (the ordinary, non-verdict case), matches cleanly
+and is completely unaffected — this check only fires on the actual
+intent/content mismatch, never on an ordinary plain comment. `--body-stdin`
+carries no staged, platform-computed provenance to check against and is
+unaffected by this check either way.
+
+**Verdict-required-role check (`review.verdict_required_roles`, BOTH
+`--body-env` AND `--body-stdin`, fail-closed, non-consuming):** the
+verdict-intent check above only catches a MISMATCH between staged content
+and invocation intent — it cannot catch a genuinely prose-only body (no
+`review_status` field anywhere) posted with no verdict flags, because
+content and route agree ("plain") and the stamp comparison passes cleanly.
+A deployment closes that residual gap by declaring
+`review.verdict_required_roles` — a list of role/caller-name strings — in
+the **user-level** `<config_root>/config.yaml` (the same
+`load_user_config_section` loader/config-root convention
+`loadout-git-host-api`'s "Host restriction" mechanism (see
+integration.md's "Host restriction (git-host-api read verb)" section)
+already uses; absent or empty by default — fully non-breaking). When the EFFECTIVE caller
+(the attested, caller-bound identity, not a raw `--caller` argv string) is
+a member of that list, and the invocation supplies NEITHER
+`--verdict-review-status` NOR `--verdict-findings`, this refuses with
+`EXIT_VERDICT_ROUTE_INTENT_MISMATCH` (`13`, the SAME code the stamp check
+above uses — both mean "this would have posted a fenceless comment where a
+verdict was required/intended") **before** any `--body-env` staged file is
+read/consumed and **before** any network call — a `--body-env` caller's
+staged pair survives untouched, and a corrected retry (adding one of the
+two verdict flags, and, if the originally staged content itself was
+genuinely prose-only with no `review_status` field, supplying verdict
+content via `--body-stdin` instead, since a prose-only body can never
+satisfy either verdict route's own content contract without a fresh stage)
+needs no restaging of what already exists. Unlike the stamp check, this one
+runs identically on `--body-stdin` — a role-declared reviewer's fenceless
+post is exactly as wrong there as via `--body-env`, since this check
+depends only on the caller's role and the invocation's own flags, never on
+staged provenance. A **malformed** config value (not a list of non-empty
+strings, or an explicit `verdict_required_roles: null`) is a hard config
+error, never silently treated as "no roles declared" — mirrors
+`transport.read_host_guard`'s own fail-closed config pattern.
 
 **`--verdict-review-status <clean|blocking>` — MANDATORY, fail-closed
 emit-and-verify verdict route, Forgejo AND GitHub parity:**

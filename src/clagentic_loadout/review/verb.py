@@ -116,6 +116,39 @@ shrink/retire as --verdict-findings becomes the sole route.
 SCOPE BOUNDARY: outside the --verdict-review-status / --verdict-findings
 routes above, this verb does not touch the fenced ```review-result```
 verdict block — see review.contract's module docstring.
+
+VERDICT-INTENT STAMP CHECK (lr-9ba589, --body-env route only): the
+--body-env read call site below passes `expect_verdict_route` — whether
+THIS invocation supplied --verdict-review-status/--verdict-findings — to
+transport.body_env.read_body_bytes, which compares it against the staged
+body's own derived verdict-intent signal (transport.body_env's
+`carries_review_status` stamp field, computed from the staged JSON at
+STAGE time, never a caller-typed assertion) BEFORE reading or consuming
+the staged file. A mismatch — most commonly, a body staged with
+'review_status' reaching this verb's plain else-branch below because the
+caller's invocation omitted the verdict flags — fails closed
+(EXIT_VERDICT_ROUTE_INTENT_MISMATCH) with the staged file left intact for
+a corrected retry, instead of the plain else-branch silently posting a
+fenceless comment with no signal that a verdict was intended. This closes
+the sixth/seventh-incident shape (see this task's own history) WITHOUT
+touching --body-stdin (which carries no staged, platform-computed
+provenance to check against) and without making the verdict route
+mandatory for every caller — an invocation that genuinely wants a plain,
+non-verdict comment, staged as plain content, is completely unaffected.
+
+VERDICT-REQUIRED-ROLE CHECK (lr-9ba589 fold-in #1, BOTH body-ingestion
+routes): the stamp check above only catches a MISMATCH between staged
+content and invocation intent — it does nothing for the shape that
+actually burned the originating incident: prose-only staged content (no
+'review_status' field at all) posted with no verdict flags, where content
+and route AGREE and the stamp comparison therefore passes cleanly. This
+verb also reads review.verdict_required_roles (a user-level config key,
+absent/empty by default — fully non-breaking) and refuses, BEFORE any
+body is read/consumed on EITHER --body-env or --body-stdin and BEFORE any
+network call, when the effective (attested, caller-bound) caller is
+declared in that list and neither verdict flag was supplied. See
+review.verdict_required_roles's own module docstring for the full design
+and its distinction from the stamp check above.
 """
 
 from __future__ import annotations
@@ -154,6 +187,10 @@ from clagentic_loadout.review.github_backend import (
     GithubReviewBackend,
     assert_platform_is_github,
 )
+from clagentic_loadout.review.verdict_required_roles import (
+    VerdictRequiredRoleRefusedError,
+    check_verdict_required_role,
+)
 from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
@@ -161,6 +198,7 @@ from clagentic_loadout.transport.attestation import (
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
+    VerdictIntentMismatchError,
     augment_body_contract_error,
     read_body_bytes,
     resolve_caller_body_path,
@@ -261,6 +299,33 @@ EXIT_DELETE_OWN_COMMENT_REFUSED = 11
 #: on an explicit mismatch -- see transport.caller_binding's own module
 #: docstring for the full behavior change.
 EXIT_CALLER_INVOKER_MISMATCH = 12
+#: The staged body's --body-env identity stamp records a verdict-intent
+#: signal (lr-9ba589: `carries_review_status`, derived at stage time from
+#: whether the staged JSON carries a 'review_status' field) that DISAGREES
+#: with whether THIS invocation is taking the verdict route
+#: (--verdict-review-status/--verdict-findings) or the plain route --
+#: either a body staged with 'review_status' reaching a plain-route
+#: invocation (the seventh-incident shape: would have posted silently
+#: fenceless) or a body staged WITHOUT 'review_status' reaching a
+#: verdict-route invocation. Distinct from EXIT_BODY_ENV_UNREADABLE so a
+#: caller can tell "nothing is staged at all" apart from "something IS
+#: staged, but for the wrong intent" -- transport.body_env.
+#: read_caller_body_bytes raises VerdictIntentMismatchError (a BodyEnvError
+#: subclass) for exactly this case, and refuses BEFORE consuming either
+#: staged file: the caller can correct the invocation (add/remove the
+#: verdict flags) and retry without re-staging.
+#:
+#: ALSO used for the SIBLING fold-in #1 check (lr-9ba589 comment #1,
+#: review.verdict_required_roles.VerdictRequiredRoleRefusedError): a role
+#: declared in the user-level review.verdict_required_roles config posting
+#: with neither verdict flag -- on EITHER body-ingestion route, since that
+#: check has no staged content to compare against and needs none. Both
+#: failures are the same incident class ("this invocation would have posted
+#: a fenceless comment where a verdict was required/intended"), so sharing
+#: one exit code means an existing caller/harness that already handles this
+#: code from the stamp check handles the role check identically, with no
+#: new code to learn.
+EXIT_VERDICT_ROUTE_INTENT_MISMATCH = 13
 
 
 class ReviewPostVerbError(Exception):
@@ -860,6 +925,33 @@ def _run(
             code=EXIT_VERDICT_BLOCK_USAGE,
         )
 
+    # VERDICT-REQUIRED-ROLE CHECK (lr-9ba589 fold-in #1): a role-declared
+    # reviewer (review.verdict_required_roles, a USER-LEVEL config key --
+    # see that module's own docstring) must never post a fenceless comment,
+    # regardless of what content it staged. This is DISTINCT from the
+    # --body-env stamp/intent check below: that check compares STAGED
+    # CONTENT against invocation intent and only ever runs on --body-env
+    # (it has no staged provenance to compare against on --body-stdin, and
+    # cannot fire before content is known); THIS check compares the
+    # CALLER'S OWN ROLE against invocation intent alone, needs no staged
+    # content at all, and therefore applies identically on BOTH
+    # body-ingestion routes. Checked BEFORE any --body-env read/consume and
+    # BEFORE any credential mint or network call -- `caller` here is the
+    # ATTESTED, caller-bound identity already resolved above, never a raw
+    # argv string. A malformed config value (InvalidVerdictRequiredRolesConfigError,
+    # a ValueError subclass) is deliberately NOT caught here -- it is
+    # allowed to propagate as an uncaught, fail-loud config error, mirroring
+    # transport.read_host_guard's own "never silently degrade to
+    # permissive" contract for a malformed config value.
+    try:
+        check_verdict_required_role(
+            caller,
+            verdict_review_status=args.verdict_review_status,
+            verdict_findings=args.verdict_findings,
+        )
+    except VerdictRequiredRoleRefusedError as exc:
+        _fail(str(exc), code=EXIT_VERDICT_ROUTE_INTENT_MISMATCH)
+
     # Platform guard + token mint BEFORE --body-env's CONSUMING read
     # (security re-audit follow-up, same class of fix as push.verb's
     # detached-HEAD reorder): build_backend() runs the platform guard
@@ -942,13 +1034,29 @@ def _run(
     # (lr-becdef): a leftover body staged for a prior, unrelated PR/review
     # can no longer be silently re-read and re-posted under this PR's
     # identity -- see transport.body_env's module docstring.
+    #
+    # expect_verdict_route (lr-9ba589, seventh incident in this seam): this
+    # invocation's OWN verdict-route intent -- whether --verdict-review-
+    # status or --verdict-findings was passed -- is compared against the
+    # staged stamp's derived carries_review_status signal BEFORE the body
+    # is read or consumed. A mismatch (staged-as-verdict content reaching
+    # this plain else-branch below with no verdict flags on the command
+    # line, or the reverse) fails closed via VerdictIntentMismatchError,
+    # caught separately below, leaving the staged pair intact for a
+    # corrected retry -- see transport.body_env's own "VERDICT-INTENT
+    # STAMP" module docstring section for the full design.
     if args.body_env:
         try:
             raw_bytes = read_body_bytes(
                 caller=caller,
                 expect_target_pr=pr_number,
                 expect_head_sha=args.verdict_head_sha,
+                expect_verdict_route=(
+                    args.verdict_review_status is not None or args.verdict_findings
+                ),
             )
+        except VerdictIntentMismatchError as exc:
+            _fail(str(exc), code=EXIT_VERDICT_ROUTE_INTENT_MISMATCH)
         except BodyEnvError as exc:
             _fail(str(exc), code=EXIT_BODY_ENV_UNREADABLE)
     else:

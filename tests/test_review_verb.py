@@ -30,7 +30,27 @@ import json
 import pytest
 
 from clagentic_loadout.review import verb
+from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_config_root(tmp_path, monkeypatch):
+    """Belt-and-suspenders isolation, same pattern/rationale as
+    test_transport_git_host_api.py's own `_isolate_user_config_root` fixture
+    (lr-9ba589 fold-in #1): review.verdict_required_roles.
+    check_verdict_required_role reads through
+    transport.provider_config.load_user_config_section, which falls back to
+    provider_config.DEFAULT_USER_CONFIG_ROOT -- the REAL
+    ~/.config/clagentic/loadout/ directory -- for any call that omits
+    config_root, which review.verb._run's own call site always does (no
+    --config-root flag on this verb). A real deployment config.yaml on the
+    host running these tests must never leak a live
+    review.verdict_required_roles list into a test asserting the
+    unconfigured (non-breaking) default. Every test in this file that
+    exercises the config tier explicitly writes into this isolated root."""
+    isolated_root = tmp_path / "isolated-user-config-root"
+    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
 
 
 class _RecordingTokenProvider:
@@ -1777,3 +1797,462 @@ class TestDeleteOwnCommentDigitOnlyGuard:
             opener=_github_delete_opener(),
         )
         assert code == verb.EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# VERDICT-ROUTE INTENT MISMATCH (lr-9ba589, seventh incident in this seam):
+# THIS TASK'S OWN ACCEPTANCE CRITERION -- reproduce the exact shape that
+# burned six-plus times: stage a body WITHOUT review_status, then invoke
+# review-post as if a verdict post was intended (or the mirror: stage WITH
+# review_status, invoke plain). Today (pre-fix) the plain-route direction
+# silently succeeds fenceless with verdict_block_verified never even
+# considered. After this fix, the invocation must fail closed with a
+# corrective message naming what is missing, and must NOT consume the
+# staged body on refusal (the caller can retry without restaging). A
+# companion class proves a legitimate PLAIN, non-verdict comment (content
+# and route intent agree) still works exactly as before.
+# ---------------------------------------------------------------------------
+
+
+def _refusing_opener(req, timeout=15):
+    """Raises if ever called -- proves this invocation never reached a
+    network call, mirroring _RefusingTokenProvider's own "must not be
+    called" pattern for the HTTP layer instead of the credential layer.
+    Used where a genuinely-staged, token-mintable body must still be
+    refused by the verdict-intent check BEFORE post_and_verify ever runs
+    (build_backend/token mint runs earlier by deliberate, pre-existing
+    design -- see review.verb._run's own "Platform guard + token mint
+    BEFORE --body-env's CONSUMING read" comment -- so a refusing TOKEN
+    provider is the wrong tool for proving this ordering; a refusing
+    OPENER is)."""
+    raise AssertionError(
+        f"no network call should have been made when the verdict-intent "
+        f"check should have refused first: {req.get_method()} {req.full_url}"
+    )
+
+
+class TestVerdictRouteIntentMismatchFailsClosed:
+    def test_verdict_staged_body_posted_via_plain_route_fails_closed_and_preserves_staged_files(
+        self, monkeypatch, tmp_path
+    ):
+        """THE MIRROR-DIRECTION MISMATCH (fold-in #1 correction: this
+        is NOT the shape that actually burned the originating incident --
+        see TestPlainCommentStillWorksUnderNonBreakingDefault's
+        test_plain_comment_staged_and_posted_plain_still_succeeds below for
+        that shape, which content-and-route-agree and therefore still
+        succeeds by design). Here: a body staged carrying review_status
+        (intended as a verdict) is read by an invocation that omits BOTH
+        --verdict-review-status and --verdict-findings -- content and route
+        DISAGREE, so this must refuse (EXIT_VERDICT_ROUTE_INTENT_MISMATCH)
+        BEFORE any network call, rather than silently posting a fenceless
+        comment."""
+        from clagentic_loadout.transport.body_env import (
+            _resolve_caller_stamp_path,
+            resolve_caller_body_path,
+        )
+
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(
+            tmp_path,
+            json.dumps({"body": "Looks clean.", "review_status": "clean"}).encode("utf-8"),
+            caller="reviewer",
+        )
+        body_path = resolve_caller_body_path(caller="reviewer", env={"TMPDIR": str(tmp_path)})
+        stamp_path = _resolve_caller_stamp_path(caller="reviewer", env={"TMPDIR": str(tmp_path)})
+        assert body_path.exists() and stamp_path.exists()
+
+        # Token mint runs BEFORE the --body-env read by deliberate,
+        # pre-existing design (protecting a genuinely-staged body from a
+        # downstream platform/token failure) -- a real token provider is
+        # therefore expected to succeed here; the refusal this test proves
+        # is that NO NETWORK CALL is ever made, via the refusing opener.
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_refusing_opener,
+        )
+        assert code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
+
+        # THE ACCEPTANCE CRITERION: the staged pair survives the refusal --
+        # a retry with the correct --verdict-review-status/--verdict-head-sha
+        # flags does not require re-staging.
+        assert body_path.exists()
+        assert stamp_path.exists()
+
+    def test_caller_can_retry_with_corrected_flags_without_restaging(self, monkeypatch, tmp_path, capsys):
+        """Follow-on to the mismatch test above: after the refusal, the SAME
+        staged pair (never re-staged) succeeds once the invocation is
+        corrected to actually request the verdict route."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(
+            tmp_path,
+            json.dumps({"body": "Looks clean.", "review_status": "clean"}).encode("utf-8"),
+            caller="reviewer",
+            head_sha=_HEAD_SHA,
+        )
+
+        first_code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_refusing_opener,
+        )
+        assert first_code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
+
+        opener_state: dict = {}
+        opener = _github_verdict_opener(posted_id=88, capture_into=opener_state)
+        second_code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+        )
+        assert second_code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["verdict_block_verified"] is True
+
+    def test_plain_staged_body_posted_via_verdict_route_fails_closed(self, monkeypatch, tmp_path):
+        """Mirror direction: a body staged with no review_status, read by an
+        invocation requesting the verdict route -- must refuse rather than
+        construct a fence around content the caller never marked as a
+        verdict."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        # Staged with the SAME head_sha the invocation below expects, so the
+        # earlier expect_head_sha stamp check passes cleanly and the
+        # verdict-intent check (this test's actual subject) is the one that
+        # fires -- isolating this refusal from the unrelated SHA check.
+        _stage_body_env(
+            tmp_path, b'{"body": "LGTM, no issues."}', caller="reviewer", head_sha=_HEAD_SHA
+        )
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_refusing_opener,
+        )
+        assert code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
+
+
+class TestPlainCommentStillWorksUnderNonBreakingDefault:
+    """Companion to the mismatch tests: a legitimate PLAIN, non-verdict
+    comment -- content and route intent AGREE -- must still post
+    successfully. This proves the fix is non-breaking for the ordinary,
+    overwhelmingly common case this seam exists to serve.
+
+    test_plain_comment_staged_and_posted_plain_still_succeeds below is ALSO,
+    by fold-in #1's own correction, the exact reproduction of the
+    shape that actually burned the originating incident: a prose-only body
+    with no review_status field at all, posted with no verdict flags.
+    Content and route agree ("plain"), so the stamp/intent check above
+    correctly does NOT refuse it -- that check has no way to know this
+    caller's role should never be allowed to post fenceless at all. That
+    residual gap is what review.verdict_required_roles (see
+    TestVerdictRequiredRoleRefusesFenceless below) closes on a different
+    axis: this test's caller ("some-role") is never declared
+    verdict-required, so it is correctly unaffected by that check too."""
+
+    def test_plain_comment_staged_and_posted_plain_still_succeeds(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        # caller="some-role" and body "LGTM" match _github_success_opener's
+        # own fixture identity/readback exactly (the login it returns from
+        # GET /user, and the body its readback echoes) -- see the existing
+        # test_github_backend_success_from_staged_file above for the same
+        # convention.
+        _stage_body_env(tmp_path, b'{"body": "LGTM"}', caller="some-role")
+
+        code = verb.main(
+            [
+                "--caller", "some-role", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_success_opener(),
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["pr_number"] == 42
+
+    def test_verdict_comment_staged_and_posted_via_verdict_route_still_succeeds(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(
+            tmp_path,
+            json.dumps({"body": "No issues.", "review_status": "clean"}).encode("utf-8"),
+            caller="reviewer",
+            head_sha=_HEAD_SHA,
+        )
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_verdict_opener(),
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["verdict_block_verified"] is True
+
+    def test_body_stdin_route_is_unaffected_by_this_check(self, monkeypatch):
+        """--body-stdin carries no staged, platform-computed provenance to
+        check against (this fix is scoped to --body-env only) -- a plain
+        --body-stdin post continues to work exactly as before."""
+        code = _run_main(
+            ["--caller", "reviewer", "--platform", "github", "some-owner/some-repo", "42"],
+            stdin_bytes=b'{"body": "LGTM"}',
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_success_opener(),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+
+def _write_verdict_required_roles_config(config_root, *, roles: list[str]) -> None:
+    """Write <config_root>/config.yaml's `review.verdict_required_roles` key
+    as a YAML list -- the one accepted shape
+    review.verdict_required_roles.load_verdict_required_roles parses."""
+    config_root.mkdir(parents=True, exist_ok=True)
+    config_path = config_root / provider_config.USER_CONFIG_FILENAME
+    roles_yaml = ", ".join(f'"{role}"' for role in roles)
+    config_path.write_text(f"review:\n  verdict_required_roles: [{roles_yaml}]\n", encoding="utf-8")
+
+
+def _write_raw_verdict_required_roles_config(config_root, *, raw_yaml_value: str) -> None:
+    """Write <config_root>/config.yaml's `review.verdict_required_roles` key
+    with the RAW YAML text *raw_yaml_value* -- used to exercise a malformed
+    (non-list, or explicit null) value, mirroring
+    test_transport_read_host_guard.py's own _write_raw_config helper."""
+    config_root.mkdir(parents=True, exist_ok=True)
+    config_path = config_root / provider_config.USER_CONFIG_FILENAME
+    config_path.write_text(
+        f"review:\n  verdict_required_roles: {raw_yaml_value}\n", encoding="utf-8"
+    )
+
+
+class TestVerdictRequiredRoleRefusesFenceless:
+    """review.verdict_required_roles (lr-9ba589 fold-in #1): closes the
+    RESIDUAL gap the stamp/intent check above cannot -- a role-declared
+    reviewer posting genuinely PROSE-ONLY staged content (no review_status
+    field anywhere) with no verdict flags. Content and route agree, so the
+    stamp check never fires; this check fires on the CALLER'S ROLE alone,
+    independent of what was staged."""
+
+    def test_declared_role_with_prose_only_body_and_no_flags_refuses_and_preserves_staged_pair(
+        self, monkeypatch, tmp_path
+    ):
+        """THE ACTUAL SHAPE THAT BURNED THE ORIGINATING INCIDENT: a
+        genuinely PROSE-ONLY body (no 'review_status' field anywhere)
+        staged for a caller whose ROLE is declared verdict-required, posted
+        with neither --verdict-review-status nor --verdict-findings.
+        Content and route AGREE ("plain") -- the stamp/intent check above
+        would never fire on this shape at all (see
+        TestPlainCommentStillWorksUnderNonBreakingDefault's own sibling
+        test) -- so this refusal is entirely attributable to the role
+        check. Must refuse (EXIT_VERDICT_ROUTE_INTENT_MISMATCH) BEFORE any
+        network call, and must leave the staged --body-env pair untouched.
+
+        RETRY, NO RESTAGING: a genuinely prose-only staged body can never
+        satisfy the verdict route's own content contract (both
+        --verdict-review-status and --verdict-findings independently
+        require a 'review_status' field in the SAME staged JSON --
+        review.contract.validate_review_verdict_body_stdin_content /
+        validate_review_findings_body_stdin_content), so a corrected retry
+        against the --body-env staged pair verbatim is not a real recovery
+        path for THIS content shape -- restaging with a review_status field
+        would be required for that route. What this test proves instead is
+        the literal 'no restaging' guarantee this check owns: the ORIGINAL
+        --body-env pair survives the refusal untouched (asserted below),
+        and the caller can retry via the entirely separate --body-stdin
+        route (supplying verdict content directly, never touching the
+        preserved --body-env files at all) without having lost anything
+        staged."""
+        from clagentic_loadout.transport.body_env import (
+            _resolve_caller_stamp_path,
+            resolve_caller_body_path,
+        )
+
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        isolated_root = provider_config.DEFAULT_USER_CONFIG_ROOT
+        _write_verdict_required_roles_config(isolated_root, roles=["reviewer"])
+
+        _stage_body_env(
+            tmp_path, b'{"body": "Looks fine to me."}', caller="reviewer", head_sha=_HEAD_SHA
+        )
+        body_path = resolve_caller_body_path(caller="reviewer", env={"TMPDIR": str(tmp_path)})
+        stamp_path = _resolve_caller_stamp_path(caller="reviewer", env={"TMPDIR": str(tmp_path)})
+        assert body_path.exists() and stamp_path.exists()
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_refusing_opener,
+        )
+        assert code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
+
+        # No restaging needed -- the refusal fires before the staged body is
+        # ever read/consumed, and the --body-env pair is left exactly as it
+        # was staged.
+        assert body_path.exists()
+        assert stamp_path.exists()
+        assert body_path.read_bytes() == b'{"body": "Looks fine to me."}'
+
+        # Retry via --body-stdin (supplying verdict content directly, never
+        # touching the preserved --body-env pair above) succeeds.
+        retry_code = _run_main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--body-stdin",
+                "some-owner/some-repo", "42",
+            ],
+            stdin_bytes=json.dumps(
+                {"body": "Looks fine to me.", "review_status": "clean"}
+            ).encode("utf-8"),
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_verdict_opener(posted_id=88),
+            monkeypatch=monkeypatch,
+        )
+        assert retry_code == verb.EXIT_OK
+
+        # The --body-env pair staged before the first (refused) attempt is
+        # still exactly as staged -- the --body-stdin retry never consumed
+        # it.
+        assert body_path.exists()
+        assert stamp_path.exists()
+
+    def test_unset_config_key_still_posts_non_breaking(self, monkeypatch, tmp_path, capsys):
+        """No review.verdict_required_roles key at all (the default, fully
+        unconfigured deployment) -- a caller who would otherwise match a
+        role-required check posts exactly as before this fix shipped."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(tmp_path, b'{"body": "LGTM"}', caller="reviewer")
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_success_opener(),
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["pr_number"] == 42
+
+    def test_caller_not_in_list_posts_plainly(self, monkeypatch, tmp_path, capsys):
+        """The config declares a DIFFERENT role as verdict-required -- a
+        caller whose own role is not in that list is unaffected."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        isolated_root = provider_config.DEFAULT_USER_CONFIG_ROOT
+        _write_verdict_required_roles_config(isolated_root, roles=["security"])
+
+        _stage_body_env(tmp_path, b'{"body": "LGTM"}', caller="reviewer")
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_success_opener(),
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["pr_number"] == 42
+
+    def test_malformed_config_refuses(self, monkeypatch, tmp_path):
+        """A present but malformed verdict_required_roles value (not a list
+        of strings) is a hard config error -- never silently treated as 'no
+        roles declared'. No credential is minted and no staged body is
+        touched."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        isolated_root = provider_config.DEFAULT_USER_CONFIG_ROOT
+        _write_raw_verdict_required_roles_config(isolated_root, raw_yaml_value="42")
+
+        _stage_body_env(tmp_path, b'{"body": "LGTM"}', caller="reviewer")
+
+        with pytest.raises(Exception) as exc_info:
+            verb.main(
+                [
+                    "--caller", "reviewer", "--platform", "github", "--body-env",
+                    "some-owner/some-repo", "42",
+                ],
+                token_provider=_RefusingTokenProvider(),
+                opener=_refusing_opener,
+            )
+        from clagentic_loadout.review.verdict_required_roles import (
+            InvalidVerdictRequiredRolesConfigError,
+        )
+
+        assert isinstance(exc_info.value, InvalidVerdictRequiredRolesConfigError)
+
+    def test_explicit_null_value_refuses_not_permissive(self, monkeypatch, tmp_path):
+        """An explicit `verdict_required_roles: null` in the config file is
+        PRESENT, not absent -- must raise, exactly like any other malformed
+        value, never silently degrade to 'unconfigured' (mirrors
+        transport.read_host_guard's ABSENT-VS-PRESENT-NULL fix)."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        isolated_root = provider_config.DEFAULT_USER_CONFIG_ROOT
+        _write_raw_verdict_required_roles_config(isolated_root, raw_yaml_value="null")
+
+        _stage_body_env(tmp_path, b'{"body": "LGTM"}', caller="reviewer")
+
+        from clagentic_loadout.review.verdict_required_roles import (
+            InvalidVerdictRequiredRolesConfigError,
+        )
+
+        with pytest.raises(InvalidVerdictRequiredRolesConfigError):
+            verb.main(
+                [
+                    "--caller", "reviewer", "--platform", "github", "--body-env",
+                    "some-owner/some-repo", "42",
+                ],
+                token_provider=_RefusingTokenProvider(),
+                opener=_refusing_opener,
+            )
+
+    def test_body_stdin_route_with_listed_role_and_no_flags_refuses(self, monkeypatch, tmp_path):
+        """THE --body-stdin ROUTE, since a role-declared reviewer's
+        fenceless post is exactly as wrong there as on --body-env -- this
+        check has no staged provenance to inspect and needs none, so it
+        applies identically regardless of body-ingestion route."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        isolated_root = provider_config.DEFAULT_USER_CONFIG_ROOT
+        _write_verdict_required_roles_config(isolated_root, roles=["reviewer"])
+
+        code = _run_main(
+            [
+                "--caller", "reviewer", "--platform", "github", "--body-stdin",
+                "some-owner/some-repo", "42",
+            ],
+            stdin_bytes=b'{"body": "LGTM, no issues."}',
+            token_provider=_RefusingTokenProvider(),
+            opener=_refusing_opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
