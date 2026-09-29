@@ -19,6 +19,7 @@ import os
 
 import pytest
 
+from clagentic_loadout.guard import scratch_policy
 from clagentic_loadout.guard.infra_ops import (
     InfraOpsConfig,
     InfraOpWrapper,
@@ -296,9 +297,20 @@ class TestIsInfraParamsFilePathContained:
 
     def test_home_only_not_contained_denies(self, monkeypatch, tmp_path):
         # lr-f8649f: $HOME is no longer a scratch boundary for this check --
-        # a value resolving under $HOME alone (no $TMPDIR set, and this
-        # synthetic tmp_path does not match the real uid-home fallback) is
-        # denied exactly like any other out-of-scratch location.
+        # a value resolving under $HOME alone (no $TMPDIR set) is denied
+        # exactly like any other out-of-scratch location.
+        #
+        # The uid-home fallback is pinned to a synthetic path here (not the
+        # host's real /etc/passwd entry): on a sandbox whose own tmp_path
+        # happens to resolve under the REAL uid home directory, this
+        # synthetic $HOME (built from tmp_path) would spuriously match that
+        # real fallback boundary, collapsing this negative assertion into a
+        # false positive that depends on host layout.
+        synthetic_uid_home = tmp_path.parent / "synthetic-uid-home-distinct-from-tmp-path"
+        synthetic_uid_home.mkdir(exist_ok=True)
+        monkeypatch.setattr(
+            scratch_policy, "_uid_home_fallback", lambda: str(synthetic_uid_home)
+        )
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("TMPDIR", raising=False)
         assert is_infra_params_file_path_contained(

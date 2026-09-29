@@ -288,7 +288,7 @@ open a NEW PR — mutually exclusive with `--target-pr`, exactly one
 required), `--head-sha` (optional — bind a verdict post's evaluated SHA).
 **Pass `--head-sha` whenever the later read will supply an expected SHA**
 (`loadout-review-post --verdict-head-sha`, `loadout-git-host-api --pr-sha`):
-the read side now fails closed (lr-9ca25a) if the reader expects a SHA but
+the read side now fails closed if the reader expects a SHA but
 the staged stamp carries none — an unstamped SHA can no longer silently
 satisfy any expected value. Omit `--head-sha` only for a genuinely
 SHA-less, non-verdict comment whose later read never supplies an expected

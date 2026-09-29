@@ -22,6 +22,7 @@ import os
 
 import pytest
 
+from clagentic_loadout.guard import scratch_policy
 from clagentic_loadout.guard.scratch_policy import (
     SCRATCH_ROOT_ENV_VARS,
     SCRATCH_SAFE_VERBS,
@@ -247,13 +248,27 @@ class TestTmpdirOnlyNarrowing:
         assert "HOME" not in SCRATCH_ROOT_ENV_VARS
 
     def test_home_rooted_mkdir_rejected(self, tmp_path, monkeypatch):
+        # The uid-home fallback must not be the REAL uid home for this
+        # assertion to be meaningful -- on a host/sandbox where the real uid
+        # home directory happens to be an ancestor of pytest's own tmp_path
+        # (e.g. a sandbox whose $TMPDIR is nested under the real uid home),
+        # `home` would incorrectly resolve as CONTAINED under that fallback,
+        # collapsing this test's intended negative case into a false
+        # positive. Pin the fallback to a synthetic path outside tmp_path so
+        # the assertion depends only on this module's logic, never on the
+        # host's real /etc/passwd entry.
+        fallback_home = tmp_path.parent / "synthetic-uid-home-not-tmp-path"
+        fallback_home.mkdir(exist_ok=True)
+        monkeypatch.setattr(
+            scratch_policy, "_uid_home_fallback", lambda: str(fallback_home)
+        )
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.delenv("TMPDIR", raising=False)
         env = {"HOME": str(home)}
         # No TMPDIR at all; the uid-home fallback backs TMPDIR instead, and
-        # this synthetic `home` path is not the real uid home, so a target
-        # under it is correctly denied.
+        # this synthetic `home` path is not the (synthetic) uid home, so a
+        # target under it is correctly denied.
         assert not is_scratch_contained(f"mkdir -p {home}/work", env=env)
 
     def test_tmpdir_rooted_mkdir_admitted(self, tmp_path):
@@ -269,8 +284,22 @@ class TestTmpdirOnlyNarrowing:
         process's real uid-home directory, which is NOT the same thing as
         "silently admit whatever $HOME is set to" -- a caller's own $HOME
         env var value (distinct from the real uid-home passwd-database
-        entry) must NOT be consulted at all."""
-        import pwd
+        entry) must NOT be consulted at all.
+
+        The uid-home value itself is pinned to a synthetic path here (not
+        the host's real `/etc/passwd` entry): on a sandbox whose own
+        $TMPDIR/tmp_path happens to resolve under the REAL uid home
+        directory, comparing against that real value would make `fake_home`
+        (built from tmp_path) spuriously resolve as CONTAINED under it,
+        collapsing the "FAKE $HOME must still be denied" assertion into a
+        false positive that depends on host layout rather than this
+        module's own logic.
+        """
+        synthetic_uid_home = tmp_path.parent / "synthetic-uid-home-distinct-from-tmp-path"
+        synthetic_uid_home.mkdir(exist_ok=True)
+        monkeypatch.setattr(
+            scratch_policy, "_uid_home_fallback", lambda: str(synthetic_uid_home)
+        )
 
         monkeypatch.delenv("TMPDIR", raising=False)
         fake_home = tmp_path / "not-the-real-uid-home"
@@ -278,14 +307,10 @@ class TestTmpdirOnlyNarrowing:
         env = {"HOME": str(fake_home)}
 
         boundaries = resolve_all_scratch_boundaries(env=env)
-        real_uid_home = pwd.getpwuid(os.getuid()).pw_dir
-        if real_uid_home:
-            assert len(boundaries) == 1
-            assert boundaries[0].env_var == "TMPDIR"
-            assert boundaries[0].resolved_path == os.path.realpath(real_uid_home)
-            assert boundaries[0].resolved_path != os.path.realpath(str(fake_home))
-        else:
-            assert boundaries == []
+        assert len(boundaries) == 1
+        assert boundaries[0].env_var == "TMPDIR"
+        assert boundaries[0].resolved_path == os.path.realpath(str(synthetic_uid_home))
+        assert boundaries[0].resolved_path != os.path.realpath(str(fake_home))
 
         # The caller's $HOME env value itself is never admitted as a
         # boundary -- a target under the FAKE $HOME must still be denied.
