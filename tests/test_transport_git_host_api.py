@@ -1360,6 +1360,167 @@ class TestMainGithubTargetRouting:
 
 
 # ---------------------------------------------------------------------------
+# Read-verb host anchoring (lr-4ebce1): --git-host-base-url unconditionally
+# wins over every other resolution tier and the minted token does NOT follow
+# the host it is destined for. transport.read_host_guard.check_host_allowed
+# anchors the RESOLVED git-host base against a caller-configured allowlist,
+# BEFORE any credential is resolved -- see that module's own docstring for
+# the full defect and the default-posture argument (permissive by default,
+# mirroring push.host_guard's own precedent).
+# ---------------------------------------------------------------------------
+
+
+class TestMainReadHostGuard:
+    def test_mismatch_refuses_with_no_mint(self, capsys):
+        """A relative-path call whose resolved git-host base is outside a
+        configured --allowed-host set must refuse BEFORE any credential is
+        resolved -- the token provider is never invoked at all, and the
+        opener never runs."""
+        provider = _PlatformRecordingProvider("forgejo-tok")
+
+        def fake_opener(req, timeout=15):
+            raise AssertionError("opener must not be called on a host-denied refusal")
+
+        rc = git_host_api.main(
+            [
+                "--git-host-base-url", "http://attacker.example.net:3000",
+                "--allowed-host", "http://forgejo.example.com:3000",
+                "GET", "/api/v1/repos/some-owner/some-repo/pulls/42.diff",
+            ],
+            token_provider=provider,
+            opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_HOST_DENIED
+        assert provider.calls == []
+        stderr = capsys.readouterr().err
+        assert "attacker.example.net:3000" in stderr
+
+    def test_legitimate_match_passes(self, capsys):
+        """A --git-host-base-url that DOES match a configured --allowed-host
+        entry proceeds exactly as before this guard existed -- the ordinary
+        relative-path request is issued with the base prepended."""
+        captured = {}
+
+        def fake_opener(req, timeout=15):
+            captured["url"] = req.full_url
+            return _FakeResponse(200, b"{}")
+
+        rc = git_host_api.main(
+            [
+                "--git-host-base-url", "http://forgejo.example.com:3000",
+                "--allowed-host", "http://forgejo.example.com:3000",
+                "GET", "/api/v1/repos/some-owner/some-repo/pulls/42.diff",
+            ],
+            token_provider=_PlatformRecordingProvider("forgejo-tok"),
+            opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_OK
+        assert captured["url"] == (
+            "http://forgejo.example.com:3000/api/v1/repos/some-owner/some-repo/pulls/42.diff"
+        )
+
+    def test_relative_path_with_hostile_base_url_refuses(self, capsys):
+        """The defect this task closes: a RELATIVE path (the overwhelming
+        majority of calls) never reaches _absolute_url_host_matches_git_host_base
+        (it only fires for an absolute-URL PATH argument) -- so a hostile
+        --git-host-base-url previously sailed straight through to credential
+        mint + request on a perfectly ordinary-looking relative-path call.
+        With an allowlist configured, this must now refuse before any I/O."""
+        provider = _PlatformRecordingProvider("forgejo-tok")
+        opener_called = False
+
+        def fake_opener(req, timeout=15):
+            nonlocal opener_called
+            opener_called = True
+            return _FakeResponse(200, b"{}")
+
+        rc = git_host_api.main(
+            [
+                "--git-host-base-url", "http://attacker.example.net:3000",
+                "--allowed-host", "http://forgejo.example.com:3000",
+                "GET", "/api/v1/repos/some-owner/some-repo/pulls/42.diff",
+            ],
+            token_provider=provider,
+            opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_HOST_DENIED
+        assert provider.calls == []
+        assert not opener_called
+
+    def test_permissive_default_no_allowlist_configured(self, capsys):
+        """Default posture: with NO --allowed-host and no
+        CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS set, an explicit
+        --git-host-base-url pointed at an arbitrary host is UNCHANGED from
+        before this guard existed -- every existing legitimate caller of
+        this flag keeps working with no new config (see
+        transport.read_host_guard's module docstring for the full default-
+        posture argument)."""
+        captured = {}
+
+        def fake_opener(req, timeout=15):
+            captured["url"] = req.full_url
+            return _FakeResponse(200, b"{}")
+
+        rc = git_host_api.main(
+            [
+                "--git-host-base-url", "http://some-self-hosted-forgejo.example.org:3000",
+                "GET", "/api/v1/repos/some-owner/some-repo/pulls/42.diff",
+            ],
+            token_provider=_PlatformRecordingProvider("forgejo-tok"),
+            opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_OK
+        assert captured["url"] == (
+            "http://some-self-hosted-forgejo.example.org:3000"
+            "/api/v1/repos/some-owner/some-repo/pulls/42.diff"
+        )
+
+    def test_allowed_host_flag_repeatable_and_env_fallback(self, monkeypatch, capsys):
+        """--allowed-host is repeatable; falls back to
+        CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS (comma-separated) when the flag
+        is omitted entirely -- mirrors push.host_guard's own env-var
+        precedence contract, on this verb's OWN (not shared) env var."""
+        monkeypatch.setenv(
+            "CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS",
+            "http://other.example.com:3000,http://forgejo.example.com:3000",
+        )
+
+        def fake_opener(req, timeout=15):
+            return _FakeResponse(200, b"{}")
+
+        rc = git_host_api.main(
+            [
+                "--git-host-base-url", "http://forgejo.example.com:3000",
+                "GET", "/api/v1/repos/some-owner/some-repo/pulls/42.diff",
+            ],
+            token_provider=_PlatformRecordingProvider("forgejo-tok"),
+            opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_OK
+
+    def test_github_target_is_not_anchored_by_this_guard(self, capsys):
+        """A GitHub-targeted call discards the resolved Forgejo base
+        unconditionally and never uses it to build the request -- this
+        guard (scoped to the resolved git-host base) must not fire for that
+        branch even with a --git-host-base-url present and an allowlist
+        configured that would otherwise deny it, since the value is unused
+        there (see --git-host-base-url's own --help)."""
+        def fake_opener(req, timeout=15):
+            return _FakeResponse(200, b'{"reviews": []}')
+
+        rc = git_host_api.main(
+            [
+                "--git-host-base-url", "http://attacker.example.net:3000",
+                "--allowed-host", "http://forgejo.example.com:3000",
+                "GET", "https://api.github.com/repos/some-owner/some-repo/pulls/318/reviews",
+            ],
+            token_provider=_PlatformRecordingProvider("gh-reader-tok"),
+            opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # GitHub-URL repo-context threading (lr-5f7971) -- the last mile of lr-104a:
 # that task wired absolute-URL ROUTING (GitHub token + no base-prepend) and
 # Forgejo repo-threading (_REPOS_PATH_RE), but never GitHub-URL repo

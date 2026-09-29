@@ -280,6 +280,12 @@ from clagentic_loadout.transport.provider_config import (
     load_user_config_section,
     resolve_platform_provider,
 )
+from clagentic_loadout.transport.read_host_guard import (
+    ALLOWED_HOSTS_ENV_VAR as READ_ALLOWED_HOSTS_ENV_VAR,
+    HostDeniedError,
+    check_host_allowed,
+    resolve_allowed_hosts,
+)
 
 # ---------------------------------------------------------------------------
 # Exit codes
@@ -404,6 +410,17 @@ EXIT_CROSS_PLATFORM_URL_SHAPE_MISMATCH = 18
 #: of those. An OMITTED --caller never triggers this check (see
 #: bind_caller's own docstring) -- it is unchanged, existing behavior.
 EXIT_CALLER_INVOKER_MISMATCH = 19
+#: The resolved git-host base (--git-host-base-url flag, its env-var tiers,
+#: or the user-level config file -- see _resolve_git_host_base) is not
+#: present in the caller-configured allowed-host set (transport.
+#: read_host_guard, lr-4ebce1). FAILS CLOSED BEFORE ANY I/O -- no token
+#: mint, no request is ever issued. Permissive by default (an unconfigured
+#: deployment enforces no restriction here, matching push.host_guard's own
+#: EXIT_HOST_DENIED precedent for a different call site) -- see
+#: transport.read_host_guard's own module docstring for the full default-
+#: posture argument and for why this verb's allowlist is deliberately NOT
+#: shared with push's own CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS.
+EXIT_HOST_DENIED = 20
 
 # HTTP methods that mutate server state and require fail-on-HTTP-error
 # enforcement. GET/HEAD are read-only.
@@ -1547,6 +1564,25 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"Forgejo-only plumbing: it is unused on a GitHub-targeted call.",
     )
     parser.add_argument(
+        "--allowed-host",
+        action="append",
+        dest="allowed_hosts",
+        default=None,
+        help="Restrict the resolved git-host base (--git-host-base-url, its "
+        "env-var tiers, or the user-level config file -- see that flag's "
+        "own help) this invocation will attach a credential to. Repeatable; "
+        "each value is a bare 'host[:port]' or a full 'scheme://host[:port]' "
+        "URL. When omitted, falls back to "
+        f"{READ_ALLOWED_HOSTS_ENV_VAR} (comma-separated); when neither is "
+        f"set, no host restriction is enforced. A mismatch exits "
+        f"{EXIT_HOST_DENIED} ({EXIT_HOST_DENIED}=EXIT_HOST_DENIED), before "
+        "any credential is resolved. This is a SEPARATE allowlist from "
+        "push's --allowed-host/CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS -- see "
+        "transport.read_host_guard's module docstring for why the two are "
+        "not shared. Ignored on a GitHub-targeted call (the resolved "
+        "git-host base is unused there -- see --git-host-base-url).",
+    )
+    parser.add_argument(
         "method_or_path",
         help="HTTP method (GET/POST/PATCH/PUT/DELETE, defaults to GET when "
         "the first positional is the path) or the API PATH itself.",
@@ -1889,6 +1925,29 @@ def _run(
     identity_provider=None,
 ) -> int:
     method, path_arg = _split_method_and_path(args)
+
+    # Host anchoring for the resolved git-host base (lr-4ebce1), checked
+    # FIRST -- before any other precondition, and BEFORE any credential is
+    # resolved or request issued. --git-host-base-url unconditionally wins
+    # over every other resolution tier (_resolve_git_host_base's own
+    # docstring, "always wins when non-empty") and the minted token does NOT
+    # follow the host it is destined for (see transport.read_host_guard's
+    # module docstring for the full defect this closes). Skipped for a
+    # GitHub target: the resolved Forgejo base is discarded unconditionally
+    # for that branch (git_host_base = "" below) and never used to build the
+    # credentialed request -- see --git-host-base-url's own --help
+    # ("unused on a GitHub-targeted call").
+    if not _is_github_target(path_arg):
+        resolved_git_host_base_for_guard = _resolve_git_host_base(args.git_host_base_url)
+        allowed_hosts = resolve_allowed_hosts(
+            frozenset(args.allowed_hosts) if args.allowed_hosts is not None else None
+        )
+        try:
+            check_host_allowed(
+                resolved_git_host_base_for_guard, allowed_hosts=allowed_hosts
+            )
+        except HostDeniedError as exc:
+            _fail(str(exc), code=EXIT_HOST_DENIED)
 
     path_owner_match = _REPOS_PATH_RE.match(path_arg)
     if path_owner_match:
