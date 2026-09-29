@@ -401,12 +401,98 @@ exclusively from the live git remote (see "1. Git-host base URL" above —
 optionally can be restricted via `CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS`
 (comma-separated) or an explicit `--allowed-host` flag (repeatable); each
 entry may be a bare `host[:port]` or a full `scheme://host[:port]` URL.
-Unset/empty is PERMISSIVE (no restriction), mirroring the namespace
-restriction above — set this in the spawn env for any deployment that wants
-push's credentialed calls anchored to a fixed set of known-good Forgejo
-hosts. A mismatch fails closed before any credential is resolved. Ignored
-on `--platform github` (GitHub coordinate derivation from the git remote is
-not supported at all — see `--repo`).
+With no `push_host_guard.allowed_hosts` config key set either (see below),
+this is UNSET/PERMISSIVE (no restriction), mirroring the namespace
+restriction above and unchanged from this flag's original released
+behavior — set this in the spawn env for any deployment that wants push's
+credentialed calls anchored to a fixed set of known-good Forgejo hosts. A mismatch fails
+closed before any credential is resolved. Ignored on `--platform github`
+(GitHub coordinate derivation from the git remote is not supported at all —
+see `--repo`).
+
+**A CALLER-SETTABLE ALLOWLIST DOES NOT PROTECT AGAINST THAT SAME CALLER —
+READ THIS BEFORE RELYING ON `--allowed-host`/THE ENV VAR FOR SECURITY**
+(mirroring the identical caveat for `git-host-api`'s own read guard below).
+The push target (`api_base`) is derived from the live git
+remote, which a caller in the same shell can repoint; both `--allowed-host`
+and `CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS` are set by that SAME invocation.
+A caller able to repoint the git remote is, by construction, equally able
+to widen the allowlist to match in that same command line or its own spawn
+environment — an "allowlist" set by the same actor it is meant to restrict
+approves its own redirect and protects against nothing. The flag and env
+var remain useful for restricting a DIFFERENT, less-trusted caller (e.g. a
+sub-process this one spawns with a scrubbed environment) or for documenting
+intent to a human reading the invocation — but they are NOT a security
+boundary against the invoking caller itself.
+
+**The only source that WIDENS the effective allowlist is an
+operator-controlled config key, immune to per-call argv/env.** Set
+`allowed_hosts` under a `push_host_guard:` section in the USER-LEVEL
+`~/.config/clagentic/loadout/config.yaml` (same file, same
+`load_user_config_section` loader every other user-level config tier in
+this package already uses — see `credentials:`/`forgejo:`/`read_host_guard:`
+above; note this is a DIFFERENT section from `read_host_guard:`, deliberately
+not shared — the two guards anchor different inputs from different trust
+boundaries, see `push.host_guard`'s own module docstring). Two shapes are
+accepted, same entry shape (`host[:port]` or `scheme://host[:port]`) as the
+env var for each entry: a comma-separated STRING, or a YAML LIST of strings:
+
+```yaml
+push_host_guard:
+  allowed_hosts: "forgejo.example.com:3000,other-forgejo.example.org:3000"
+```
+
+```yaml
+push_host_guard:
+  allowed_hosts:
+    - "forgejo.example.com:3000"
+    - "other-forgejo.example.org:3000"
+```
+
+**Any other value is a hard config error, never a silent fallback to
+permissive** — an int, a mapping, a list containing a non-string entry, OR
+an explicit `null`/empty value refuses at load time (before any credential
+is resolved or git operation is attempted), exit `EXIT_HOST_CONFIG_INVALID`
+(37), naming the config file, the `push_host_guard`/`allowed_hosts`
+section/key, the received type, and the two accepted forms above. Only a
+GENUINELY ABSENT key means "unconfigured"; a PRESENT value of any other
+shape — including an operator-authored `null` — is always a refusal, never
+treated as if the key had not been set.
+
+Once this key is set, it becomes the CEILING: `--allowed-host`/the env var
+can only NARROW it (the effective set is the overlap between the configured
+ceiling and whatever the caller supplied, compared via the same normalized
+host:port authority match `push_host_guard`'s own membership check uses —
+not raw string equality), never widen it — a caller can no longer add a
+host absent from the operator's own configured list. Supplying neither flag
+nor env var, with the config key set, enforces the full configured set —
+including an operator's own explicit empty `allowed_hosts: ""`, a real
+"restrict to nothing" choice that correctly denies every host (an earlier
+revision of `check_host_allowed` treated any empty resolved set as
+permissive, which would have silently defeated exactly this
+configuration).
+
+**Back-compat: leaving the config key unset reproduces the pre-fix
+precedence byte-for-byte** — `--allowed-host` still wins over the env var,
+which still wins over the permissive (no-restriction) default, with no
+forced config write for a deployment that has not opted into the config-file
+ceiling.
+
+**The refusal message matches whichever mode is actually in effect**: when
+the config key is UNSET, a denied host's error still tells you to set
+`CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS` or pass `--allowed-host`. Once the
+config key IS set, that advice would be FALSE — the message instead names
+the `push_host_guard.allowed_hosts` key in the user-level config file as the
+only thing that actually permits the host.
+
+**Shared resolution logic, not a second implementation.** The
+config-ceiling/caller-narrow-only precedence, the `None`-vs-empty-frozenset
+distinction, the list-or-string config parse, and the
+malformed-config-is-a-hard-error rule are implemented ONCE, in
+`transport.host_guard_resolve`, and reused by both this guard and
+`git-host-api`'s own read guard below — each guard keeps its OWN env var
+name and OWN config section/key (this section is `push_host_guard`, the
+read guard's is `read_host_guard`), never a shared configuration surface.
 
 ### Host restriction (git-host-api read verb)
 
