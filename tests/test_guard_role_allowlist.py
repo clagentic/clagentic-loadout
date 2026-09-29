@@ -11,6 +11,7 @@ import re
 
 import pytest
 
+from clagentic_loadout.guard import scratch_policy
 from clagentic_loadout.guard.role_allowlist import (
     BashRole,
     MergerReadOnlyConfig,
@@ -359,6 +360,19 @@ class TestCheckMergerCommandScratchGrant:
         # a bare mkdir naming a real $HOME-resolved path with no $TMPDIR
         # configured (and no uid-home fallback matching this synthetic path)
         # has no boundary to resolve against, so is_scratch_contained denies.
+        #
+        # The uid-home fallback is pinned to a synthetic path here (not the
+        # host's real /etc/passwd entry): on a sandbox whose own tmp_path
+        # happens to resolve under the REAL uid home directory, $HOME (set
+        # to tmp_path below) would spuriously match that real fallback
+        # boundary, collapsing this negative assertion into a false
+        # positive that depends on host layout rather than this module's
+        # own logic.
+        synthetic_uid_home = tmp_path.parent / "synthetic-uid-home-distinct-from-tmp-path"
+        synthetic_uid_home.mkdir(exist_ok=True)
+        monkeypatch.setattr(
+            scratch_policy, "_uid_home_fallback", lambda: str(synthetic_uid_home)
+        )
         monkeypatch.delenv("TMPDIR", raising=False)
         monkeypatch.setenv("HOME", str(tmp_path))
         ok, reason = check_merger_command(f"mkdir -p {tmp_path}/stage")
