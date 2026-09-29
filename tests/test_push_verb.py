@@ -1118,6 +1118,66 @@ class TestHostConfigCeiling:
         )
         assert code == verb.EXIT_HOST_DENIED
 
+    def test_malformed_config_does_not_affect_a_github_push(
+        self, repo_with_remote, monkeypatch, tmp_path
+    ):
+        """lr-57573e fold-in #1, F3: a malformed push_host_guard.allowed_hosts
+        config value must NOT fail a --platform github push -- the guard is
+        documented (push.host_guard's own module docstring, docs/
+        integration.md's "Host restriction (push)" section) as never
+        applying to GitHub at all (api_base is "" on that path, never
+        derived from the git remote). Before the fix, resolve_allowed_hosts/
+        push_host_config_is_set ran unconditionally, before args.platform
+        was even resolved, so a malformed config value refused a GitHub push
+        too via EXIT_HOST_CONFIG_INVALID (37) -- exactly the same class of
+        failure the guard is supposed to be a no-op for on this platform."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _github_create_opener()
+        config_root = tmp_path / "host-config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+        (config_root / provider_config.USER_CONFIG_FILENAME).write_text(
+            f"{PUSH_HOST_CONFIG_SECTION}:\n  {PUSH_HOST_CONFIG_KEY}: 42\n", encoding="utf-8",
+        )
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_malformed_config_still_fails_a_forgejo_push_before_token_resolution(
+        self, repo_with_remote, monkeypatch, tmp_path
+    ):
+        """Sibling case to the GitHub no-op test above: a malformed
+        push_host_guard.allowed_hosts config value must still refuse a
+        FORGEJO push (the platform the guard actually applies to), and must
+        still fire before any credential is resolved -- the F3 fix scopes
+        resolution to the Forgejo path, it does not remove the check."""
+        repo, _remote = repo_with_remote
+        config_root = tmp_path / "host-config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+        (config_root / provider_config.USER_CONFIG_FILENAME).write_text(
+            f"{PUSH_HOST_CONFIG_SECTION}:\n  {PUSH_HOST_CONFIG_KEY}: 42\n", encoding="utf-8",
+        )
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_HOST_CONFIG_INVALID
+
 
 class TestContentionCheck:
     """lr-78a584: optional, config-gated, default-OFF pre-flight read that

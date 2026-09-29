@@ -37,6 +37,19 @@ Coverage:
     file must NOT be treated as "unconfigured" -- both raise
     InvalidPushHostConfigError, mint-free, distinct from a genuinely ABSENT
     key (which stays permissive, config UNSET).
+  - TestResolveHostCeiling (lr-57573e fold-in #1, F2): resolve_host_ceiling
+    -- the single-read replacement for the resolve_allowed_hosts +
+    push_host_config_is_set two-call shape push.verb previously used --
+    agrees with the two separate calls across every mode, and its
+    HostCeilingResolution result feeds check_host_allowed's two parameters
+    directly.
+  - TestSharedUserConfigRoot (lr-57573e fold-in #1, F1, HOLDEN-adjudicated):
+    push.host_guard's config-file tier and provider_config's `credentials:`
+    tier resolve from the SAME user-level config root by construction --
+    proof that a redirected HOME/XDG_CONFIG_HOME cannot widen this ceiling
+    without also redirecting (and therefore losing) the operator's real
+    credential root, mirroring test_transport_read_host_guard.py::
+    TestSharedUserConfigRoot exactly.
 """
 
 from __future__ import annotations
@@ -51,8 +64,10 @@ from clagentic_loadout.push.host_guard import (
     check_host_allowed,
     push_host_config_is_set,
     resolve_allowed_hosts,
+    resolve_host_ceiling,
 )
 from clagentic_loadout.transport import provider_config
+from clagentic_loadout.transport.host_guard_resolve import HostCeilingResolution
 
 
 @pytest.fixture(autouse=True)
@@ -632,3 +647,162 @@ class TestAbsentVsPresentNullConfig:
         result = resolve_allowed_hosts(None, env={}, config_root=config_root)
         assert result is None
         assert push_host_config_is_set(config_root) is False
+
+
+class TestResolveHostCeiling:
+    """lr-57573e fold-in #1, F2 (HOLDEN-adjudicated): push.verb previously
+    called resolve_allowed_hosts and push_host_config_is_set SEPARATELY --
+    two independent reads/parses of the same push_host_guard.allowed_hosts
+    config key per invocation. resolve_host_ceiling is the single call that
+    replaces both, returning a HostCeilingResolution(allowed_hosts,
+    config_is_set) from ONE read. These tests prove the combined function
+    agrees with the two separate calls it replaces, across every mode
+    TestConfigWidenGuard/TestAbsentVsPresentNullConfig above already cover
+    for the two-call shape."""
+
+    def test_config_unset_matches_separate_calls(self, tmp_path):
+        config_root = tmp_path / "config-root"
+        result = resolve_host_ceiling(
+            frozenset({"https://explicit-host.example.com"}),
+            env={ALLOWED_HOSTS_ENV_VAR: "https://env-host.example.com"},
+            config_root=config_root,
+        )
+        assert result == HostCeilingResolution(
+            allowed_hosts=frozenset({"https://explicit-host.example.com"}),
+            config_is_set=False,
+        )
+
+    def test_config_set_narrows_and_reports_is_set(self, tmp_path):
+        config_root = tmp_path / "config-root"
+        _write_config(
+            config_root,
+            section=PUSH_HOST_CONFIG_SECTION,
+            key=PUSH_HOST_CONFIG_KEY,
+            value="https://forgejo.example.com:3000",
+        )
+        result = resolve_host_ceiling(
+            frozenset({"https://attacker.example.net"}),
+            env={},
+            config_root=config_root,
+        )
+        assert result == HostCeilingResolution(
+            allowed_hosts=frozenset(), config_is_set=True
+        )
+
+    def test_malformed_config_raises_before_either_field_is_produced(self, tmp_path):
+        config_root = tmp_path / "config-root"
+        _write_raw_config(
+            config_root,
+            section=PUSH_HOST_CONFIG_SECTION,
+            key=PUSH_HOST_CONFIG_KEY,
+            raw_yaml_value="42",
+        )
+        with pytest.raises(InvalidPushHostConfigError):
+            resolve_host_ceiling(None, env={}, config_root=config_root)
+
+    def test_result_feeds_check_host_allowed_directly(self, tmp_path):
+        """The combined result's two fields are exactly what
+        check_host_allowed's allowed_hosts/config_is_set parameters expect
+        -- no adaptation needed at the call site."""
+        config_root = tmp_path / "config-root"
+        _write_config(
+            config_root,
+            section=PUSH_HOST_CONFIG_SECTION,
+            key=PUSH_HOST_CONFIG_KEY,
+            value="https://forgejo.example.com:3000",
+        )
+        result = resolve_host_ceiling(
+            frozenset({"https://attacker.example.net"}),
+            env={},
+            config_root=config_root,
+        )
+        with pytest.raises(HostDeniedError) as exc_info:
+            check_host_allowed(
+                "https://attacker.example.net",
+                allowed_hosts=result.allowed_hosts,
+                config_is_set=result.config_is_set,
+            )
+        msg = str(exc_info.value)
+        assert PUSH_HOST_CONFIG_SECTION in msg
+        assert "can only NARROW" in msg
+
+
+class TestSharedUserConfigRoot:
+    """lr-57573e fold-in #1, F1 (HOLDEN-adjudicated, OVERRULED on substance
+    against widening HOME): push.host_guard's config-file tier and
+    provider_config's `credentials:` tier must resolve from the SAME
+    user-level config root -- otherwise a caller could pair a
+    caller-controlled, narrower push_host_guard ceiling against the
+    operator's real credential root, defeating the ceiling's own purpose (a
+    redirected HOME/XDG_CONFIG_HOME would then widen/narrow the push
+    allowlist without touching which credential actually gets minted). Both
+    tiers read through the ONE shared loader,
+    provider_config.load_user_config_section (mirrors
+    test_transport_read_host_guard.py::TestSharedUserConfigRoot exactly, for
+    push's own config tier) -- proven here by writing BOTH sections into ONE
+    physical file under one root and confirming each tier's own public
+    reader sees the value the OTHER tier's section carries when given the
+    identical root, i.e. there is exactly one file/root in play, not two
+    independently-resolved ones."""
+
+    def test_push_host_guard_and_credentials_section_share_one_config_file(self, tmp_path):
+        config_root = tmp_path / "config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+        config_path = config_root / provider_config.USER_CONFIG_FILENAME
+        config_path.write_text(
+            "credentials:\n"
+            "  token_provider_forgejo: command\n"
+            "  token_command_forgejo: \"echo real-operator-token\"\n"
+            f"{PUSH_HOST_CONFIG_SECTION}:\n"
+            f"  {PUSH_HOST_CONFIG_KEY}: \"forgejo.example.com:3000\"\n",
+            encoding="utf-8",
+        )
+
+        # push.host_guard's own tier, resolved via THIS root.
+        allowed = resolve_allowed_hosts(None, env={}, config_root=config_root)
+        assert allowed == frozenset({"forgejo.example.com:3000"})
+
+        # provider_config's `credentials:` tier, resolved via the SAME root
+        # value passed the SAME way (config_root=...) -- if the two tiers
+        # ever resolved from independently-computed roots, this would be
+        # the seam that could diverge; it reads the value the fixture wrote
+        # into the SAME physical file the allowlist read above came from.
+        kind, command = provider_config.resolve_provider_kind_and_command(
+            provider_config.PLATFORM_FORGEJO,
+            env={},
+            config_root=config_root,
+        )
+        assert kind == provider_config.PROVIDER_KIND_COMMAND
+        assert command == "echo real-operator-token"
+
+    def test_omitted_config_root_resolves_both_tiers_to_the_same_live_default(
+        self, monkeypatch, tmp_path
+    ):
+        """Both loaders fall back to provider_config.DEFAULT_USER_CONFIG_ROOT
+        when config_root is OMITTED -- load_user_config_section (the ONE
+        shared loader both push.host_guard and provider_config's credentials
+        tier call through) reads that constant live from provider_config's
+        OWN module namespace at call time, so redirecting
+        provider_config.DEFAULT_USER_CONFIG_ROOT (e.g. via a redirected
+        HOME/XDG_CONFIG_HOME) redirects BOTH tiers in lock-step even with
+        config_root never passed explicitly -- proven here by monkeypatching
+        that one constant and confirming push.host_guard's own
+        omitted-config_root call observes a config file written under the
+        redirected root. This is the F1 finding's actual substance: a caller
+        that redirects HOME to widen this ceiling redirects the credential
+        root right along with it, so it can never widen the ceiling while
+        leaving the operator's real credential resolution untouched."""
+        isolated_root = tmp_path / "isolated-live-default"
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
+        isolated_root.mkdir(parents=True, exist_ok=True)
+        config_path = isolated_root / provider_config.USER_CONFIG_FILENAME
+        config_path.write_text(
+            f"{PUSH_HOST_CONFIG_SECTION}:\n  {PUSH_HOST_CONFIG_KEY}: \"forgejo.example.com:3000\"\n",
+            encoding="utf-8",
+        )
+        # config_root OMITTED here (unlike every other test in this file,
+        # which pins it explicitly) -- this is the exact call shape that
+        # depends on push.host_guard's loader and provider_config's loader
+        # sharing one live default.
+        result = resolve_allowed_hosts(None, env={})
+        assert result == frozenset({"forgejo.example.com:3000"})
