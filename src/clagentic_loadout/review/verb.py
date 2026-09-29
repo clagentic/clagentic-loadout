@@ -135,6 +135,20 @@ touching --body-stdin (which carries no staged, platform-computed
 provenance to check against) and without making the verdict route
 mandatory for every caller — an invocation that genuinely wants a plain,
 non-verdict comment, staged as plain content, is completely unaffected.
+
+VERDICT-REQUIRED-ROLE CHECK (lr-9ba589 fold-in #1, BOTH body-ingestion
+routes): the stamp check above only catches a MISMATCH between staged
+content and invocation intent — it does nothing for the shape that
+actually burned the originating incident: prose-only staged content (no
+'review_status' field at all) posted with no verdict flags, where content
+and route AGREE and the stamp comparison therefore passes cleanly. This
+verb also reads review.verdict_required_roles (a user-level config key,
+absent/empty by default — fully non-breaking) and refuses, BEFORE any
+body is read/consumed on EITHER --body-env or --body-stdin and BEFORE any
+network call, when the effective (attested, caller-bound) caller is
+declared in that list and neither verdict flag was supplied. See
+review.verdict_required_roles's own module docstring for the full design
+and its distinction from the stamp check above.
 """
 
 from __future__ import annotations
@@ -172,6 +186,10 @@ from clagentic_loadout.review.forgejo_backend import ForgejoReviewBackend
 from clagentic_loadout.review.github_backend import (
     GithubReviewBackend,
     assert_platform_is_github,
+)
+from clagentic_loadout.review.verdict_required_roles import (
+    VerdictRequiredRoleRefusedError,
+    check_verdict_required_role,
 )
 from clagentic_loadout.transport.attestation import (
     AttestationError,
@@ -296,6 +314,17 @@ EXIT_CALLER_INVOKER_MISMATCH = 12
 #: subclass) for exactly this case, and refuses BEFORE consuming either
 #: staged file: the caller can correct the invocation (add/remove the
 #: verdict flags) and retry without re-staging.
+#:
+#: ALSO used for the SIBLING fold-in #1 check (lr-9ba589 comment #1,
+#: review.verdict_required_roles.VerdictRequiredRoleRefusedError): a role
+#: declared in the user-level review.verdict_required_roles config posting
+#: with neither verdict flag -- on EITHER body-ingestion route, since that
+#: check has no staged content to compare against and needs none. Both
+#: failures are the same incident class ("this invocation would have posted
+#: a fenceless comment where a verdict was required/intended"), so sharing
+#: one exit code means an existing caller/harness that already handles this
+#: code from the stamp check handles the role check identically, with no
+#: new code to learn.
 EXIT_VERDICT_ROUTE_INTENT_MISMATCH = 13
 
 
@@ -895,6 +924,33 @@ def _run(
             "route on this verb).",
             code=EXIT_VERDICT_BLOCK_USAGE,
         )
+
+    # VERDICT-REQUIRED-ROLE CHECK (lr-9ba589 fold-in #1): a role-declared
+    # reviewer (review.verdict_required_roles, a USER-LEVEL config key --
+    # see that module's own docstring) must never post a fenceless comment,
+    # regardless of what content it staged. This is DISTINCT from the
+    # --body-env stamp/intent check below: that check compares STAGED
+    # CONTENT against invocation intent and only ever runs on --body-env
+    # (it has no staged provenance to compare against on --body-stdin, and
+    # cannot fire before content is known); THIS check compares the
+    # CALLER'S OWN ROLE against invocation intent alone, needs no staged
+    # content at all, and therefore applies identically on BOTH
+    # body-ingestion routes. Checked BEFORE any --body-env read/consume and
+    # BEFORE any credential mint or network call -- `caller` here is the
+    # ATTESTED, caller-bound identity already resolved above, never a raw
+    # argv string. A malformed config value (InvalidVerdictRequiredRolesConfigError,
+    # a ValueError subclass) is deliberately NOT caught here -- it is
+    # allowed to propagate as an uncaught, fail-loud config error, mirroring
+    # transport.read_host_guard's own "never silently degrade to
+    # permissive" contract for a malformed config value.
+    try:
+        check_verdict_required_role(
+            caller,
+            verdict_review_status=args.verdict_review_status,
+            verdict_findings=args.verdict_findings,
+        )
+    except VerdictRequiredRoleRefusedError as exc:
+        _fail(str(exc), code=EXIT_VERDICT_ROUTE_INTENT_MISMATCH)
 
     # Platform guard + token mint BEFORE --body-env's CONSUMING read
     # (security re-audit follow-up, same class of fix as push.verb's
