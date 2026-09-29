@@ -255,6 +255,7 @@ from clagentic_loadout.push.errors import (
     DirtyWorkTreeError,
     GitPushError,
     HostDeniedError,
+    InvalidPushHostConfigError,
     MissingIssueLinkError,
     NamespaceDeniedError,
     PrOpenError,
@@ -275,8 +276,10 @@ from clagentic_loadout.push.git_hermeticity import (
 )
 from clagentic_loadout.push.git_push import git_push_with_token
 from clagentic_loadout.push.host_guard import (
+    PUSH_HOST_CONFIG_KEY,
+    PUSH_HOST_CONFIG_SECTION,
     check_host_allowed,
-    resolve_allowed_hosts,
+    resolve_host_ceiling,
 )
 from clagentic_loadout.push.identity_config import (
     InvalidBuilderIdentityConfigError,
@@ -432,6 +435,16 @@ EXIT_TASK_ID_GUARD_VIOLATION = 35
 #: (name AND email) -- with no bot identity, no re-authoring is attempted
 #: at all, so this check does not run.
 EXIT_DIRTY_WORK_TREE = 36
+#: The user-level config file's push_host_guard.allowed_hosts key
+#: (push.host_guard.PUSH_HOST_CONFIG_SECTION/_KEY, lr-57573e) is PRESENT
+#: but holds a value that is neither a comma-separated string nor a YAML
+#: list of strings, or is explicitly null -- a hard config error, fired
+#: BEFORE any credential is resolved or git operation attempted. ONLY
+#: reachable once a deployment has opted into the config-file ceiling tier
+#: (an absent key is a strict no-op, unchanged from before this task) --
+#: see push.host_guard.check_host_allowed's own docstring for the full
+#: config-ceiling rationale.
+EXIT_HOST_CONFIG_INVALID = 37
 
 
 class PushVerbError(Exception):
@@ -705,11 +718,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "each value is a bare 'host[:port]' or a full 'scheme://host[:port]' "
         "URL. When omitted, falls back to "
         "CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS (comma-separated); when "
-        f"neither is set, no host restriction is enforced. A mismatch exits "
-        f"{EXIT_HOST_DENIED} ({EXIT_HOST_DENIED}=EXIT_HOST_DENIED), before "
-        "any credential is resolved. Ignored on --platform github (GitHub "
-        "coordinate derivation from the git remote is not supported at all "
-        "-- see --repo).",
+        "neither is set AND no push_host_guard.allowed_hosts key is "
+        "configured in the user-level config file, no host restriction is "
+        "enforced. If that config key IS set, it is the CEILING: this flag "
+        "and the env var can only NARROW it (never widen past it) -- see "
+        "docs/integration.md's 'Host restriction (push)' section. A "
+        f"mismatch exits {EXIT_HOST_DENIED} "
+        f"({EXIT_HOST_DENIED}=EXIT_HOST_DENIED); a malformed or explicitly "
+        f"null config value exits {EXIT_HOST_CONFIG_INVALID} "
+        f"({EXIT_HOST_CONFIG_INVALID}=EXIT_HOST_CONFIG_INVALID) -- both "
+        "before any credential is resolved. Ignored on --platform github "
+        "(GitHub coordinate derivation from the git remote is not "
+        "supported at all -- see --repo).",
     )
     parser.add_argument(
         "--skip-title-check",
@@ -1525,6 +1545,7 @@ def main(
     opener=None,
     builder_identity_config_root: str | Path | None = None,
     identity_provider=None,
+    host_config_root: str | Path | None = None,
 ) -> int:
     """CLI entrypoint. Returns the process exit code (does not call
     sys.exit itself so it stays testable).
@@ -1540,6 +1561,14 @@ def main(
     per-invocation choice (mirrors identity_config.load_builder_identity's
     own `config_root` parameter, which is documented there as
     primarily-for-tests too).
+
+    `host_config_root` (lr-57573e): the SAME TEST-ONLY injection shape as
+    `builder_identity_config_root` above, for push.host_guard's own
+    config-ceiling tier (`push.host_guard.resolve_host_ceiling`) --
+    overrides the user-level config root the `push_host_guard:` section is
+    read from. A real CLI invocation never passes this; no corresponding
+    CLI flag exists for the same reason `builder_identity_config_root` has
+    none (the config root is deployment-fixed, not per-invocation).
 
     `identity_provider` (lr-c75c9a): a zero-arg callable returning a
     `transport.attestation.Identity` (defaults to
@@ -1580,6 +1609,7 @@ def main(
             opener=opener,
             builder_identity_config_root=builder_identity_config_root,
             identity_provider=identity_provider,
+            host_config_root=host_config_root,
         )
     except PushVerbError as exc:
         print(f"push: {exc}", file=sys.stderr)
@@ -1614,6 +1644,9 @@ def main(
     except CallerBindingError as exc:
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_CALLER_INVOKER_MISMATCH
+    except InvalidPushHostConfigError as exc:
+        print(f"push: {exc}", file=sys.stderr)
+        return EXIT_HOST_CONFIG_INVALID
 
 
 def _run(
@@ -1623,6 +1656,7 @@ def _run(
     opener,
     builder_identity_config_root: str | Path | None = None,
     identity_provider=None,
+    host_config_root: str | Path | None = None,
 ) -> int:
     # 1. Argument-shape validation, before any I/O.
     if args.body_env and args.body_stdin:
@@ -1754,11 +1788,16 @@ def _run(
     allowed_namespaces = resolve_allowed_namespaces(
         frozenset(args.allowed_namespaces) if args.allowed_namespaces else None
     )
-    allowed_hosts = resolve_allowed_hosts(
-        frozenset(args.allowed_hosts) if args.allowed_hosts else None
-    )
 
-    # 4. Platform resolution.
+    # 4. Platform resolution -- MUST happen before host-config-ceiling
+    # resolution below (lr-57573e fold-in #1, F3): the push_host_guard
+    # allowlist only ever applies to a Forgejo-derived api_base (see
+    # push.host_guard's own module docstring, api_base is "" on
+    # --platform github and never legitimately matches a configured entry);
+    # resolving/validating push_host_guard config unconditionally, before
+    # args.platform is even known, made a malformed config value refuse a
+    # GitHub push too, even though the guard is documented as never
+    # applying there.
     raw_remote_url = git_coords.read_remote_url_best_effort(project_root)
     try:
         resolved_platform = resolve_platform(args.platform, raw_remote_url)
@@ -1770,16 +1809,44 @@ def _run(
         )
     args.platform = resolved_platform
 
+    # HOST-CONFIG-CEILING (lr-57573e): resolved (and, on a malformed
+    # push_host_guard.allowed_hosts config value, refused via
+    # InvalidPushHostConfigError -> EXIT_HOST_CONFIG_INVALID) BEFORE any
+    # credential is resolved or git operation attempted -- mirrors
+    # transport.read_host_guard's own "fires before any credential" posture
+    # for the sibling guard. ONLY resolved/validated on the Forgejo path
+    # (lr-57573e fold-in #1, F3): a GitHub push never derives api_base from
+    # the git remote at all (see push.host_guard's own module docstring),
+    # so a malformed push_host_guard config must not affect it -- on
+    # --platform github, allowed_hosts/host_config_is_set stay at their
+    # permissive/unset defaults and _run_update_pr/_run_create_pr already
+    # skip check_host_allowed unconditionally for GitHub regardless. ONE
+    # config read (F2): resolve_host_ceiling returns both allowed_hosts and
+    # host_config_is_set from a single load_configured_hosts call, rather
+    # than resolve_allowed_hosts and push_host_config_is_set each
+    # re-reading/re-parsing the same config key independently.
+    allowed_hosts: frozenset[str] | None = None
+    host_config_is_set = False
+    if args.platform != PLATFORM_GITHUB:
+        ceiling = resolve_host_ceiling(
+            frozenset(args.allowed_hosts) if args.allowed_hosts else None,
+            config_root=host_config_root,
+        )
+        allowed_hosts = ceiling.allowed_hosts
+        host_config_is_set = ceiling.config_is_set
+
     if args.update_pr:
         return _run_update_pr(
             args, body=body, caller=caller, project_root=project_root,
             allowed_namespaces=allowed_namespaces, allowed_hosts=allowed_hosts,
+            host_config_is_set=host_config_is_set,
             token_provider=token_provider, opener=opener,
         )
 
     return _run_create_pr(
         args, body=body, caller=caller, project_root=project_root,
         allowed_namespaces=allowed_namespaces, allowed_hosts=allowed_hosts,
+        host_config_is_set=host_config_is_set,
         token_provider=token_provider, opener=opener,
         builder_identity_config_root=builder_identity_config_root,
     )
@@ -1865,7 +1932,8 @@ def _run_update_pr(
     caller: str,
     project_root: Path,
     allowed_namespaces: frozenset[str],
-    allowed_hosts: frozenset[str],
+    allowed_hosts: frozenset[str] | None,
+    host_config_is_set: bool,
     token_provider: TokenProvider | None,
     opener,
 ) -> int:
@@ -1879,15 +1947,18 @@ def _run_update_pr(
     except NamespaceDeniedError as exc:
         _fail(str(exc), code=EXIT_NAMESPACE_DENIED)
 
-    # Host anchoring (lr-0e39f9): api_base is "" on the GitHub path
-    # (github_backend hardcodes its own public API base, see
+    # Host anchoring (lr-0e39f9; config-ceiling + mode-aware message
+    # lr-57573e): api_base is "" on the GitHub path (github_backend
+    # hardcodes its own public API base, see
     # _resolve_owner_repo_for_update's own docstring) -- an empty string
     # never legitimately matches a configured allowed-host entry, so this
     # check is skipped unconditionally for GitHub rather than requiring
     # every deployment's allowlist to also carry an empty-string entry.
     if args.platform != PLATFORM_GITHUB:
         try:
-            check_host_allowed(api_base, allowed_hosts=allowed_hosts)
+            check_host_allowed(
+                api_base, allowed_hosts=allowed_hosts, config_is_set=host_config_is_set
+            )
         except HostDeniedError as exc:
             _fail(str(exc), code=EXIT_HOST_DENIED)
 
@@ -1961,7 +2032,8 @@ def _run_create_pr(
     caller: str,
     project_root: Path,
     allowed_namespaces: frozenset[str],
-    allowed_hosts: frozenset[str],
+    allowed_hosts: frozenset[str] | None,
+    host_config_is_set: bool,
     token_provider: TokenProvider | None,
     opener,
     builder_identity_config_root: str | Path | None = None,
@@ -2001,14 +2073,16 @@ def _run_create_pr(
     except NamespaceDeniedError as exc:
         _fail(str(exc), code=EXIT_NAMESPACE_DENIED)
 
-    # Host anchoring (lr-0e39f9): api_base is "" on the GitHub path (a fixed
-    # literal set two branches above, never derived from the git remote) --
-    # skipped unconditionally for GitHub, mirroring _run_update_pr's own
-    # identical guard (see that function's own comment for the full
-    # rationale).
+    # Host anchoring (lr-0e39f9; config-ceiling + mode-aware message
+    # lr-57573e): api_base is "" on the GitHub path (a fixed literal set two
+    # branches above, never derived from the git remote) -- skipped
+    # unconditionally for GitHub, mirroring _run_update_pr's own identical
+    # guard (see that function's own comment for the full rationale).
     if args.platform != PLATFORM_GITHUB:
         try:
-            check_host_allowed(api_base, allowed_hosts=allowed_hosts)
+            check_host_allowed(
+                api_base, allowed_hosts=allowed_hosts, config_is_set=host_config_is_set
+            )
         except HostDeniedError as exc:
             _fail(str(exc), code=EXIT_HOST_DENIED)
 

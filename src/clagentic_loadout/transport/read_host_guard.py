@@ -223,6 +223,18 @@ genuinely absent key is the only way to reach the permissive None return; a
 present-but-null value falls through to the same InvalidReadHostConfigError
 every other malformed-value case raises, fail-closed before any credential
 is minted.
+
+SHARED RESOLVER EXTRACTION (lr-57573e): the config-ceiling/caller-narrow-
+only resolution algorithm this module pioneered (everything described above
+from "CALLER-WIDENING DEFECT + FIX" through "ABSENT-VS-PRESENT-NULL FIX") is
+now factored into `transport.host_guard_resolve`, shared with
+`push.host_guard` (which mirrors this same design rather than carrying a
+second, independently-drifting copy). This module's own public surface
+(`resolve_allowed_hosts`, `check_host_allowed`, `read_host_config_is_set`,
+`InvalidReadHostConfigError`, the env-var/config-section/config-key
+constants) is UNCHANGED — every existing caller and every existing test in
+this module's own test file keeps working with no edit required; only the
+internal parsing/precedence logic moved.
 """
 
 from __future__ import annotations
@@ -230,12 +242,13 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from clagentic_loadout.transport.host_match import host_matches
-from clagentic_loadout.transport.provider_config import (
-    DEFAULT_USER_CONFIG_ROOT,
-    USER_CONFIG_FILENAME,
-    load_user_config_section,
+from clagentic_loadout.transport.host_guard_resolve import (
+    HostCeilingResolution,
+    config_is_set as _config_is_set,
+    resolve_ceiling as _resolve_ceiling,
+    resolve_ceiling_hosts as _resolve_ceiling_hosts,
 )
+from clagentic_loadout.transport.host_match import host_matches
 
 #: Env var carrying a comma-separated allowed-host list for the git-host-api
 #: (read) verb's resolved git-host base (each entry a bare "host[:port]"
@@ -303,92 +316,6 @@ class InvalidReadHostConfigError(Exception):
         self.received = received
 
 
-def _parse_comma_separated(raw: str) -> frozenset[str]:
-    """Shared comma-separated-list parse for the env var and config-file
-    values -- same whitespace-trim/empty-entry-drop rule for both, so the
-    two sources never silently disagree on what counts as a valid entry."""
-    if not raw.strip():
-        return frozenset()
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
-
-
-def _config_file_path(config_root: str | Path | None) -> Path:
-    """Resolve the on-disk path of the user-level config file *config_root*
-    (or DEFAULT_USER_CONFIG_ROOT when None) points at -- used only to name
-    the offending file in InvalidReadHostConfigError's message; never opened
-    directly here (load_user_config_section/_read_yaml_mapping own the
-    actual read)."""
-    root = Path(config_root) if config_root is not None else DEFAULT_USER_CONFIG_ROOT
-    return root / USER_CONFIG_FILENAME
-
-
-def _load_configured_allowed_hosts(config_root: str | Path | None) -> frozenset[str] | None:
-    """Read READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY from the
-    user-level config file. Returns None when the section/key is ABSENT
-    (config UNSET -- the pre-fix, caller-settable-only precedence applies).
-
-    Returns a frozenset (possibly empty, an operator's real choice to
-    restrict to nothing) when the key IS present and holds a value in one of
-    the TWO accepted shapes:
-      - a comma-separated STRING (the original, back-compat shape), or
-      - a YAML LIST of strings (the natural YAML authoring shape for a
-        multi-entry allowlist, e.g. `allowed_hosts: [a.example, b.example]`).
-
-    FAIL-OPEN FIX (lr-4ebce1 fold-in #2): the pre-fix
-    version of this function treated ANY non-string value -- including the
-    natural YAML list shape an operator configuring this key for the first
-    time would reach for -- as "not configured" and silently returned None
-    (PERMISSIVE). An operator who wrote `allowed_hosts: [a.example,
-    b.example]`, believing they had just turned host restriction ON, got
-    ZERO enforcement instead, with no error anywhere. A config parse/shape
-    problem must never resolve to "no restriction" -- it must refuse loudly,
-    the same fail-closed posture check_host_allowed itself already applies
-    to a denied host. Only an ABSENT key means "unconfigured"; every
-    PRESENT-but-malformed value -- INCLUDING an explicit `allowed_hosts:
-    null` -- is a hard config error, raised as InvalidReadHostConfigError,
-    never degraded to permissive.
-
-    ABSENT-VS-PRESENT-NULL FIX (lr-4ebce1 fold-in #3, pre-merge security
-    review finding): `dict.get(key)` returns None for BOTH "key not in the
-    mapping" and "key in the mapping with value None" -- a bare `raw =
-    section.get(...)` could not tell an operator's genuinely absent key
-    apart from an operator who wrote `allowed_hosts: null` (or `allowed_hosts:`
-    with no value, which YAML also parses as None) and believed that
-    explicitly enabled/configured the key. Both collapsed to the SAME
-    permissive None return, mismatching this function's own docstring
-    contract above ("Only an ABSENT key ... means unconfigured") and,
-    per `resolve_allowed_hosts`'s "Config UNSET" precedence, silently
-    re-opening the caller-widening path (env var/--allowed-host winning
-    outright) the fold-in #1 fix exists to close, for a value an operator
-    wrote deliberately. FIXED: membership is checked explicitly via
-    `READ_HOST_CONFIG_KEY in section` BEFORE reading the value -- a genuinely
-    ABSENT key returns None (config UNSET, unchanged); a PRESENT key whose
-    value is None (or any other type `isinstance(raw, (str, list))` does not
-    accept) falls through to the same InvalidReadHostConfigError every other
-    malformed-value case already raises, mint-free, exit EXIT_HOST_CONFIG_INVALID
-    (21) at the CLI boundary.
-    """
-    section = load_user_config_section(READ_HOST_CONFIG_SECTION, config_root=config_root)
-    if READ_HOST_CONFIG_KEY not in section:
-        return None
-    raw = section.get(READ_HOST_CONFIG_KEY)
-    if isinstance(raw, str):
-        return _parse_comma_separated(raw)
-    if isinstance(raw, list):
-        non_string_entries = [entry for entry in raw if not isinstance(entry, str)]
-        if non_string_entries:
-            raise InvalidReadHostConfigError(
-                _config_file_path(config_root),
-                received=raw,
-                detail=(
-                    f"list entry {non_string_entries[0]!r} "
-                    f"(type {type(non_string_entries[0]).__name__}) is not a string"
-                ),
-            )
-        return frozenset(entry.strip() for entry in raw if entry.strip())
-    raise InvalidReadHostConfigError(_config_file_path(config_root), received=raw)
-
-
 def resolve_allowed_hosts(
     explicit: frozenset[str] | None = None,
     *,
@@ -432,48 +359,23 @@ def resolve_allowed_hosts(
     config-file tier reads from (mainly for tests), mirroring
     transport.git_host_api._resolve_git_host_base's own `config_root`
     parameter.
+
+    SHARED RESOLVER (lr-57573e): the precedence above is implemented once,
+    in `transport.host_guard_resolve.resolve_ceiling_hosts` -- this is a
+    thin, module-specific wrapper supplying READ_HOST_CONFIG_SECTION/
+    READ_HOST_CONFIG_KEY/ALLOWED_HOSTS_ENV_VAR/InvalidReadHostConfigError,
+    the same shape `push.host_guard.resolve_allowed_hosts` now also wraps.
     """
     active_env = env if env is not None else os.environ
-
-    if explicit is not None:
-        caller_supplied: frozenset[str] | None = frozenset(explicit)
-    else:
-        raw_env = active_env.get(ALLOWED_HOSTS_ENV_VAR, "")
-        caller_supplied = _parse_comma_separated(raw_env) if raw_env.strip() else None
-
-    configured = _load_configured_allowed_hosts(config_root)
-    if configured is None:
-        # Config UNSET -- unchanged pre-fix behavior. No restriction
-        # configured anywhere resolves to None (permissive) rather than
-        # frozenset() -- see RETURN-TYPE FIX.
-        if explicit is not None:
-            return frozenset(explicit)
-        return caller_supplied
-
-    # Config SET -- config is the ceiling; a caller-supplied value can only
-    # narrow it, never add a host absent from `configured`. Narrowing is
-    # done via host_matches (the SAME normalized authority comparison
-    # check_host_allowed itself uses below) rather than a raw string-set
-    # intersection -- two entries can name the identical authority in
-    # different shapes (e.g. configured "example.com:3000" vs
-    # caller-supplied "http://example.com:3000"), and a literal-string
-    # intersection would wrongly treat that as "no overlap", silently
-    # narrowing to nothing even though both sides agree on the host. Keeps
-    # `configured`'s OWN entry strings (not the caller-supplied shape) in
-    # the result, since those are the values already proven safe by the
-    # operator-controlled tier. The result here is ALWAYS an enforced set
-    # (possibly empty), never None -- config being set means a restriction
-    # IS configured, so this can never degrade to permissive.
-    if caller_supplied is not None:
-        return frozenset(
-            configured_entry
-            for configured_entry in configured
-            if any(
-                host_matches(configured_entry, caller_entry)
-                for caller_entry in caller_supplied
-            )
-        )
-    return configured
+    return _resolve_ceiling_hosts(
+        explicit,
+        env=active_env,
+        env_var=ALLOWED_HOSTS_ENV_VAR,
+        config_root=config_root,
+        config_section=READ_HOST_CONFIG_SECTION,
+        config_key=READ_HOST_CONFIG_KEY,
+        invalid_config_error=InvalidReadHostConfigError,
+    )
 
 
 class HostDeniedError(Exception):
@@ -483,6 +385,43 @@ class HostDeniedError(Exception):
     transport.git_host_api._run/main and mapped to EXIT_HOST_DENIED --
     fires BEFORE any credential is resolved or request issued, mirroring
     push.errors.HostDeniedError's own posture for the sibling guard."""
+
+
+def resolve_host_ceiling(
+    explicit: frozenset[str] | None = None,
+    *,
+    env: dict[str, str] | None = None,
+    config_root: str | Path | None = None,
+) -> HostCeilingResolution:
+    """Resolve BOTH the effective allowed-host set and whether the
+    config-file ceiling produced it, in ONE read of the user-level config
+    file (lr-57573e fold-in #1, F2: transport.git_host_api._run previously
+    called `resolve_allowed_hosts` and `read_host_config_is_set`
+    SEPARATELY, each independently re-reading and re-parsing the same
+    `read_host_guard.allowed_hosts` config key).
+
+    A caller (transport.git_host_api._run) that needs both `allowed_hosts`
+    (for enforcement) and `config_is_set` (for the mode-aware refusal
+    message) should call THIS function instead of `resolve_allowed_hosts`
+    plus `read_host_config_is_set` -- see `transport.host_guard_resolve.
+    HostCeilingResolution`'s own docstring for the full argument, and
+    `push.host_guard.resolve_host_ceiling` for the sibling guard's identical
+    fix. `resolve_allowed_hosts`/`read_host_config_is_set` stay available
+    for a caller that only ever needs one of the two values.
+
+    *env*/*config_root* have the same meaning as `resolve_allowed_hosts`'s
+    own parameters.
+    """
+    active_env = env if env is not None else os.environ
+    return _resolve_ceiling(
+        explicit,
+        env=active_env,
+        env_var=ALLOWED_HOSTS_ENV_VAR,
+        config_root=config_root,
+        config_section=READ_HOST_CONFIG_SECTION,
+        config_key=READ_HOST_CONFIG_KEY,
+        invalid_config_error=InvalidReadHostConfigError,
+    )
 
 
 def read_host_config_is_set(config_root: str | Path | None = None) -> bool:
@@ -504,7 +443,12 @@ def read_host_config_is_set(config_root: str | Path | None = None) -> bool:
     error propagating on a malformed config value, exactly like every other
     caller of the config-file tier.
     """
-    return _load_configured_allowed_hosts(config_root) is not None
+    return _config_is_set(
+        config_root=config_root,
+        config_section=READ_HOST_CONFIG_SECTION,
+        config_key=READ_HOST_CONFIG_KEY,
+        invalid_config_error=InvalidReadHostConfigError,
+    )
 
 
 def check_host_allowed(
@@ -598,4 +542,5 @@ __all__ = [
     "check_host_allowed",
     "read_host_config_is_set",
     "resolve_allowed_hosts",
+    "resolve_host_ceiling",
 ]

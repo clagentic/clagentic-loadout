@@ -285,8 +285,7 @@ from clagentic_loadout.transport.read_host_guard import (
     HostDeniedError,
     InvalidReadHostConfigError,
     check_host_allowed,
-    read_host_config_is_set,
-    resolve_allowed_hosts,
+    resolve_host_ceiling,
 )
 
 # ---------------------------------------------------------------------------
@@ -1970,18 +1969,22 @@ def _run(
     # credentialed request -- see --git-host-base-url's own --help
     # ("unused on a GitHub-targeted call").
     if resolved_git_host_base is not None:
+        # ONE config read (lr-57573e fold-in #1, F2): resolve_host_ceiling
+        # returns both allowed_hosts and config_is_set from a single
+        # load_configured_hosts call, rather than resolve_allowed_hosts and
+        # read_host_config_is_set each re-reading/re-parsing the same
+        # read_host_guard.allowed_hosts config key independently.
         try:
-            allowed_hosts = resolve_allowed_hosts(
+            ceiling = resolve_host_ceiling(
                 frozenset(args.allowed_hosts) if args.allowed_hosts is not None else None
             )
-            config_is_set = read_host_config_is_set()
         except InvalidReadHostConfigError as exc:
             _fail(str(exc), code=EXIT_HOST_CONFIG_INVALID)
         try:
             check_host_allowed(
                 resolved_git_host_base,
-                allowed_hosts=allowed_hosts,
-                config_is_set=config_is_set,
+                allowed_hosts=ceiling.allowed_hosts,
+                config_is_set=ceiling.config_is_set,
             )
         except HostDeniedError as exc:
             _fail(str(exc), code=EXIT_HOST_DENIED)

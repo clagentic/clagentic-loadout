@@ -401,12 +401,140 @@ exclusively from the live git remote (see "1. Git-host base URL" above —
 optionally can be restricted via `CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS`
 (comma-separated) or an explicit `--allowed-host` flag (repeatable); each
 entry may be a bare `host[:port]` or a full `scheme://host[:port]` URL.
-Unset/empty is PERMISSIVE (no restriction), mirroring the namespace
-restriction above — set this in the spawn env for any deployment that wants
-push's credentialed calls anchored to a fixed set of known-good Forgejo
-hosts. A mismatch fails closed before any credential is resolved. Ignored
-on `--platform github` (GitHub coordinate derivation from the git remote is
-not supported at all — see `--repo`).
+With no `push_host_guard.allowed_hosts` config key set either (see below),
+this is UNSET/PERMISSIVE (no restriction), mirroring the namespace
+restriction above and unchanged from this flag's original released
+behavior — set this in the spawn env for any deployment that wants push's
+credentialed calls anchored to a fixed set of known-good Forgejo hosts. A mismatch fails
+closed before any credential is resolved. Ignored on `--platform github`
+(GitHub coordinate derivation from the git remote is not supported at all —
+see `--repo`) — and the `push_host_guard.allowed_hosts` config-file tier is
+not even RESOLVED on that path: a malformed config value refuses a Forgejo
+push (`EXIT_HOST_CONFIG_INVALID`, 37) but never affects a GitHub one,
+matching the guard's own documented no-op there.
+
+**A CALLER-SETTABLE ALLOWLIST DOES NOT PROTECT AGAINST THAT SAME CALLER —
+READ THIS BEFORE RELYING ON `--allowed-host`/THE ENV VAR FOR SECURITY**
+(mirroring the identical caveat for `git-host-api`'s own read guard below).
+The push target (`api_base`) is derived from the live git
+remote, which a caller in the same shell can repoint; both `--allowed-host`
+and `CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS` are set by that SAME invocation.
+A caller able to repoint the git remote is, by construction, equally able
+to widen the allowlist to match in that same command line or its own spawn
+environment — an "allowlist" set by the same actor it is meant to restrict
+approves its own redirect and protects against nothing. The flag and env
+var remain useful for restricting a DIFFERENT, less-trusted caller (e.g. a
+sub-process this one spawns with a scrubbed environment) or for documenting
+intent to a human reading the invocation — but they are NOT a security
+boundary against the invoking caller itself.
+
+**The only source that WIDENS the effective allowlist is an
+operator-controlled config key, immune to per-call argv/env.** Set
+`allowed_hosts` under a `push_host_guard:` section in the USER-LEVEL
+`~/.config/clagentic/loadout/config.yaml` (same file, same
+`load_user_config_section` loader every other user-level config tier in
+this package already uses — see `credentials:`/`forgejo:`/`read_host_guard:`
+above; note this is a DIFFERENT section from `read_host_guard:`, deliberately
+not shared — the two guards anchor different inputs from different trust
+boundaries, see `push.host_guard`'s own module docstring). Two shapes are
+accepted, same entry shape (`host[:port]` or `scheme://host[:port]`) as the
+env var for each entry: a comma-separated STRING, or a YAML LIST of strings:
+
+```yaml
+push_host_guard:
+  allowed_hosts: "forgejo.example.com:3000,other-forgejo.example.org:3000"
+```
+
+```yaml
+push_host_guard:
+  allowed_hosts:
+    - "forgejo.example.com:3000"
+    - "other-forgejo.example.org:3000"
+```
+
+**Any other value is a hard config error, never a silent fallback to
+permissive** — an int, a mapping, a list containing a non-string entry, OR
+an explicit `null` value (`allowed_hosts: null`, or `allowed_hosts:` with no
+value at all — PyYAML parses both the same way) refuses at load time
+(before any credential is resolved or git operation is attempted), exit
+`EXIT_HOST_CONFIG_INVALID` (37), naming the config file, the
+`push_host_guard`/`allowed_hosts` section/key, the received type, and the
+two accepted forms above. Only a GENUINELY ABSENT key means "unconfigured";
+a PRESENT value of any other shape — including an operator-authored `null`
+— is always a refusal, never treated as if the key had not been set. An
+explicit EMPTY STRING (`allowed_hosts: ""`) is NOT one of these refusal
+cases — it is a present, validly-typed (string) value that parses to an
+empty set, and is a real, enforced "restrict to nothing" choice (see below),
+not a config error.
+
+Once this key is set, it becomes the CEILING: `--allowed-host`/the env var
+can only NARROW it (the effective set is the overlap between the configured
+ceiling and whatever the caller supplied, compared via the same normalized
+host:port authority match `push_host_guard`'s own membership check uses —
+not raw string equality), never widen it — a caller can no longer add a
+host absent from the operator's own configured list. Supplying neither flag
+nor env var, with the config key set, enforces the full configured set —
+including an operator's own explicit empty `allowed_hosts: ""`, a real
+"restrict to nothing" choice that correctly denies every host (an earlier
+revision of `check_host_allowed` treated any empty resolved set as
+permissive, which would have silently defeated exactly this
+configuration).
+
+**Back-compat: leaving the config key unset reproduces the pre-fix
+precedence byte-for-byte** — `--allowed-host` still wins over the env var,
+which still wins over the permissive (no-restriction) default, with no
+forced config write for a deployment that has not opted into the config-file
+ceiling.
+
+**The refusal message matches whichever mode is actually in effect**: when
+the config key is UNSET, a denied host's error still tells you to set
+`CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS` or pass `--allowed-host`. Once the
+config key IS set, that advice would be FALSE — the message instead names
+the `push_host_guard.allowed_hosts` key in the user-level config file as the
+only thing that actually permits the host.
+
+**Shared resolution logic, not a second implementation.** The
+config-ceiling/caller-narrow-only precedence, the `None`-vs-empty-frozenset
+distinction, the list-or-string config parse, and the
+malformed-config-is-a-hard-error rule are implemented ONCE, in
+`transport.host_guard_resolve`, and reused by both this guard and
+`git-host-api`'s own read guard below — each guard keeps its OWN env var
+name and OWN config section/key (this section is `push_host_guard`, the
+read guard's is `read_host_guard`), never a shared configuration surface.
+`push.host_guard.resolve_host_ceiling` / `transport.read_host_guard.
+resolve_host_ceiling` resolve BOTH the effective allowed-host set and
+whether the config-file ceiling produced it in ONE read of the config
+file, rather than a caller making two independent calls
+(`resolve_allowed_hosts` then `push_host_config_is_set`/
+`read_host_config_is_set`) that each re-read/re-parse the same config key —
+both verbs' `main`/`_run` call this combined resolver.
+
+**This allowlist's config tier and the `credentials:` tier share the SAME
+user-level config root, by construction** (re-examined for whether a
+caller-redirected HOME could widen this ceiling against a DIFFERENT
+credential root than the one that actually mints the token — it cannot, by
+construction, see below): `push.host_guard`'s
+config-file tier (`resolve_host_ceiling` /
+`transport.host_guard_resolve.load_configured_hosts`) and
+`provider_config`'s credentials tier (`_load_credentials_section`) both
+resolve through the same one function —
+`provider_config.load_user_config_section(section_name, config_root=...)` —
+which in turn resolves the config-file path as `Path(config_root) if
+config_root is not None else DEFAULT_USER_CONFIG_ROOT` before reading
+`<root>/config.yaml`. Neither section has its own, independently computed
+root. Practically: this ceiling allowlist can never be widened from one
+root while the real git-host token is minted against a credentials tier
+resolved from a DIFFERENT root — redirecting `HOME` (or `XDG_CONFIG_HOME`,
+wherever `DEFAULT_USER_CONFIG_ROOT` itself is anchored) redirects BOTH
+tiers identically, in lock-step, because both read through the identical
+`config_root` parameter and the identical fallback constant. A caller
+cannot pair a caller-controlled, narrower `push_host_guard` ceiling against
+the operator's real, un-redirected credential root — there is exactly one
+root to redirect, and redirecting it redirects the credential the ceiling
+exists to protect right along with it. See
+`tests/test_push_host_guard.py::TestSharedUserConfigRoot` for the proof
+(mirrors `tests/test_transport_read_host_guard.py::
+TestSharedUserConfigRoot` for the sibling guard).
 
 ### Host restriction (git-host-api read verb)
 
@@ -501,15 +629,21 @@ read_host_guard:
 
 **Any other value is a hard config error, never a silent fallback to
 permissive** — an int, a mapping, a list containing a non-string entry, OR
-an explicit `null`/empty value (`allowed_hosts: null`, or `allowed_hosts:`
-with no value at all — PyYAML parses both the same way) refuses at load
-time (before any credential is resolved), naming the config file, the
+an explicit `null` value (`allowed_hosts: null`, or `allowed_hosts:` with no
+value at all — PyYAML parses both the same way) refuses at load time
+(before any credential is resolved), naming the config file, the
 `read_host_guard`/`allowed_hosts` section/key, the received type, and the
 two accepted forms above. Only a GENUINELY ABSENT key (the `read_host_guard`
 section exists but never mentions `allowed_hosts` at all, or the section
 itself is absent) means "unconfigured"; a PRESENT value of any other shape —
 including an operator-authored `null` — is always a refusal, never treated
-as if the key had not been set. This closes two gaps at the same root cause
+as if the key had not been set. An explicit EMPTY STRING
+(`allowed_hosts: ""`) is NOT one of these refusal cases — it is a present,
+validly-typed (string) value that parses to an empty set, and is a real,
+enforced "restrict to nothing" choice (an operator-configured allowlist that
+denies every host — the same distinction `push`'s own host-restriction
+section above documents), not a config error. This closes two gaps at the
+same root cause
 (a bare `dict.get(key)` cannot tell "key absent" apart from "key present
 with value `None`"): any non-string value, including the YAML list shape
 above, was once silently treated as "not configured" (leaving an operator
@@ -545,26 +679,29 @@ user-level config file as the only thing that actually permits the host.
 
 **This allowlist's config tier and the `credentials:` tier share the SAME
 user-level config root, by construction.** `read_host_guard`'s config-file
-tier (`_load_configured_allowed_hosts`,
-`src/clagentic_loadout/transport/read_host_guard.py:334`) and
-`provider_config`'s credentials tier (`_load_credentials_section`,
-`src/clagentic_loadout/transport/provider_config.py:220-226`) both resolve
-through the same one function —
-`provider_config.load_user_config_section(section_name, config_root=...)`
-(`src/clagentic_loadout/transport/provider_config.py:192-217`) — which in
-turn resolves the config-file path as `Path(config_root) if config_root is
-not None else DEFAULT_USER_CONFIG_ROOT` before reading `<root>/config.yaml`
-(`provider_config.py:214-215`). Neither section has its own, independently
-computed root. Practically: this ceiling allowlist can never be widened
-from one root while the real git-host token is minted against a
-credentials tier resolved from a DIFFERENT root — redirecting `HOME` (or
-`XDG_CONFIG_HOME`, wherever `DEFAULT_USER_CONFIG_ROOT` itself is anchored)
-redirects BOTH tiers identically, in lock-step, because both read through
-the identical `config_root` parameter and the identical fallback constant.
-A caller cannot pair a caller-controlled, narrower `read_host_guard`
-ceiling against the operator's real, un-redirected credential root — there
-is exactly one root to redirect, and redirecting it redirects the
-credential the ceiling exists to protect right along with it.
+tier (`resolve_host_ceiling` ->
+`transport.host_guard_resolve.load_configured_hosts`, the shared resolver
+both `read_host_guard` and `push.host_guard` wrap — see "Shared resolution
+logic" in the push host-restriction section above) and `provider_config`'s
+credentials tier (`_load_credentials_section`) both resolve through the
+same one function —
+`provider_config.load_user_config_section(section_name, config_root=...)` —
+which in turn resolves the config-file path as `Path(config_root) if
+config_root is not None else DEFAULT_USER_CONFIG_ROOT` before reading
+`<root>/config.yaml`. Neither section has its own, independently computed
+root. Practically: this ceiling allowlist can never be widened from one
+root while the real git-host token is minted against a credentials tier
+resolved from a DIFFERENT root — redirecting `HOME` (or `XDG_CONFIG_HOME`,
+wherever `DEFAULT_USER_CONFIG_ROOT` itself is anchored) redirects BOTH
+tiers identically, in lock-step, because both read through the identical
+`config_root` parameter and the identical fallback constant. A caller
+cannot pair a caller-controlled, narrower `read_host_guard` ceiling against
+the operator's real, un-redirected credential root — there is exactly one
+root to redirect, and redirecting it redirects the credential the ceiling
+exists to protect right along with it. See
+`tests/test_transport_read_host_guard.py::TestSharedUserConfigRoot` for the
+proof (mirrored by `tests/test_push_host_guard.py::
+TestSharedUserConfigRoot` for the sibling guard).
 
 ### Verdict-required roles (`review-post`)
 
