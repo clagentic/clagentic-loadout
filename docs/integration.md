@@ -408,6 +408,60 @@ hosts. A mismatch fails closed before any credential is resolved. Ignored
 on `--platform github` (GitHub coordinate derivation from the git remote is
 not supported at all — see `--repo`).
 
+### Host restriction (git-host-api read verb)
+
+`git-host-api` (`transport.git_host_api`), unlike `push`, treats an EXPLICIT
+`--git-host-base-url` as authoritative — `_resolve_git_host_base` returns it
+unconditionally when non-empty (see "1. Git-host base URL" above, tier 1),
+and the resolved base is exactly what a minted git-host token gets attached
+to. Neither the credential provider (no host concept in its contract) nor a
+clone-time pin (this verb has no git remote/clone context) exists to
+cross-check that value — the same gap `push.host_guard` closed for `push`'s
+git-remote-derived host, on a different input here: a CLI argument (or the
+env-var/config-file tiers `_resolve_git_host_base` also consults) rather
+than a repointed git remote.
+
+The resolved git-host base optionally can be restricted via
+`CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS` (comma-separated) or an explicit
+`--allowed-host` flag (repeatable) on `git-host-api` itself; each entry may
+be a bare `host[:port]` or a full `scheme://host[:port]` URL. Unset/empty is
+PERMISSIVE (no restriction) — set this in the spawn env for any deployment
+that wants `git-host-api`'s credentialed calls anchored to a fixed set of
+known-good git hosts. A mismatch fails closed before any credential is
+resolved or request is issued, and the error names the offending host.
+Ignored for a GitHub-targeted call (the resolved Forgejo base is discarded
+unconditionally there — see "1. Git-host base URL" above — and never used to
+build the credentialed request).
+
+**DELIBERATELY A SEPARATE ALLOWLIST from push's own
+`CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS`/`--allowed-host`**, not shared: the
+two guards anchor different inputs from different trust boundaries — push's
+target host comes from the comparatively low-churn, repo-scoped live git
+remote; this verb's resolved base comes from a CLI flag/env var/user-level
+config file supplied fresh on every invocation, including by a caller this
+deployment never anticipated. Coupling one allowlist across both verbs would
+force an operator who wants to scope one narrowly to scope the other
+identically too, with no offsetting benefit — see
+`transport.read_host_guard`'s module docstring for the full argument.
+
+**DEFAULT POSTURE — PERMISSIVE**, matching the push guard's own precedent
+above rather than defaulting to enforce. This was re-examined rather than
+inherited (the exposure here IS reachable from a lower bar than push's — a
+caller argument, not a repointed git remote — which argues for landing this
+guard, not for defaulting it on): `--git-host-base-url`'s own env-var tiers
+are documented above as "a per-invocation override for a caller that
+genuinely needs to point at a different Forgejo instance for one call" — every
+existing legitimate caller of this flag (`review-post`, `merge`,
+`close-pr`, `post-merge`, `acquire`, and `git-host-api` itself, several of
+which have committed tests exercising a non-default base URL) intentionally
+resolves to a non-default host today, with no allowlist configured anywhere.
+A default-ON allowlist with no seeded entries would refuse every one of
+those existing, correct calls the moment this shipped — a breaking change to
+basic verb operability, not an additive safety net, for a released tool with
+users beyond this deployment. Opt-in matches every sibling guard in this
+package (`push.namespace_guard`, `push.host_guard`,
+`transport.git_host_api`'s own `known_bad_owners`).
+
 ## Minimal spawn-env checklist
 
 For a role that only calls Forgejo-path verbs with the `static` credential
