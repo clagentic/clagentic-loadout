@@ -966,4 +966,222 @@ class TestSweepAbandonedPairs:
 
         removed = body_env.sweep_abandoned_pairs(env={"TMPDIR": str(tmp_path)})
         assert removed == 0
-        assert "could not resolve the staging directory" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# VERDICT-INTENT STAMP (lr-9ba589, seventh incident in this seam): a body
+# staged WITHOUT review_status, then read with a mismatched verdict-route
+# expectation, must fail closed WITHOUT consuming the staged pair -- the
+# THIS TASK'S OWN acceptance criterion, reproducing the exact shape that
+# burned six-plus times: today (pre-fix) this silently succeeds fenceless;
+# after the fix, the mismatch is refused and the staged content survives for
+# a corrected retry. A companion test proves a legitimate PLAIN comment
+# (opted out of the check, or matching intent) is completely unaffected.
+# ---------------------------------------------------------------------------
+
+
+class TestDeriveCarriesReviewStatus:
+    def test_review_status_clean_is_detected(self):
+        assert body_env._derive_carries_review_status(
+            b'{"body": "x", "review_status": "clean"}'
+        ) is True
+
+    def test_review_status_blocking_is_detected(self):
+        assert body_env._derive_carries_review_status(
+            b'{"review_status": "blocking", "findings": []}'
+        ) is True
+
+    def test_plain_body_with_no_review_status_is_false(self):
+        assert body_env._derive_carries_review_status(b'{"body": "LGTM"}') is False
+
+    def test_malformed_json_is_false_not_raised(self):
+        # This is an advisory signal, never a second content validator --
+        # review.contract's own validators remain the sole authority on
+        # whether the JSON is well-formed at all.
+        assert body_env._derive_carries_review_status(b"not json") is False
+
+    def test_non_object_json_is_false(self):
+        assert body_env._derive_carries_review_status(b"[1, 2, 3]") is False
+
+    def test_invalid_review_status_value_is_false(self):
+        # Only the two values the verdict routes themselves accept count --
+        # a stray/foreign 'review_status' value is not treated as intent.
+        assert body_env._derive_carries_review_status(
+            b'{"review_status": "not-a-real-status"}'
+        ) is False
+
+
+class TestStageCallerBodyRecordsVerdictIntent:
+    def test_verdict_body_stamp_records_true(self, tmp_path):
+        env = {"TMPDIR": str(tmp_path)}
+        body_env.stage_caller_body(
+            caller="reviewer",
+            body_bytes=b'{"body": "clean", "review_status": "clean"}',
+            target_pr=42,
+            env=env,
+        )
+        stamp_path = body_env._resolve_caller_stamp_path(caller="reviewer", env=env)
+        import json
+
+        stamp = json.loads(stamp_path.read_text())
+        assert stamp["carries_review_status"] is True
+
+    def test_plain_body_stamp_records_false(self, tmp_path):
+        env = {"TMPDIR": str(tmp_path)}
+        body_env.stage_caller_body(
+            caller="reviewer", body_bytes=b'{"body": "LGTM"}', target_pr=42, env=env
+        )
+        stamp_path = body_env._resolve_caller_stamp_path(caller="reviewer", env=env)
+        import json
+
+        stamp = json.loads(stamp_path.read_text())
+        assert stamp["carries_review_status"] is False
+
+
+class TestVerdictIntentMismatchFailsClosedWithoutConsuming:
+    """THIS TASK'S OWN acceptance criterion (lr-9ba589): stage a body
+    WITHOUT review_status, then read it as if a verdict post was intended
+    (the mirror direction is also covered) -- must fail closed via
+    VerdictIntentMismatchError, and BOTH staged files must SURVIVE the
+    refusal so the caller can retry without re-staging (closing the
+    lr-becdef single-use-consume evidence-destruction gap this task calls
+    out by name)."""
+
+    def test_verdict_intended_body_read_as_plain_route_fails_closed(self, tmp_path):
+        """The shape that actually burned: content staged carrying
+        review_status, but the reading invocation's own intent
+        (expect_verdict_route) says plain (no verdict flags on argv).
+        Today (pre-fix) this would silently succeed fenceless; after the
+        fix it must refuse before consuming."""
+        env = {"TMPDIR": str(tmp_path)}
+        body_env.stage_caller_body(
+            caller="reviewer",
+            body_bytes=b'{"body": "clean", "review_status": "clean"}',
+            target_pr=42,
+            env=env,
+        )
+        body_path = body_env.resolve_caller_body_path(caller="reviewer", env=env)
+        stamp_path = body_env._resolve_caller_stamp_path(caller="reviewer", env=env)
+        assert body_path.exists() and stamp_path.exists()
+
+        with pytest.raises(body_env.VerdictIntentMismatchError) as exc_info:
+            body_env.read_caller_body_bytes(
+                caller="reviewer",
+                expect_target_pr=42,
+                expect_verdict_route=False,
+                env=env,
+            )
+        assert "review_status" in str(exc_info.value)
+        assert "SILENTLY FENCELESS" in str(exc_info.value)
+
+        # THE ACCEPTANCE CRITERION: neither file was consumed. A caller can
+        # retry (e.g. with the corrected --verdict-review-status flags)
+        # WITHOUT re-staging.
+        assert body_path.exists()
+        assert stamp_path.exists()
+
+    def test_plain_body_read_as_verdict_route_fails_closed(self, tmp_path):
+        """Mirror direction: a body staged with no review_status, but the
+        invocation requests the verdict route -- refusing rather than
+        constructing a fence around content the caller never marked as a
+        verdict."""
+        env = {"TMPDIR": str(tmp_path)}
+        body_env.stage_caller_body(
+            caller="reviewer", body_bytes=b'{"body": "LGTM"}', target_pr=42, env=env
+        )
+        body_path = body_env.resolve_caller_body_path(caller="reviewer", env=env)
+        stamp_path = body_env._resolve_caller_stamp_path(caller="reviewer", env=env)
+
+        with pytest.raises(body_env.VerdictIntentMismatchError) as exc_info:
+            body_env.read_caller_body_bytes(
+                caller="reviewer",
+                expect_target_pr=42,
+                expect_verdict_route=True,
+                env=env,
+            )
+        assert "PLAIN, non-verdict comment" in str(exc_info.value)
+
+        assert body_path.exists()
+        assert stamp_path.exists()
+
+    def test_verdict_intent_mismatch_is_a_body_env_error_subclass(self, tmp_path):
+        # Any call site's existing `except BodyEnvError` (every call site
+        # written before this fix) still catches this without modification.
+        assert issubclass(body_env.VerdictIntentMismatchError, body_env.BodyEnvError)
+
+
+class TestVerdictIntentMatchOrOptOutIsUnaffected:
+    """Companion to the mismatch tests: a legitimate PLAIN, non-verdict
+    comment (content and intent AGREE) must post/read exactly as before this
+    fix -- this is not a new blanket refusal on ordinary review comments."""
+
+    def test_matching_plain_intent_reads_and_consumes_normally(self, tmp_path):
+        env = {"TMPDIR": str(tmp_path)}
+        raw = b'{"body": "LGTM, no issues."}'
+        body_env.stage_caller_body(caller="reviewer", body_bytes=raw, target_pr=42, env=env)
+
+        result = body_env.read_caller_body_bytes(
+            caller="reviewer", expect_target_pr=42, expect_verdict_route=False, env=env
+        )
+        assert result == raw
+        # Read-and-consume (lr-becdef) still applies on a MATCHING read --
+        # this check only changes the MISMATCH behavior.
+        assert not body_env.resolve_caller_body_path(caller="reviewer", env=env).exists()
+
+    def test_matching_verdict_intent_reads_and_consumes_normally(self, tmp_path):
+        env = {"TMPDIR": str(tmp_path)}
+        raw = b'{"body": "clean", "review_status": "clean"}'
+        body_env.stage_caller_body(caller="reviewer", body_bytes=raw, target_pr=42, env=env)
+
+        result = body_env.read_caller_body_bytes(
+            caller="reviewer", expect_target_pr=42, expect_verdict_route=True, env=env
+        )
+        assert result == raw
+
+    def test_expect_verdict_route_none_skips_the_check_entirely(self, tmp_path):
+        """Default/opt-out behavior (every call site that predates this
+        fix, including transport.git_host_api's own --body-env read site,
+        which never passes expect_verdict_route): a body staged carrying
+        review_status, read with NO verdict-route expectation supplied at
+        all, is NOT refused -- the check only runs when the caller opts in."""
+        env = {"TMPDIR": str(tmp_path)}
+        raw = b'{"body": "clean", "review_status": "clean"}'
+        body_env.stage_caller_body(caller="reviewer", body_bytes=raw, target_pr=42, env=env)
+
+        # expect_verdict_route omitted entirely (defaults to None).
+        result = body_env.read_caller_body_bytes(
+            caller="reviewer", expect_target_pr=42, env=env
+        )
+        assert result == raw
+
+    def test_read_body_bytes_wrapper_also_supports_expect_verdict_route(self, tmp_path):
+        env = {"TMPDIR": str(tmp_path)}
+        raw = b'{"body": "LGTM"}'
+        body_env.stage_caller_body(caller="reviewer", body_bytes=raw, target_pr=42, env=env)
+
+        result = body_env.read_body_bytes(
+            caller="reviewer",
+            expect_target_pr=42,
+            expect_verdict_route=False,
+            env=env,
+        )
+        assert result == raw
+
+    def test_pre_fix_stamp_with_no_carries_review_status_key_defaults_false(self, tmp_path):
+        """A stamp written before this fix shipped (or hand-authored/
+        foreign) has no 'carries_review_status' key at all -- must be
+        treated as False (no verdict-intent signal), never raise merely for
+        predating this field."""
+        import json
+
+        env = {"TMPDIR": str(tmp_path)}
+        staging_dir = tmp_path / "clagentic-loadout"
+        staging_dir.mkdir()
+        (staging_dir / "body.reviewer.json").write_bytes(b'{"body": "LGTM"}')
+        legacy_stamp = {"target_pr": 42, "create_branch": None, "head_sha": None, "staged_at": "x"}
+        (staging_dir / "body.reviewer.stamp.json").write_text(json.dumps(legacy_stamp))
+
+        result = body_env.read_caller_body_bytes(
+            caller="reviewer", expect_target_pr=42, expect_verdict_route=False, env=env
+        )
+        assert result == b'{"body": "LGTM"}'

@@ -1777,3 +1777,214 @@ class TestDeleteOwnCommentDigitOnlyGuard:
             opener=_github_delete_opener(),
         )
         assert code == verb.EXIT_OK
+
+
+# ---------------------------------------------------------------------------
+# VERDICT-ROUTE INTENT MISMATCH (lr-9ba589, seventh incident in this seam):
+# THIS TASK'S OWN ACCEPTANCE CRITERION -- reproduce the exact shape that
+# burned six-plus times: stage a body WITHOUT review_status, then invoke
+# review-post as if a verdict post was intended (or the mirror: stage WITH
+# review_status, invoke plain). Today (pre-fix) the plain-route direction
+# silently succeeds fenceless with verdict_block_verified never even
+# considered. After this fix, the invocation must fail closed with a
+# corrective message naming what is missing, and must NOT consume the
+# staged body on refusal (the caller can retry without restaging). A
+# companion class proves a legitimate PLAIN, non-verdict comment (content
+# and route intent agree) still works exactly as before.
+# ---------------------------------------------------------------------------
+
+
+def _refusing_opener(req, timeout=15):
+    """Raises if ever called -- proves this invocation never reached a
+    network call, mirroring _RefusingTokenProvider's own "must not be
+    called" pattern for the HTTP layer instead of the credential layer.
+    Used where a genuinely-staged, token-mintable body must still be
+    refused by the verdict-intent check BEFORE post_and_verify ever runs
+    (build_backend/token mint runs earlier by deliberate, pre-existing
+    design -- see review.verb._run's own "Platform guard + token mint
+    BEFORE --body-env's CONSUMING read" comment -- so a refusing TOKEN
+    provider is the wrong tool for proving this ordering; a refusing
+    OPENER is)."""
+    raise AssertionError(
+        f"no network call should have been made when the verdict-intent "
+        f"check should have refused first: {req.get_method()} {req.full_url}"
+    )
+
+
+class TestVerdictRouteIntentMismatchFailsClosed:
+    def test_verdict_staged_body_posted_via_plain_route_fails_closed_and_preserves_staged_files(
+        self, monkeypatch, tmp_path
+    ):
+        """THE SHAPE THAT ACTUALLY BURNED: a body staged carrying
+        review_status (intended as a verdict) is read by an invocation that
+        omits BOTH --verdict-review-status and --verdict-findings -- this
+        must now refuse (EXIT_VERDICT_ROUTE_INTENT_MISMATCH) BEFORE any
+        network call, rather than silently posting a fenceless comment."""
+        from clagentic_loadout.transport.body_env import (
+            _resolve_caller_stamp_path,
+            resolve_caller_body_path,
+        )
+
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(
+            tmp_path,
+            json.dumps({"body": "Looks clean.", "review_status": "clean"}).encode("utf-8"),
+            caller="reviewer",
+        )
+        body_path = resolve_caller_body_path(caller="reviewer", env={"TMPDIR": str(tmp_path)})
+        stamp_path = _resolve_caller_stamp_path(caller="reviewer", env={"TMPDIR": str(tmp_path)})
+        assert body_path.exists() and stamp_path.exists()
+
+        # Token mint runs BEFORE the --body-env read by deliberate,
+        # pre-existing design (protecting a genuinely-staged body from a
+        # downstream platform/token failure) -- a real token provider is
+        # therefore expected to succeed here; the refusal this test proves
+        # is that NO NETWORK CALL is ever made, via the refusing opener.
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_refusing_opener,
+        )
+        assert code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
+
+        # THE ACCEPTANCE CRITERION: the staged pair survives the refusal --
+        # a retry with the correct --verdict-review-status/--verdict-head-sha
+        # flags does not require re-staging.
+        assert body_path.exists()
+        assert stamp_path.exists()
+
+    def test_caller_can_retry_with_corrected_flags_without_restaging(self, monkeypatch, tmp_path, capsys):
+        """Follow-on to the mismatch test above: after the refusal, the SAME
+        staged pair (never re-staged) succeeds once the invocation is
+        corrected to actually request the verdict route."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(
+            tmp_path,
+            json.dumps({"body": "Looks clean.", "review_status": "clean"}).encode("utf-8"),
+            caller="reviewer",
+            head_sha=_HEAD_SHA,
+        )
+
+        first_code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_refusing_opener,
+        )
+        assert first_code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
+
+        opener_state: dict = {}
+        opener = _github_verdict_opener(posted_id=88, capture_into=opener_state)
+        second_code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+        )
+        assert second_code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["verdict_block_verified"] is True
+
+    def test_plain_staged_body_posted_via_verdict_route_fails_closed(self, monkeypatch, tmp_path):
+        """Mirror direction: a body staged with no review_status, read by an
+        invocation requesting the verdict route -- must refuse rather than
+        construct a fence around content the caller never marked as a
+        verdict."""
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        # Staged with the SAME head_sha the invocation below expects, so the
+        # earlier expect_head_sha stamp check passes cleanly and the
+        # verdict-intent check (this test's actual subject) is the one that
+        # fires -- isolating this refusal from the unrelated SHA check.
+        _stage_body_env(
+            tmp_path, b'{"body": "LGTM, no issues."}', caller="reviewer", head_sha=_HEAD_SHA
+        )
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_refusing_opener,
+        )
+        assert code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
+
+
+class TestPlainCommentStillWorksUnderNonBreakingDefault:
+    """Companion to the mismatch tests: a legitimate PLAIN, non-verdict
+    comment -- content and route intent AGREE -- must still post
+    successfully. This proves the fix is non-breaking for the ordinary,
+    overwhelmingly common case this seam exists to serve."""
+
+    def test_plain_comment_staged_and_posted_plain_still_succeeds(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        # caller="some-role" and body "LGTM" match _github_success_opener's
+        # own fixture identity/readback exactly (the login it returns from
+        # GET /user, and the body its readback echoes) -- see the existing
+        # test_github_backend_success_from_staged_file above for the same
+        # convention.
+        _stage_body_env(tmp_path, b'{"body": "LGTM"}', caller="some-role")
+
+        code = verb.main(
+            [
+                "--caller", "some-role", "--platform", "github", "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_success_opener(),
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["pr_number"] == 42
+
+    def test_verdict_comment_staged_and_posted_via_verdict_route_still_succeeds(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        monkeypatch.setenv("TMPDIR", str(tmp_path))
+        _stage_body_env(
+            tmp_path,
+            json.dumps({"body": "No issues.", "review_status": "clean"}).encode("utf-8"),
+            caller="reviewer",
+            head_sha=_HEAD_SHA,
+        )
+
+        code = verb.main(
+            [
+                "--caller", "reviewer", "--platform", "github",
+                "--verdict-review-status", "clean",
+                "--verdict-head-sha", _HEAD_SHA,
+                "--body-env",
+                "some-owner/some-repo", "42",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_verdict_opener(),
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["verdict_block_verified"] is True
+
+    def test_body_stdin_route_is_unaffected_by_this_check(self, monkeypatch):
+        """--body-stdin carries no staged, platform-computed provenance to
+        check against (this fix is scoped to --body-env only) -- a plain
+        --body-stdin post continues to work exactly as before."""
+        code = _run_main(
+            ["--caller", "reviewer", "--platform", "github", "some-owner/some-repo", "42"],
+            stdin_bytes=b'{"body": "LGTM"}',
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_success_opener(),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
