@@ -1,5 +1,6 @@
 """transport.read_host_guard — config-driven allowed-host anchoring for the
-git-host-api (read) verb's credentialed call (lr-4ebce1).
+git-host-api (read) verb's credentialed call (lr-4ebce1, WIDEN/NARROW fix
+lr-4ebce1 fold-in #1).
 
 BACKGROUND: unlike `push` (whose credentialed api_base is derived exclusively
 from the live git remote and never consults `--git-host-base-url` at all --
@@ -103,13 +104,81 @@ REUSE, NOT A SECOND IMPLEMENTATION: host comparison itself
 delegates to (extracted lr-0e39f9) and `push.host_guard` also uses -- this
 module is the predicate's third caller, per lr-0e39f9's own closing comment
 ("deliberately avoiding a second drifting implementation").
+
+CALLER-WIDENING DEFECT + FIX (lr-4ebce1 fold-in #1, pre-merge security
+review finding): the ORIGINAL version of this module let *explicit*
+(the --allowed-host CLI flag) and ALLOWED_HOSTS_ENV_VAR win outright over an
+unconfigured default -- but BOTH of those sources are set by the SAME
+process invocation that also supplies --git-host-base-url. A caller who can
+pass --git-host-base-url https://evil can, in the identical command line or
+its own spawn environment, also pass --allowed-host evil (or export
+ALLOWED_HOSTS_ENV_VAR=evil) and make check_host_allowed approve its own
+redirect -- the "allowlist" protected against nothing when the thing being
+anchored and the thing doing the anchoring share a trust boundary. An
+allowlist is only a real control when it widens the permitted set from a
+source the caller invoking THIS call cannot itself set.
+
+FIX: a THIRD tier, READ_HOST_CONFIG_SECTION in the USER-LEVEL
+<config_root>/config.yaml (the same file/loader
+transport.provider_config.load_user_config_section already serves for the
+`credentials:` and `forgejo:` sections -- no second YAML parser, no second
+config path) is the only source that WIDENS the read allowlist. It is
+operator-written to the user-level config file ahead of time, outside any
+per-call argv/environment the caller controls -- exactly the same trust
+boundary that already makes provider_config's `credentials:` tier safe
+against a hostile repo-local override (lr-0818), applied here to a
+caller-controlled CLI/env pair instead of a repo-local file.
+
+Effective precedence, per check_host_allowed's ONE caller
+(transport.git_host_api._run):
+  - Config UNSET (no READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY in the
+    user-level file): *explicit* > env var > empty-permissive, BYTE-FOR-BYTE
+    the pre-fix precedence -- an unconfigured deployment sees no behavior
+    change, and every existing legitimate caller of --allowed-host/the env
+    var (this verb's own documented, released contract) keeps working with
+    no forced config write.
+  - Config SET: the config-file set is the ceiling. explicit/env, when
+    supplied, can only NARROW it (effective = config ∩ (explicit or env));
+    when neither is supplied, the full config set is the effective
+    allowlist. A caller can never use --allowed-host/the env var to ADD a
+    host absent from the configured ceiling -- resolve_allowed_hosts simply
+    never returns a wider set than the config tier once that tier is set,
+    regardless of what a hostile or careless caller passes on argv/env.
+
+RETURN-TYPE FIX, load-bearing for the above (NOT a cosmetic change):
+resolve_allowed_hosts returns `frozenset[str] | None`, never conflating
+"no restriction configured anywhere" (None) with "a restriction IS
+configured and it resolved to zero permitted hosts" (an EMPTY frozenset --
+e.g. config SET but narrowed by a caller value with no overlap, or an
+operator's own explicit `allowed_hosts: ""` choice). check_host_allowed's
+own pre-fix contract treated an EMPTY allowed_hosts as "permissive" -- if
+this module kept returning a bare frozenset() for both cases, a caller
+narrowing the configured ceiling to zero overlap (e.g. --allowed-host
+pointed at a host absent from config) would resolve to frozenset() and
+check_host_allowed would silently PERMIT EVERY HOST, reopening exactly the
+caller-widening hole this fix exists to close, just one layer down. None
+means "skip the check entirely" (check_host_allowed's own contract); any
+frozenset, including an empty one, means "enforce membership against
+exactly this set" -- an empty enforced set denies every host, correctly.
+
+A caller-settable allowlist (the pre-fix shape, and the DEFAULT shape here
+when config is unset) does NOT protect against that SAME caller -- it only
+ever restricts an DIFFERENT, less-trusted caller (e.g. a sub-process this
+one spawns with a scrubbed environment) or documents intent for a human
+reading the invocation. An operator who actually needs protection against
+THIS caller sets READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY in the
+user-level config file -- see docs/integration.md's "Host restriction
+(git-host-api read verb)" section for the operator-facing statement of this
+same rule.
 """
 
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from clagentic_loadout.transport.host_match import host_matches
+from clagentic_loadout.transport.provider_config import load_user_config_section
 
 #: Env var carrying a comma-separated allowed-host list for the git-host-api
 #: (read) verb's resolved git-host base (each entry a bare "host[:port]"
@@ -118,39 +187,140 @@ from clagentic_loadout.transport.host_match import host_matches
 #: allowlist configured" (permissive -- see module docstring). Deliberately
 #: NOT push.host_guard.ALLOWED_HOSTS_ENV_VAR -- see module docstring, "OWN
 #: ALLOWLIST, NOT SHARED WITH push's".
+#:
+#: CALLER-SETTABLE -- can only NARROW once READ_HOST_CONFIG_SECTION is
+#: configured; see module docstring, "CALLER-WIDENING DEFECT + FIX".
 ALLOWED_HOSTS_ENV_VAR = "CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS"
+
+#: Top-level section in the USER-LEVEL <config_root>/config.yaml carrying
+#: this verb's OPERATOR-CONTROLLED read allowlist -- the only source that
+#: can WIDEN the effective set (see module docstring, "CALLER-WIDENING
+#: DEFECT + FIX"). Read via transport.provider_config.load_user_config_section,
+#: the SAME loader/config-root convention every other user-level config tier
+#: in this package already uses (credentials:, forgejo:).
+READ_HOST_CONFIG_SECTION = "read_host_guard"
+
+#: Key within READ_HOST_CONFIG_SECTION carrying the comma-separated allowed-
+#: host list, same entry shape (bare "host[:port]" or full
+#: "scheme://host[:port]") and same parsing rule as ALLOWED_HOSTS_ENV_VAR.
+READ_HOST_CONFIG_KEY = "allowed_hosts"
+
+
+def _parse_comma_separated(raw: str) -> frozenset[str]:
+    """Shared comma-separated-list parse for the env var and config-file
+    values -- same whitespace-trim/empty-entry-drop rule for both, so the
+    two sources never silently disagree on what counts as a valid entry."""
+    if not raw.strip():
+        return frozenset()
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _load_configured_allowed_hosts(config_root: str | Path | None) -> frozenset[str] | None:
+    """Read READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY from the
+    user-level config file. Returns None when the section/key is absent
+    (config UNSET -- the pre-fix, caller-settable-only precedence applies),
+    or a frozenset (possibly empty, an operator's real choice to restrict to
+    nothing) when the key IS present.
+    """
+    section = load_user_config_section(READ_HOST_CONFIG_SECTION, config_root=config_root)
+    raw = section.get(READ_HOST_CONFIG_KEY)
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        # A malformed (non-string) value is treated as "not configured"
+        # rather than raised -- this module never fails startup over a
+        # section it merely reads (matches provider_config._read_yaml_mapping's
+        # own degrade-to-default contract for every other config tier in
+        # this package).
+        return None
+    return _parse_comma_separated(raw)
 
 
 def resolve_allowed_hosts(
     explicit: frozenset[str] | None = None,
     *,
     env: dict[str, str] | None = None,
-) -> frozenset[str]:
+    config_root: str | Path | None = None,
+) -> frozenset[str] | None:
     """Resolve the allowed-host set for the read verb's credentialed call.
 
-    Precedence (mirrors push.host_guard.resolve_allowed_hosts /
-    push.namespace_guard.resolve_allowed_namespaces exactly):
-      1. *explicit* (caller-supplied set, e.g. a --allowed-host CLI flag
-         repeated N times) -- always wins when not None, even if empty (an
-         explicit empty set is a real choice: "restrict to nothing", handled
-         by the caller's own validation, not silently reinterpreted as
-         permissive here).
-      2. ALLOWED_HOSTS_ENV_VAR, comma-separated, whitespace-trimmed, empty
-         entries dropped.
-      3. Empty frozenset (no restriction configured -- permissive default,
-         see module docstring for why this posture was re-examined and kept
-         for this verb).
+    See module docstring, "CALLER-WIDENING DEFECT + FIX" and "RETURN-TYPE
+    FIX", for the full argument. Precedence:
+
+      Config UNSET (no READ_HOST_CONFIG_SECTION.READ_HOST_CONFIG_KEY in the
+      user-level <config_root>/config.yaml) -- BYTE-FOR-BYTE the pre-fix
+      precedence, unchanged for back-compat:
+        1. *explicit* (caller-supplied set, e.g. a --allowed-host CLI flag
+           repeated N times) -- always wins when not None, even if empty (an
+           explicit empty set is a real choice: "restrict to nothing",
+           handled by the caller's own validation, not silently
+           reinterpreted as permissive here).
+        2. ALLOWED_HOSTS_ENV_VAR, comma-separated, whitespace-trimmed, empty
+           entries dropped.
+        3. None (no restriction configured -- permissive default; see
+           RETURN-TYPE FIX for why this is None rather than an empty
+           frozenset).
+
+      Config SET -- the config-file set is the ceiling; *explicit*/env can
+      only NARROW it, never widen it:
+        - *explicit* or env supplied (non-None/non-empty-string) -> the
+          subset of the configured set that OVERLAPS whatever explicit/env
+          resolved to (explicit still wins over env when both are given, as
+          in the unset-config case -- only ONE of the two is ever matched
+          against config, matching the existing "explicit wins" rule one
+          level up). May be EMPTY when there is no overlap at all -- a real
+          "deny everything" outcome, not permissive (see RETURN-TYPE FIX).
+        - neither supplied -> the full configured set (also enforced, never
+          reinterpreted as permissive even when the operator configured it
+          to be empty).
 
     *env* overrides os.environ for tests; defaults to the real process
-    environment.
+    environment. *config_root* overrides the user-level config root the
+    config-file tier reads from (mainly for tests), mirroring
+    transport.git_host_api._resolve_git_host_base's own `config_root`
+    parameter.
     """
-    if explicit is not None:
-        return frozenset(explicit)
     active_env = env if env is not None else os.environ
-    raw = active_env.get(ALLOWED_HOSTS_ENV_VAR, "")
-    if not raw.strip():
-        return frozenset()
-    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+    if explicit is not None:
+        caller_supplied: frozenset[str] | None = frozenset(explicit)
+    else:
+        raw_env = active_env.get(ALLOWED_HOSTS_ENV_VAR, "")
+        caller_supplied = _parse_comma_separated(raw_env) if raw_env.strip() else None
+
+    configured = _load_configured_allowed_hosts(config_root)
+    if configured is None:
+        # Config UNSET -- unchanged pre-fix behavior. No restriction
+        # configured anywhere resolves to None (permissive) rather than
+        # frozenset() -- see RETURN-TYPE FIX.
+        if explicit is not None:
+            return frozenset(explicit)
+        return caller_supplied
+
+    # Config SET -- config is the ceiling; a caller-supplied value can only
+    # narrow it, never add a host absent from `configured`. Narrowing is
+    # done via host_matches (the SAME normalized authority comparison
+    # check_host_allowed itself uses below) rather than a raw string-set
+    # intersection -- two entries can name the identical authority in
+    # different shapes (e.g. configured "example.com:3000" vs
+    # caller-supplied "http://example.com:3000"), and a literal-string
+    # intersection would wrongly treat that as "no overlap", silently
+    # narrowing to nothing even though both sides agree on the host. Keeps
+    # `configured`'s OWN entry strings (not the caller-supplied shape) in
+    # the result, since those are the values already proven safe by the
+    # operator-controlled tier. The result here is ALWAYS an enforced set
+    # (possibly empty), never None -- config being set means a restriction
+    # IS configured, so this can never degrade to permissive.
+    if caller_supplied is not None:
+        return frozenset(
+            configured_entry
+            for configured_entry in configured
+            if any(
+                host_matches(configured_entry, caller_entry)
+                for caller_entry in caller_supplied
+            )
+        )
+    return configured
 
 
 class HostDeniedError(Exception):
@@ -162,15 +332,23 @@ class HostDeniedError(Exception):
     push.errors.HostDeniedError's own posture for the sibling guard."""
 
 
-def check_host_allowed(git_host_base: str, *, allowed_hosts: frozenset[str]) -> None:
+def check_host_allowed(git_host_base: str, *, allowed_hosts: frozenset[str] | None) -> None:
     """Refuse *git_host_base* if an allowlist is configured and no entry in
     it matches *git_host_base*'s host:port (via
     transport.host_match.host_matches).
 
-    An EMPTY allowed_hosts means "no allowlist configured" -- every host is
-    permitted (permissive default, see module docstring). A NON-EMPTY
-    allowed_hosts enforces membership: *git_host_base* must match at least
-    one configured entry.
+    *allowed_hosts* is None when NO restriction is configured anywhere --
+    every host is permitted (permissive default, see module docstring). Any
+    frozenset value, INCLUDING AN EMPTY ONE, means a restriction IS
+    configured and membership is enforced: *git_host_base* must match at
+    least one entry, and an empty frozenset (an operator's real "restrict to
+    nothing" choice, or a caller-supplied value narrowed to zero overlap
+    with the operator-configured ceiling -- see read_host_guard's own
+    "RETURN-TYPE FIX") matches NOTHING and denies unconditionally. This is
+    the load-bearing distinction the None/empty-frozenset split exists for
+    -- collapsing "not configured" and "configured but empty" to the same
+    falsy value would silently re-permit every host on exactly the
+    caller-widening path this fix (lr-4ebce1 fold-in #1) closes.
 
     Raises HostDeniedError BEFORE any credential is resolved or request
     issued -- a host refusal is deterministic and must never partially
@@ -181,7 +359,7 @@ def check_host_allowed(git_host_base: str, *, allowed_hosts: frozenset[str]) -> 
     stays a pure predicate with no dependency back on the verb it guards,
     exactly like push.host_guard's relationship to push.errors).
     """
-    if not allowed_hosts:
+    if allowed_hosts is None:
         return
     if any(host_matches(git_host_base, entry) for entry in allowed_hosts):
         return
@@ -199,6 +377,8 @@ def check_host_allowed(git_host_base: str, *, allowed_hosts: frozenset[str]) -> 
 
 __all__ = [
     "ALLOWED_HOSTS_ENV_VAR",
+    "READ_HOST_CONFIG_KEY",
+    "READ_HOST_CONFIG_SECTION",
     "HostDeniedError",
     "check_host_allowed",
     "resolve_allowed_hosts",
