@@ -279,8 +279,7 @@ from clagentic_loadout.push.host_guard import (
     PUSH_HOST_CONFIG_KEY,
     PUSH_HOST_CONFIG_SECTION,
     check_host_allowed,
-    push_host_config_is_set,
-    resolve_allowed_hosts,
+    resolve_host_ceiling,
 )
 from clagentic_loadout.push.identity_config import (
     InvalidBuilderIdentityConfigError,
@@ -1565,12 +1564,11 @@ def main(
 
     `host_config_root` (lr-57573e): the SAME TEST-ONLY injection shape as
     `builder_identity_config_root` above, for push.host_guard's own
-    config-ceiling tier (`push.host_guard.resolve_allowed_hosts`/
-    `push_host_config_is_set`) -- overrides the user-level config root the
-    `push_host_guard:` section is read from. A real CLI invocation never
-    passes this; no corresponding CLI flag exists for the same reason
-    `builder_identity_config_root` has none (the config root is
-    deployment-fixed, not per-invocation).
+    config-ceiling tier (`push.host_guard.resolve_host_ceiling`) --
+    overrides the user-level config root the `push_host_guard:` section is
+    read from. A real CLI invocation never passes this; no corresponding
+    CLI flag exists for the same reason `builder_identity_config_root` has
+    none (the config root is deployment-fixed, not per-invocation).
 
     `identity_provider` (lr-c75c9a): a zero-arg callable returning a
     `transport.attestation.Identity` (defaults to
@@ -1790,22 +1788,16 @@ def _run(
     allowed_namespaces = resolve_allowed_namespaces(
         frozenset(args.allowed_namespaces) if args.allowed_namespaces else None
     )
-    # HOST-CONFIG-CEILING (lr-57573e): resolved (and, on a malformed
-    # push_host_guard.allowed_hosts config value, refused via
-    # InvalidPushHostConfigError -> EXIT_HOST_CONFIG_INVALID) BEFORE any
-    # credential is resolved or git operation attempted -- mirrors
-    # transport.read_host_guard's own "fires before any credential" posture
-    # for the sibling guard. host_config_is_set is threaded through to
-    # check_host_allowed below (_run_update_pr/_run_create_pr) so the
-    # refusal message names the right remediation for whichever mode is
-    # actually in effect.
-    allowed_hosts = resolve_allowed_hosts(
-        frozenset(args.allowed_hosts) if args.allowed_hosts else None,
-        config_root=host_config_root,
-    )
-    host_config_is_set = push_host_config_is_set(host_config_root)
 
-    # 4. Platform resolution.
+    # 4. Platform resolution -- MUST happen before host-config-ceiling
+    # resolution below (lr-57573e fold-in #1, F3): the push_host_guard
+    # allowlist only ever applies to a Forgejo-derived api_base (see
+    # push.host_guard's own module docstring, api_base is "" on
+    # --platform github and never legitimately matches a configured entry);
+    # resolving/validating push_host_guard config unconditionally, before
+    # args.platform is even known, made a malformed config value refuse a
+    # GitHub push too, even though the guard is documented as never
+    # applying there.
     raw_remote_url = git_coords.read_remote_url_best_effort(project_root)
     try:
         resolved_platform = resolve_platform(args.platform, raw_remote_url)
@@ -1816,6 +1808,32 @@ def _run(
             code=EXIT_REMOTE_ERROR,
         )
     args.platform = resolved_platform
+
+    # HOST-CONFIG-CEILING (lr-57573e): resolved (and, on a malformed
+    # push_host_guard.allowed_hosts config value, refused via
+    # InvalidPushHostConfigError -> EXIT_HOST_CONFIG_INVALID) BEFORE any
+    # credential is resolved or git operation attempted -- mirrors
+    # transport.read_host_guard's own "fires before any credential" posture
+    # for the sibling guard. ONLY resolved/validated on the Forgejo path
+    # (lr-57573e fold-in #1, F3): a GitHub push never derives api_base from
+    # the git remote at all (see push.host_guard's own module docstring),
+    # so a malformed push_host_guard config must not affect it -- on
+    # --platform github, allowed_hosts/host_config_is_set stay at their
+    # permissive/unset defaults and _run_update_pr/_run_create_pr already
+    # skip check_host_allowed unconditionally for GitHub regardless. ONE
+    # config read (F2): resolve_host_ceiling returns both allowed_hosts and
+    # host_config_is_set from a single load_configured_hosts call, rather
+    # than resolve_allowed_hosts and push_host_config_is_set each
+    # re-reading/re-parsing the same config key independently.
+    allowed_hosts: frozenset[str] | None = None
+    host_config_is_set = False
+    if args.platform != PLATFORM_GITHUB:
+        ceiling = resolve_host_ceiling(
+            frozenset(args.allowed_hosts) if args.allowed_hosts else None,
+            config_root=host_config_root,
+        )
+        allowed_hosts = ceiling.allowed_hosts
+        host_config_is_set = ceiling.config_is_set
 
     if args.update_pr:
         return _run_update_pr(
