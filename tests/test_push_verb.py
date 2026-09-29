@@ -40,8 +40,12 @@ import pytest
 
 from clagentic_loadout.push import verb
 from clagentic_loadout.push.github_backend import GITHUB_API_BASE
+from clagentic_loadout.push.host_guard import (
+    PUSH_HOST_CONFIG_KEY,
+    PUSH_HOST_CONFIG_SECTION,
+)
 from clagentic_loadout.sha import validate_sha
-from clagentic_loadout.transport import body_env, stage_body_verb
+from clagentic_loadout.transport import body_env, provider_config, stage_body_verb
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
 
 
@@ -174,10 +178,31 @@ def repo_with_remote(tmp_path):
     return repo, remote
 
 
-def _run_main(argv, *, token_provider=None, opener=None, stdin_text=None, monkeypatch=None):
+def _run_main(
+    argv, *, token_provider=None, opener=None, stdin_text=None, monkeypatch=None,
+    host_config_root=None,
+):
     if stdin_text is not None:
         monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(stdin_text.encode("utf-8"))))
-    return verb.main(argv, token_provider=token_provider, opener=opener)
+    return verb.main(
+        argv, token_provider=token_provider, opener=opener, host_config_root=host_config_root,
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_config_root(tmp_path, monkeypatch):
+    """Belt-and-suspenders isolation, mirroring
+    test_transport_read_host_guard.py's own `_isolate_user_config_root`
+    fixture (lr-57573e): push.host_guard's config-ceiling tier
+    (PUSH_HOST_CONFIG_SECTION) reads through
+    transport.provider_config.load_user_config_section, which falls back to
+    provider_config.DEFAULT_USER_CONFIG_ROOT -- the REAL
+    ~/.config/clagentic/loadout/ directory -- for any call in this module
+    that omits host_config_root. A real deployment config.yaml on the host
+    running these tests must never leak a live allowlist into a test
+    asserting the config-UNSET (back-compat) precedence."""
+    isolated_root = tmp_path / "isolated-user-config-root"
+    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
 
 
 class TestArgumentValidation:
@@ -869,6 +894,229 @@ class TestHostGuard:
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_OK
+
+
+def _write_push_host_config(config_root, *, value: str) -> None:
+    config_root.mkdir(parents=True, exist_ok=True)
+    config_path = config_root / provider_config.USER_CONFIG_FILENAME
+    config_path.write_text(
+        f"{PUSH_HOST_CONFIG_SECTION}:\n  {PUSH_HOST_CONFIG_KEY}: \"{value}\"\n",
+        encoding="utf-8",
+    )
+
+
+class TestHostConfigCeiling:
+    """lr-57573e: mirrors PR #33's read-guard design onto push -- the
+    user-level push_host_guard.allowed_hosts config key is the CEILING;
+    --allowed-host/the env var can only NARROW it once set, never widen past
+    it, and a malformed/present-null value is a hard config error
+    (EXIT_HOST_CONFIG_INVALID) fired before any credential is resolved.
+    Unconfigured (the default, exercised by TestHostGuard above) is
+    byte-for-byte unchanged."""
+
+    def test_flag_cannot_widen_past_configured_ceiling(self, repo_with_remote, monkeypatch, tmp_path):
+        """The core fix: --allowed-host naming a host NOT present in the
+        configured ceiling must still deny -- the config tier is a ceiling,
+        not a co-equal source, once it is set. The token provider must
+        never be reached."""
+        repo, _remote = repo_with_remote
+        config_root = tmp_path / "host-config-root"
+        _write_push_host_config(config_root, value="https://forgejo.example.com:3000")
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--allowed-host", "http://git-host.example.com",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_HOST_DENIED
+
+    def test_env_var_cannot_widen_past_configured_ceiling(self, repo_with_remote, monkeypatch, tmp_path):
+        """Same fix, via the env var instead of the explicit flag."""
+        repo, _remote = repo_with_remote
+        config_root = tmp_path / "host-config-root"
+        _write_push_host_config(config_root, value="https://forgejo.example.com:3000")
+        monkeypatch.setenv("CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS", "http://git-host.example.com")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_HOST_DENIED
+
+    def test_flag_narrows_configured_ceiling_and_permits(self, repo_with_remote, monkeypatch, tmp_path):
+        """A caller-supplied value that overlaps the configured ceiling
+        narrows to (and permits) that subset."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        config_root = tmp_path / "host-config-root"
+        _write_push_host_config(
+            config_root, value="http://git-host.example.com,https://other.example.com:3000",
+        )
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--allowed-host", "http://git-host.example.com",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_config_only_no_flag_or_env_permits_configured_host(self, repo_with_remote, monkeypatch, tmp_path):
+        """Neither --allowed-host nor the env var supplied -- the full
+        configured ceiling is the effective allowlist."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        config_root = tmp_path / "host-config-root"
+        _write_push_host_config(config_root, value="http://git-host.example.com")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_config_set_to_empty_string_denies_every_host(self, repo_with_remote, monkeypatch, tmp_path):
+        """An operator-configured empty allowlist is a real 'restrict to
+        nothing' choice -- the empty-set-collapse defect this task fixes
+        would have silently permitted every host here instead."""
+        repo, _remote = repo_with_remote
+        config_root = tmp_path / "host-config-root"
+        _write_push_host_config(config_root, value="")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_HOST_DENIED
+
+    def test_config_set_denial_message_names_config_key_not_flag(self, repo_with_remote, monkeypatch, tmp_path, capsys):
+        """Mode-aware refusal message (lr-57573e): once the config ceiling
+        is set, the refusal must point at the config key -- NOT tell the
+        caller that --allowed-host/the env var alone will permit the host
+        (false in this mode)."""
+        repo, _remote = repo_with_remote
+        config_root = tmp_path / "host-config-root"
+        _write_push_host_config(config_root, value="https://forgejo.example.com:3000")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_HOST_DENIED
+        stderr = capsys.readouterr().err
+        assert PUSH_HOST_CONFIG_SECTION in stderr
+        assert PUSH_HOST_CONFIG_KEY in stderr
+        assert "can only NARROW" in stderr
+
+    def test_malformed_config_value_fails_closed_before_token_resolution(
+        self, repo_with_remote, monkeypatch, tmp_path
+    ):
+        """A present-but-malformed push_host_guard.allowed_hosts value (an
+        int, here) must refuse -- never silently degrade to 'unconfigured'
+        (permissive)."""
+        repo, _remote = repo_with_remote
+        config_root = tmp_path / "host-config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+        (config_root / provider_config.USER_CONFIG_FILENAME).write_text(
+            f"{PUSH_HOST_CONFIG_SECTION}:\n  {PUSH_HOST_CONFIG_KEY}: 42\n", encoding="utf-8",
+        )
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_HOST_CONFIG_INVALID
+
+    def test_explicit_null_config_value_fails_closed(self, repo_with_remote, monkeypatch, tmp_path):
+        """An explicit `allowed_hosts: null` must NOT be treated as
+        'unconfigured' -- it is a present, malformed value, hard-refused."""
+        repo, _remote = repo_with_remote
+        config_root = tmp_path / "host-config-root"
+        config_root.mkdir(parents=True, exist_ok=True)
+        (config_root / provider_config.USER_CONFIG_FILENAME).write_text(
+            f"{PUSH_HOST_CONFIG_SECTION}:\n  {PUSH_HOST_CONFIG_KEY}: null\n", encoding="utf-8",
+        )
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_HOST_CONFIG_INVALID
+
+    def test_unconfigured_ceiling_reproduces_pre_fix_precedence(self, repo_with_remote, monkeypatch, tmp_path):
+        """Back-compat: with no push_host_guard config section written at
+        all, --allowed-host still wins outright (byte-for-byte the pre-fix
+        precedence) -- an unconfigured deployment sees no behavior change."""
+        repo, _remote = repo_with_remote
+        provider = _RecordingTokenProvider()
+        opener = _forgejo_create_opener()
+        config_root = tmp_path / "host-config-root"
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: t", "--body-stdin",
+                "--allowed-host", "http://git-host.example.com",
+            ],
+            token_provider=provider,
+            opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_OK
+
+    def test_update_pr_path_also_honors_the_ceiling(self, repo_with_remote, monkeypatch, tmp_path):
+        """The config ceiling applies on --update-pr too, mirroring
+        TestHostGuard's own create/update-pr symmetry."""
+        repo, _remote = repo_with_remote
+        config_root = tmp_path / "host-config-root"
+        _write_push_host_config(config_root, value="https://forgejo.example.com:3000")
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "t",
+                "--allowed-host", "http://git-host.example.com",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            monkeypatch=monkeypatch,
+            host_config_root=config_root,
+        )
+        assert code == verb.EXIT_HOST_DENIED
 
 
 class TestContentionCheck:
