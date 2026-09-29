@@ -61,7 +61,7 @@ guard-specific wrapper around `resolve_ceiling_hosts` below.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 from clagentic_loadout.transport.host_match import host_matches
 from clagentic_loadout.transport.provider_config import (
@@ -144,30 +144,26 @@ def load_configured_hosts(
     raise invalid_config_error(config_file_path(config_root), received=raw)
 
 
-def config_is_set(
-    *,
-    config_root: str | Path | None,
-    config_section: str,
-    config_key: str,
-    invalid_config_error: Callable[..., Exception],
-) -> bool:
-    """True iff *config_key* is PRESENT in *config_section* in the
-    user-level config file — i.e. the config-file tier is the ceiling for
-    this resolution. Raises *invalid_config_error* under the same condition
-    `load_configured_hosts` itself would (a malformed configured value) —
-    this does not shield that call from its own fail-closed contract."""
-    return (
-        load_configured_hosts(
-            config_root=config_root,
-            config_section=config_section,
-            config_key=config_key,
-            invalid_config_error=invalid_config_error,
-        )
-        is not None
-    )
+class HostCeilingResolution(NamedTuple):
+    """Both outputs a caller ever needs from ONE config-file read: the
+    resolved allowed-host set (`allowed_hosts`) and whether the config-file
+    ceiling tier is the thing that produced it (`config_is_set`) — see
+    `resolve_ceiling` below, the single read this tuple is built from
+    (lr-57573e fold-in #1, F2: previously each verb called
+    `resolve_ceiling_hosts` and `config_is_set` SEPARATELY, each performing
+    its own independent `load_configured_hosts` call — two reads of the
+    same config file per invocation for a value that only ever changes
+    between process invocations, not within one). `check_*_allowed`'s own
+    `config_is_set` parameter and its `allowed_hosts` parameter are both
+    populated from the SAME field on this one result, so the message and
+    the enforcement decision can never observe two different reads of a
+    config file that changed between them."""
+
+    allowed_hosts: frozenset[str] | None
+    config_is_set: bool
 
 
-def resolve_ceiling_hosts(
+def resolve_ceiling(
     explicit: frozenset[str] | None,
     *,
     env: dict[str, str],
@@ -176,8 +172,13 @@ def resolve_ceiling_hosts(
     config_section: str,
     config_key: str,
     invalid_config_error: Callable[..., Exception],
-) -> frozenset[str] | None:
-    """Resolve the effective allowed-host set for one guard.
+) -> HostCeilingResolution:
+    """Resolve the effective allowed-host set for one guard, AND whether the
+    config-file ceiling tier is set — in ONE read of the user-level config
+    file (lr-57573e fold-in #1, F2). This is the single implementation both
+    `resolve_ceiling_hosts` and `config_is_set` below now wrap, rather than
+    each performing its own independent `load_configured_hosts` call for a
+    value that cannot change within one process invocation.
 
     Config UNSET (no *config_key* under *config_section* in the user-level
     config file) — BYTE-FOR-BYTE the guard's own pre-fix precedence,
@@ -223,14 +224,13 @@ def resolve_ceiling_hosts(
     )
     if configured is None:
         # Config UNSET -- unchanged pre-fix behavior.
-        if explicit is not None:
-            return frozenset(explicit)
-        return caller_supplied
+        resolved = frozenset(explicit) if explicit is not None else caller_supplied
+        return HostCeilingResolution(allowed_hosts=resolved, config_is_set=False)
 
     # Config SET -- config is the ceiling; a caller-supplied value can only
     # narrow it, never add a host absent from `configured`.
     if caller_supplied is not None:
-        return frozenset(
+        resolved = frozenset(
             configured_entry
             for configured_entry in configured
             if any(
@@ -238,13 +238,72 @@ def resolve_ceiling_hosts(
                 for caller_entry in caller_supplied
             )
         )
-    return configured
+        return HostCeilingResolution(allowed_hosts=resolved, config_is_set=True)
+    return HostCeilingResolution(allowed_hosts=configured, config_is_set=True)
+
+
+def config_is_set(
+    *,
+    config_root: str | Path | None,
+    config_section: str,
+    config_key: str,
+    invalid_config_error: Callable[..., Exception],
+) -> bool:
+    """True iff *config_key* is PRESENT in *config_section* in the
+    user-level config file — i.e. the config-file tier is the ceiling for
+    this resolution. Raises *invalid_config_error* under the same condition
+    `load_configured_hosts` itself would (a malformed configured value) —
+    this does not shield that call from its own fail-closed contract.
+
+    KEPT for a caller that only ever needs this one boolean without an
+    `explicit`/`env_var` pair to resolve alongside it (e.g. a read-only
+    inspector) — every caller that also needs `allowed_hosts` should prefer
+    `resolve_ceiling` instead, which produces both from a single read (see
+    `HostCeilingResolution`'s own docstring, "F2")."""
+    return (
+        load_configured_hosts(
+            config_root=config_root,
+            config_section=config_section,
+            config_key=config_key,
+            invalid_config_error=invalid_config_error,
+        )
+        is not None
+    )
+
+
+def resolve_ceiling_hosts(
+    explicit: frozenset[str] | None,
+    *,
+    env: dict[str, str],
+    env_var: str,
+    config_root: str | Path | None,
+    config_section: str,
+    config_key: str,
+    invalid_config_error: Callable[..., Exception],
+) -> frozenset[str] | None:
+    """KEPT for a caller that only ever needs the resolved set, not
+    `config_is_set` alongside it — see `resolve_ceiling`'s own docstring for
+    the full precedence this wraps, and `HostCeilingResolution`'s docstring
+    for why a caller needing BOTH values should call `resolve_ceiling`
+    directly instead of this plus a separate `config_is_set` call (two reads
+    of the same config file for one invocation)."""
+    return resolve_ceiling(
+        explicit,
+        env=env,
+        env_var=env_var,
+        config_root=config_root,
+        config_section=config_section,
+        config_key=config_key,
+        invalid_config_error=invalid_config_error,
+    ).allowed_hosts
 
 
 __all__ = [
+    "HostCeilingResolution",
     "config_file_path",
     "config_is_set",
     "load_configured_hosts",
     "parse_comma_separated",
+    "resolve_ceiling",
     "resolve_ceiling_hosts",
 ]
