@@ -10,6 +10,8 @@ exception classes so main() never needs a transport-specific except clause.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from clagentic_loadout.push.push_redaction import redact_push_secrets
 
 
@@ -34,6 +36,51 @@ class HostDeniedError(Exception):
     host refusal is deterministic and must never partially execute, mirroring
     NamespaceDeniedError's own posture for a different dimension of the same
     target."""
+
+
+class InvalidPushHostConfigError(Exception):
+    """Raised when push.host_guard.PUSH_HOST_CONFIG_SECTION.
+    PUSH_HOST_CONFIG_KEY in the user-level config file holds a value that is
+    not one of the two accepted shapes (a comma-separated string, or a YAML
+    list of strings), or is present with an explicit `null` value (lr-57573e,
+    mirroring transport.read_host_guard.InvalidReadHostConfigError exactly
+    for push's own config-ceiling tier).
+
+    Fires BEFORE any credential is resolved or git operation attempted — a
+    malformed config value must never let a push proceed as if no
+    restriction were configured. The message names the config FILE,
+    SECTION, KEY, the RECEIVED type, and the ACCEPTED forms, so an operator
+    can fix the value without reading push.host_guard's source.
+    """
+
+    def __init__(self, config_path: Path, *, received: object, detail: str | None = None) -> None:
+        from clagentic_loadout.push.host_guard import (
+            PUSH_HOST_CONFIG_KEY,
+            PUSH_HOST_CONFIG_SECTION,
+        )
+
+        received_type = type(received).__name__
+        message = (
+            f"{config_path}: [{PUSH_HOST_CONFIG_SECTION}].{PUSH_HOST_CONFIG_KEY} "
+            f"holds a {received_type} ({received!r}), which is not a valid "
+            f"push-host allowlist value"
+        )
+        if detail:
+            message += f" ({detail})"
+        message += (
+            ". Accepted forms: a comma-separated string "
+            '(e.g. "a.example.com,b.example.com:3000"), or a YAML list of '
+            'strings (e.g. ["a.example.com", "b.example.com:3000"]). Fix '
+            f"the {PUSH_HOST_CONFIG_KEY!r} value under the "
+            f"{PUSH_HOST_CONFIG_SECTION!r} section in {config_path}. "
+            "Refusing before any credential is resolved or git operation "
+            "is attempted -- a malformed config value is never treated as "
+            "'unconfigured' (which would silently disable the restriction "
+            "the operator was trying to set)."
+        )
+        super().__init__(message)
+        self.config_path = config_path
+        self.received = received
 
 
 class AuthorMismatchError(Exception):
@@ -165,6 +212,7 @@ __all__ = [
     "DirtyWorkTreeError",
     "GitPushError",
     "HostDeniedError",
+    "InvalidPushHostConfigError",
     "MissingIssueLinkError",
     "NamespaceDeniedError",
     "PrOpenError",
