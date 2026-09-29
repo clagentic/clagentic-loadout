@@ -240,6 +240,56 @@ a caller cannot hand-author it, and a caller supplies body CONTENT only,
 never a filesystem location of any kind. See `stage_caller_body`'s and
 `read_caller_body_bytes`'s own docstrings for the exact contract.
 
+VERDICT-INTENT STAMP (lr-9ba589, seventh incident in this seam):
+`review.verb`'s plain-comment route (no `--verdict-review-status`/
+`--verdict-findings` on the invoking command line) posts whatever
+`--body-env` reads back with NO check that the STAGED content itself
+carried a `review_status` field -- meaning a caller who staged a body
+intended as a verdict (its JSON carries `review_status`) but then invoked
+`review-post` WITHOUT the verdict flags (a copy-paste miss, a forgotten
+flag, a harness that staged correctly but built the wrong invocation) gets
+a successful, fenceless, unverified post with no signal at either stage
+time or post time. Six prior point fixes in this seam (lr-4e7fa0,
+lr-f8f532, lr-efbcc6, lr-2b20d2, lr-ae00e6) closed discoverability gaps
+without closing this one; incident six and seven both reproduced the exact
+same shape after all of them shipped. The standing instruction from
+lr-ae00e6's own closure, applied here: the SHAPE is wrong, not the docs.
+
+THE FIX: `stage_caller_body` now derives `carries_review_status` from the
+body bytes it is ALREADY staging -- inspecting the same JSON the caller
+handed it for a `review_status` key whose value is `"clean"` or
+`"blocking"` -- and records that boolean in the identity stamp. This is
+PLATFORM-COMPUTED, exactly like every other stamp field (`target_pr`,
+`create_branch`, `head_sha`): the caller never types "this is a verdict"
+as a separate, driftable signal; the platform reads it off the content
+already present. `read_caller_body_bytes` (and `read_body_bytes`) gain an
+optional `expect_verdict_route: bool | None` parameter (default `None` --
+no check at all, fully backward compatible with every existing caller,
+including `transport.git_host_api`'s own `--body-env` read site, which
+does not pass it and is therefore byte-for-byte unaffected by this
+change). A caller that DOES pass `expect_verdict_route` (currently only
+`review.verb`, at its own `--body-env` read call site) gets a stamp
+comparison BEFORE the body is read or either file is consumed: a mismatch
+between what the invocation is ABOUT to do (post via the verdict route or
+the plain route) and what the staged content itself signals (carries
+`review_status` or not) raises `BodyEnvError` with the exact mismatch
+named, and leaves BOTH staged files in place -- the caller can retry with
+the corrected invocation (adding or removing the verdict flags) without
+re-staging, closing the lr-becdef single-use-consume evidence-destruction
+gap this task's acceptance criteria call out by name.
+
+NON-BREAKING FOR A PLAIN, NON-VERDICT CALLER: a body staged with no
+`review_status` field, read by an invocation with
+`expect_verdict_route=False` (review.verb's plain-comment route, the
+default when neither verdict flag is passed), matches cleanly and posts
+exactly as before this fix -- there is no new refusal on the legitimate
+"stage a plain comment, post it plainly" path this seam has always
+supported. The refusal fires ONLY on the actual mismatch shape that
+burned six-plus times: staged-as-verdict content reaching a plain-route
+invocation (or, symmetrically, staged-as-plain content reaching a
+verdict-route invocation, which would otherwise construct a fence around
+content the caller never marked as a verdict).
+
 ABANDONED-PAIR REAPER (lr-4c1646, the durable-debris half the task's
 review-corrected scope narrowed this to).
 
@@ -331,6 +381,20 @@ class BodyEnvError(Exception):
     missing, empty, or unreadable. Carries no exit code of its own --
     each verb's own call site maps this to that verb's usage-error exit
     code, exactly like every other precondition failure in this package."""
+
+
+class VerdictIntentMismatchError(BodyEnvError):
+    """Raised specifically by the lr-9ba589 verdict-intent check (see
+    `read_caller_body_bytes`'s *expect_verdict_route* parameter): the
+    staged body's derived `carries_review_status` signal disagrees with
+    whether THIS invocation is taking the verdict route or the plain route.
+    A `BodyEnvError` subclass -- any existing catch of the base class (every
+    call site written before this fix) still catches this unchanged -- but
+    distinct enough that a call site that wants to map it to its OWN,
+    more specific exit code (distinguishing "no body staged at all" from
+    "a body IS staged, but for the wrong intent") can `except` it before
+    the base `BodyEnvError` without missing anything the base class already
+    handled."""
 
 
 #: Shared `--body-env` help-text fragment (lr-ae00e6), appended verbatim by
@@ -712,6 +776,7 @@ class _StagedStamp:
     create_branch: str | None
     head_sha: str | None
     staged_at: str
+    carries_review_status: bool
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -749,6 +814,41 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
         os.fsync(dir_fd)
     finally:
         os.close(dir_fd)
+
+
+#: Values `review_status` must be one of for a staged body to be treated as
+#: verdict-bound (lr-9ba589) -- mirrors review.contract's own
+#: validate_review_verdict_body_stdin_content / validate_review_findings_
+#: body_stdin_content acceptance set exactly, so the stamp's derived signal
+#: never disagrees with what the verdict routes themselves would accept.
+_VERDICT_REVIEW_STATUS_VALUES = ("clean", "blocking")
+
+
+def _derive_carries_review_status(body_bytes: bytes) -> bool:
+    """Platform-computed verdict-intent signal (lr-9ba589): inspect the JSON
+    *body_bytes* being staged for a top-level `review_status` field whose
+    value is one of `_VERDICT_REVIEW_STATUS_VALUES`, and return whether it is
+    present. This is NOT a second, caller-typed "is this a verdict" flag --
+    it is read off the exact content the caller is already staging, the same
+    way `target_pr`/`create_branch`/`head_sha` are all values this module
+    computes or receives from an already-resolved source rather than trusting
+    a parallel caller assertion. Deliberately tolerant of content this is NOT
+    the authoritative validator for: malformed JSON, a non-object body, or a
+    missing/invalid `review_status` value all resolve to `False` here rather
+    than raising -- the verdict-route validators in `review.contract` (
+    `validate_review_verdict_body_stdin_content`,
+    `validate_review_findings_body_stdin_content`) remain the SOLE authority
+    on whether staged content is a well-formed verdict body; this function's
+    only job is producing the stamp's advisory intent signal, never a second
+    content-validation pass with its own error surface.
+    """
+    try:
+        parsed = json.loads(body_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    return parsed.get("review_status") in _VERDICT_REVIEW_STATUS_VALUES
 
 
 def stage_caller_body(
@@ -837,6 +937,7 @@ def stage_caller_body(
         "create_branch": create_branch,
         "head_sha": head_sha,
         "staged_at": datetime.now(timezone.utc).isoformat(),
+        "carries_review_status": _derive_carries_review_status(body_bytes),
     }
     stamp_bytes = json.dumps(stamp).encode("utf-8")
 
@@ -956,6 +1057,13 @@ def _read_and_validate_stamp(
         create_branch=parsed.get("create_branch"),
         head_sha=parsed.get("head_sha"),
         staged_at=parsed.get("staged_at", ""),
+        # A stamp written before lr-9ba589 shipped (or a foreign/hand-
+        # authored one) has no 'carries_review_status' key at all -- treated
+        # as False (no verdict-intent signal), never as a reason to raise:
+        # this field is advisory/derived, not a mandatory provenance field
+        # like target_pr, and a caller must not be newly refused merely for
+        # reading a stamp staged before this stamp field existed.
+        carries_review_status=bool(parsed.get("carries_review_status", False)),
     )
 
 
@@ -966,6 +1074,7 @@ def read_body_bytes(
     expect_target_pr: int | None = None,
     expect_create_branch: str | None = None,
     expect_head_sha: str | None = None,
+    expect_verdict_route: bool | None = None,
 ) -> bytes:
     """Read a staged body and return its raw bytes.
 
@@ -1007,6 +1116,18 @@ def read_body_bytes(
       - the staged file's identity stamp names a different PR/branch (or,
         when *expect_head_sha* is supplied, a different head SHA) than
         requested.
+      - *expect_verdict_route* is supplied and disagrees with the stamp's
+        derived `carries_review_status` signal (lr-9ba589 -- see
+        `read_caller_body_bytes`'s own docstring for the full contract).
+
+    *expect_verdict_route* (lr-9ba589, OPT-IN, default `None`): when `None`
+    (the default -- every call site that predates this fix, including
+    `transport.git_host_api`'s own `--body-env` read, which never passes
+    it), no verdict-intent check runs at all and behavior is BYTE-FOR-BYTE
+    UNCHANGED. A caller that DOES pass `True`/`False` asks this function to
+    compare that value against the staged stamp's `carries_review_status`
+    field BEFORE the body is read or consumed -- see
+    `read_caller_body_bytes` for the exact mismatch/fail-closed contract.
 
     See `read_caller_body_bytes` for the read-and-consume + stamp-check
     contract that applies whenever *caller* is supplied.
@@ -1028,6 +1149,7 @@ def read_body_bytes(
             expect_target_pr=expect_target_pr,
             expect_create_branch=expect_create_branch,
             expect_head_sha=expect_head_sha,
+            expect_verdict_route=expect_verdict_route,
             env=env,
         )
     path = resolve_body_path(env=env)
@@ -1040,6 +1162,7 @@ def read_caller_body_bytes(
     expect_target_pr: int | None = None,
     expect_create_branch: str | None = None,
     expect_head_sha: str | None = None,
+    expect_verdict_route: bool | None = None,
     env: dict[str, str] | None = None,
 ) -> bytes:
     """Read the PER-CALLER staged body (`resolve_caller_body_path`), verify
@@ -1117,6 +1240,22 @@ def read_caller_body_bytes(
     aborted invocation is still reaped even when this particular read's
     own outcome is failure. See this module's own "ABANDONED-PAIR REAPER"
     docstring section for the full design and honest coverage statement.
+
+    VERDICT-INTENT CHECK (lr-9ba589, OPT-IN via *expect_verdict_route*,
+    default `None`): when the caller passes `True` or `False`, this is
+    compared -- BEFORE the body is read or either file consumed, in the
+    same non-destructive fail-closed position as every stamp check above --
+    against the stamp's own `carries_review_status` field (derived at STAGE
+    time by `stage_caller_body` from the body content itself, never a
+    caller-typed assertion). A mismatch raises `BodyEnvError` and leaves
+    BOTH staged files in place, exactly like a PR/branch/SHA mismatch: the
+    caller can correct the INVOCATION (add or remove the verdict flags) and
+    retry without re-staging -- there is no evidence-destroying single-use
+    consume on a refusal here, closing the lr-becdef consume-then-retry-
+    blind gap for this specific mismatch. Passing `None` (the default, and
+    every call site that predates this fix) skips the check entirely --
+    this is a pure addition to the read-side contract, not a change to any
+    existing caller's behavior.
     """
     sweep_abandoned_pairs(env=env)
 
@@ -1207,6 +1346,45 @@ def read_caller_body_bytes(
             f"correct body via: {recovery}"
         )
 
+    # VERDICT-INTENT MISMATCH (lr-9ba589, seventh incident in this seam):
+    # checked BEFORE the body is read or either file consumed, exactly like
+    # every other stamp check above -- a mismatch here is exactly as fail-
+    # closed and exactly as non-destructive as a PR/branch/SHA mismatch.
+    # Only runs at all when the CALLER opted in by passing
+    # *expect_verdict_route* (not None); every call site that omits it
+    # (every call site that existed before this fix) is byte-for-byte
+    # unaffected.
+    if expect_verdict_route is not None and expect_verdict_route != stamp.carries_review_status:
+        if expect_verdict_route and not stamp.carries_review_status:
+            raise VerdictIntentMismatchError(
+                f"--body-env: this invocation requests the VERDICT route "
+                f"(--verdict-review-status/--verdict-findings) for caller "
+                f"{caller!r}, but the staged body carries no 'review_status' "
+                f"field -- it was staged as a PLAIN, non-verdict comment. "
+                f"Posting it through the verdict route would construct a "
+                f"fence around content the caller never marked as a "
+                f"verdict. Fails closed: the staged file is left in place, "
+                f"never posted. Either drop the verdict flags from this "
+                f"invocation to post it as a plain comment, or re-stage "
+                f"with a 'review_status' field ('clean'/'blocking') in the "
+                f"body JSON via: {recovery}"
+            )
+        raise VerdictIntentMismatchError(
+            f"--body-env: the body staged for caller {caller!r} carries a "
+            f"'review_status' field -- it was staged as a VERDICT-INTENDED "
+            f"body -- but this invocation omits BOTH "
+            f"--verdict-review-status and --verdict-findings, so it would "
+            f"post SILENTLY FENCELESS (the exact defect this check exists "
+            f"to close: a merge-gate verdict that looks like a successful "
+            f"post but carries no fence at all). Fails closed: the staged "
+            f"file is left in place, never posted, so the staged content "
+            f"is not lost. Either add --verdict-review-status <status> "
+            f"--verdict-head-sha <sha> (or --verdict-findings "
+            f"--verdict-head-sha <sha>) to this invocation, or re-stage "
+            f"without a 'review_status' field if a plain comment was "
+            f"genuinely intended."
+        )
+
     body_bytes = _read_staged_bytes(path)
 
     # Consume ONLY after both the stamp check and the body read succeeded --
@@ -1223,6 +1401,7 @@ __all__ = [
     "BODY_ENV_NOT_EPHEMERAL_NOTE",
     "BODY_STDIN_CONTRACT_GUIDANCE",
     "BodyEnvError",
+    "VerdictIntentMismatchError",
     "augment_body_contract_error",
     "read_body_bytes",
     "read_caller_body_bytes",
