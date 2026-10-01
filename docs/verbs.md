@@ -614,14 +614,16 @@ blocked with the stage and reason named. `1` usage (including any argument
 parsing error), `2` token, `3` profile invalid, `4` wrong platform, `5` acquire
 failed, `7` caller/attested-identity mismatch.
 
-**Resume.** Each chunk's result is persisted. A stall (timeout or carrier exit)
-that survives the in-call retry is persisted and `run` exits **10**: run the
-identical command again and only the unfinished chunks are retried. After
+**Resume.** A stall (timeout or carrier exit) that survives the in-call retry is
+persisted and `run` exits **10**: run the identical command again and only the
+unfinished chunks are retried, with their attempt counts carried forward. After
 `max_attempts` (default 3) the chunk is exhausted and the run exits **20**.
 An engine answering badly twice, or no engine existing, exits **20** at once.
-Every such terminal failure is cached like a finished chunk, so re-running the
-identical command reports the same block without calling the engine again; the
-blocked result names `state_dir`, and removing it forces a fresh attempt.
+Only chunks that finished ok are cached. Exit 20 is not sticky: the failed
+records are discarded, so re-running the identical command gives every non-ok
+chunk a fresh attempt budget (for example, an engine that was absent and has
+since appeared completes on the next invocation) while finished chunks are
+reused without calling the engine again.
 The timeout record keeps the carrier's stderr and a bounded excerpt of its
 partial stdout, so a stall can be diagnosed. State lives in the run directory,
 under a key derived from the chunk text, carrier and fallback argv, and

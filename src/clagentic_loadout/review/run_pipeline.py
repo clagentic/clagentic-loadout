@@ -5,9 +5,12 @@ directory keyed on everything that shapes the chunk (its text, the carrier and
 fallback argv, the rulebook), so re-running the identical command skips
 finished chunks and retries only the unfinished ones. A failed chunk is
 persisted, not fatal: a retriable failure (timeout, carrier exit) makes the
-run return RESUME so the next invocation retries just that chunk, and only
-once its attempts are exhausted — or the engine answered badly twice, or no
-engine exists — does the run return BLOCKED naming the chunk.
+run return RESUME so the next invocation retries just that chunk, with its
+attempt count carried forward. Only once its attempts are exhausted — or the
+engine answered badly twice, or no engine exists — does the run return
+BLOCKED naming the chunk. Only ok chunks are ever reused: BLOCKED discards
+the failed records, so the next invocation gives every non-ok chunk a fresh
+attempt budget.
 
 All writes stay inside the run directory.
 """
@@ -136,6 +139,19 @@ def _is_terminal(record: dict[str, Any], max_attempts: int) -> bool:
     )
 
 
+def _discard_unfinished(state_dir: Path, records: dict[int, dict[str, Any]]) -> None:
+    """Drop every non-ok chunk record when a run reports blocked, so failure
+    state never outlives the invocation that reported it. A reviewer role
+    cannot delete state itself; re-invoking is its deliberate retry. A record
+    that cannot be removed is still ignored on load (see fresh_budget)."""
+    for index, record in records.items():
+        if record.get("status") != STATUS_OK:
+            try:
+                _result_path(state_dir, index).unlink(missing_ok=True)
+            except OSError:
+                continue
+
+
 def _stage_status(record: dict[str, Any]) -> str:
     if record.get("status") == STATUS_FAILED:
         return "failed"
@@ -199,15 +215,17 @@ def run_review(
 
     records: dict[int, dict[str, Any]] = {}
     pending: list[Chunk] = []
+    # Chunks whose persisted failure is terminal or exhausted start over with
+    # a fresh attempt budget: only an exit-10 sequence carries counts forward.
+    fresh_budget: set[int] = set()
     for chunk in chunks:
         existing = _load_record(state_dir, chunk.index)
         if existing is not None and existing.get("status") == STATUS_OK:
             records[chunk.index] = existing
             stage(f"chunk-{chunk.index}", _stage_status(existing), resumed="yes", nonce=existing.get("nonce"))
-        elif existing is not None and _is_terminal(existing, profile.max_attempts):
-            records[chunk.index] = existing
-            stage(f"chunk-{chunk.index}", "failed", resumed="yes", reason=existing.get("reason"))
         else:
+            if existing is not None and _is_terminal(existing, profile.max_attempts):
+                fresh_budget.add(chunk.index)
             pending.append(chunk)
 
     def work(chunk: Chunk) -> dict[str, Any]:
@@ -216,7 +234,7 @@ def run_review(
             chunk,
             len(chunks),
             profile,
-            attempts_before=_attempts(previous),
+            attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
             cwd=run_dir,
             runner=runner,
         )
@@ -255,6 +273,7 @@ def run_review(
         detail = first.get("detail", "")
         if exhausted:
             detail = f"retries exhausted after {first.get('attempts')} attempts: {detail}"
+        _discard_unfinished(state_dir, records)
         return _blocked(
             f"chunk-{first['index']}",
             first.get("reason", "CHUNK_FAILED"),
@@ -264,9 +283,6 @@ def run_review(
             reply_excerpt=first.get("reply_excerpt"),
             stderr_excerpt=first.get("stderr_excerpt"),
             run_dir=str(run_dir),
-            # A terminal failure is cached like a finished chunk; removing
-            # the state directory is the explicit way to force a fresh try.
-            state_dir=str(state_dir),
         )
 
     unfinished = sorted(

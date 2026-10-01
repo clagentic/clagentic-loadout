@@ -288,7 +288,7 @@ def test_stage_status_changes_are_machine_readable_on_stderr(env, capsys):
     assert "loadout-review: stage=merged status=ok" in err
 
 
-def test_a_terminal_failure_is_cached_and_not_silently_rerun(env, capsys):
+def test_a_terminal_failure_is_not_sticky_and_is_retried_on_reinvoke(env, capsys):
     env.configure(carrier_mode="prose")
 
     first_code, first = env.run(capsys=capsys)
@@ -297,8 +297,38 @@ def test_a_terminal_failure_is_cached_and_not_silently_rerun(env, capsys):
 
     assert (first_code, second_code) == (20, 20)
     assert second["reason"] == "FALLBACK_OUTPUT_INVALID"
-    assert len(prompts(env.stubs, "carrier")) == sent_after_first
-    assert second["state_dir"]
+    assert len(prompts(env.stubs, "carrier")) > sent_after_first
+    assert "state_dir" not in second
+    assert not list(Path(first["run_dir"]).glob("state-*/result-*.json"))
+
+
+def test_model_unavailable_then_engine_appears_completes_on_reinvoke(env, capsys):
+    env.configure(carrier_mode="exit127")
+
+    first_code, first = env.run(capsys=capsys)
+    set_mode(env.stubs, "carrier", "array")
+    second_code, second = env.run(capsys=capsys)
+
+    assert first_code == 20
+    assert first["reason"] == "MODEL_UNAVAILABLE"
+    assert second_code == 0
+    assert second["result"] == "complete"
+
+
+def test_exit_20_then_reinvoke_gives_a_fresh_budget_and_reuses_ok_chunks(env, capsys):
+    env.diff = make_diff({"a.py": 6, "STALL_ME.py": 6})
+    env.configure(carrier_mode="stall_marker", timeout_seconds=0.5, chunk_lines=14, max_attempts=1)
+
+    first_code, first = env.run(capsys=capsys)
+    second_code, second = env.run(capsys=capsys)
+
+    assert first_code == 20
+    assert first["reason"] == "CHUNK_TIMEOUT"
+    assert second_code == 0
+    sent = prompts(env.stubs, "carrier")
+    assert sum("+line 1 of a.py" in p for p in sent) == 1
+    resumed = [s for s in second["stages"] if s.get("resumed") == "yes"]
+    assert {s["stage"] for s in resumed} == {"chunk-1"}
 
 
 def test_both_engines_absent_reports_both_diagnostics(env, capsys):
