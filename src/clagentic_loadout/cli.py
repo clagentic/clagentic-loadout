@@ -48,6 +48,12 @@ def _review_post_main(argv: list[str]) -> int:
     return review_main(argv)
 
 
+def _pr_review_main(argv: list[str]) -> int:
+    from clagentic_loadout.review.cli import main as pr_review_main
+
+    return pr_review_main(argv)
+
+
 def _merge_main(argv: list[str]) -> int:
     from clagentic_loadout.merge.verb import main as merge_main
 
@@ -119,6 +125,10 @@ def _doctor_main(argv: list[str]) -> int:
 _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "push": ("Push a branch, open or update a PR.", _push_main),
     "review": ("Post one review comment and verify it landed.", _review_post_main),
+    "pr-review": (
+        "Run a PR review end to end (run), then post it (post).",
+        _pr_review_main,
+    ),
     "merge": ("Run the merge-gate chain, then merge a PR.", _merge_main),
     "git-host-api": ("Make one authenticated Forgejo REST call.", _git_host_api_main),
     "stage-body": (

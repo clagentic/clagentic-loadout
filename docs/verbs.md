@@ -554,6 +554,117 @@ LOCAL repo root resolved from a wrapper directory with no `.git` of its own —
 lower priority than this verb, since API-based acquisition avoids local git
 entirely.
 
+### `loadout-review` — run a PR review end to end, then post it
+
+`clagentic_loadout.review.cli` (also `clagentic-loadout pr-review`). One verb
+with two subcommands, so a reviewer role types one command to produce findings,
+judges them, and types one command to post its judgement:
+
+```
+loadout-review run  --caller <role> --repo <owner/repo> --pr <n> [--platform github|forgejo]
+                    [--profile <name>] [--out <dir>] [--repo-path <dir>]
+loadout-review post --caller <role> --repo <owner/repo> --pr <n> --findings <path>
+                    --status clean|blocking [--head-sha <sha>] [--platform ...]
+```
+
+`--caller` binds to the attested invoking identity before any I/O, exactly like
+every other verb, and is accepted before or after the subcommand. `--platform`
+is detected from the origin remote of `--repo-path` (default: the current
+directory) when omitted; that directory is used only for config and platform
+detection, never for the diff.
+
+**`run`** does everything between "a PR exists" and "findings are in hand":
+
+1. **Acquire.** The PR's base and head SHAs and diff come from the host API
+   (`loadout-acquire`'s backends) — never the local checkout, never a worktree.
+   Both SHAs must be 40 lowercase hex characters and the response must be for
+   the requested repo and PR, or the run is blocked at stage `acquired`.
+2. **Chunk.** The diff is split deterministically at `chunk_lines` (default
+   600): whole files are grouped while they fit, an oversized file splits on
+   hunk boundaries, an oversized hunk on line boundaries, every piece repeats
+   its file header, and tiny pieces are merged into a neighbour. An empty diff
+   is blocked (`DIFF_EMPTY`) rather than reported clean.
+3. **Review each chunk.** The prompt is a read-only preamble, the profile's
+   rulebook text, the chunk, and — last — the findings output contract. The
+   configured **carrier** command runs once per chunk (prompt on stdin, reply on
+   stdout, no shell). Bounded retry: a timeout or non-zero exit is retried once
+   in the call; a reply that is not a findings array gets one format-only
+   re-prompt. An absent carrier (executable missing, or exit 127) hands that
+   chunk to the configured **fallback** — for every chunk, not just the first.
+4. **Validate.** Each reply must be one JSON array of findings (`file`, `line`,
+   `rule_id`, `severity` of `blocking|nit|praise`, `message`). Prose is never
+   treated as "no findings". Reason codes are distinct: `FALLBACK_OUTPUT_INVALID`
+   (an engine answered badly twice; the reply excerpt is kept), `MODEL_UNAVAILABLE`
+   (no engine could run), `CHUNK_TIMEOUT` (stalled), `CARRIER_FAILED` (non-zero
+   exit).
+5. **Merge.** Findings are concatenated in chunk order, deduplicated (the most
+   severe copy wins), and written to `findings.json` in the run directory with
+   per-chunk evidence: engine, nonce, attempts, exit code, files.
+
+Machine status goes to stderr, one line per stage
+(`loadout-review: stage=chunk-2 status=ok|fallback|failed ...`), and the final
+JSON result goes to stdout. Exit codes: **0** complete, **10** resume, **20**
+blocked with the stage and reason named. `1` usage, `2` token, `3` profile
+invalid, `4` wrong platform, `5` acquire failed, `7` caller/attested-identity
+mismatch.
+
+**Resume.** Each chunk's result is persisted. A stall (timeout or carrier exit)
+that survives the in-call retry is persisted and `run` exits **10**: run the
+identical command again and only the unfinished chunks are retried. After
+`max_attempts` (default 3) the chunk is exhausted and the run exits **20**.
+An engine answering badly twice, or no engine existing, exits **20** at once.
+The timeout record keeps the carrier's stderr and a bounded excerpt of its
+partial stdout, so a stall can be diagnosed. State lives in the run directory,
+under a key derived from the chunk text, carrier and fallback argv, and
+rulebook, so changing any of them never reuses stale chunks.
+
+**Run directory.** `--out` wins. Otherwise it is
+`<run_root>/<owner>__<repo>/pr-<n>/<head sha prefix>`, with `run_root` from
+`CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT`, then the user-level `review.run_root`,
+then `<user config root>/state/review-runs`. It is deliberately not under a
+per-process `TMPDIR`, so a re-dispatched run resumes its finished chunks.
+`run` writes nothing outside the run directory.
+
+**Profiles** live in deployment config, keyed by name (default: the `--caller`
+role). Loadout never names an agent or a model; the carrier is whatever argv you
+configure.
+
+```yaml
+# ~/.config/clagentic/loadout/config.yaml
+review:
+  run_root: /var/lib/loadout/review-runs   # optional
+  profiles:
+    reviewer:
+      carrier: ["my-review-cli", "--read-only"]   # argv list; prompt on stdin
+      fallback: ["my-other-cli", "--no-tools"]    # optional
+      rulebook: /etc/loadout/rulebook.md          # optional
+      chunk_lines: 600
+      timeout_seconds: 480
+      fallback_timeout_seconds: 400
+      max_attempts: 3
+      parallel: 4
+```
+
+The repo-level config (`.clagentic/loadout/config.yaml`, same
+`review.profiles.<name>` shape) may override only `chunk_lines`,
+`timeout_seconds`, `fallback_timeout_seconds`, `max_attempts`, `parallel`, and a
+`rulebook` path that stays inside the repository. A repo-level `carrier` or
+`fallback` is ignored with a warning: those keys name a command this process
+executes, and a cloned repository must not choose it.
+
+**`post`** stages the findings and posts them through the existing
+`loadout-review-post` structured-findings route (`--verdict-findings`), so the
+comment body — header, one bullet per finding, and the `review-result` fence — is
+constructed entirely by the tool. There is no free-form body input. `--findings`
+is the file `run` wrote (or a bare JSON array of findings plus `--head-sha`); the
+agent may edit it to drop findings it judged wrong. `post` refuses before
+posting when the PR head is no longer the head the findings were produced for
+(exit **31**), when `--status clean` contradicts a blocking finding, or when the
+file is for another PR or malformed (exit **32**). After the post, the landed
+comment is read back and its fence re-parsed field for field; the JSON result
+carries `verified_by_login` and `verdict_block_verified`. A failed post exits
+**30**.
+
 ### `loadout-push` — bot-attributed commit push + PR open/update
 
 `clagentic_loadout.push.verb`. Pushes a branch's commits (re-authored to
