@@ -582,8 +582,12 @@ detection, never for the diff.
 2. **Chunk.** The diff is split deterministically at `chunk_lines` (default
    600): whole files are grouped while they fit, an oversized file splits on
    hunk boundaries, an oversized hunk on line boundaries, every piece repeats
-   its file header, and tiny pieces are merged into a neighbour. An empty diff
-   is blocked (`DIFF_EMPTY`) rather than reported clean.
+   its file header, and tiny pieces are merged into a neighbour. Lines are split
+   on LF only, so form feeds, lone CRs, and Unicode line separators inside
+   changed content never alter the diff's structure. Each piece of a split hunk
+   starts with a real `@@ -a,b +c,d @@` header whose offsets and counts are
+   recomputed for that piece. An empty diff is blocked (`DIFF_EMPTY`) rather than
+   reported clean.
 3. **Review each chunk.** The prompt is a read-only preamble, the profile's
    rulebook text, the chunk, and — last — the findings output contract. The
    configured **carrier** command runs once per chunk (prompt on stdin, reply on
@@ -591,8 +595,10 @@ detection, never for the diff.
    in the call; a reply that is not a findings array gets one format-only
    re-prompt. An absent carrier (executable missing, or exit 127) hands that
    chunk to the configured **fallback** — for every chunk, not just the first.
-4. **Validate.** Each reply must be one JSON array of findings (`file`, `line`,
-   `rule_id`, `severity` of `blocking|nit|praise`, `message`). Prose is never
+   A present but non-executable file is a carrier failure, not an absent engine.
+4. **Validate.** Each reply must be one JSON array of findings (`file`, `line`
+   of 1 or greater, `rule_id`, `severity` of `blocking|nit|praise`, `message`
+   of at most 200 characters; a longer message is truncated). Prose is never
    treated as "no findings". Reason codes are distinct: `FALLBACK_OUTPUT_INVALID`
    (an engine answered badly twice; the reply excerpt is kept), `MODEL_UNAVAILABLE`
    (no engine could run), `CHUNK_TIMEOUT` (stalled), `CARRIER_FAILED` (non-zero
@@ -604,15 +610,18 @@ detection, never for the diff.
 Machine status goes to stderr, one line per stage
 (`loadout-review: stage=chunk-2 status=ok|fallback|failed ...`), and the final
 JSON result goes to stdout. Exit codes: **0** complete, **10** resume, **20**
-blocked with the stage and reason named. `1` usage, `2` token, `3` profile
-invalid, `4` wrong platform, `5` acquire failed, `7` caller/attested-identity
-mismatch.
+blocked with the stage and reason named. `1` usage (including any argument
+parsing error), `2` token, `3` profile invalid, `4` wrong platform, `5` acquire
+failed, `7` caller/attested-identity mismatch.
 
 **Resume.** Each chunk's result is persisted. A stall (timeout or carrier exit)
 that survives the in-call retry is persisted and `run` exits **10**: run the
 identical command again and only the unfinished chunks are retried. After
 `max_attempts` (default 3) the chunk is exhausted and the run exits **20**.
 An engine answering badly twice, or no engine existing, exits **20** at once.
+Every such terminal failure is cached like a finished chunk, so re-running the
+identical command reports the same block without calling the engine again; the
+blocked result names `state_dir`, and removing it forces a fresh attempt.
 The timeout record keeps the carrier's stderr and a bounded excerpt of its
 partial stdout, so a stall can be diagnosed. State lives in the run directory,
 under a key derived from the chunk text, carrier and fallback argv, and
@@ -650,7 +659,11 @@ The repo-level config (`.clagentic/loadout/config.yaml`, same
 `timeout_seconds`, `fallback_timeout_seconds`, `max_attempts`, `parallel`, and a
 `rulebook` path that stays inside the repository. A repo-level `carrier` or
 `fallback` is ignored with a warning: those keys name a command this process
-executes, and a cloned repository must not choose it.
+executes, and a cloned repository must not choose it. Repo-level numbers are
+clamped with a warning: `parallel` at most 16, `max_attempts` at most 10,
+`timeout_seconds` and `fallback_timeout_seconds` at most 3600, `chunk_lines` at
+least 50. Values in the user-level config are not clamped. A repo-level config
+file that cannot be parsed is ignored with a warning on stderr.
 
 **`post`** stages the findings and posts them through the existing
 `loadout-review-post` structured-findings route (`--verdict-findings`), so the
@@ -659,11 +672,14 @@ constructed entirely by the tool. There is no free-form body input. `--findings`
 is the file `run` wrote (or a bare JSON array of findings plus `--head-sha`); the
 agent may edit it to drop findings it judged wrong. `post` refuses before
 posting when the PR head is no longer the head the findings were produced for
-(exit **31**), when `--status clean` contradicts a blocking finding, or when the
-file is for another PR or malformed (exit **32**). After the post, the landed
-comment is read back and its fence re-parsed field for field; the JSON result
-carries `verified_by_login` and `verdict_block_verified`. A failed post exits
-**30**.
+(exit **31**), when `--status clean` contradicts a blocking finding (severity is
+matched case-insensitively and ignoring surrounding whitespace; a severity
+outside `blocking|nit|praise` is refused), or when the file is for another PR or
+malformed (exit **32**). After the post, the landed comment is read back and its
+fence re-parsed field for field; the JSON result carries `verified_by_login` and
+`verdict_block_verified`. A failed post exits **30**, including when the inner
+post path exits 0 but its result cannot be parsed (the landed comment is then
+unverified); on a non-zero inner exit its output is echoed to stderr.
 
 ### `loadout-push` — bot-attributed commit push + PR open/update
 

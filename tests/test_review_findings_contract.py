@@ -47,6 +47,19 @@ def test_anything_else_is_an_invalid_reply(reply):
         parse_chunk_reply(reply)
 
 
+@pytest.mark.parametrize("line", [0, -4])
+def test_non_positive_line_is_an_invalid_reply(line):
+    with pytest.raises(InvalidReplyError):
+        parse_chunk_reply(json.dumps([{**_FINDING, "line": line}]))
+
+
+def test_over_long_message_is_truncated_to_the_contract_bound():
+    parsed = parse_chunk_reply(json.dumps([{**_FINDING, "message": "x" * 500}]))
+
+    assert len(parsed[0]["message"]) == 200
+    assert parsed[0]["message"].endswith("...")
+
+
 def test_merge_orders_by_chunk_and_tags_the_chunk():
     other = {**_FINDING, "file": "b.py"}
 

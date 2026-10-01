@@ -73,7 +73,10 @@ def run_engine(
             stdout_excerpt=excerpt(exc.stdout),
             detail=f"no reply within {timeout:g}s",
         )
-    except (FileNotFoundError, PermissionError) as exc:
+    except FileNotFoundError as exc:
+        # Only a missing executable means "engine absent". PermissionError (a
+        # present but non-executable file) is a misconfiguration and falls to
+        # the OSError branch below, so it is not silently handed to a fallback.
         return EngineResult(
             kind=KIND_UNAVAILABLE,
             detail=f"cannot execute {argv[0]!r}: {exc}",

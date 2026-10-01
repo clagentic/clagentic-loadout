@@ -52,7 +52,7 @@ FINDINGS_FILENAME = "findings.json"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
-PIPELINE_VERSION = "1"
+PIPELINE_VERSION = "2"
 
 REASON_ACQUIRE_INVALID = "ACQUIRE_INVALID"
 REASON_DIFF_EMPTY = "DIFF_EMPTY"
@@ -113,11 +113,26 @@ def _load_record(state_dir: Path, index: int) -> dict[str, Any] | None:
     return record if isinstance(record, dict) else None
 
 
+def _attempts(record: dict[str, Any]) -> int:
+    """Attempt count of a persisted record; a corrupt value counts as zero
+    (the chunk is simply retried) rather than crashing the run."""
+    value = record.get("attempts", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 def _is_exhausted(record: dict[str, Any], max_attempts: int) -> bool:
     return (
         record.get("status") == STATUS_FAILED
         and record.get("retriable", False)
-        and int(record.get("attempts", 0)) >= max_attempts
+        and _attempts(record) >= max_attempts
+    )
+
+
+def _is_terminal(record: dict[str, Any], max_attempts: int) -> bool:
+    """A failure that a re-run must not silently repeat: a non-retriable
+    failure (engine answered badly twice, no engine) or exhausted retries."""
+    return record.get("status") == STATUS_FAILED and (
+        not record.get("retriable", False) or _is_exhausted(record, max_attempts)
     )
 
 
@@ -169,16 +184,18 @@ def run_review(
             "clean review for a diff that was never read",
             stages,
         )
-    stage("chunked", "ok", chunk_count=len(chunks))
 
     state_dir = run_dir / f"state-{_resume_key(chunks, profile, acquired.head_sha)}"
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
+        # Reported once, as the stage's only status: "chunked" is not
+        # announced ok until its state directory exists.
         stage("chunked", "failed", reason=REASON_RUN_DIR_UNWRITABLE)
         return _blocked(
             "chunked", REASON_RUN_DIR_UNWRITABLE, f"cannot create {str(state_dir)!r}: {exc}", stages
         )
+    stage("chunked", "ok", chunk_count=len(chunks))
 
     records: dict[int, dict[str, Any]] = {}
     pending: list[Chunk] = []
@@ -187,7 +204,7 @@ def run_review(
         if existing is not None and existing.get("status") == STATUS_OK:
             records[chunk.index] = existing
             stage(f"chunk-{chunk.index}", _stage_status(existing), resumed="yes", nonce=existing.get("nonce"))
-        elif existing is not None and _is_exhausted(existing, profile.max_attempts):
+        elif existing is not None and _is_terminal(existing, profile.max_attempts):
             records[chunk.index] = existing
             stage(f"chunk-{chunk.index}", "failed", resumed="yes", reason=existing.get("reason"))
         else:
@@ -199,7 +216,7 @@ def run_review(
             chunk,
             len(chunks),
             profile,
-            attempts_before=int(previous.get("attempts", 0)),
+            attempts_before=_attempts(previous),
             cwd=run_dir,
             runner=runner,
         )
@@ -230,8 +247,7 @@ def run_review(
 
     blocking = [
         r for r in sorted(records.values(), key=lambda r: r["index"])
-        if r.get("status") == STATUS_FAILED
-        and (not r.get("retriable", False) or _is_exhausted(r, profile.max_attempts))
+        if _is_terminal(r, profile.max_attempts)
     ]
     if blocking:
         first = blocking[0]
@@ -248,6 +264,9 @@ def run_review(
             reply_excerpt=first.get("reply_excerpt"),
             stderr_excerpt=first.get("stderr_excerpt"),
             run_dir=str(run_dir),
+            # A terminal failure is cached like a finished chunk; removing
+            # the state directory is the explicit way to force a fresh try.
+            state_dir=str(state_dir),
         )
 
     unfinished = sorted(

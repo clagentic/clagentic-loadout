@@ -75,6 +75,47 @@ def test_planning_is_deterministic():
     assert plan_chunks(diff, 15) == plan_chunks(diff, 15)
 
 
+def test_exotic_line_separators_inside_content_do_not_split_lines():
+    exotic = "+a\x0cb\x0bc\rd e f\x85g"
+    diff = "\n".join(
+        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -0,0 +1,2 @@", exotic, "+tail"]
+    ) + "\n"
+
+    chunks = plan_chunks(diff, 100)
+
+    assert len(chunks) == 1
+    assert chunks[0].lines == 6
+    assert chunks[0].text == diff
+
+
+def test_continued_hunk_pieces_carry_real_headers_with_recomputed_offsets():
+    # Old side: 3 context + 4 removed = 7 lines from 10; new side: 3 context + 5
+    # added = 8 lines from 20.
+    body = [" c1", " c2", " c3", "-r1", "-r2", "-r3", "-r4", "+a1", "+a2", "+a3", "+a4", "+a5"]
+    diff = "\n".join(
+        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -10,7 +20,8 @@ def fn():"] + body
+    ) + "\n"
+
+    chunks = plan_chunks(diff, 9)
+
+    headers = [
+        line for chunk in chunks for line in chunk.text.splitlines() if line.startswith("@@")
+    ]
+    assert len(headers) == 3
+    assert headers[0].startswith("@@ -10,5 +20,3 @@ def fn():")
+    assert headers[1].startswith("@@ -15,2 +23,3 @@")
+    # A piece with no old-side lines names the line BEFORE its position.
+    assert headers[2].startswith("@@ -16,0 +26,2 @@")
+    # Every piece's declared counts match the lines it actually carries.
+    for chunk in chunks:
+        lines = chunk.text.splitlines()
+        declared = [ln for ln in lines if ln.startswith("@@")][0].split()
+        old = sum(1 for ln in lines if ln[:1] in (" ", "-") and not ln.startswith("---"))
+        new = sum(1 for ln in lines if ln[:1] in (" ", "+") and not ln.startswith("+++"))
+        assert int(declared[1].split(",")[1]) == old
+        assert int(declared[2].split(",")[1]) == new
+
+
 def test_non_positive_bound_is_rejected():
     with pytest.raises(ValueError):
         plan_chunks("diff --git a/x b/x\n", 0)

@@ -81,14 +81,13 @@ def test_stale_head_is_refused_and_nothing_is_posted(env, tmp_path, capsys):
     assert code == review_cli.EXIT_STALE_HEAD
     assert env.opener_state["posted_body"] is None
 
-
 def test_clean_status_with_a_blocking_finding_is_refused(env, tmp_path, capsys):
     findings = _write_findings(tmp_path / "f.json", [_BLOCKING])
 
     code, _ = env.post("--findings", str(findings), "--status", "clean", capsys=capsys)
 
     assert code == review_cli.EXIT_FINDINGS_INVALID
-    assert env.opener_state.get("posted_body") is None
+    assert env.opener_state["posted_body"] is None
 
 
 def test_findings_for_another_pr_are_refused(env, tmp_path, capsys):
@@ -97,6 +96,7 @@ def test_findings_for_another_pr_are_refused(env, tmp_path, capsys):
     code, _ = env.post("--findings", str(findings), "--status", "clean", capsys=capsys)
 
     assert code == review_cli.EXIT_FINDINGS_INVALID
+    assert env.opener_state["posted_body"] is None
 
 
 def test_bare_findings_array_needs_a_head_sha(env, tmp_path, capsys):
@@ -121,6 +121,69 @@ def test_a_failing_review_post_path_is_reported_as_post_failed(env, tmp_path, ca
 
     assert code == review_cli.EXIT_POST_FAILED
     assert payload == {"result": "post_failed", "review_post_exit_code": 9}
+
+
+@pytest.mark.parametrize("severity", ["Blocking", " blocking", "BLOCKING "])
+def test_blocking_severity_is_normalized_before_the_contradiction_check(
+    env, tmp_path, capsys, severity
+):
+    findings = _write_findings(tmp_path / "f.json", [{**_BLOCKING, "severity": severity}])
+
+    code, _ = env.post("--findings", str(findings), "--status", "clean", capsys=capsys)
+
+    assert code == review_cli.EXIT_FINDINGS_INVALID
+    assert env.opener_state["posted_body"] is None
+
+
+@pytest.mark.parametrize("bad", ["urgent", 3, ""])
+def test_unknown_severity_is_refused(env, tmp_path, capsys, bad):
+    findings = _write_findings(tmp_path / "f.json", [{**_NIT, "severity": bad}])
+
+    code, _ = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
+
+    assert code == review_cli.EXIT_FINDINGS_INVALID
+
+
+def test_non_positive_line_is_refused(env, tmp_path, capsys):
+    findings = _write_findings(tmp_path / "f.json", [{**_NIT, "line": 0}])
+
+    code, _ = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
+
+    assert code == review_cli.EXIT_FINDINGS_INVALID
+
+
+def test_unparseable_review_post_output_is_post_failed_not_posted(
+    env, tmp_path, capsys, monkeypatch
+):
+    findings = _write_findings(tmp_path / "f.json", [])
+
+    def fake_main(argv, **kwargs):
+        print("this is not json")
+        return 0
+
+    monkeypatch.setattr(review_cli.review_post_verb, "main", fake_main)
+
+    code, payload = env.post("--findings", str(findings), "--status", "clean", capsys=capsys)
+
+    assert code == review_cli.EXIT_POST_FAILED
+    assert payload["result"] == "post_failed"
+
+
+def test_failed_review_post_keeps_its_stdout_for_diagnosis(env, tmp_path, capsys, monkeypatch):
+    findings = _write_findings(tmp_path / "f.json", [])
+
+    def fake_main(argv, **kwargs):
+        print("inner-failure-detail")
+        return 9
+
+    monkeypatch.setattr(review_cli.review_post_verb, "main", fake_main)
+    capsys.readouterr()
+    code = env._invoke("post", ["--findings", str(findings), "--status", "clean"])
+    captured = capsys.readouterr()
+
+    assert code == review_cli.EXIT_POST_FAILED
+    assert "inner-failure-detail" in captured.err
+    assert "inner-failure-detail" not in captured.out
 
 
 def test_post_passes_the_verdict_route_flags_to_review_post(env, tmp_path, capsys, monkeypatch):

@@ -110,8 +110,10 @@ def _run_one_engine(
     when the engine is absent (the caller decides whether a fallback exists)."""
     result = run_engine_with_retry(argv, prompt, timeout, cwd=cwd, runner=runner)
     if result.kind == KIND_UNAVAILABLE:
-        record["unavailable_detail"] = result.detail
-        record["unavailable_stderr_excerpt"] = result.stderr_excerpt
+        # Keyed per engine so a fallback's own absence never overwrites the
+        # carrier's diagnostic.
+        record[f"{engine}_unavailable_detail"] = result.detail
+        record[f"{engine}_unavailable_stderr_excerpt"] = result.stderr_excerpt
         return None
     if result.kind in (KIND_TIMEOUT, KIND_FAILED):
         return _failure(record, engine, _transient_reason(result), result, retriable=True)
@@ -196,9 +198,9 @@ def review_chunk(
             REASON_MODEL_UNAVAILABLE,
             EngineResult(
                 kind=KIND_UNAVAILABLE,
-                detail=record.get("unavailable_detail", "carrier unavailable")
+                detail=record.get(f"{ENGINE_CARRIER}_unavailable_detail", "carrier unavailable")
                 + "; no fallback is configured for this profile",
-                stderr_excerpt=record.get("unavailable_stderr_excerpt", ""),
+                stderr_excerpt=record.get(f"{ENGINE_CARRIER}_unavailable_stderr_excerpt", ""),
             ),
             retriable=False,
         )
@@ -208,7 +210,7 @@ def review_chunk(
         cwd=cwd, runner=runner,
     )
     if finished is not None:
-        finished["carrier_unavailable"] = record.get("unavailable_detail", "")
+        finished["carrier_unavailable"] = record.get(f"{ENGINE_CARRIER}_unavailable_detail", "")
         return finished
     return _failure(
         record,
@@ -216,9 +218,15 @@ def review_chunk(
         REASON_MODEL_UNAVAILABLE,
         EngineResult(
             kind=KIND_UNAVAILABLE,
-            detail="carrier and fallback are both unavailable: "
-            + record.get("unavailable_detail", ""),
-            stderr_excerpt=record.get("unavailable_stderr_excerpt", ""),
+            detail=(
+                "carrier and fallback are both unavailable: carrier: "
+                f"{record.get(f'{ENGINE_CARRIER}_unavailable_detail', '')}; fallback: "
+                f"{record.get(f'{ENGINE_FALLBACK}_unavailable_detail', '')}"
+            ),
+            stderr_excerpt=(
+                record.get(f"{ENGINE_FALLBACK}_unavailable_stderr_excerpt", "")
+                or record.get(f"{ENGINE_CARRIER}_unavailable_stderr_excerpt", "")
+            ),
         ),
         retriable=False,
     )

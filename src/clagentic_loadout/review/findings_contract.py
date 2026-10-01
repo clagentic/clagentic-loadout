@@ -16,6 +16,9 @@ from typing import Any
 
 SEVERITIES = ("blocking", "nit", "praise")
 
+#: Mirrors the "at most 200 characters" line in OUTPUT_CONTRACT.
+MAX_MESSAGE_CHARS = 200
+
 # Higher is more severe; used only to pick which duplicate survives a merge.
 _SEVERITY_RANK = {"praise": 0, "nit": 1, "blocking": 2}
 
@@ -25,7 +28,7 @@ OUTPUT_CONTRACT = """\
 Reply with exactly one JSON array and nothing else: no prose before or after,
 no Markdown. Each element is an object with these keys:
   "file": path as it appears in the diff header (string)
-  "line": line number inside a diff hunk (integer)
+  "line": line number inside a diff hunk (integer, 1 or greater)
   "rule_id": a rule id from the rulebook above (string)
   "severity": "blocking", "nit", or "praise"
   "message": what is wrong and why, at most 200 characters (string)
@@ -62,8 +65,14 @@ def _validate_finding(item: Any, position: int) -> dict[str, Any]:
         raise InvalidReplyError(f"finding {position} has no message")
     if isinstance(line, bool) or not isinstance(line, int):
         raise InvalidReplyError(f"finding {position} line is not an integer")
+    if line < 1:
+        raise InvalidReplyError(f"finding {position} line must be >= 1, got {line}")
     if severity not in SEVERITIES:
         raise InvalidReplyError(f"finding {position} severity is not one of {SEVERITIES}")
+    if len(message) > MAX_MESSAGE_CHARS:
+        # A good finding with a long message is kept, not discarded; the
+        # contract's bound is enforced by truncation.
+        message = message[: MAX_MESSAGE_CHARS - 3] + "..."
     return {
         "file": file_value,
         "line": line,

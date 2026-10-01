@@ -12,13 +12,15 @@ fits the bound.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 DEFAULT_CHUNK_LINES = 600
 
 _FILE_MARKER = "diff --git "
 _HUNK_MARKER = "@@"
-_CONTINUATION_LINE = "@@ (hunk continued from the previous chunk) @@"
+_HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+_CONTINUATION_NOTE = " (hunk continued from the previous chunk)"
 _B_PATH_SEPARATOR = " b/"
 
 
@@ -46,11 +48,21 @@ def _file_name(header_line: str) -> str:
     return rest.strip()
 
 
+def _diff_lines(diff_text: str) -> list[str]:
+    """Split on LF only. str.splitlines() also breaks on form feed, vertical
+    tab, lone CR, and U+2028/U+2029, all of which can sit inside a changed
+    line's content and would silently change the diff's line structure."""
+    lines = diff_text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _split_files(diff_text: str) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
     current: list[str] | None = None
     name = ""
-    for line in diff_text.splitlines():
+    for line in _diff_lines(diff_text):
         if line.startswith(_FILE_MARKER):
             if current is not None:
                 sections.append((name, current))
@@ -77,6 +89,65 @@ def _split_hunks(lines: list[str]) -> tuple[list[str], list[list[str]]]:
     return header, hunks
 
 
+def _line_counts(body: list[str]) -> tuple[int, int]:
+    """(old, new) line counts a hunk body spans. A `\\ No newline` marker
+    belongs to the line before it and counts for neither side."""
+    old = new = 0
+    for line in body:
+        if line.startswith("\\"):
+            continue
+        if line.startswith("+"):
+            new += 1
+        elif line.startswith("-"):
+            old += 1
+        else:
+            old += 1
+            new += 1
+    return old, new
+
+
+def _range(first: int, count: int) -> str:
+    # A zero-length range is written as the line BEFORE the position.
+    start = first if count > 0 else first - 1
+    return f"{start}" if count == 1 else f"{start},{count}"
+
+
+def _split_hunk(hunk: list[str], budget: int) -> list[list[str]]:
+    """Split one oversized hunk into pieces of at most *budget* lines, each
+    led by a real `@@ -a,b +c,d @@` header whose offsets and counts are
+    recomputed for the piece, so a reviewer can map a line to a file offset
+    from any chunk alone."""
+    match = _HUNK_HEADER_RE.match(hunk[0])
+    if match is None:
+        # A malformed header carries no offsets to continue from; counting
+        # from line 1 keeps the piece well-formed without inventing a start.
+        old_first = new_first = 1
+        section = ""
+    else:
+        old_start, old_count, new_start, new_count, section = match.groups()
+        # A zero-count start already names the line BEFORE the hunk.
+        old_first = int(old_start) + (1 if old_count == "0" else 0)
+        new_first = int(new_start) + (1 if new_count == "0" else 0)
+
+    body = hunk[1:]
+    room = max(1, budget - 1)
+    pieces: list[list[str]] = []
+    position = 0
+    while position < len(body):
+        part = body[position:position + room]
+        old_count_piece, new_count_piece = _line_counts(part)
+        header = (
+            f"@@ -{_range(old_first, old_count_piece)} "
+            f"+{_range(new_first, new_count_piece)} @@"
+            + (section if position == 0 else _CONTINUATION_NOTE)
+        )
+        pieces.append([header] + part)
+        old_first += old_count_piece
+        new_first += new_count_piece
+        position += len(part)
+    return pieces or [hunk]
+
+
 def _split_oversized_file(name: str, lines: list[str], max_lines: int) -> list[_Piece]:
     header, hunks = _split_hunks(lines)
     budget = max(1, max_lines - len(header))
@@ -96,15 +167,8 @@ def _split_oversized_file(name: str, lines: list[str], max_lines: int) -> list[_
             body.extend(hunk)
             continue
         flush()
-        position = 0
-        first = True
-        while position < len(hunk):
-            room = budget if first else budget - 1
-            room = max(1, room)
-            part = hunk[position:position + room]
-            position += len(part)
-            body = ([] if first else [_CONTINUATION_LINE]) + part
-            first = False
+        for piece_lines in _split_hunk(hunk, budget):
+            body = piece_lines
             flush()
     flush()
     if not pieces:

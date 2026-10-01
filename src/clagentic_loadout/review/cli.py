@@ -42,6 +42,7 @@ from clagentic_loadout.platform_detect import (
     resolve_platform,
 )
 from clagentic_loadout.review import verb as review_post_verb
+from clagentic_loadout.review.findings_contract import SEVERITIES
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
     ReviewProfileError,
@@ -70,7 +71,7 @@ from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE, TokenP
 from clagentic_loadout.transport.git_host_api import (
     DEFAULT_GIT_HOST_BASE_URL,
     GIT_HOST_BASE_URL_ENV_VAR,
-    _resolve_git_host_base,
+    resolve_git_host_base,
 )
 from clagentic_loadout.transport.provider_config import DEFAULT_USER_CONFIG_ROOT
 
@@ -279,7 +280,7 @@ def _acquire(
             owner=owner,
             repo=repo,
             caller=caller,
-            git_host_base=_resolve_git_host_base(args.git_host_base_url),
+            git_host_base=resolve_git_host_base(args.git_host_base_url),
             token_provider=token_provider,
             opener=opener,
         )
@@ -416,8 +417,21 @@ def _load_findings(path: str, args: argparse.Namespace) -> tuple[str, list[dict[
             or not isinstance(item["line"], int)
         ):
             _fail(f"finding {position} has a field of the wrong type", EXIT_FINDINGS_INVALID)
+        if item["line"] < 1:
+            _fail(f"finding {position} line must be >= 1, got {item['line']}", EXIT_FINDINGS_INVALID)
         severity = item.get("severity")
-        message = f"({severity}) {item['message']}" if isinstance(severity, str) and severity else item["message"]
+        if severity is not None:
+            # Normalized so "Blocking" or " blocking" cannot slip past the
+            # clean-vs-blocking contradiction check in the caller.
+            normalized = severity.strip().lower() if isinstance(severity, str) else None
+            if normalized not in SEVERITIES:
+                _fail(
+                    f"finding {position} severity must be one of {', '.join(SEVERITIES)}, "
+                    f"got {severity!r}",
+                    EXIT_FINDINGS_INVALID,
+                )
+            severity = normalized
+        message = f"({severity}) {item['message']}" if severity else item["message"]
         cleaned.append(
             {
                 "file": item["file"],
@@ -499,12 +513,25 @@ def _post_command(
             f"loadout-review: posting failed: the review-post path exited {code}",
             file=sys.stderr,
         )
+        # The inner path's own output carries the failure detail.
+        inner_output = captured.getvalue().strip()
+        if inner_output:
+            print(f"loadout-review: review-post output: {inner_output}", file=sys.stderr)
         return EXIT_POST_FAILED
 
     try:
         posted = json.loads(captured.getvalue().strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError):
-        posted = {}
+        posted = None
+    if not isinstance(posted, dict):
+        print(json.dumps({"result": "post_failed", "review_post_exit_code": code}))
+        print(
+            "loadout-review: posting could not be confirmed: the review-post path "
+            "exited 0 but its output was not a JSON result object, so the landed "
+            "comment was not verified",
+            file=sys.stderr,
+        )
+        return EXIT_POST_FAILED
     print(
         json.dumps(
             {
@@ -546,7 +573,11 @@ def main(
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:
-        return exc.code if isinstance(exc.code, int) else EXIT_USAGE
+        # argparse exits 2 on a usage error, which this verb reserves for a
+        # token-fetch failure; a usage error is EXIT_USAGE.
+        if exc.code in (0, None):
+            return EXIT_OK
+        return EXIT_USAGE
 
     try:
         owner, repo = _parse_owner_repo(args.repo)

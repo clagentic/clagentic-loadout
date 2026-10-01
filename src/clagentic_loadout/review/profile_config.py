@@ -35,6 +35,7 @@ or selects a model; that is entirely the configured argv's business.
 
 from __future__ import annotations
 
+import math
 import shlex
 import sys
 from dataclasses import dataclass
@@ -70,8 +71,41 @@ _REPO_OVERRIDABLE_KEYS = (
 _REPO_REFUSED_KEYS = ("carrier", "fallback")
 
 
+#: A cloned repository must not be able to make this process spawn an
+#: unbounded number of carrier processes or wait unboundedly on one. Repo-level
+#: values are clamped to these bounds; the user-level config is not.
+_REPO_MAX = {
+    "parallel": 16,
+    "max_attempts": 10,
+    "timeout_seconds": 3600,
+    "fallback_timeout_seconds": 3600,
+}
+_REPO_MIN = {"chunk_lines": 50}
+
+
 class ReviewProfileError(ValueError):
     """The requested review profile is missing or malformed."""
+
+
+def _bound_repo_value(key: str, value: object, profile: str) -> object:
+    """Clamp a numeric repo-level override into its bound, saying so on
+    stderr. Non-numeric values pass through to the normal validation."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        return value
+    upper = _REPO_MAX.get(key)
+    lower = _REPO_MIN.get(key)
+    if upper is not None and value > upper:
+        bounded: int | float = upper
+    elif lower is not None and value < lower:
+        bounded = lower
+    else:
+        return value
+    print(
+        f"clagentic-loadout: review.profiles.{profile}.{key}={value!r} in the repo-level "
+        f"config is outside the allowed repo-level bound; using {bounded!r}.",
+        file=sys.stderr,
+    )
+    return bounded
 
 
 @dataclass(frozen=True)
@@ -89,7 +123,13 @@ class ReviewProfile:
 
 def _argv(value: object, key: str, profile: str) -> tuple[str, ...]:
     if isinstance(value, str):
-        parts = shlex.split(value)
+        try:
+            parts = shlex.split(value)
+        except ValueError as exc:
+            raise ReviewProfileError(
+                f"review profile {profile!r}: {key!r} is not a valid shell-quoted "
+                f"string ({exc}): {value!r}"
+            ) from exc
     elif isinstance(value, list) and all(isinstance(item, str) for item in value):
         parts = list(value)
     else:
@@ -103,7 +143,10 @@ def _argv(value: object, key: str, profile: str) -> tuple[str, ...]:
 
 
 def _positive_number(value: object, key: str, profile: str, *, integer: bool) -> float:
-    ok = isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
+    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+    # YAML can produce .inf/.nan; int(inf) raises OverflowError, so finiteness
+    # is checked before any conversion.
+    ok = ok and math.isfinite(value) and value > 0
     if integer:
         ok = ok and float(value) == int(value)
     if not ok:
@@ -119,7 +162,13 @@ def _read_yaml_mapping(path: Path) -> dict:
         return {}
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, yaml.YAMLError) as exc:
+        # Treated as absent (a repo's broken file must not block a review), but
+        # said out loud so an ignored override is never a mystery.
+        print(
+            f"clagentic-loadout: ignoring unreadable repo-level config {str(path)!r}: {exc}",
+            file=sys.stderr,
+        )
         return {}
     return raw if isinstance(raw, dict) else {}
 
@@ -189,7 +238,7 @@ def load_review_profile(
     merged = dict(user_entry)
     for key in _REPO_OVERRIDABLE_KEYS:
         if key in repo_entry:
-            merged[key] = repo_entry[key]
+            merged[key] = _bound_repo_value(key, repo_entry[key], name)
 
     if "carrier" not in merged:
         raise ReviewProfileError(f"review profile {name!r}: 'carrier' is required")

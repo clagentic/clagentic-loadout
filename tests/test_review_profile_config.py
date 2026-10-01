@@ -115,6 +115,85 @@ def test_unreadable_rulebook_is_a_profile_error(tmp_path):
         load_review_profile("reviewer", config_root=root)
 
 
+def test_repo_level_bounds_are_clamped_with_a_warning(tmp_path, capsys):
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"]}})
+    repo = _repo(
+        tmp_path,
+        {"reviewer": {"parallel": 5000, "max_attempts": 999, "timeout_seconds": 10**9,
+                      "chunk_lines": 1}},
+    )
+
+    profile = load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+    assert profile.parallel == 16
+    assert profile.max_attempts == 10
+    assert profile.timeout_seconds == 3600.0
+    assert profile.chunk_lines == 50
+    assert "outside the allowed repo-level bound" in capsys.readouterr().err
+
+
+def test_user_level_values_are_not_clamped(tmp_path):
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"], "parallel": 64}})
+
+    assert load_review_profile("reviewer", config_root=root).parallel == 64
+
+
+def test_unbalanced_quote_in_a_string_argv_is_a_profile_error(tmp_path):
+    root = _user(tmp_path, {"reviewer": {"carrier": "engine 'unterminated"}})
+
+    with pytest.raises(ReviewProfileError, match="shell-quoted"):
+        load_review_profile("reviewer", config_root=root)
+
+
+@pytest.mark.parametrize("value", [".inf", "-.inf", ".nan"])
+def test_non_finite_numbers_are_a_profile_error_not_a_crash(tmp_path, value):
+    root = tmp_path / "user"
+    root.mkdir()
+    (root / "config.yaml").write_text(
+        "review:\n  profiles:\n    reviewer:\n      carrier: [x]\n"
+        f"      max_attempts: {value}\n      timeout_seconds: {value}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ReviewProfileError):
+        load_review_profile("reviewer", config_root=root)
+
+
+def test_malformed_repo_yaml_is_ignored_with_a_warning(tmp_path, capsys):
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"]}})
+    repo = tmp_path / "repo"
+    (repo / ".clagentic" / "loadout").mkdir(parents=True)
+    (repo / ".clagentic" / "loadout" / "config.yaml").write_text(
+        "review: [unclosed", encoding="utf-8"
+    )
+
+    profile = load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+    assert profile.carrier == ("x",)
+    assert "ignoring unreadable repo-level config" in capsys.readouterr().err
+
+
+def test_repo_level_rulebook_absolute_path_is_refused(tmp_path):
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"]}})
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    repo = _repo(tmp_path, {"reviewer": {"rulebook": str(outside)}})
+
+    with pytest.raises(ReviewProfileError, match="outside the repository"):
+        load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+
+def test_repo_level_rulebook_symlink_escape_is_refused(tmp_path):
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"]}})
+    outside = tmp_path / "outside.md"
+    outside.write_text("secret", encoding="utf-8")
+    repo = _repo(tmp_path, {"reviewer": {"rulebook": "link.md"}})
+    (repo / "link.md").symlink_to(outside)
+
+    with pytest.raises(ReviewProfileError, match="outside the repository"):
+        load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+
 def test_run_root_override(tmp_path):
     root = _user(tmp_path, {}, run_root=str(tmp_path / "runs"))
 

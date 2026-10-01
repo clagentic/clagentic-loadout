@@ -12,6 +12,7 @@ import pytest
 
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.review.findings_contract import FORMAT_REPROMPT, OUTPUT_CONTRACT
+from clagentic_loadout.transport import provider_config
 from tests._review_cli_support import (
     HEAD_SHA,
     Env,
@@ -28,6 +29,10 @@ from tests._review_cli_support import (
 def env(tmp_path, monkeypatch) -> Env:
     environment = Env(tmp_path)
     monkeypatch.setenv("STUB_DIR", str(environment.stubs))
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
+    monkeypatch.delenv(review_cli.RUN_ROOT_ENV_VAR, raising=False)
+    # Keep any config lookup off the real user's config.
+    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "user-config")
     return environment
 
 
@@ -281,3 +286,76 @@ def test_stage_status_changes_are_machine_readable_on_stderr(env, capsys):
     assert "loadout-review: stage=chunked status=ok chunk_count=1" in err
     assert "loadout-review: stage=chunk-1 status=ok resumed=yes" in err
     assert "loadout-review: stage=merged status=ok" in err
+
+
+def test_a_terminal_failure_is_cached_and_not_silently_rerun(env, capsys):
+    env.configure(carrier_mode="prose")
+
+    first_code, first = env.run(capsys=capsys)
+    sent_after_first = len(prompts(env.stubs, "carrier"))
+    second_code, second = env.run(capsys=capsys)
+
+    assert (first_code, second_code) == (20, 20)
+    assert second["reason"] == "FALLBACK_OUTPUT_INVALID"
+    assert len(prompts(env.stubs, "carrier")) == sent_after_first
+    assert second["state_dir"]
+
+
+def test_both_engines_absent_reports_both_diagnostics(env, capsys):
+    write_profile_config(
+        env.cfg,
+        carrier=["/nonexistent/carrier-binary"],
+        fallback=["/nonexistent/fallback-binary"],
+    )
+
+    code, payload = env.run(capsys=capsys)
+
+    assert code == 20
+    assert payload["reason"] == "MODEL_UNAVAILABLE"
+    assert "carrier-binary" in payload["detail"]
+    assert "fallback-binary" in payload["detail"]
+
+
+def test_a_corrupt_persisted_attempt_count_does_not_crash_the_run(env, capsys):
+    env.configure(carrier_mode="hang", timeout_seconds=0.5, max_attempts=3)
+    first_code, first = env.run(capsys=capsys)
+    assert first_code == 10
+    record_path = next(Path(first["run_dir"]).glob("state-*/result-0001.json"))
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["attempts"] = "many"
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    code, _ = env.run(capsys=capsys)
+
+    assert code == 10
+
+
+def test_chunked_is_reported_once_when_the_state_dir_cannot_be_created(tmp_path):
+    from clagentic_loadout.acquire.contract import AcquiredPr
+    from clagentic_loadout.review.profile_config import ReviewProfile
+    from clagentic_loadout.review.run_pipeline import run_review
+
+    blocker = tmp_path / "blocker"
+    blocker.write_text("a file where the run directory should be", encoding="utf-8")
+    acquired = AcquiredPr(
+        owner="some-owner", repo="some-repo", pr_number=42,
+        base_sha="a" * 40, head_sha="b" * 40, diff_text=make_diff({"a.py": 3}),
+    )
+    profile = ReviewProfile(
+        name="reviewer", carrier=("unused",), fallback=None, rulebook_text="",
+        chunk_lines=600, timeout_seconds=1.0, fallback_timeout_seconds=1.0,
+        max_attempts=1, parallel=1,
+    )
+
+    outcome = run_review(acquired, profile, blocker, emit=lambda *a, **k: None)
+
+    assert outcome.exit_code == 20
+    chunked = [s["status"] for s in outcome.stages if s["stage"] == "chunked"]
+    assert chunked == ["failed"]
+
+
+def test_usage_error_exits_usage_not_the_token_failure_code(env, capsys):
+    code = review_cli.main(["run", "--caller", "reviewer", "--pr", "notanumber"])
+
+    assert code == review_cli.EXIT_USAGE
+    assert code != review_cli.EXIT_TOKEN_FETCH_FAILED
