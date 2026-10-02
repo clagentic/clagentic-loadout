@@ -127,16 +127,13 @@ _SEMANTIC_RELEASE_CONFIG_NAMES = (
     "release.config.mjs",
 )
 
-#: Per-repo loadout config marker dir — its presence doubles as "this repo
-#: already has its own release wiring". Checks both the current
-#: `.clagentic` home (see repo_config.py, lr-446c35) and the legacy
-#: `.loadout` home, so a not-yet-migrated repo is still recognized during
-#: the transitional period (removed after the fleet migration, lr-a645aa).
-#: Kept as a bare marker-DIRECTORY check (not the specific config FILE) —
-#: lr-18f46a adds the bounded wrapper-hop to this lookup but deliberately
-#: does NOT change this check's own file-vs-dir semantics, only WHERE it
-#: looks (repo_path itself, or one git-anchored hop above it).
-_LOADOUT_CONFIG_MARKER = Path(DEFAULT_CONFIG_RELATIVE_PATH).parts[0]
+#: Per-repo loadout config markers — their presence doubles as "this repo
+#: already has its own release wiring". The current marker is loadout's OWN
+#: config file under its own namespace; the bare `.clagentic` directory is
+#: shared by other products and must never count. The legacy `.loadout`
+#: home is loadout-only and still recognized during the transitional
+#: period (removed after the fleet migration, lr-a645aa).
+_LOADOUT_CONFIG_MARKER = DEFAULT_CONFIG_RELATIVE_PATH
 _LEGACY_LOADOUT_CONFIG_MARKER = LEGACY_CONFIG_MARKER
 
 # Generic http(s) git-host "owner/repo" extractor — deliberately not tied to
@@ -212,16 +209,17 @@ def is_semantic_release_owned(repo_path: Path) -> bool:
     detector must skip it entirely (no signal at all) to avoid double-posting.
 
     Ownership markers (any is sufficient): a release.config.{js,cjs,mjs} at
-    repo root, or a per-repo loadout config marker DIRECTORY reachable via
-    the bounded wrapper-hop (lr-18f46a: `repo_path` itself, its own git top
-    level, or that top level's immediate parent/wrapper — see
-    `repo_config.resolve_repo_config_root`) at either the CURRENT
-    `.clagentic` home (see repo_config.py, lr-446c35) or the LEGACY
-    `.loadout` home (transitional — a not-yet-migrated repo still counts as
-    configured; removed after the fleet migration, lr-a645aa). Unchanged
-    from the pre-lr-18f46a contract: this checks bare marker-DIRECTORY
-    presence, not the specific config file — only WHERE it looks gained the
-    wrapper hop, not the presence predicate itself.
+    repo root, or a per-repo loadout config marker reachable via the bounded
+    wrapper-hop (lr-18f46a: `repo_path` itself, its own git top level, or
+    that top level's immediate parent/wrapper — see
+    `repo_config.resolve_repo_config_root`): loadout's own config file
+    `.clagentic/loadout/config.yaml`, or the LEGACY `.loadout` home
+    (transitional — a not-yet-migrated repo still counts as configured;
+    removed after the fleet migration, lr-a645aa).
+
+    A bare `.clagentic` directory deliberately does NOT count (lr-caaa67):
+    that directory is shared with other products, and another product's
+    state must never change loadout's behaviour.
     """
     for name in _SEMANTIC_RELEASE_CONFIG_NAMES:
         if (repo_path / name).exists():
@@ -232,11 +230,9 @@ def is_semantic_release_owned(repo_path: Path) -> bool:
         _LEGACY_LOADOUT_CONFIG_MARKER,
         exists_check=Path.exists,
     )
-    if (config_root / _LOADOUT_CONFIG_MARKER).exists():
-        return True
-    if (config_root / _LEGACY_LOADOUT_CONFIG_MARKER).exists():
-        return True
-    return False
+    return (config_root / _LOADOUT_CONFIG_MARKER).exists() or (
+        config_root / _LEGACY_LOADOUT_CONFIG_MARKER
+    ).exists()
 
 
 def _run_git(repo_path: Path, args: list[str]) -> str:
