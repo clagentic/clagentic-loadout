@@ -54,7 +54,17 @@ documented step ordering):
      refusal (VerdictMalformedError) rather than silently parsing the last
      one. A repo with legacy multi-fence comments opts OUT explicitly via
      `merge: enforce_single_verdict_fence: false` — see that resolver's own
-     docstring for the full trade-off.
+     docstring for the full trade-off. The roles required are the UNION of
+     --required-reviewer and the repo's declared
+     `merge: required_reviewer_roles` (a floor; merge.repo_gate_runtime). A
+     repo gate config that cannot be loaded falls back to flags-only with a
+     stderr warning; a loadable but unsatisfiable floor refuses, overridable
+     only by --ignore-repo-gate (logged, attested). Findings state: a
+     finding an earlier fence held open that the current verdict neither
+     clears at this head nor re-raises refuses (merge.verdict.
+     assert_prior_findings_resolved), and a clean verdict reporting a
+     `merge: required_scanners` scanner as failed refuses
+     (merge.verdict.check_required_scanners).
   5b. Model attestation (merge.model_attestation, lr-95543d) — OPT-IN
      (`merge: require_model_attestation: true`, default off): when enabled,
      a required reviewer's `clean` verdict must ALSO carry a genuine
@@ -467,7 +477,9 @@ from clagentic_loadout.merge.errors import (
     VerdictBlockingError,
     VerdictMalformedError,
     VerdictMissingError,
+    VerdictPriorFindingsOpenError,
     VerdictRoleMismatchError,
+    VerdictScannerFailedError,
     VerdictStaleError,
 )
 from clagentic_loadout.merge.merge_readback import verify_merge_landed
@@ -507,6 +519,7 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_sync_tree_after_merge,
 )
 from clagentic_loadout.merge.pre_checks_config import load_pre_checks
+from clagentic_loadout.merge.repo_gate_runtime import load_repo_gate
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
@@ -913,7 +926,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "back-compat path). A required reviewer with no clean, current-SHA "
         "verdict refuses the merge. Omit entirely to run with no "
         "reviewer-verdict gate (e.g. a deployment gating solely on CI + "
-        "authority).",
+        "authority). Roles declared in the repo's merge.required_reviewer_roles "
+        "(read via --repo-path) are required as well: the roles enforced are "
+        "the union of the two.",
+    )
+    parser.add_argument(
+        "--ignore-repo-gate",
+        action="store_true",
+        default=False,
+        dest="ignore_repo_gate",
+        help="Do not require the reviewer roles the repo declares in "
+        "merge.required_reviewer_roles; only --required-reviewer applies. For "
+        "a repo whose declared gate cannot be satisfied (for example while "
+        "landing the config that fixes it). Logged to stderr and recorded in "
+        "the merge-completion attestation. A repo gate config that cannot be "
+        "loaded at all already falls back to flags-only with a warning and "
+        "does not need this flag.",
     )
     parser.add_argument(
         "--max-changed-files",
@@ -1251,6 +1279,30 @@ def _run(
     bind_caller(role, caller_explicit=True, identity=attested_identity)
 
     required_reviewers = _parse_required_reviewers(args.required_reviewers, args.platform)
+
+    # The repo's declared reviewer roles are a floor beneath --required-reviewer
+    # (merge.repo_gate_runtime owns the unloadable-config fallback). A role
+    # already named by a flag keeps the flag's login binding.
+    repo_gate = load_repo_gate(args.repo_path)
+    for warning in repo_gate.warnings:
+        print(f"merge: WARNING -- {warning}", file=sys.stderr)
+    floor_only_reviewers: dict[str, str] = {}
+    if args.ignore_repo_gate:
+        print(
+            f"merge: repo reviewer gate IGNORED via --ignore-repo-gate (declared "
+            f"roles: {list(repo_gate.reviewer_roles)!r}); only --required-reviewer applies",
+            file=sys.stderr,
+        )
+    else:
+        undeclared = [r for r in repo_gate.reviewer_roles if r not in required_reviewers]
+        try:
+            floor_only_reviewers = _parse_required_reviewers(undeclared, args.platform)
+        except MergeUsageError as exc:
+            raise MergeUsageError(
+                f"{exc} This role is required by the repo's merge.required_reviewer_roles; "
+                f"pass --ignore-repo-gate to override it (logged and attested)."
+            ) from exc
+        required_reviewers = {**required_reviewers, **floor_only_reviewers}
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
 
     # 1. Namespace guard — runs FIRST, before any credential or network call.
@@ -1323,10 +1375,10 @@ def _run(
         # resolve_enforce_single_verdict_fence's own docstring for the
         # ENFORCE-BY-DEFAULT / CONFIG-GATED OPT-OUT trade-off (the inverse
         # shape of resolve_enforce_merge_shape's warn-by-default precedent;
-        # lives in the SAME module as that resolver for the same
-        # bootstrap-safety reason -- merge.gate_config is diagnostic-only and
-        # must never be imported here; see that module's "BLAST RADIUS"
-        # docstring section). Resolved once per invocation, from the same
+        # lives in the SAME module as that resolver). merge.gate_config is
+        # reached only through merge.repo_gate_runtime, which owns the
+        # unloadable-config fallback; see gate_config's "BLAST RADIUS"
+        # docstring section. Resolved once per invocation, from the same
         # --repo-path config root every other repo-tier gate key here reads.
         try:
             enforce_single_verdict_fence = resolve_enforce_single_verdict_fence(
@@ -1359,6 +1411,11 @@ def _run(
                     enforce_single_fence=enforce_single_verdict_fence,
                 )
                 verdict.assert_clean_verdict(verdict_obj, reviewer_name)
+                verdict.assert_prior_findings_resolved(verdict_obj, reviewer_name)
+                for scanner_warning in verdict.check_required_scanners(
+                    verdict_obj, reviewer_name, repo_gate.scanners_for(reviewer_name)
+                ):
+                    print(f"merge: WARNING -- {scanner_warning}", file=sys.stderr)
                 # lr-95543d: mirrors assert_clean_verdict's disposition --
                 # a clean verdict lacking genuine attestation refuses the
                 # merge exactly like a blocking one. No-op when
@@ -1374,10 +1431,18 @@ def _run(
                 VerdictRoleMismatchError,
                 VerdictStaleError,
                 VerdictBlockingError,
+                VerdictPriorFindingsOpenError,
+                VerdictScannerFailedError,
                 ModelAttestationMissingError,
                 ModelAttestationInvalidError,
             ) as exc:
-                _fail(str(exc), code=EXIT_GATE_RESULT_BLOCKED)
+                hint = (
+                    " This reviewer is required by the repo's merge.required_reviewer_roles; "
+                    "--ignore-repo-gate overrides it (logged and attested)."
+                    if reviewer_name in floor_only_reviewers
+                    else ""
+                )
+                _fail(f"{exc}{hint}", code=EXIT_GATE_RESULT_BLOCKED)
             print(
                 f"merge: {reviewer_name!r} verdict PASSED -- "
                 f"review_status={verdict_obj.review_status!r}, "
@@ -1628,6 +1693,7 @@ def _run(
         gated_head_sha=current_head_sha,
         merged_sha=current_head_sha,
         required_reviewer_logins=list(required_reviewers.values()),
+        repo_gate_ignored=args.ignore_repo_gate,
         ci_disposition=ci_disposition,
         task_id=args.task_id,
         issue_number=issue_number,
@@ -1666,6 +1732,7 @@ def _run(
     print(json.dumps({
         "pr_number": args.pr_number, "owner": owner, "repo": repo,
         READBACK_ENVELOPE_KEY: merge_readback.to_dict(),
+        **({"repo_gate_ignored": list(repo_gate.reviewer_roles)} if args.ignore_repo_gate else {}),
     }))
 
     # 10. Working-tree sync + post-merge steps -- ONLY reached after the

@@ -43,6 +43,7 @@ from clagentic_loadout.platform_detect import (
     PlatformResolutionError,
     resolve_platform,
 )
+from clagentic_loadout.merge.fence_state import normalize_findings_state
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.delta import resolve_delta
 from clagentic_loadout.review.findings_contract import InvalidReplyError, validate_finding
@@ -245,6 +246,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Head SHA the findings were produced for. Required only when "
         "--findings is a bare array.",
+    )
+    post.add_argument(
+        "--state-file",
+        default=None,
+        help="JSON object with the structured findings state to carry in the "
+        "verdict fence: 'findings_open' (id, rule_id, head), 'supersedes' "
+        "(comment id), 'cleared_claims' (id, head, evidence) and "
+        "'scanners_run' (scanner, status, reason). Rendered by the tool inside "
+        "the fence, never as body text; every field is optional. A cleared "
+        "claim's head must be this review's head.",
     )
     return parser
 
@@ -583,6 +594,25 @@ def _post_command(
             EXIT_FINDINGS_INVALID,
         )
 
+    state: dict[str, Any] = {}
+    if args.state_file:
+        try:
+            loaded = json.loads(Path(args.state_file).read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            _fail(f"cannot read state file {args.state_file!r}: {exc}", EXIT_FINDINGS_INVALID)
+        if not isinstance(loaded, dict):
+            _fail(
+                f"state file {args.state_file!r} must be a JSON object",
+                EXIT_FINDINGS_INVALID,
+            )
+        state = loaded
+        # Validated here as well as when the fence is built, so a bad state
+        # file fails before any I/O instead of after the head re-check.
+        try:
+            normalize_findings_state(state, head_sha=head_sha, review_status=args.status)
+        except ValueError as exc:
+            _fail(f"state file {args.state_file!r}: {exc}", EXIT_FINDINGS_INVALID)
+
     def assert_head_unmoved() -> None:
         live = _acquire(
             args, owner=owner, repo=repo, caller=caller, platform=platform,
@@ -600,6 +630,7 @@ def _post_command(
     body = {
         "review_status": args.status,
         "findings": [{k: f[k] for k in _FINDING_KEYS} for f in _render_for_post(findings)],
+        **state,
     }
     try:
         stage_caller_body(

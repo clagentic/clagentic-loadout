@@ -63,13 +63,12 @@ step, `max_changed_files` feeds `merge.diff_scope.check_diff_scope`'s
 existing `max_changed_files` parameter directly, same as `--max-changed-files`
 does today).
 
-SCOPE NOTE: this module ships the repo-config READ side only (this task's
-scope per lr-0a03c3: "schema + doctor + docs change"). Wiring `merge.verb`'s
-CLI to READ these values as its own flag DEFAULTS (so a bare `loadout-merge`
-invocation with no `--required-reviewer`/`--authorized-role`/
-`--max-changed-files` flags still enforces a repo's declared policy) is a
-follow-up consumption slice, named explicitly rather than silently
-over-built into this schema-and-doctor task.
+SCOPE NOTE: this module ships the repo-config READ side. `merge.verb` now
+consumes `required_reviewer_roles` as a FLOOR beneath `--required-reviewer`
+(required = union of the two), and `required_scanners`, through
+`merge.repo_gate_runtime`, which owns the fallback and escape-hatch policy
+described under BLAST RADIUS below. `authorized_roles` and `merge_requirements`
+are still read only by doctor and by a caller building its own invocation.
 
 ABSENCE SEMANTICS (lr-638945 hardening — read this before relying on either
 key's default): `required_reviewer_roles` and `authorized_roles` sit in the
@@ -99,29 +98,25 @@ because they answer different questions:
     section that reads as "this repo's merges are gated" while actually
     gating only WHO may merge, never WHETHER anyone reviewed it.
 
-BLAST RADIUS OF EVERY RAISE THIS MODULE INTRODUCES (lr-638945, bootstrap
-safety — read this before wiring any new caller): `load_required_reviewer_roles`
-has exactly ONE non-test caller today, `doctor.checks.check_repo_loadout_schema`
-(see SCOPE NOTE above — `merge.verb`/`push.verb` do not import this module at
-all; reviewer roles and merge authority are still purely CLI-flag-driven,
-`--required-reviewer`/`--authorized-role`, for the actual gate chain). Every
-error this module raises — `InvalidMergeGateConfigError` and its
-`RequiredReviewerRolesNotDeclaredError` subclass alike — therefore surfaces
-ONLY as a `loadout-doctor` DIAGNOSTIC (a schema-check FAIL and a non-zero
-`loadout-doctor` exit code), never as a failure of `loadout-push`,
-`loadout-merge`, `loadout-review-post`, or any credential-resolution call.
-This MUST stay true: an unsatisfiable-or-ambiguous gate config must never
-become a reason `loadout-push`/`loadout-merge` themselves refuse to run,
-because that would block the exact operation (push a corrected config, land
-it) needed to fix the config doctor is complaining about — the same
-bricked-repo shape a credential-guard/repo-name refusal produced elsewhere
-(the `.github`-segment incident) before that gate was corrected to admit
-it. Wiring this loader (or `doctor`'s cross-check) into a write/merge path
-in a future slice is an explicit operator decision with bootstrap
-implications, not a mechanical follow-up — see `check_repo_loadout_schema`'s
-own docstring, and `tests/test_doctor_checks.py`'s
-`test_unsatisfiable_gate_is_diagnostic_only_not_a_merge_blocker` for the
-regression lock.
+BLAST RADIUS OF EVERY RAISE THIS MODULE INTRODUCES (bootstrap safety — read
+this before wiring any new caller). A declared-but-unread key reads as
+protection, so `loadout-merge` now enforces `required_reviewer_roles` as a
+floor. That makes a broken gate config capable of blocking the very merge that
+would fix it, so the wiring lives in ONE place, `merge.repo_gate_runtime`, and
+obeys two rules:
+
+  - A config that cannot be loaded (unreadable YAML, a `merge:` section that is
+    not a mapping, a malformed role list, or a `merge:` section that omits
+    `required_reviewer_roles`) falls back to flags-only with a loud stderr
+    warning naming the file and the error. The fix-the-config merge always
+    lands. Every error this module raises is therefore caught there, never
+    propagated out of `loadout-merge` or `loadout-push`.
+  - A config that loads cleanly but cannot be satisfied (a declared role with
+    no resolvable login, or no verdict from it) refuses the merge, with
+    `--ignore-repo-gate` as the deliberate, logged escape hatch.
+
+`push.verb` must still never import this module: pushing a corrected config
+must never depend on it. `tests/test_doctor_checks.py` locks both properties.
 """
 
 from __future__ import annotations
@@ -162,6 +157,11 @@ CONFIG_KEY_REQUIRED_REVIEWER_ROLES = "required_reviewer_roles"
 #: to hold merge authority -- feeds merge.authority.StaticRoleAuthorityProvider
 #: exactly like the CLI's repeated --authorized-role flag does today.
 CONFIG_KEY_AUTHORIZED_ROLES = "authorized_roles"
+
+#: Key within the `merge:` section mapping a reviewer role to the scanner names
+#: a clean verdict from that role must not report as failed. Names are
+#: deployment vocabulary; none is built in.
+CONFIG_KEY_REQUIRED_SCANNERS = "required_scanners"
 
 
 class InvalidMergeGateConfigError(ValueError):
@@ -417,10 +417,55 @@ def load_authorized_roles(
     return _validate_role_list(raw, key=CONFIG_KEY_AUTHORIZED_ROLES, config_path=config_path)
 
 
+def load_required_scanners(
+    repo_root: str | Path | None,
+    *,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+) -> dict[str, tuple[str, ...]]:
+    """Resolve the `merge: required_scanners:` mapping (reviewer role ->
+    scanner names) for a repo.
+
+    Returns `{}` (no scanner is required) when *repo_root* is None, the config
+    file is absent, the `merge:` section is absent, or the key is absent.
+
+    Raises:
+        InvalidMergeGateConfigError: malformed YAML, a non-mapping `merge:`
+            section, `required_scanners` not a mapping of role name to a list
+            of non-empty scanner-name strings.
+    """
+    if repo_root is None:
+        return {}
+    config_path, merge_section = _read_merge_section(
+        repo_root, config_relative_path=config_relative_path
+    )
+    raw = merge_section.get(CONFIG_KEY_REQUIRED_SCANNERS)
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise InvalidMergeGateConfigError(
+            f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_REQUIRED_SCANNERS} must be a "
+            f"mapping of reviewer role to a list of scanner names, got {type(raw).__name__}."
+        )
+    resolved: dict[str, tuple[str, ...]] = {}
+    for role, scanners in raw.items():
+        if not isinstance(role, str) or not role.strip():
+            raise InvalidMergeGateConfigError(
+                f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_REQUIRED_SCANNERS} keys must "
+                f"be non-empty role-name strings, got {role!r}."
+            )
+        resolved[role] = _validate_role_list(
+            scanners,
+            key=f"{CONFIG_KEY_REQUIRED_SCANNERS}.{role}",
+            config_path=config_path,
+        )
+    return resolved
+
+
 __all__ = [
     "CONFIG_KEY_AUTHORIZED_ROLES",
     "CONFIG_KEY_MERGE_REQUIREMENTS",
     "CONFIG_KEY_REQUIRED_REVIEWER_ROLES",
+    "CONFIG_KEY_REQUIRED_SCANNERS",
     "CONFIG_SECTION_MERGE",
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "REQUIREMENT_KEY_CI_PASS",
@@ -431,4 +476,5 @@ __all__ = [
     "load_authorized_roles",
     "load_merge_requirements",
     "load_required_reviewer_roles",
+    "load_required_scanners",
 ]
