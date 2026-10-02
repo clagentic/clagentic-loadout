@@ -1741,6 +1741,18 @@ def _resolve_git_host_base(
     return DEFAULT_GIT_HOST_BASE_URL.rstrip("/")
 
 
+def resolve_git_host_base(
+    explicit: str | None,
+    *,
+    env: dict[str, str] | None = None,
+    config_root: str | None = None,
+) -> str:
+    """Public name for the resolver, for verbs outside this module. It looks
+    the private name up at call time, so a patch of ``_resolve_git_host_base``
+    (which existing call sites and tests apply) also reaches its callers."""
+    return _resolve_git_host_base(explicit, env=env, config_root=config_root)
+
+
 def _absolute_url_host_matches_git_host_base(path_arg: str, git_host_base: str) -> bool:
     """True iff *path_arg* is an absolute http(s) URL whose host:port matches
     *git_host_base*'s own host:port (lr-69af67, closing a gap flagged

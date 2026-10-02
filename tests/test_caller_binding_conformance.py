@@ -418,6 +418,7 @@ _MINIMAL_ARGV_BY_SCRIPT: dict[str, list[str]] = {
     "loadout-push": ["--title", "feat: x", "--body-stdin"],
     "loadout-review-post": ["--platform", "github", "some-owner/some-repo", "1"],
     "loadout-acquire": ["--platform", "github", "some-owner/some-repo", "1"],
+    "loadout-review": ["run", "--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1"],
     "loadout-merge": [
         "--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1",
         "--no-post-merge-tree",

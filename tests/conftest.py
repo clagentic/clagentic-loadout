@@ -286,6 +286,23 @@ def _isolate_real_attestation_chain(monkeypatch, tmp_path):
         monkeypatch.delenv(env_var, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _confine_git_discovery_to_tmp(monkeypatch, tmp_path):
+    """Autouse repo-wide: git's upward repo discovery never leaves the
+    pytest temp tree.
+
+    Tests build bare temp directories and expect "no git repository here".
+    Without a ceiling, `git rev-parse --show-toplevel` walks up through every
+    ancestor, so a host whose filesystem root (or any ancestor of the temp
+    base) is itself a git work tree turns "no git anchor" into a hit and
+    changes the answer of anything that resolves a repo-config root. Pinning
+    the ceiling to tmp_path's parent keeps tmp_path and everything below it
+    discoverable while hiding every ancestor, so the suite's result does not
+    depend on the host's filesystem. A test that needs a different ceiling
+    sets its own, which wins."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.resolve().parent))
+
+
 def pytest_configure(config: "pytest.Config") -> None:
     config.addinivalue_line(
         "markers",
