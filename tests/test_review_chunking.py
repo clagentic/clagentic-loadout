@@ -222,3 +222,62 @@ def test_file_names_survive_odd_headers(header, expected):
 def test_non_positive_bound_is_rejected():
     with pytest.raises(ValueError):
         plan_chunks("diff --git a/x b/x\n", 0)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ('diff --git "a/tab\\there.py" "b/tab\\there.py"', "tab\there.py"),
+        ('diff --git "a/q\\"uote.py" "b/q\\"uote.py"', 'q"uote.py'),
+        ('diff --git "a/caf\\303\\251.py" "b/caf\\303\\251.py"', "café.py"),
+        ('diff --git a/plain.py "b/we\\tird.py"', "we\tird.py"),
+        ('diff --git "a/we\\tird.py" b/plain.py', "plain.py"),
+        ('diff --git "a/back\\\\slash.py" "b/back\\\\slash.py"', "back\\slash.py"),
+    ],
+)
+def test_c_quoted_paths_are_decoded(header, expected):
+    diff = "\n".join([header, "--- a/x", "+++ b/x", "@@ -0,0 +1 @@", "+a"]) + "\n"
+
+    assert plan_chunks(diff, 100)[0].files == (expected,)
+
+
+def test_a_multi_file_diff_without_git_headers_is_split_per_file():
+    diff = "\n".join(
+        [
+            "--- a/one.txt\t2026-01-01",
+            "+++ b/one.txt\t2026-01-02",
+            "@@ -1 +1 @@",
+            "-old one",
+            "+new one",
+            "--- a/two.txt",
+            "+++ b/two.txt",
+            "@@ -1 +1 @@",
+            "-old two",
+            "+new two",
+            "--- a/gone.txt",
+            "+++ /dev/null",
+            "@@ -1 +0,0 @@",
+            "-removed",
+        ]
+    ) + "\n"
+
+    chunks = plan_chunks(diff, 5)
+
+    assert [c.files for c in chunks] == [("one.txt",), ("two.txt",), ("gone.txt",)]
+    # Each file's headers stay with its own hunk, never inside another's body.
+    for chunk in chunks:
+        lines = chunk.text.splitlines()
+        for position, line in enumerate(lines):
+            if line.startswith("+++ "):
+                assert lines[position - 1].startswith("--- ")
+
+
+def test_a_removed_line_that_looks_like_a_header_does_not_split_a_plain_diff():
+    diff = "\n".join(
+        ["--- a/p.txt", "+++ b/p.txt", "@@ -1,2 +1,2 @@", "--- not a header", "+++ nor this", " keep"]
+    ) + "\n"
+
+    chunks = plan_chunks(diff, 100)
+
+    assert len(chunks) == 1
+    assert chunks[0].text == diff

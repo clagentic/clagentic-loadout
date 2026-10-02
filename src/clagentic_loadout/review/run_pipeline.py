@@ -51,6 +51,7 @@ RESULT_BLOCKED = "blocked"
 
 FINDINGS_SCHEMA = "loadout.review-findings/1"
 FINDINGS_FILENAME = "findings.json"
+BINDING_FILENAME = "run-binding.json"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
@@ -82,6 +83,24 @@ def default_run_dir(run_root: Path, owner: str, repo: str, pr_number: int, head_
         raise ValueError(f"head sha must be 40 lowercase hex characters, got {head_sha!r}")
     owner_repo = _SAFE_SEGMENT_RE.sub("_", f"{owner}__{repo}")
     return run_root / owner_repo / f"pr-{pr_number}" / head_sha[:12]
+
+
+def bind_run_dir(run_dir: Path, owner: str, repo: str, pr_number: int, head_sha: str) -> None:
+    """Tie *run_dir* to (repo, pr, head_sha). Chunk state is already keyed on
+    the head, so an old head's chunks are never resumed; this additionally
+    drops a merged findings file left by any other binding, so a caller cannot
+    pick up findings for a head that has since moved. Raises OSError when the
+    directory cannot be written."""
+    binding = {"repo": f"{owner}/{repo}".lower(), "pr_number": pr_number, "head_sha": head_sha}
+    path = run_dir / BINDING_FILENAME
+    try:
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        recorded = None
+    if recorded == binding:
+        return
+    (run_dir / FINDINGS_FILENAME).unlink(missing_ok=True)
+    _write_json(path, binding)
 
 
 def _write_json(path: Path, data: Any) -> None:
@@ -312,7 +331,7 @@ def run_review(
         )
 
     findings = merge_findings(
-        [(index, record.get("findings", [])) for index, record in records.items()]
+        [(index, record.get("findings", [])) for index, record in sorted(records.items())]
     )
     findings_path = run_dir / FINDINGS_FILENAME
     document = {

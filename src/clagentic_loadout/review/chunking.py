@@ -22,7 +22,11 @@ _HUNK_MARKER = "@@"
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 _CONTINUATION_NOTE = " (hunk continued from the previous chunk)"
 _B_PATH_SEPARATOR = " b/"
+_QUOTED_B_SEPARATOR = ' "b/'
 _UNHEADED_NAME = "(diff without file headers)"
+_OCTAL_DIGITS = "01234567"
+_C_ESCAPES = {"a": 7, "b": 8, "f": 12, "n": 10, "r": 13, "t": 9, "v": 11, '"': 34, "\\": 92}
+_DEV_NULL = "/dev/null"
 
 
 @dataclass(frozen=True)
@@ -41,17 +45,73 @@ class _Piece:
     files: tuple[str, ...]
 
 
+def _read_quoted(text: str) -> tuple[str, str]:
+    """Split a leading C-quoted token (``text[0] == '"'``) into its raw inner
+    text and whatever follows the closing quote."""
+    position = 1
+    while position < len(text):
+        if text[position] == "\\":
+            position += 2
+            continue
+        if text[position] == '"':
+            return text[1:position], text[position + 1:]
+        position += 1
+    return text[1:], ""
+
+
+def _unquote_c(inner: str) -> str:
+    """Decode the C-style escapes git uses when it quotes a path: single-char
+    escapes and 1-3 digit octal bytes (a UTF-8 path arrives as octal bytes)."""
+    out = bytearray()
+    position = 0
+    while position < len(inner):
+        char = inner[position]
+        if char != "\\" or position + 1 >= len(inner):
+            out += char.encode("utf-8")
+            position += 1
+            continue
+        following = inner[position + 1]
+        if following in _OCTAL_DIGITS:
+            digits = 1
+            while digits < 3 and position + 1 + digits < len(inner) and (
+                inner[position + 1 + digits] in _OCTAL_DIGITS
+            ):
+                digits += 1
+            out.append(int(inner[position + 1:position + 1 + digits], 8) & 0xFF)
+            position += 1 + digits
+        elif following in _C_ESCAPES:
+            out.append(_C_ESCAPES[following])
+            position += 2
+        else:
+            out += following.encode("utf-8")
+            position += 2
+    return out.decode("utf-8", "replace")
+
+
+def _path_token(token: str) -> str:
+    """A path as written in a diff header: unquoted when C-quoted."""
+    if token.startswith('"'):
+        return _unquote_c(_read_quoted(token)[0])
+    return token.strip()
+
+
 def _file_name(header_line: str) -> str:
     """Best-effort path of a `diff --git a/x b/x` header (the b/ side).
 
     An unrenamed file repeats its path on both sides, so when the two halves
     match exactly that is the answer even if the path itself contains " b/".
-    A rename (differing sides) falls back to the last " b/" separator; a
-    quoted header is split on its quote boundary."""
+    A rename (differing sides) falls back to the last " b/" separator. A
+    header with a C-quoted side (spaces, tabs, quotes, non-ASCII) is split on
+    the quote boundary and the quoted path is decoded."""
     rest = header_line[len(_FILE_MARKER):]
-    quoted_split = '" "b/'
-    if rest.startswith('"') and quoted_split in rest:
-        return rest.rsplit(quoted_split, 1)[1].rstrip('"').strip()
+    b_side: str | None = None
+    if rest.startswith('"'):
+        b_side = _read_quoted(rest)[1].lstrip(" ")
+    elif _QUOTED_B_SEPARATOR in rest:
+        b_side = '"b/' + rest.rsplit(_QUOTED_B_SEPARATOR, 1)[1]
+    if b_side is not None:
+        path = _path_token(b_side)
+        return path[2:] if path.startswith("b/") else path
     path_len = (len(rest) - len("a/") - len(_B_PATH_SEPARATOR)) // 2
     if (
         path_len > 0
@@ -93,10 +153,50 @@ def _split_files(diff_text: str) -> list[tuple[str, list[str]]]:
         sections.append((name, current))
     if not sections and any(line.strip() for line in all_lines):
         # A plain `diff -u` has no `diff --git` headers. Dropping it would
-        # report a clean review of a diff that was never read, so the whole
-        # text is reviewed as one unnamed section instead.
-        sections.append((_UNHEADED_NAME, all_lines))
+        # report a clean review of a diff that was never read.
+        sections.extend(_split_plain_diff(all_lines))
     return sections
+
+
+def _plain_name(old_line: str, new_line: str) -> str:
+    """Path of a plain-diff file from its `--- old` / `+++ new` lines: the new
+    side, or the old side for a deletion. A trailing tab-separated timestamp
+    and an a/ or b/ prefix are dropped."""
+    def clean(line: str) -> str:
+        text = line[4:]
+        token = text if text.startswith('"') else text.split("\t", 1)[0]
+        return _path_token(token)
+
+    new_path = clean(new_line)
+    if new_path == _DEV_NULL:
+        new_path = clean(old_line)
+        prefix = "a/"
+    else:
+        prefix = "b/"
+    return new_path[2:] if new_path.startswith(prefix) else new_path
+
+
+def _split_plain_diff(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """Split a diff with no `diff --git` headers at each `---`/`+++`/`@@`
+    triple, so every file is its own section instead of later files' headers
+    landing inside the first file's hunk body. The three-line check keeps a
+    removed line that merely begins with `-- ` from being taken for a header."""
+    starts = [
+        position
+        for position in range(len(lines) - 2)
+        if lines[position].startswith("--- ")
+        and lines[position + 1].startswith("+++ ")
+        and lines[position + 2].startswith(_HUNK_MARKER)
+    ]
+    if len(starts) < 2:
+        # Zero or one file: nothing to separate, and a lone section keeps the
+        # generic label because its path cannot be told apart from prose.
+        return [(_UNHEADED_NAME, lines)]
+    boundaries = [0] + starts[1:] + [len(lines)]
+    return [
+        (_plain_name(lines[start], lines[start + 1]), lines[begin:end])
+        for start, begin, end in zip(starts, boundaries, boundaries[1:])
+    ]
 
 
 def _split_hunks(lines: list[str]) -> tuple[list[str], list[list[str]]]:

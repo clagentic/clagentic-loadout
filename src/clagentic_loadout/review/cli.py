@@ -52,6 +52,7 @@ from clagentic_loadout.review.profile_config import (
 from clagentic_loadout.review.run_pipeline import (
     EXIT_BLOCKED,
     RESULT_BLOCKED,
+    bind_run_dir,
     default_run_dir,
     run_review,
 )
@@ -93,7 +94,8 @@ EXIT_STALE_HEAD = 31
 #: `post`: the findings file or --status is internally inconsistent.
 EXIT_FINDINGS_INVALID = 32
 
-RUN_ROOT_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT"
+_GIT_PROBE_TIMEOUT_SECONDS = 10
+RUN_ROOT_ENV_VAR ="CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT"
 _STATUSES = ("clean", "blocking")
 _FINDING_KEYS = ("file", "line", "rule_id", "message")
 
@@ -251,8 +253,11 @@ def _origin_url(repo_path: Path) -> str:
             ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
             capture_output=True,
             text=True,
+            timeout=_GIT_PROBE_TIMEOUT_SECONDS,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
+        # A hung probe is treated as "no remote": platform detection then
+        # asks for an explicit --platform instead of blocking forever.
         return ""
     return probe.stdout.strip() if probe.returncode == 0 else ""
 
@@ -368,8 +373,9 @@ def _run_command(
     if head_sha_usable:
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
+            bind_run_dir(run_dir, owner, repo, args.pr, acquired.head_sha)
         except OSError as exc:
-            _fail(f"cannot create the run directory {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
+            _fail(f"cannot prepare the run directory {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
 
     kwargs = {"runner": runner} if runner is not None else {}
     outcome = run_review(acquired, profile, run_dir, emit=_emit_stage, **kwargs)
@@ -390,7 +396,7 @@ def _load_findings(
 ) -> tuple[str, list[dict[str, Any]]]:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         _fail(f"cannot read findings file {path!r}: {exc}", EXIT_FINDINGS_INVALID)
     if isinstance(data, dict):
         head_sha = data.get("head_sha")
@@ -481,16 +487,19 @@ def _post_command(
             EXIT_FINDINGS_INVALID,
         )
 
-    acquired = _acquire(
-        args, owner=owner, repo=repo, caller=caller, platform=platform,
-        token_provider=token_provider, opener=opener,
-    )
-    if acquired.head_sha != head_sha:
-        _fail(
-            f"the findings were produced for head {head_sha} but the PR head is now "
-            f"{acquired.head_sha}; run the review again before posting",
-            EXIT_STALE_HEAD,
+    def assert_head_unmoved() -> None:
+        live = _acquire(
+            args, owner=owner, repo=repo, caller=caller, platform=platform,
+            token_provider=token_provider, opener=opener,
         )
+        if live.head_sha != head_sha:
+            _fail(
+                f"the findings were produced for head {head_sha} but the PR head is now "
+                f"{live.head_sha}; run the review again before posting",
+                EXIT_STALE_HEAD,
+            )
+
+    assert_head_unmoved()
 
     body = {
         "review_status": args.status,
@@ -523,8 +532,17 @@ def _post_command(
     if identity_provider is not None:
         kwargs["identity_provider"] = identity_provider
     captured = io.StringIO()
-    with contextlib.redirect_stdout(captured):
-        code = review_post_verb.main(post_argv, **kwargs)
+    # Re-read the live head as late as possible: Forgejo also pins it with
+    # --pr-sha, but GitHub has no server-side pin, so this narrows the window
+    # in which a push could land between the first read and the post.
+    assert_head_unmoved()
+    try:
+        with contextlib.redirect_stdout(captured):
+            code = review_post_verb.main(post_argv, **kwargs)
+    except SystemExit as exc:
+        # The inner verb may exit directly; map it to a code so the
+        # post_failed report below is still printed.
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     if code != 0:
         print(json.dumps({"result": "post_failed", "review_post_exit_code": code}))
         print(

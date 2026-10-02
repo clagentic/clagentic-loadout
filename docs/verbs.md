@@ -584,7 +584,10 @@ detection, never for the diff.
    hunk boundaries, an oversized hunk on line boundaries, every piece repeats
    its file header, and tiny pieces are merged into a neighbour. Lines are split
    on LF only, so form feeds, lone CRs, and Unicode line separators inside
-   changed content never alter the diff's structure. Each piece of a split hunk
+   changed content never alter the diff's structure. File names in `diff --git`
+   headers are decoded when git C-quotes them (tabs, quotes, octal-escaped
+   non-ASCII). A diff without `diff --git` headers is split at each
+   `---`/`+++`/`@@` file header so every file is its own section. Each piece of a split hunk
    starts with a real `@@ -a,b +c,d @@` header whose offsets and counts are
    recomputed for that piece. An empty diff is blocked (`DIFF_EMPTY`) rather than
    reported clean.
@@ -596,6 +599,10 @@ detection, never for the diff.
    re-prompt. An absent carrier (executable missing, or exit 127) hands that
    chunk to the configured **fallback** — for every chunk, not just the first.
    A present but non-executable file is a carrier failure, not an absent engine.
+   A failure that comes from the local setup (a missing working directory, a
+   file that cannot be executed) is never retried, and exits **20** at once
+   rather than **10**: repeating the call cannot change the outcome. A timeout
+   kills the carrier's whole process group and reaps the direct child.
 4. **Validate.** Each reply must be one JSON array of findings (`file`, `line`
    of 1 or greater, `rule_id`, `severity` of `blocking|nit|praise`, `message`
    of at most 200 characters; a longer message is truncated). Prose is never
@@ -630,7 +637,11 @@ partial stdout, so a stall can be diagnosed. State lives in the run directory,
 under a key derived from the chunk text, carrier and fallback argv, and
 rulebook, so changing any of them never reuses stale chunks.
 
-**Run directory.** `--out` wins. Otherwise it is
+**Run directory.** A run directory is bound to (repo, pr, head sha) by a
+`run-binding.json` marker. Chunk state is keyed on the head, so an explicit
+`--out` that was last used for another head never resumes that head's chunks,
+and the merged `findings.json` left by the other binding is removed before the
+new run starts. `--out` wins. Otherwise it is
 `<run_root>/<owner>__<repo>/pr-<n>/<head sha prefix>`, with `run_root` from
 `CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT`, then the user-level `review.run_root`,
 then `<user config root>/state/review-runs`. It is deliberately not under a
@@ -679,10 +690,11 @@ constructed entirely by the tool. There is no free-form body input. `--findings`
 is the file `run` wrote (or a bare JSON array of findings plus `--head-sha`); the
 agent may edit it to drop findings it judged wrong. `post` refuses before
 posting when the PR head is no longer the head the findings were produced for
-(exit **31**), when `--status clean` contradicts a blocking finding (severity is
+(exit **31**; the live head is read once up front and again immediately before
+the post, on both platforms), when `--status clean` contradicts a blocking finding (severity is
 matched case-insensitively and ignoring surrounding whitespace; a severity
 outside `blocking|nit|praise` is refused), or when the file is for another PR or
-malformed (exit **32**). After the post, the landed comment is read back and its
+malformed or not UTF-8 (exit **32**). After the post, the landed comment is read back and its
 fence re-parsed field for field; the JSON result carries `verified_by_login` and
 `verdict_block_verified`. A failed post exits **30**: the result is reported as
 `posted` only when the read-back returned a comment id and

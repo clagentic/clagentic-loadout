@@ -281,3 +281,106 @@ def test_post_passes_the_verdict_route_flags_to_review_post(env, tmp_path, capsy
     assert "--verdict-findings" in argv
     assert argv[argv.index("--verdict-head-sha") + 1] == HEAD_SHA
     assert "--body-env" in argv
+
+
+def test_a_head_that_moves_between_the_first_read_and_the_post_is_refused(
+    env, tmp_path, capsys, monkeypatch
+):
+    import dataclasses
+
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+    real_acquire = review_cli._acquire
+    reads: list[int] = []
+
+    def moving_acquire(*args, **kwargs):
+        acquired = real_acquire(*args, **kwargs)
+        reads.append(1)
+        # The first read sees the head the findings were made for; a push
+        # lands before the second.
+        return acquired if len(reads) == 1 else dataclasses.replace(acquired, head_sha="c" * 40)
+
+    monkeypatch.setattr(review_cli, "_acquire", moving_acquire)
+
+    code, _ = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
+
+    assert code == review_cli.EXIT_STALE_HEAD
+    assert len(reads) == 2
+    assert env.opener_state["posted_body"] is None
+
+
+def test_a_head_that_moves_before_the_post_is_refused_on_forgejo_too(
+    env, tmp_path, capsys, monkeypatch
+):
+    from clagentic_loadout.acquire.contract import AcquiredPr
+    from tests._review_cli_support import BASE_SHA, identity_provider
+
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+    heads = iter([HEAD_SHA, "c" * 40])
+
+    def moving_acquire(args, **kwargs):
+        return AcquiredPr(
+            owner="some-owner", repo="some-repo", pr_number=42,
+            base_sha=BASE_SHA, head_sha=next(heads), diff_text="",
+        )
+
+    monkeypatch.setattr(review_cli, "_acquire", moving_acquire)
+    monkeypatch.setattr(
+        review_cli.review_post_verb, "main", lambda argv, **kwargs: pytest.fail("posted")
+    )
+
+    code = review_cli.main(
+        ["post", "--caller", "reviewer", "--repo", "some-owner/some-repo", "--pr", "42",
+         "--platform", "forgejo", "--findings", str(findings), "--status", "blocking"],
+        token_provider=env.token_provider,
+        identity_provider=identity_provider(),
+    )
+
+    assert code == review_cli.EXIT_STALE_HEAD
+
+
+def test_a_review_post_path_that_exits_directly_still_reports_post_failed(
+    env, tmp_path, capsys, monkeypatch
+):
+    findings = _write_findings(tmp_path / "f.json", [])
+
+    def exiting_main(argv, **kwargs):
+        print("inner-exit-detail")
+        raise SystemExit(2)
+
+    monkeypatch.setattr(review_cli.review_post_verb, "main", exiting_main)
+
+    code, out, err = env.invoke(
+        "post", "--findings", str(findings), "--status", "clean", capsys=capsys
+    )
+
+    assert code == review_cli.EXIT_POST_FAILED
+    assert json.loads(out.strip().splitlines()[-1]) == {
+        "result": "post_failed",
+        "review_post_exit_code": 2,
+    }
+    assert "inner-exit-detail" in err
+
+
+def test_a_findings_file_that_is_not_utf8_exits_findings_invalid(env, tmp_path, capsys):
+    findings = tmp_path / "f.json"
+    findings.write_bytes(b'{"findings": "\xff\xfe"}')
+
+    code, _ = env.post("--findings", str(findings), "--status", "clean", capsys=capsys)
+
+    assert code == review_cli.EXIT_FINDINGS_INVALID
+    assert env.opener_state["posted_body"] is None
+
+
+def test_a_hung_origin_probe_is_bounded_and_means_no_remote(tmp_path, monkeypatch):
+    import subprocess
+
+    seen: dict = {}
+
+    def hung(argv, **kwargs):
+        seen.update(kwargs)
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(review_cli.subprocess, "run", hung)
+
+    assert review_cli._origin_url(tmp_path) == ""
+    assert seen["timeout"] == review_cli._GIT_PROBE_TIMEOUT_SECONDS

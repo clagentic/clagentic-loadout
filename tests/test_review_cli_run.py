@@ -473,3 +473,62 @@ def test_usage_error_exits_usage_not_the_token_failure_code(env, capsys):
 
     assert code == review_cli.EXIT_USAGE
     assert code != review_cli.EXIT_TOKEN_FETCH_FAILED
+
+
+def test_an_explicit_out_dir_is_bound_to_the_head_and_never_resumes_an_older_head(env, capsys, tmp_path):
+    env.configure()
+    out = tmp_path / "chosen"
+    first_code, _ = env.run("--out", str(out), capsys=capsys)
+    assert first_code == 0
+    assert (out / "findings.json").is_file()
+    set_mode(env.stubs, "carrier", "exit1")
+
+    code, _ = env.run("--out", str(out), capsys=capsys, head_sha="c" * 40)
+
+    # The old head's finished chunk is not reused (the carrier ran again and
+    # failed) and its merged findings no longer sit in the directory.
+    assert code != 0
+    assert not (out / "findings.json").exists()
+    assert len(prompts(env.stubs, "carrier")) > 1
+    binding = json.loads((out / "run-binding.json").read_text(encoding="utf-8"))
+    assert binding["head_sha"] == "c" * 40
+
+
+def test_the_same_head_keeps_its_findings_and_cached_chunks_in_an_explicit_out_dir(env, capsys, tmp_path):
+    env.configure()
+    out = tmp_path / "chosen"
+    env.run("--out", str(out), capsys=capsys)
+
+    code, _ = env.run("--out", str(out), capsys=capsys)
+
+    assert code == 0
+    assert len(prompts(env.stubs, "carrier")) == 1
+
+
+def test_a_local_setup_failure_is_not_retried_and_blocks_at_once(env, capsys, tmp_path):
+    script = tmp_path / "engine"
+    script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    script.chmod(0o644)
+    write_profile_config(env.cfg, carrier=[str(script)], max_attempts=3)
+
+    code, payload = env.run(capsys=capsys)
+
+    # Resume (exit 10) would send the caller around a loop that cannot change.
+    assert code == 20
+    assert payload["reason"] == "CARRIER_FAILED"
+    assert "cannot run" in payload["detail"]
+
+
+def test_findings_order_is_the_same_for_a_resumed_run_and_a_fresh_run(env, capsys, tmp_path):
+    env.diff = make_diff({"a.py": 6, "STALL_ME.py": 6, "c.py": 6})
+    env.configure(carrier_mode="stall_marker", timeout_seconds=3, chunk_lines=14)
+    env.run("--out", str(tmp_path / "resumed"), capsys=capsys)
+    resumed_code, resumed = env.run("--out", str(tmp_path / "resumed"), capsys=capsys)
+    set_mode(env.stubs, "carrier", "array")
+    fresh_code, fresh = env.run("--out", str(tmp_path / "fresh"), capsys=capsys)
+
+    assert (resumed_code, fresh_code) == (0, 0)
+    order = lambda payload: [  # noqa: E731
+        (f["chunk"], f["file"]) for f in _chunk_records(payload)["findings"]
+    ]
+    assert order(resumed) == order(fresh) == [(1, "a.py"), (2, "STALL_ME.py"), (3, "c.py")]

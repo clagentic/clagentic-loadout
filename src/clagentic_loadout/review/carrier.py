@@ -42,6 +42,9 @@ class EngineResult:
     stderr_excerpt: str = ""
     stdout_excerpt: str = ""
     detail: str = ""
+    #: True when the failure comes from the local setup (bad working
+    #: directory, unexecutable file), so repeating the call cannot change it.
+    deterministic: bool = False
 
 
 def excerpt(data: bytes | str | None, limit: int = EXCERPT_LIMIT) -> str:
@@ -96,6 +99,10 @@ def run_in_process_group(
             # A descendant that left the group can still hold a pipe open;
             # report what was captured rather than waiting on it.
             stdout, stderr = drain.stdout, drain.stderr
+            # communicate() gave up before reaping the direct child; without
+            # a wait it would stay a zombie for the life of this process.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=_DRAIN_SECONDS)
         raise subprocess.TimeoutExpired(
             list(argv), timeout, output=stdout, stderr=stderr
         ) from None
@@ -122,6 +129,7 @@ def run_engine(
         return EngineResult(
             kind=KIND_FAILED,
             detail=f"cannot run {argv[0]!r}: working directory {str(cwd)!r} does not exist",
+            deterministic=True,
         )
     try:
         proc = runner(
@@ -147,7 +155,9 @@ def run_engine(
             detail=f"cannot execute {argv[0]!r}: {exc}",
         )
     except OSError as exc:
-        return EngineResult(kind=KIND_FAILED, detail=f"cannot run {argv[0]!r}: {exc}")
+        return EngineResult(
+            kind=KIND_FAILED, detail=f"cannot run {argv[0]!r}: {exc}", deterministic=True
+        )
 
     stderr = excerpt(proc.stderr)
     stdout = excerpt(proc.stdout)
@@ -184,9 +194,10 @@ def run_engine_with_retry(
     cwd: Path,
     runner: Runner = run_in_process_group,
 ) -> EngineResult:
-    """run_engine, repeated once when the first call timed out or failed. An
-    absent engine is never retried: nothing changes between two calls."""
+    """run_engine, repeated once when the first call timed out or exited
+    non-zero. An absent engine or a local-setup failure is never retried:
+    nothing changes between two calls."""
     result = run_engine(argv, prompt, timeout, cwd=cwd, runner=runner)
-    if result.kind in _TRANSIENT_KINDS:
+    if result.kind in _TRANSIENT_KINDS and not result.deterministic:
         result = run_engine(argv, prompt, timeout, cwd=cwd, runner=runner)
     return result

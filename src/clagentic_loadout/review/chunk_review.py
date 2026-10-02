@@ -116,7 +116,9 @@ def _run_one_engine(
         record[f"{engine}_unavailable_stderr_excerpt"] = result.stderr_excerpt
         return None
     if result.kind in (KIND_TIMEOUT, KIND_FAILED):
-        return _failure(record, engine, _transient_reason(result), result, retriable=True)
+        return _failure(
+            record, engine, _transient_reason(result), result, retriable=not result.deterministic
+        )
 
     try:
         findings = parse_chunk_reply(result.text)
@@ -132,7 +134,9 @@ def _run_one_engine(
             record[f"{engine}_unavailable_stderr_excerpt"] = retry.stderr_excerpt
             return None
         if retry.kind in (KIND_TIMEOUT, KIND_FAILED):
-            return _failure(record, engine, _transient_reason(retry), retry, retriable=True)
+            return _failure(
+                record, engine, _transient_reason(retry), retry, retriable=not retry.deterministic
+            )
         try:
             findings = parse_chunk_reply(retry.text)
             reply_result = retry
