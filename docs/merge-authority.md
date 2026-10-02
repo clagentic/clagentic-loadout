@@ -163,14 +163,24 @@ merge:
   role-only — it never carries a login or account name, so this split does
   not create a second identity-bearing key inside the repo-tier section.
 
-As of this writing, reading `merge.authorized_roles` /
-`required_reviewer_roles` into `StaticRoleAuthorityProvider` / the
-reviewer-verdict gate as the CLI's own flag *defaults* is a named follow-up
-(see [docs/provisioning.md](provisioning.md#merge-gate-config-homes));
-today a caller (a dispatch/lead layer) reads the config and passes the
-resolved roles via `--authorized-role` / `--required-reviewer` explicitly.
-The schema and its `loadout-doctor` validation are landed; the CLI-wiring
-slice is not.
+`loadout-merge` enforces `merge.required_reviewer_roles` as a **floor**: the
+roles it requires are the union of that list (read through `--repo-path`) and
+any `--required-reviewer` flags. Declaring the key gates the merge. Two rules
+keep a broken config from blocking the merge that would fix it:
+
+- A gate config that cannot be loaded (unreadable, malformed, or a `merge:`
+  section that omits the key) falls back to flags-only, with a stderr warning
+  naming the file and the error.
+- A config that loads but cannot be satisfied (a declared role with no
+  verdict, or no resolvable login) refuses the merge. `--ignore-repo-gate`
+  is the deliberate escape hatch: it is logged to stderr, printed in the
+  merge output, and recorded in the merge-completion attestation.
+
+**Upgrading.** This is a breaking change for a repo that declared
+`required_reviewer_roles` decoratively. Its merges now need those verdicts.
+Declare `required_reviewer_roles: []` for no reviewer gate. `merge.authorized_roles`
+and `merge.merge_requirements` are still read only by `loadout-doctor` and by a
+caller building its own invocation.
 
 ## 4. The built-in fallback: what it actually grants
 

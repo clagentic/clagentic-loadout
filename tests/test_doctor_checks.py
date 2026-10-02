@@ -1098,9 +1098,20 @@ class TestUnsatisfiableGateIsDiagnosticOnlyNotABootstrapTrap:
     a future refactor wiring this validation into a write/merge path cannot
     silently recreate it."""
 
-    def test_unsatisfiable_gate_is_diagnostic_only_not_a_merge_blocker(self, tmp_path):
+    def test_unsatisfiable_gate_is_a_doctor_fail_and_a_bootstrap_safe_merge_input(self, tmp_path):
         """The exact live-incident config shape (comment #1: security
-        required but not declared in roles:) is a hard doctor FAIL ..."""
+        required but not declared in roles:) is a hard doctor FAIL ...
+
+        Rewritten when loadout-merge began consuming required_reviewer_roles
+        as a floor. The old property (merge never reads this config, so it
+        can never block) no longer holds on purpose: a declared reviewer gate
+        that does not gate reads as protection. What replaces it, and is
+        locked in tests/test_merge_verb_findings_state.py::TestRepoReviewerFloor:
+        a gate config that cannot be loaded falls back to flags-only with a
+        warning and the merge lands; a config that loads but cannot be
+        satisfied refuses, and --ignore-repo-gate is the logged escape hatch.
+        This test keeps the doctor-side half and the loader-level guarantee
+        that the loaders themselves still return values for this config."""
         _write_loadout_config(
             tmp_path,
             "roles:\n"
@@ -1117,16 +1128,11 @@ class TestUnsatisfiableGateIsDiagnosticOnlyNotABootstrapTrap:
         assert doctor_result.ok is False
 
         # ... but the SAME underlying loaders that produced that FAIL must
-        # not raise when called the way a write/merge-path caller would --
-        # today, no such caller exists (merge.verb/push.verb do not import
-        # merge.gate_config at all, confirmed by
-        # test_merge_verb_and_push_verb_never_import_gate_config below), so
-        # this asserts the diagnostic-only property directly at the loader
-        # level: load_required_reviewer_roles/load_authorized_roles/
-        # load_role_verbs (the exact three loaders check_repo_loadout_schema
-        # composes) must each still return a normal value for this same
-        # config, not raise -- the FAIL is check_repo_loadout_schema's own
-        # cross-check finding, layered ON TOP of loaders that keep working.
+        # not raise for this config: load_required_reviewer_roles/
+        # load_authorized_roles/load_role_verbs (the exact three loaders
+        # check_repo_loadout_schema composes) must each still return a
+        # normal value, so the FAIL is check_repo_loadout_schema's own
+        # cross-check finding layered ON TOP of loaders that keep working.
         from clagentic_loadout.merge.gate_config import (
             load_authorized_roles,
             load_required_reviewer_roles,
@@ -1138,13 +1144,14 @@ class TestUnsatisfiableGateIsDiagnosticOnlyNotABootstrapTrap:
         assert "security" not in load_role_verbs(tmp_path)
 
     def test_merge_verb_and_push_verb_never_import_gate_config(self):
-        """Static guarantee: merge.gate_config's required_reviewer_roles/
-        authorized_roles loaders (and therefore any error they raise) are
-        never reachable from merge.verb or push.verb's module -- the two
-        modules that actually push/merge. A future change that imports
-        merge.gate_config into either module is exactly the kind of change
-        this test exists to force a deliberate look at (see gate_config.py's
-        own "BLAST RADIUS" docstring section).
+        """Static guarantee: merge.gate_config's loaders (and therefore any
+        error they raise) are never imported directly by merge.verb or
+        push.verb. push.verb must never reach them at all. merge.verb now
+        consumes them, but ONLY through merge.repo_gate_runtime, which owns
+        the unloadable-config fallback; importing gate_config directly into
+        merge.verb would bypass that and let a broken config block the merge
+        that fixes it (see gate_config.py's own "BLAST RADIUS" docstring
+        section).
 
         lr-3f1851: this is an AST-level source check
         (tests._import_guard.assert_module_never_imports), not a
@@ -1163,6 +1170,13 @@ class TestUnsatisfiableGateIsDiagnosticOnlyNotABootstrapTrap:
 
         for module in (merge_verb_module, push_verb_module):
             assert_module_never_imports(module, "clagentic_loadout.merge.gate_config")
+
+    def test_push_verb_never_imports_the_gate_runtime_either(self):
+        import clagentic_loadout.push.verb as push_verb_module
+
+        assert_module_never_imports(
+            push_verb_module, "clagentic_loadout.merge.repo_gate_runtime"
+        )
 
     def test_qualified_submodule_import_shape_is_still_caught(self, tmp_path):
         """The exact gap lr-3f1851 closes: a synthetic module using the
