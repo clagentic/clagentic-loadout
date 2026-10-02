@@ -1308,10 +1308,29 @@ tool-owned posting path going forward, which narrows this gap to
 already-landed comments and any non-loadout-owned posting path — not
 eliminated, but significantly smaller than before this task.
 
-**Repo-config homes for the gate DECLARATION (schema + doctor
-only — see [docs/provisioning.md](provisioning.md)'s "Merge-gate config
-homes" section):** `--authorized-role`, `--required-reviewer`, and
-`--max-changed-files` above are CLI flags today with no repo-config
+**Findings state in the verdict fence.** A fence may carry optional,
+tool-rendered state (`fence_schema_version` 2): `findings_open` (id, rule_id,
+head), `supersedes` (comment id), `cleared_claims` (id, head, evidence) and
+`scanners_run` (scanner, status of `ran`, `not_applicable`, `not_invoked` or
+`failed`, plus a reason). `review-post` accepts them as JSON fields next to
+`review_status` on `--verdict-findings` and `--verdict-review-status`, and
+`loadout-review post` takes them from `--state-file`; they are validated and
+rendered inside the fence, never as body text, and a fence that lands without
+them fails the readback. A hand-authored fence is refused as it always was.
+At the gate, the reviewer's earlier fences are walked in order: a finding an
+earlier fence held open that the current verdict neither clears at its own
+head (with evidence) nor re-raises refuses the merge and names the finding. A
+clean verdict reporting a `merge.required_scanners` scanner as `failed`
+refuses. A version 1 fence, with no state, asserts nothing and is never an
+error. A verdict at a stale head never authorizes a merge; when the same
+reviewer commented afterwards without posting a verdict, the refusal says so.
+
+**Repo-config homes for the gate DECLARATION (see
+[docs/provisioning.md](provisioning.md)'s "Merge-gate config homes"
+section):** `required_reviewer_roles` is enforced as a floor beneath
+`--required-reviewer` (with `--ignore-repo-gate` as the logged escape hatch;
+see [docs/merge-authority.md](merge-authority.md)). `--authorized-role` and
+`--max-changed-files` above are still CLI flags with no repo-config
 default — a caller (a dispatch/lead layer) re-supplies them on every
 invocation. `merge.pre_checks_config` and `merge.gate_config` now give a
 repo a `.clagentic/loadout/config.yaml` `merge:` section home for that
@@ -1321,9 +1340,8 @@ see "Pre-merge checks" below for the ACTUAL gate-chain wiring).
 `push.identity_config` and `review.login_config` add matching
 deployment-tier homes for the identity half (`builder_identity`,
 `review.reviewer_logins`). Wiring `merge.verb`'s own flag DEFAULTS to
-read `merge_requirements`/`required_reviewer_roles`/`authorized_roles`
-remains a named follow-up — this slice is the schema + `loadout-doctor`
-validation only for those three keys.
+read `merge_requirements`/`authorized_roles` remains a named follow-up —
+those two keys are schema + `loadout-doctor` validation only.
 
 **Pre-merge checks (`merge.pre_checks_config` / `merge.post_merge`):**
 an OPTIONAL, repo-declared `merge: pre_checks:` list (SAME

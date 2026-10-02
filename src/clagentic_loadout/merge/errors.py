@@ -64,6 +64,28 @@ class VerdictStaleError(Exception):
     it."""
 
 
+class VerdictStaleAfterCommentsError(VerdictStaleError):
+    """A reviewer's last fenced verdict is at an older head AND the same
+    reviewer has commented since without posting a new verdict. Same refusal
+    family as VerdictStaleError (a stale verdict never authorizes a merge);
+    a distinct class because the operator action differs: the reviewer spoke
+    but did not re-verdict, rather than never having been re-run."""
+
+
+class VerdictPriorFindingsOpenError(Exception):
+    """A finding an earlier verdict held open at an earlier head has no
+    resolution at the current head: the current verdict neither clears it
+    (with evidence) nor re-raises it. A clean verdict at a later head is not,
+    by itself, evidence that an earlier blocker was examined."""
+
+
+class VerdictScannerFailedError(Exception):
+    """A clean verdict reports a scanner the deployment requires as failed.
+    A scanner that did not apply or was not invoked, with a reason, is
+    legitimate (a judgment-only re-audit); a scanner that failed is not
+    coverage."""
+
+
 class VerdictBlockingError(Exception):
     """Raised when a reviewer's verdict block's review_status is
     'blocking'. The reviewer found an issue that must be resolved before
@@ -162,6 +184,9 @@ __all__ = [
     "VerdictBlockingError",
     "VerdictMalformedError",
     "VerdictMissingError",
+    "VerdictPriorFindingsOpenError",
     "VerdictRoleMismatchError",
+    "VerdictScannerFailedError",
+    "VerdictStaleAfterCommentsError",
     "VerdictStaleError",
 ]
