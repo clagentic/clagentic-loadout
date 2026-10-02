@@ -353,9 +353,10 @@ def _run_command(
         token_provider=token_provider, opener=opener,
     )
 
+    head_sha_usable = FULL_SHA_RE.match(acquired.head_sha) is not None
     if args.out:
         run_dir = Path(args.out)
-    elif FULL_SHA_RE.match(acquired.head_sha):
+    elif head_sha_usable:
         run_dir = default_run_dir(
             _resolve_run_root(run_root, config_root), owner, repo, args.pr, acquired.head_sha
         )
@@ -364,7 +365,7 @@ def _run_command(
         # blocks at the "acquired" stage before it touches the run directory,
         # so the run root stands in as a placeholder that is never written.
         run_dir = _resolve_run_root(run_root, config_root)
-    if FULL_SHA_RE.match(acquired.head_sha):
+    if head_sha_usable:
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -384,7 +385,9 @@ def _run_command(
     return outcome.exit_code
 
 
-def _load_findings(path: str, args: argparse.Namespace) -> tuple[str, list[dict[str, Any]]]:
+def _load_findings(
+    path: str, args: argparse.Namespace, *, owner: str, repo: str
+) -> tuple[str, list[dict[str, Any]]]:
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -393,10 +396,13 @@ def _load_findings(path: str, args: argparse.Namespace) -> tuple[str, list[dict[
         head_sha = data.get("head_sha")
         findings = data.get("findings")
         owner_repo = f"{data.get('owner')}/{data.get('repo')}"
-        if owner_repo.lower() != args.repo.lower() or data.get("pr_number") != args.pr:
+        # Compared against the parsed owner/repo, not the raw argument, so a
+        # padded --repo value that acquire accepted is not rejected here.
+        requested = f"{owner}/{repo}"
+        if owner_repo.lower() != requested.lower() or data.get("pr_number") != args.pr:
             _fail(
                 f"findings file {path!r} is for {owner_repo}#{data.get('pr_number')}, "
-                f"but {args.repo}#{args.pr} was requested",
+                f"but {requested}#{args.pr} was requested",
                 EXIT_FINDINGS_INVALID,
             )
         if args.head_sha is not None and args.head_sha != head_sha:
@@ -467,7 +473,7 @@ def _post_command(
     opener,
     identity_provider,
 ) -> int:
-    head_sha, findings = _load_findings(args.findings, args)
+    head_sha, findings = _load_findings(args.findings, args, owner=owner, repo=repo)
     if args.status == "clean" and any(f["severity"] == "blocking" for f in findings):
         _fail(
             "--status clean contradicts the findings file, which carries a blocking finding; "

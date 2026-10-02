@@ -19,7 +19,6 @@ Policy, in one place:
 
 from __future__ import annotations
 
-import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -32,6 +31,7 @@ from clagentic_loadout.review.carrier import (
     Runner,
     excerpt,
     run_engine_with_retry,
+    run_in_process_group,
 )
 from clagentic_loadout.review.chunking import Chunk
 from clagentic_loadout.review.findings_contract import (
@@ -174,7 +174,7 @@ def review_chunk(
     *,
     attempts_before: int,
     cwd: Path,
-    runner: Runner = subprocess.run,
+    runner: Runner = run_in_process_group,
 ) -> dict[str, Any]:
     """Review *chunk*; returns its persistable record. Never raises for an
     engine problem: every outcome is a record with a status."""

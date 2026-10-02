@@ -59,18 +59,29 @@ def test_run_then_post_is_two_commands_and_lands_a_verified_fence(env, tmp_path,
     assert "```review-result" in posted
     assert f'"head_sha": "{HEAD_SHA}"' in posted
     assert '"reviewer": "reviewer"' in posted
-    # The staged body pair was consumed by the post.
-    assert list((tmp_path / "tmp" / "clagentic-loadout").glob("body.reviewer*")) == []
+    # The staged body pair was consumed by the post. The staging directory
+    # must exist, or the empty glob below would pass without proving anything.
+    staging = tmp_path / "tmp" / "clagentic-loadout"
+    assert staging.is_dir()
+    assert env.opener_state["posted_body"] is not None
+    assert list(staging.glob("body.reviewer*")) == []
 
 
 def test_posted_body_has_no_caller_prose(env, tmp_path, capsys):
-    findings = _write_findings(tmp_path / "f.json", [_NIT])
+    findings = _write_findings(
+        tmp_path / "f.json",
+        [{**_NIT, "summary": "CALLER-PROSE-IN-FINDING"}],
+        body="CALLER-PROSE-IN-DOCUMENT",
+        notes="CALLER-PROSE-IN-NOTES",
+    )
 
     code, _ = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
 
     assert code == 0
     posted = env.opener_state["posted_body"]
     assert posted.splitlines()[0] == "REVIEWER — blocking (1 finding(s))"
+    assert "stub finding" in posted
+    assert "CALLER-PROSE" not in posted
 
 
 def test_stale_head_is_refused_and_nothing_is_posted(env, tmp_path, capsys):
@@ -175,6 +186,19 @@ def test_a_head_sha_that_matches_the_findings_file_is_accepted(env, tmp_path, ca
     )
 
     assert code == 0
+    assert env.opener_state["posted_body"] is not None
+
+
+def test_a_padded_repo_argument_still_matches_the_findings_file(env, tmp_path, capsys):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+
+    code, _ = env.post(
+        "--findings", str(findings), "--status", "blocking", "--repo", " some-owner/some-repo ",
+        capsys=capsys,
+    )
+
+    assert code == 0
+    assert env.opener_state["posted_body"] is not None
 
 
 @pytest.mark.parametrize(

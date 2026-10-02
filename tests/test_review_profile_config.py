@@ -3,6 +3,8 @@ the refusal to let a repo choose which command runs."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 import yaml
 
@@ -14,7 +16,7 @@ from clagentic_loadout.review.profile_config import (
 )
 
 
-def _user(tmp_path, profiles: dict, **section) -> object:
+def _user(tmp_path, profiles: dict, **section) -> Path:
     root = tmp_path / "user"
     root.mkdir()
     (root / "config.yaml").write_text(
@@ -23,7 +25,7 @@ def _user(tmp_path, profiles: dict, **section) -> object:
     return root
 
 
-def _repo(tmp_path, profiles: dict):
+def _repo(tmp_path, profiles: dict) -> Path:
     repo = tmp_path / "repo"
     (repo / ".clagentic" / "loadout").mkdir(parents=True)
     (repo / ".clagentic" / "loadout" / "config.yaml").write_text(
@@ -146,13 +148,16 @@ def test_unbalanced_quote_in_a_string_argv_is_a_profile_error(tmp_path):
         load_review_profile("reviewer", config_root=root)
 
 
+@pytest.mark.parametrize("field", ["max_attempts", "timeout_seconds"])
 @pytest.mark.parametrize("value", [".inf", "-.inf", ".nan"])
-def test_non_finite_numbers_are_a_profile_error_not_a_crash(tmp_path, value):
+def test_non_finite_numbers_are_a_profile_error_not_a_crash(tmp_path, field, value):
+    # One field per case, so a regression in either validator is not masked
+    # by the other.
     root = tmp_path / "user"
     root.mkdir()
     (root / "config.yaml").write_text(
         "review:\n  profiles:\n    reviewer:\n      carrier: [x]\n"
-        f"      max_attempts: {value}\n      timeout_seconds: {value}\n",
+        f"      {field}: {value}\n",
         encoding="utf-8",
     )
 

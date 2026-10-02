@@ -139,7 +139,9 @@ def test_prose_twice_blocks_with_the_reply_excerpt(env, capsys):
 
 
 def test_timeout_once_then_success_completes(env, capsys):
-    env.configure(carrier_mode="timeout_then_array", timeout_seconds=1)
+    # The margin is for the second call, which does not stall: it must not time
+    # out on a loaded runner.
+    env.configure(carrier_mode="timeout_then_array", timeout_seconds=3)
 
     code, payload = env.run(capsys=capsys)
 
@@ -212,7 +214,9 @@ def test_stall_is_persisted_and_resumes_before_blocking(env, capsys):
 
 def test_resume_retries_only_the_stalled_chunk(env, capsys):
     env.diff = make_diff({"a.py": 6, "STALL_ME.py": 6, "c.py": 6})
-    env.configure(carrier_mode="stall_marker", timeout_seconds=0.5, chunk_lines=14)
+    # Non-stalling chunks share this timeout, so it carries a margin for a
+    # loaded runner.
+    env.configure(carrier_mode="stall_marker", timeout_seconds=3, chunk_lines=14)
 
     first_code, first = env.run(capsys=capsys)
     second_code, second = env.run(capsys=capsys)
@@ -324,7 +328,7 @@ def test_model_unavailable_then_engine_appears_completes_on_reinvoke(env, capsys
 
 def test_exit_20_then_reinvoke_gives_a_fresh_budget_and_reuses_ok_chunks(env, capsys):
     env.diff = make_diff({"a.py": 6, "STALL_ME.py": 6})
-    env.configure(carrier_mode="stall_marker", timeout_seconds=0.5, chunk_lines=14, max_attempts=1)
+    env.configure(carrier_mode="stall_marker", timeout_seconds=3, chunk_lines=14, max_attempts=1)
 
     first_code, first = env.run(capsys=capsys)
     second_code, second = env.run(capsys=capsys)
@@ -364,7 +368,11 @@ def test_a_corrupt_persisted_attempt_count_does_not_crash_the_run(env, capsys):
 
     code, _ = env.run(capsys=capsys)
 
+    # An unreadable count is treated as zero prior attempts: the budget
+    # restarts (1 of 3 used) rather than counting as exhausted.
     assert code == 10
+    rewritten = json.loads(record_path.read_text(encoding="utf-8"))
+    assert rewritten["attempts"] == 1
 
 
 def test_chunked_is_reported_once_when_the_state_dir_cannot_be_created(tmp_path):
@@ -431,9 +439,23 @@ def test_a_cached_record_without_an_index_does_not_crash_the_merge(env, capsys):
     del record["index"]
     record_path.write_text(json.dumps(record), encoding="utf-8")
 
-    code, _ = env.run(capsys=capsys)
+    code, payload = env.run(capsys=capsys)
 
     assert code == 0
+    assert {f["chunk"] for f in _chunk_records(payload)["findings"]} == {1}
+
+
+def test_a_diff_without_file_headers_is_reviewed_not_reported_clean(env, capsys):
+    env.diff = "--- a/plain.txt\n+++ b/plain.txt\n@@ -1 +1 @@\n-old\n+new\n"
+    env.configure()
+
+    code, payload = env.run(capsys=capsys)
+
+    assert code == 0
+    sent = prompts(env.stubs, "carrier")
+    assert len(sent) == 1
+    assert "+new" in sent[0]
+    assert payload["finding_count"] == 1
 
 
 def test_public_git_host_base_resolver_follows_a_patch_of_the_private_name(monkeypatch):

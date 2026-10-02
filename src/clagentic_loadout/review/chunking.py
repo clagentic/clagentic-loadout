@@ -22,6 +22,7 @@ _HUNK_MARKER = "@@"
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 _CONTINUATION_NOTE = " (hunk continued from the previous chunk)"
 _B_PATH_SEPARATOR = " b/"
+_UNHEADED_NAME = "(diff without file headers)"
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,8 @@ def _split_files(diff_text: str) -> list[tuple[str, list[str]]]:
     sections: list[tuple[str, list[str]]] = []
     current: list[str] | None = None
     name = ""
-    for line in _diff_lines(diff_text):
+    all_lines = _diff_lines(diff_text)
+    for line in all_lines:
         if line.startswith(_FILE_MARKER):
             if current is not None:
                 sections.append((name, current))
@@ -89,6 +91,11 @@ def _split_files(diff_text: str) -> list[tuple[str, list[str]]]:
         # Lines before the first file header carry no reviewable content.
     if current is not None:
         sections.append((name, current))
+    if not sections and any(line.strip() for line in all_lines):
+        # A plain `diff -u` has no `diff --git` headers. Dropping it would
+        # report a clean review of a diff that was never read, so the whole
+        # text is reviewed as one unnamed section instead.
+        sections.append((_UNHEADED_NAME, all_lines))
     return sections
 
 
@@ -225,7 +232,11 @@ def plan_chunks(diff_text: str, max_lines: int = DEFAULT_CHUNK_LINES) -> list[Ch
     """Split *diff_text* into chunks of at most *max_lines* lines each.
 
     A file whose header alone exceeds the bound is the only way a chunk can
-    exceed it. An empty diff yields no chunks.
+    exceed it, apart from one degenerate case: with a bound so small that a
+    split hunk has room for a single body line, a `\\ No newline` marker is
+    kept with its line, so that piece is one line over. A diff with no
+    content yields no chunks; a diff with content but no `diff --git` headers
+    is reviewed as one unnamed section, never dropped.
     """
     if max_lines < 1:
         raise ValueError(f"max_lines must be >= 1, got {max_lines!r}")

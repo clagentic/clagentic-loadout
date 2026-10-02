@@ -22,7 +22,6 @@ import hashlib
 import json
 import os
 import re
-import subprocess
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -30,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.acquire.contract import AcquiredPr
-from clagentic_loadout.review.carrier import Runner
+from clagentic_loadout.review.carrier import Runner, run_in_process_group
 from clagentic_loadout.review.chunk_review import (
     ENGINE_FALLBACK,
     STATUS_FAILED,
@@ -55,7 +54,7 @@ FINDINGS_FILENAME = "findings.json"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
-PIPELINE_VERSION = "2"
+PIPELINE_VERSION = "3"
 
 REASON_ACQUIRE_INVALID = "ACQUIRE_INVALID"
 REASON_DIFF_EMPTY = "DIFF_EMPTY"
@@ -180,7 +179,7 @@ def run_review(
     run_dir: Path,
     *,
     emit: StageEmitter,
-    runner: Runner = subprocess.run,
+    runner: Runner = run_in_process_group,
 ) -> RunOutcome:
     """Drive one invocation of the review pipeline for *acquired*."""
     stages: list[dict[str, Any]] = []

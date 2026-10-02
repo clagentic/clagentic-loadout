@@ -10,6 +10,9 @@ from the per-chunk record instead of being a bare "timed out".
 
 from __future__ import annotations
 
+import contextlib
+import os
+import signal
 import subprocess
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -17,6 +20,8 @@ from pathlib import Path
 
 EXIT_COMMAND_NOT_FOUND = 127
 EXCERPT_LIMIT = 2000
+#: How long to wait for pipes to close after the process group is killed.
+_DRAIN_SECONDS = 5
 
 KIND_OK = "ok"
 KIND_UNAVAILABLE = "unavailable"
@@ -49,13 +54,65 @@ def excerpt(data: bytes | str | None, limit: int = EXCERPT_LIMIT) -> str:
     return text
 
 
+def _kill_group(proc: "subprocess.Popen[bytes]") -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        # The group is already gone, or was never ours to signal; fall back
+        # to the direct child so a timeout never leaves it running.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+
+
+def run_in_process_group(
+    argv: Sequence[str],
+    *,
+    input: bytes,
+    capture_output: bool,
+    timeout: float,
+    cwd: str,
+) -> "subprocess.CompletedProcess[bytes]":
+    """subprocess.run semantics, except the child leads its own process group
+    and a timeout kills the whole group. subprocess.run kills only the direct
+    child and then waits for pipe EOF, so a carrier whose grandchildren inherit
+    stdout would hang past the timeout."""
+    if not capture_output:
+        raise ValueError("run_in_process_group always captures output")
+    proc = subprocess.Popen(
+        list(argv),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        cwd=cwd,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(input=input, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired as drain:
+            # A descendant that left the group can still hold a pipe open;
+            # report what was captured rather than waiting on it.
+            stdout, stderr = drain.stdout, drain.stderr
+        raise subprocess.TimeoutExpired(
+            list(argv), timeout, output=stdout, stderr=stderr
+        ) from None
+    except BaseException:
+        _kill_group(proc)
+        proc.wait()
+        raise
+    return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
+
+
 def run_engine(
     argv: Sequence[str],
     prompt: str,
     timeout: float,
     *,
     cwd: Path,
-    runner: Runner = subprocess.run,
+    runner: Runner = run_in_process_group,
 ) -> EngineResult:
     """Execute *argv* once with *prompt* on stdin."""
     # subprocess raises FileNotFoundError for a missing cwd exactly as it does
@@ -125,7 +182,7 @@ def run_engine_with_retry(
     timeout: float,
     *,
     cwd: Path,
-    runner: Runner = subprocess.run,
+    runner: Runner = run_in_process_group,
 ) -> EngineResult:
     """run_engine, repeated once when the first call timed out or failed. An
     absent engine is never retried: nothing changes between two calls."""

@@ -146,6 +146,50 @@ def test_a_marker_is_carried_along_when_a_piece_holds_one_line():
     assert "+l1\n\\ No newline at end of file\n" in joined
 
 
+def test_a_diff_without_git_headers_becomes_one_unnamed_chunk():
+    diff = "--- a/p.txt\n+++ b/p.txt\n@@ -1 +1 @@\n-old\n+new\n"
+
+    chunks = plan_chunks(diff, 100)
+
+    assert len(chunks) == 1
+    assert chunks[0].text == diff
+    assert chunks[0].files == ("(diff without file headers)",)
+
+
+def test_a_large_diff_without_git_headers_is_split_and_loses_no_line():
+    body = [f"+added {i}" for i in range(30)]
+    diff = "\n".join(["--- a/p.txt", "+++ b/p.txt", "@@ -0,0 +1,30 @@"] + body) + "\n"
+
+    chunks = plan_chunks(diff, 10)
+
+    assert len(chunks) > 1
+    joined = "\n".join(c.text for c in chunks)
+    assert all(f"+added {i}\n" in joined + "\n" for i in range(30))
+
+
+@pytest.mark.parametrize("blank", ["\n", "\n\n", "  \n"])
+def test_a_whitespace_only_diff_yields_no_chunks(blank):
+    assert plan_chunks(blank, 100) == []
+
+
+def test_a_tiny_bound_keeps_the_marker_with_its_line_even_one_line_over():
+    body = ["+l1", "\\ No newline at end of file", "+l2"]
+    diff = "\n".join(
+        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -0,0 +1,2 @@"] + body
+    ) + "\n"
+
+    chunks = plan_chunks(diff, 5)
+
+    # The 3-line file header leaves a 2-line budget: one hunk header plus one
+    # body line. The piece carrying the marker needs a second body line, so
+    # it is the documented single line over the bound, never more.
+    assert max(c.lines for c in chunks) == 5 + 1
+    for chunk in chunks:
+        lines = chunk.text.splitlines()
+        marker_at = [i for i, ln in enumerate(lines) if ln.startswith("\\")]
+        assert all(lines[i - 1].startswith("+") for i in marker_at)
+
+
 def test_malformed_hunk_header_is_kept_not_replaced_with_invented_offsets():
     diff = make_diff({"big.py": 20}).replace("@@ -0,0 +1,20 @@", "@@ garbage @@")
 
