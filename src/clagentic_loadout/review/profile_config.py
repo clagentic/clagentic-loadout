@@ -236,9 +236,22 @@ def load_review_profile(
                 )
 
     merged = dict(user_entry)
+    # The rulebook's SOURCE decides how its path is read, not whether a repo
+    # root happened to resolve: a repo-sourced path is never a host path.
+    rulebook_from_repo = False
     for key in _REPO_OVERRIDABLE_KEYS:
-        if key in repo_entry:
-            merged[key] = _bound_repo_value(key, repo_entry[key], name)
+        if key not in repo_entry:
+            continue
+        if key == "rulebook":
+            if repo_entry[key] is None:
+                print(
+                    f"clagentic-loadout: ignoring review.profiles.{name}.rulebook=null in the "
+                    f"repo-level config: it cannot remove the user-level rulebook.",
+                    file=sys.stderr,
+                )
+                continue
+            rulebook_from_repo = True
+        merged[key] = _bound_repo_value(key, repo_entry[key], name)
 
     if "carrier" not in merged:
         raise ReviewProfileError(f"review profile {name!r}: 'carrier' is required")
@@ -250,7 +263,12 @@ def load_review_profile(
     if rulebook is not None:
         if not isinstance(rulebook, str) or not rulebook.strip():
             raise ReviewProfileError(f"review profile {name!r}: 'rulebook' must be a path string")
-        if "rulebook" in repo_entry and repo_base is not None:
+        if rulebook_from_repo:
+            if repo_base is None:
+                raise ReviewProfileError(
+                    f"review profile {name!r}: repo-level rulebook {rulebook!r} cannot be "
+                    f"read because no repository root was resolved to confine it to"
+                )
             resolved = (repo_base / rulebook).resolve()
             if not resolved.is_relative_to(repo_base.resolve()):
                 raise ReviewProfileError(

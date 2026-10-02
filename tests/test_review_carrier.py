@@ -29,3 +29,10 @@ def test_exit_127_is_unavailable(tmp_path):
     result = run_engine([sys.executable, "-c", "raise SystemExit(127)"], "p", 5, cwd=tmp_path)
 
     assert result.kind == KIND_UNAVAILABLE
+
+
+def test_missing_working_directory_is_a_failure_not_an_absent_engine(tmp_path):
+    result = run_engine([sys.executable, "-c", "pass"], "p", 5, cwd=tmp_path / "gone")
+
+    assert result.kind == KIND_FAILED
+    assert "working directory" in result.detail

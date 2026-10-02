@@ -116,6 +116,65 @@ def test_continued_hunk_pieces_carry_real_headers_with_recomputed_offsets():
         assert int(declared[2].split(",")[1]) == new
 
 
+def test_a_split_never_orphans_a_no_newline_marker():
+    body = ["+l1", "+l2", "+l3", "+l4", "\\ No newline at end of file", "+l5"]
+    diff = "\n".join(
+        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -0,0 +1,5 @@"] + body
+    ) + "\n"
+
+    chunks = plan_chunks(diff, 8)
+
+    assert len(chunks) > 1
+    assert all(c.lines <= 8 for c in chunks)
+    for chunk in chunks:
+        lines = chunk.text.splitlines()
+        after_header = lines[lines.index(next(ln for ln in lines if ln.startswith("@@"))) + 1]
+        assert not after_header.startswith("\\")
+    joined = "\n".join(c.text for c in chunks)
+    assert "+l4\n\\ No newline at end of file\n" in joined
+
+
+def test_a_marker_is_carried_along_when_a_piece_holds_one_line():
+    body = ["+l1", "\\ No newline at end of file", "+l2"]
+    diff = "\n".join(
+        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -0,0 +1,2 @@"] + body
+    ) + "\n"
+
+    chunks = plan_chunks(diff, 5)
+
+    joined = "\n".join(c.text for c in chunks)
+    assert "+l1\n\\ No newline at end of file\n" in joined
+
+
+def test_malformed_hunk_header_is_kept_not_replaced_with_invented_offsets():
+    diff = make_diff({"big.py": 20}).replace("@@ -0,0 +1,20 @@", "@@ garbage @@")
+
+    chunks = plan_chunks(diff, 10)
+
+    headers = [
+        line for chunk in chunks for line in chunk.text.splitlines() if line.startswith("@@")
+    ]
+    assert len(headers) > 1
+    assert headers[0] == "@@ garbage @@"
+    assert all(h.startswith("@@ garbage @@") for h in headers)
+    assert not any(h.startswith("@@ -") for h in headers)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("diff --git a/dir b/file.py b/dir b/file.py", "dir b/file.py"),
+        ('diff --git "a/sp ace.py" "b/sp ace.py"', "sp ace.py"),
+        ("diff --git a/old.py b/new.py", "new.py"),
+        ("diff --git a/plain.py b/plain.py", "plain.py"),
+    ],
+)
+def test_file_names_survive_odd_headers(header, expected):
+    diff = "\n".join([header, "--- a/x", "+++ b/x", "@@ -0,0 +1 @@", "+a"]) + "\n"
+
+    assert plan_chunks(diff, 100)[0].files == (expected,)
+
+
 def test_non_positive_bound_is_rejected():
     with pytest.raises(ValueError):
         plan_chunks("diff --git a/x b/x\n", 0)

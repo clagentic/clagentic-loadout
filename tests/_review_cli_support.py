@@ -43,6 +43,11 @@ STUB_SCRIPT = textwrap.dedent(
         print("[]")
     elif mode == "prose_then_array":
         print("Looks fine to me, nothing to add." if count == 0 else array)
+    elif mode == "prose_then_exit127":
+        if count == 0:
+            print("Looks fine to me, nothing to add.")
+        else:
+            sys.exit(127)
     elif mode == "prose":
         print("I reviewed the change and it seems fine.")
     elif mode == "exit127":
@@ -151,7 +156,9 @@ class Env:
             fallback = write_stub(self.stubs, "fallback", fallback_mode)
         write_profile_config(self.cfg, carrier=carrier, fallback=fallback, **extra)
 
-    def _invoke(self, command: str, extra, **opener_kwargs) -> int:
+    def main(self, command: str, *extra: str, identity=None, **opener_kwargs) -> int:
+        """One verb invocation against this deployment; returns the exit code.
+        `identity` overrides the attested subject; the rest shape the fake host."""
         from clagentic_loadout.review import cli as review_cli
 
         return review_cli.main(
@@ -161,22 +168,28 @@ class Env:
             ],
             token_provider=self.token_provider,
             opener=github_opener(diff=self.diff, state=self.opener_state, **opener_kwargs),
-            identity_provider=identity_provider(),
+            identity_provider=identity_provider(identity or "reviewer"),
             config_root=self.cfg,
             run_root=self.runs,
         )
 
-    def run(self, *extra: str, capsys, **opener_kwargs) -> tuple[int, dict]:
+    def invoke(self, command: str, *extra: str, capsys, **kwargs) -> tuple[int, str, str]:
+        """Run a verb and return (exit code, stdout, stderr) of that call only."""
         capsys.readouterr()
-        code = self._invoke("run", extra, **opener_kwargs)
-        out = capsys.readouterr().out.strip()
+        code = self.main(command, *extra, **kwargs)
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def _result(self, command: str, extra, capsys, **kwargs) -> tuple[int, dict]:
+        code, out, _ = self.invoke(command, *extra, capsys=capsys, **kwargs)
+        out = out.strip()
         return code, json.loads(out.splitlines()[-1]) if out else {}
 
-    def post(self, *extra: str, capsys, **opener_kwargs) -> tuple[int, dict]:
-        capsys.readouterr()
-        code = self._invoke("post", extra, **opener_kwargs)
-        out = capsys.readouterr().out.strip()
-        return code, json.loads(out.splitlines()[-1]) if out else {}
+    def run(self, *extra: str, capsys, **kwargs) -> tuple[int, dict]:
+        return self._result("run", extra, capsys, **kwargs)
+
+    def post(self, *extra: str, capsys, **kwargs) -> tuple[int, dict]:
+        return self._result("post", extra, capsys, **kwargs)
 
 
 class RecordingTokenProvider:

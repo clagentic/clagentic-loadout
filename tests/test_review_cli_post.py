@@ -142,6 +142,7 @@ def test_unknown_severity_is_refused(env, tmp_path, capsys, bad):
     code, _ = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
 
     assert code == review_cli.EXIT_FINDINGS_INVALID
+    assert env.opener_state["posted_body"] is None
 
 
 def test_non_positive_line_is_refused(env, tmp_path, capsys):
@@ -150,6 +151,57 @@ def test_non_positive_line_is_refused(env, tmp_path, capsys):
     code, _ = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
 
     assert code == review_cli.EXIT_FINDINGS_INVALID
+    assert env.opener_state["posted_body"] is None
+
+
+def test_a_head_sha_that_conflicts_with_the_findings_file_is_refused(env, tmp_path, capsys):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+
+    code, _ = env.post(
+        "--findings", str(findings), "--status", "blocking", "--head-sha", "c" * 40,
+        capsys=capsys,
+    )
+
+    assert code == review_cli.EXIT_FINDINGS_INVALID
+    assert env.opener_state["posted_body"] is None
+
+
+def test_a_head_sha_that_matches_the_findings_file_is_accepted(env, tmp_path, capsys):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+
+    code, _ = env.post(
+        "--findings", str(findings), "--status", "blocking", "--head-sha", HEAD_SHA,
+        capsys=capsys,
+    )
+
+    assert code == 0
+
+
+@pytest.mark.parametrize(
+    "inner",
+    [
+        {"verified_id": 1, "verdict_block_verified": False},
+        {"verified_id": 1},
+        {"verified_id": None, "verdict_block_verified": True},
+        {"verdict_block_verified": True},
+        {"verified_id": 1, "verdict_block_verified": "yes"},
+    ],
+)
+def test_an_unverified_landing_is_post_failed_not_posted(
+    env, tmp_path, capsys, monkeypatch, inner
+):
+    findings = _write_findings(tmp_path / "f.json", [])
+
+    def fake_main(argv, **kwargs):
+        print(json.dumps(inner))
+        return 0
+
+    monkeypatch.setattr(review_cli.review_post_verb, "main", fake_main)
+
+    code, payload = env.post("--findings", str(findings), "--status", "clean", capsys=capsys)
+
+    assert code == review_cli.EXIT_POST_FAILED
+    assert payload["result"] == "post_failed"
 
 
 def test_unparseable_review_post_output_is_post_failed_not_posted(
@@ -177,13 +229,14 @@ def test_failed_review_post_keeps_its_stdout_for_diagnosis(env, tmp_path, capsys
         return 9
 
     monkeypatch.setattr(review_cli.review_post_verb, "main", fake_main)
-    capsys.readouterr()
-    code = env._invoke("post", ["--findings", str(findings), "--status", "clean"])
-    captured = capsys.readouterr()
+
+    code, out, err = env.invoke(
+        "post", "--findings", str(findings), "--status", "clean", capsys=capsys
+    )
 
     assert code == review_cli.EXIT_POST_FAILED
-    assert "inner-failure-detail" in captured.err
-    assert "inner-failure-detail" not in captured.out
+    assert "inner-failure-detail" in err
+    assert "inner-failure-detail" not in out
 
 
 def test_post_passes_the_verdict_route_flags_to_review_post(env, tmp_path, capsys, monkeypatch):

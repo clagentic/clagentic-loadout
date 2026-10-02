@@ -6,6 +6,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
+from clagentic_loadout.review import profile_config
 from clagentic_loadout.review.profile_config import (
     ReviewProfileError,
     load_review_profile,
@@ -192,6 +193,47 @@ def test_repo_level_rulebook_symlink_escape_is_refused(tmp_path):
 
     with pytest.raises(ReviewProfileError, match="outside the repository"):
         load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+
+@pytest.mark.parametrize("rulebook", ["ABSOLUTE", "~/some-host-file.md"])
+def test_repo_level_rulebook_with_no_resolved_repo_root_fails_closed(
+    tmp_path, monkeypatch, rulebook
+):
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"]}})
+    host_file = tmp_path / "host-secret.md"
+    host_file.write_text("secret", encoding="utf-8")
+    repo = _repo(
+        tmp_path,
+        {"reviewer": {"rulebook": str(host_file) if rulebook == "ABSOLUTE" else rulebook}},
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(profile_config, "resolve_repo_config_root", lambda *a, **k: None)
+
+    with pytest.raises(ReviewProfileError, match="no repository root"):
+        load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+
+def test_user_level_rulebook_may_be_any_host_path_even_with_a_repo_config(tmp_path):
+    host_file = tmp_path / "host-rules.md"
+    host_file.write_text("host rules", encoding="utf-8")
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"], "rulebook": str(host_file)}})
+    repo = _repo(tmp_path, {"reviewer": {"chunk_lines": 100}})
+
+    profile = load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+    assert profile.rulebook_text == "host rules"
+
+
+def test_repo_level_null_rulebook_does_not_drop_the_user_rulebook(tmp_path, capsys):
+    host_file = tmp_path / "host-rules.md"
+    host_file.write_text("host rules", encoding="utf-8")
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"], "rulebook": str(host_file)}})
+    repo = _repo(tmp_path, {"reviewer": {"rulebook": None}})
+
+    profile = load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+    assert profile.rulebook_text == "host rules"
+    assert "rulebook=null" in capsys.readouterr().err
 
 
 def test_run_root_override(tmp_path):

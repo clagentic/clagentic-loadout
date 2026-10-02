@@ -58,6 +58,14 @@ def run_engine(
     runner: Runner = subprocess.run,
 ) -> EngineResult:
     """Execute *argv* once with *prompt* on stdin."""
+    # subprocess raises FileNotFoundError for a missing cwd exactly as it does
+    # for a missing executable; checking first keeps a bad run directory from
+    # being reported as an absent engine and handed to the fallback.
+    if not cwd.is_dir():
+        return EngineResult(
+            kind=KIND_FAILED,
+            detail=f"cannot run {argv[0]!r}: working directory {str(cwd)!r} does not exist",
+        )
     try:
         proc = runner(
             list(argv),

@@ -16,8 +16,6 @@ from clagentic_loadout.transport import provider_config
 from tests._review_cli_support import (
     HEAD_SHA,
     Env,
-    github_opener,
-    identity_provider,
     make_diff,
     prompts,
     set_mode,
@@ -79,16 +77,26 @@ def test_stale_local_checkout_does_not_change_the_reviewed_diff(env, capsys, mon
     assert all(method == "GET" for method, _ in env.opener_state["requests"])
 
 
-def test_nothing_is_written_outside_the_run_dir(env, capsys):
+def _snapshot(root: Path, *, skip: tuple[Path, ...]) -> list[str]:
+    """Every path under *root* (recursively) except under the *skip* trees."""
+    return sorted(
+        str(path.relative_to(root))
+        for path in root.rglob("*")
+        if not any(path == s or s in path.parents for s in skip)
+    )
+
+
+def test_nothing_is_written_outside_the_run_dir(env, capsys, tmp_path):
     env.configure()
-    before_repo = sorted(p.name for p in env.repo.iterdir())
-    before_cfg = sorted(p.name for p in env.cfg.iterdir())
+    # The stub engines log their own prompts under stubs/; that is the test
+    # fixture writing, not the verb.
+    skip = (env.runs, env.stubs)
+    before = _snapshot(tmp_path, skip=skip)
 
     code, payload = env.run(capsys=capsys)
 
     assert code == 0
-    assert sorted(p.name for p in env.repo.iterdir()) == before_repo
-    assert sorted(p.name for p in env.cfg.iterdir()) == before_cfg
+    assert _snapshot(tmp_path, skip=skip) == before
     run_dir = Path(payload["run_dir"])
     assert run_dir == env.runs / "some-owner__some-repo" / "pr-42" / HEAD_SHA[:12]
     assert run_dir.is_dir()
@@ -126,7 +134,7 @@ def test_prose_twice_blocks_with_the_reply_excerpt(env, capsys):
     assert code == 20
     assert payload["result"] == "blocked"
     assert payload["stage"] == "chunk-1"
-    assert payload["reason"] == "FALLBACK_OUTPUT_INVALID"
+    assert payload["reason"] == "OUTPUT_INVALID"
     assert "seems fine" in payload["reply_excerpt"]
 
 
@@ -151,6 +159,29 @@ def test_absent_carrier_runs_the_fallback_for_every_chunk(env, capsys):
     assert [chunk["engine"] for chunk in document["chunks"]] == ["fallback"] * 3
     assert len(prompts(env.stubs, "fallback")) == 3
     assert len(prompts(env.stubs, "carrier")) == 3
+
+
+def test_carrier_going_absent_on_the_format_reprompt_still_uses_the_fallback(env, capsys):
+    env.configure(carrier_mode="prose_then_exit127", fallback_mode="array")
+
+    code, payload = env.run(capsys=capsys)
+
+    assert code == 0
+    document = _chunk_records(payload)
+    assert [chunk["engine"] for chunk in document["chunks"]] == ["fallback"]
+    assert len(prompts(env.stubs, "carrier")) == 2
+    assert len(prompts(env.stubs, "fallback")) == 1
+
+
+def test_carrier_going_absent_on_the_format_reprompt_without_a_fallback_is_unavailable(
+    env, capsys
+):
+    env.configure(carrier_mode="prose_then_exit127")
+
+    code, payload = env.run(capsys=capsys)
+
+    assert code == 20
+    assert payload["reason"] == "MODEL_UNAVAILABLE"
 
 
 def test_missing_executable_without_a_fallback_is_model_unavailable(env, capsys):
@@ -225,17 +256,8 @@ def test_empty_diff_is_blocked_not_clean(env, capsys):
 
 def test_unreadable_head_sha_from_the_api_is_blocked_at_acquired(env, capsys):
     env.configure()
-    capsys.readouterr()
-    code = review_cli.main(
-        ["run", "--caller", "reviewer", "--repo", "some-owner/some-repo", "--pr", "42",
-         "--platform", "github", "--repo-path", str(env.repo)],
-        token_provider=env.token_provider,
-        opener=github_opener(diff=env.diff, head_sha="abc123"),
-        identity_provider=identity_provider(),
-        config_root=env.cfg,
-        run_root=env.runs,
-    )
-    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    code, payload = env.run(capsys=capsys, head_sha="abc123")
 
     assert code == 20
     assert payload["stage"] == "acquired"
@@ -253,15 +275,7 @@ def test_missing_profile_exits_profile_invalid_before_any_mint(env, capsys):
 
 def test_mismatched_attested_identity_is_refused_before_any_mint(env, capsys):
     env.configure()
-    code = review_cli.main(
-        ["run", "--caller", "reviewer", "--repo", "some-owner/some-repo", "--pr", "42",
-         "--platform", "github"],
-        token_provider=env.token_provider,
-        opener=github_opener(diff=env.diff),
-        identity_provider=identity_provider("someone-else"),
-        config_root=env.cfg,
-        run_root=env.runs,
-    )
+    code = env.main("run", identity="someone-else")
 
     assert code == review_cli.EXIT_CALLER_INVOKER_MISMATCH
     assert env.token_provider.resolved_for == []
@@ -269,23 +283,16 @@ def test_mismatched_attested_identity_is_refused_before_any_mint(env, capsys):
 
 def test_stage_status_changes_are_machine_readable_on_stderr(env, capsys):
     env.configure()
-    env.run(capsys=capsys)
-    # env.run drains capsys; re-run to read stderr from a fresh invocation.
-    set_mode(env.stubs, "carrier", "array")
-    review_cli.main(
-        ["run", "--caller", "reviewer", "--repo", "some-owner/some-repo", "--pr", "42",
-         "--platform", "github", "--repo-path", str(env.repo)],
-        token_provider=env.token_provider,
-        opener=github_opener(diff=env.diff),
-        identity_provider=identity_provider(),
-        config_root=env.cfg,
-        run_root=env.runs,
-    )
-    err = capsys.readouterr().err
-    assert "loadout-review: stage=acquired status=ok" in err
-    assert "loadout-review: stage=chunked status=ok chunk_count=1" in err
-    assert "loadout-review: stage=chunk-1 status=ok resumed=yes" in err
-    assert "loadout-review: stage=merged status=ok" in err
+
+    _, _, fresh_err = env.invoke("run", capsys=capsys)
+    _, _, resumed_err = env.invoke("run", capsys=capsys)
+
+    assert "loadout-review: stage=acquired status=ok" in fresh_err
+    assert "loadout-review: stage=chunked status=ok chunk_count=1" in fresh_err
+    assert "loadout-review: stage=chunk-1 status=ok nonce=" in fresh_err
+    assert "resumed=yes" not in fresh_err
+    assert "loadout-review: stage=merged status=ok" in fresh_err
+    assert "loadout-review: stage=chunk-1 status=ok resumed=yes" in resumed_err
 
 
 def test_a_terminal_failure_is_not_sticky_and_is_retried_on_reinvoke(env, capsys):
@@ -296,7 +303,7 @@ def test_a_terminal_failure_is_not_sticky_and_is_retried_on_reinvoke(env, capsys
     second_code, second = env.run(capsys=capsys)
 
     assert (first_code, second_code) == (20, 20)
-    assert second["reason"] == "FALLBACK_OUTPUT_INVALID"
+    assert second["reason"] == "OUTPUT_INVALID"
     assert len(prompts(env.stubs, "carrier")) > sent_after_first
     assert "state_dir" not in second
     assert not list(Path(first["run_dir"]).glob("state-*/result-*.json"))
@@ -382,6 +389,61 @@ def test_chunked_is_reported_once_when_the_state_dir_cannot_be_created(tmp_path)
     assert outcome.exit_code == 20
     chunked = [s["status"] for s in outcome.stages if s["stage"] == "chunked"]
     assert chunked == ["failed"]
+
+
+@pytest.mark.parametrize("bad_sha", ["../..", "abc123", "B" * 40])
+def test_default_run_dir_refuses_a_head_sha_that_is_not_40_lowercase_hex(tmp_path, bad_sha):
+    from clagentic_loadout.review.run_pipeline import default_run_dir
+
+    with pytest.raises(ValueError, match="40 lowercase hex"):
+        default_run_dir(tmp_path, "some-owner", "some-repo", 42, bad_sha)
+
+
+def test_a_traversal_head_sha_from_the_api_creates_nothing_under_the_run_root(env, capsys):
+    env.configure()
+
+    code, payload = env.run(capsys=capsys, head_sha="../../escape")
+
+    assert code == 20
+    assert payload["reason"] == "ACQUIRE_INVALID"
+    assert not env.runs.exists()
+    assert not (env.runs.parent / "escape").exists()
+
+
+def test_a_failed_state_write_leaves_no_temp_file_behind(tmp_path):
+    from clagentic_loadout.review.run_pipeline import _write_json
+
+    target = tmp_path / "result.json"
+    target.mkdir()  # os.replace onto a directory fails after the temp file exists
+
+    with pytest.raises(OSError):
+        _write_json(target, {"k": "v"})
+
+    assert [p.name for p in tmp_path.iterdir()] == ["result.json"]
+
+
+def test_a_cached_record_without_an_index_does_not_crash_the_merge(env, capsys):
+    env.configure()
+    first_code, first = env.run(capsys=capsys)
+    assert first_code == 0
+    record_path = next(Path(first["run_dir"]).glob("state-*/result-0001.json"))
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    del record["index"]
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+
+    code, _ = env.run(capsys=capsys)
+
+    assert code == 0
+
+
+def test_public_git_host_base_resolver_follows_a_patch_of_the_private_name(monkeypatch):
+    from clagentic_loadout.transport import git_host_api
+
+    monkeypatch.setattr(
+        git_host_api, "_resolve_git_host_base", lambda explicit, **kwargs: "http://patched.example"
+    )
+
+    assert git_host_api.resolve_git_host_base(None) == "http://patched.example"
 
 
 def test_usage_error_exits_usage_not_the_token_failure_code(env, capsys):

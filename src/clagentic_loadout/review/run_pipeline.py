@@ -75,15 +75,25 @@ class RunOutcome:
 
 
 def default_run_dir(run_root: Path, owner: str, repo: str, pr_number: int, head_sha: str) -> Path:
-    """Stable run directory for (repo, pr, head_sha) under *run_root*."""
+    """Stable run directory for (repo, pr, head_sha) under *run_root*.
+
+    Raises ValueError for a head_sha that is not 40 lowercase hex characters:
+    it becomes a path segment, so an unvalidated value could escape *run_root*."""
+    if not FULL_SHA_RE.match(head_sha):
+        raise ValueError(f"head sha must be 40 lowercase hex characters, got {head_sha!r}")
     owner_repo = _SAFE_SEGMENT_RE.sub("_", f"{owner}__{repo}")
     return run_root / owner_repo / f"pr-{pr_number}" / head_sha[:12]
 
 
 def _write_json(path: Path, data: Any) -> None:
     tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        # Leave no half-written temp file in the state directory.
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _resume_key(chunks: list[Chunk], profile: ReviewProfile, head_sha: str) -> str:
@@ -253,10 +263,10 @@ def run_review(
     if pending:
         workers = max(1, min(profile.parallel, len(pending)))
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            for record in pool.map(work, pending):
-                records[record["index"]] = record
+            for chunk, record in zip(pending, pool.map(work, pending)):
+                records[chunk.index] = record
                 stage(
-                    f"chunk-{record['index']}",
+                    f"chunk-{chunk.index}",
                     _stage_status(record),
                     nonce=record.get("nonce"),
                     attempts=record.get("attempts"),
@@ -264,18 +274,18 @@ def run_review(
                 )
 
     blocking = [
-        r for r in sorted(records.values(), key=lambda r: r["index"])
+        (index, r) for index, r in sorted(records.items())
         if _is_terminal(r, profile.max_attempts)
     ]
     if blocking:
-        first = blocking[0]
+        first_index, first = blocking[0]
         exhausted = _is_exhausted(first, profile.max_attempts)
         detail = first.get("detail", "")
         if exhausted:
             detail = f"retries exhausted after {first.get('attempts')} attempts: {detail}"
         _discard_unfinished(state_dir, records)
         return _blocked(
-            f"chunk-{first['index']}",
+            f"chunk-{first_index}",
             first.get("reason", "CHUNK_FAILED"),
             detail,
             stages,

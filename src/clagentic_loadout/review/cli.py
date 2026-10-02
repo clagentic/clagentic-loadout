@@ -355,14 +355,20 @@ def _run_command(
 
     if args.out:
         run_dir = Path(args.out)
-    else:
+    elif FULL_SHA_RE.match(acquired.head_sha):
         run_dir = default_run_dir(
             _resolve_run_root(run_root, config_root), owner, repo, args.pr, acquired.head_sha
         )
-    try:
-        run_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        _fail(f"cannot create the run directory {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
+    else:
+        # An unusable head SHA must never become a path segment. run_review
+        # blocks at the "acquired" stage before it touches the run directory,
+        # so the run root stands in as a placeholder that is never written.
+        run_dir = _resolve_run_root(run_root, config_root)
+    if FULL_SHA_RE.match(acquired.head_sha):
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            _fail(f"cannot create the run directory {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
 
     kwargs = {"runner": runner} if runner is not None else {}
     outcome = run_review(acquired, profile, run_dir, emit=_emit_stage, **kwargs)
@@ -391,6 +397,12 @@ def _load_findings(path: str, args: argparse.Namespace) -> tuple[str, list[dict[
             _fail(
                 f"findings file {path!r} is for {owner_repo}#{data.get('pr_number')}, "
                 f"but {args.repo}#{args.pr} was requested",
+                EXIT_FINDINGS_INVALID,
+            )
+        if args.head_sha is not None and args.head_sha != head_sha:
+            _fail(
+                f"--head-sha {args.head_sha} conflicts with the head SHA {head_sha} recorded "
+                f"in the findings file {path!r}; drop --head-sha or regenerate the findings",
                 EXIT_FINDINGS_INVALID,
             )
     else:
@@ -523,12 +535,24 @@ def _post_command(
         posted = json.loads(captured.getvalue().strip().splitlines()[-1])
     except (IndexError, json.JSONDecodeError):
         posted = None
-    if not isinstance(posted, dict):
+    # Success means the landed comment was read back: a comment id and a
+    # verified verdict block. Anything less is reported as a failure, never
+    # as "posted".
+    if (
+        not isinstance(posted, dict)
+        or posted.get("verdict_block_verified") is not True
+        or posted.get("verified_id") is None
+    ):
         print(json.dumps({"result": "post_failed", "review_post_exit_code": code}))
+        observed = (
+            "its output was not a JSON result object"
+            if not isinstance(posted, dict)
+            else f"verified_id={posted.get('verified_id')!r}, "
+            f"verdict_block_verified={posted.get('verdict_block_verified')!r}"
+        )
         print(
-            "loadout-review: posting could not be confirmed: the review-post path "
-            "exited 0 but its output was not a JSON result object, so the landed "
-            "comment was not verified",
+            "loadout-review: posting could not be confirmed: the review-post path exited 0 "
+            f"but the landed comment was not verified ({observed})",
             file=sys.stderr,
         )
         return EXIT_POST_FAILED
@@ -543,7 +567,7 @@ def _post_command(
                 "verified_id": posted.get("verified_id"),
                 "verified_url": posted.get("verified_url"),
                 "verified_by_login": posted.get("verified_by_login"),
-                "verdict_block_verified": posted.get("verdict_block_verified", False),
+                "verdict_block_verified": True,
             }
         )
     )
@@ -564,10 +588,6 @@ def main(
     are injection points for tests and embedding callers."""
     if argv is None:
         argv = sys.argv[1:]
-
-    if any(arg in ("--help", "-h") for arg in argv[:1]):
-        _build_arg_parser().print_help()
-        return EXIT_OK
 
     parser = _build_arg_parser()
     try:

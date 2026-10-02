@@ -599,8 +599,9 @@ detection, never for the diff.
 4. **Validate.** Each reply must be one JSON array of findings (`file`, `line`
    of 1 or greater, `rule_id`, `severity` of `blocking|nit|praise`, `message`
    of at most 200 characters; a longer message is truncated). Prose is never
-   treated as "no findings". Reason codes are distinct: `FALLBACK_OUTPUT_INVALID`
-   (an engine answered badly twice; the reply excerpt is kept), `MODEL_UNAVAILABLE`
+   treated as "no findings". Reason codes are distinct: `OUTPUT_INVALID`
+   (an engine, carrier or fallback, answered badly twice; the reply excerpt is
+   kept), `MODEL_UNAVAILABLE`
    (no engine could run), `CHUNK_TIMEOUT` (stalled), `CARRIER_FAILED` (non-zero
    exit).
 5. **Merge.** Findings are concatenated in chunk order, deduplicated (the most
@@ -659,7 +660,11 @@ review:
 The repo-level config (`.clagentic/loadout/config.yaml`, same
 `review.profiles.<name>` shape) may override only `chunk_lines`,
 `timeout_seconds`, `fallback_timeout_seconds`, `max_attempts`, `parallel`, and a
-`rulebook` path that stays inside the repository. A repo-level `carrier` or
+`rulebook` path that stays inside the repository (a repo-level rulebook is
+refused outright when no repository root can be resolved to confine it to; only
+a user-level rulebook may be an arbitrary host path, and a repo-level
+`rulebook: null` is ignored with a warning rather than dropping the user-level
+one). A repo-level `carrier` or
 `fallback` is ignored with a warning: those keys name a command this process
 executes, and a cloned repository must not choose it. Repo-level numbers are
 clamped with a warning: `parallel` at most 16, `max_attempts` at most 10,
@@ -679,9 +684,13 @@ matched case-insensitively and ignoring surrounding whitespace; a severity
 outside `blocking|nit|praise` is refused), or when the file is for another PR or
 malformed (exit **32**). After the post, the landed comment is read back and its
 fence re-parsed field for field; the JSON result carries `verified_by_login` and
-`verdict_block_verified`. A failed post exits **30**, including when the inner
-post path exits 0 but its result cannot be parsed (the landed comment is then
-unverified); on a non-zero inner exit its output is echoed to stderr.
+`verdict_block_verified`. A failed post exits **30**: the result is reported as
+`posted` only when the read-back returned a comment id and
+`verdict_block_verified` is true, so an inner post path that exits 0 with an
+unparseable result, a null comment id, or an unverified fence is a failure (the
+landed comment is unverified). On a non-zero inner exit its output is echoed to
+stderr. With a findings file written by `run`, a `--head-sha` that differs from
+the file's recorded head is refused (exit **32**).
 
 ### `loadout-push` — bot-attributed commit push + PR open/update
 

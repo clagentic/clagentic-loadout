@@ -41,8 +41,24 @@ class _Piece:
 
 
 def _file_name(header_line: str) -> str:
-    """Best-effort path of a `diff --git a/x b/x` header (the b/ side)."""
+    """Best-effort path of a `diff --git a/x b/x` header (the b/ side).
+
+    An unrenamed file repeats its path on both sides, so when the two halves
+    match exactly that is the answer even if the path itself contains " b/".
+    A rename (differing sides) falls back to the last " b/" separator; a
+    quoted header is split on its quote boundary."""
     rest = header_line[len(_FILE_MARKER):]
+    quoted_split = '" "b/'
+    if rest.startswith('"') and quoted_split in rest:
+        return rest.rsplit(quoted_split, 1)[1].rstrip('"').strip()
+    path_len = (len(rest) - len("a/") - len(_B_PATH_SEPARATOR)) // 2
+    if (
+        path_len > 0
+        and rest.startswith("a/")
+        and rest[2 + path_len:2 + path_len + len(_B_PATH_SEPARATOR)] == _B_PATH_SEPARATOR
+        and rest[2:2 + path_len] == rest[2 + path_len + len(_B_PATH_SEPARATOR):]
+    ):
+        return rest[2:2 + path_len]
     if _B_PATH_SEPARATOR in rest:
         return rest.rsplit(_B_PATH_SEPARATOR, 1)[1].strip()
     return rest.strip()
@@ -119,9 +135,10 @@ def _split_hunk(hunk: list[str], budget: int) -> list[list[str]]:
     from any chunk alone."""
     match = _HUNK_HEADER_RE.match(hunk[0])
     if match is None:
-        # A malformed header carries no offsets to continue from; counting
-        # from line 1 keeps the piece well-formed without inventing a start.
-        old_first = new_first = 1
+        # A malformed header carries no offsets to continue from. Fabricating
+        # a start would look real to the reviewer, so the original header is
+        # kept verbatim on every piece instead (continuations are annotated).
+        old_first = new_first = 0
         section = ""
     else:
         old_start, old_count, new_start, new_count, section = match.groups()
@@ -134,13 +151,22 @@ def _split_hunk(hunk: list[str], budget: int) -> list[list[str]]:
     pieces: list[list[str]] = []
     position = 0
     while position < len(body):
-        part = body[position:position + room]
+        end = min(position + room, len(body))
+        # A `\ No newline` marker belongs to the line before it, so a cut may
+        # not land between them: pull that line into the next piece, or take
+        # the marker along when the piece holds nothing else.
+        if end < len(body) and body[end].startswith("\\"):
+            end = end - 1 if end - position > 1 else end + 1
+        part = body[position:end]
         old_count_piece, new_count_piece = _line_counts(part)
-        header = (
-            f"@@ -{_range(old_first, old_count_piece)} "
-            f"+{_range(new_first, new_count_piece)} @@"
-            + (section if position == 0 else _CONTINUATION_NOTE)
-        )
+        if match is None:
+            header = hunk[0] + ("" if position == 0 else _CONTINUATION_NOTE)
+        else:
+            header = (
+                f"@@ -{_range(old_first, old_count_piece)} "
+                f"+{_range(new_first, new_count_piece)} @@"
+                + (section if position == 0 else _CONTINUATION_NOTE)
+            )
         pieces.append([header] + part)
         old_first += old_count_piece
         new_first += new_count_piece

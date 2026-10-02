@@ -12,7 +12,7 @@ Policy, in one place:
     CARRIER_FAILED): the caller persists it and a later invocation retries
     only that chunk, up to the profile's attempt bound.
   * A reply that is not a findings array gets one format-only re-prompt. A
-    second bad reply is a TERMINAL FALLBACK_OUTPUT_INVALID with a bounded
+    second bad reply is a TERMINAL OUTPUT_INVALID with a bounded
     excerpt of what the engine actually said; prose is never treated as "no
     findings".
 """
@@ -45,7 +45,7 @@ from clagentic_loadout.review.profile_config import ReviewProfile
 REASON_MODEL_UNAVAILABLE = "MODEL_UNAVAILABLE"
 REASON_CHUNK_TIMEOUT = "CHUNK_TIMEOUT"
 REASON_CARRIER_FAILED = "CARRIER_FAILED"
-REASON_OUTPUT_INVALID = "FALLBACK_OUTPUT_INVALID"
+REASON_OUTPUT_INVALID = "OUTPUT_INVALID"
 
 STATUS_OK = "ok"
 STATUS_FAILED = "failed"
@@ -126,9 +126,11 @@ def _run_one_engine(
             argv, prompt + FORMAT_REPROMPT, timeout, cwd=cwd, runner=runner
         )
         if retry.kind == KIND_UNAVAILABLE:
-            return _failure(
-                record, engine, REASON_MODEL_UNAVAILABLE, retry, retriable=False
-            )
+            # The engine vanished between the two calls: same as being absent
+            # on the first, so the caller still hands the chunk to the fallback.
+            record[f"{engine}_unavailable_detail"] = retry.detail
+            record[f"{engine}_unavailable_stderr_excerpt"] = retry.stderr_excerpt
+            return None
         if retry.kind in (KIND_TIMEOUT, KIND_FAILED):
             return _failure(record, engine, _transient_reason(retry), retry, retriable=True)
         try:
