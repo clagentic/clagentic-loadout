@@ -134,13 +134,17 @@ def test_a_split_never_orphans_a_no_newline_marker():
     assert "+l4\n\\ No newline at end of file\n" in joined
 
 
-def test_a_marker_is_carried_along_when_a_piece_holds_one_line():
+def _marker_diff() -> str:
+    """One file, one hunk of two added lines with a no-newline marker after the
+    first: the smallest diff in which a split could orphan the marker."""
     body = ["+l1", "\\ No newline at end of file", "+l2"]
-    diff = "\n".join(
+    return "\n".join(
         ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -0,0 +1,2 @@"] + body
     ) + "\n"
 
-    chunks = plan_chunks(diff, 5)
+
+def test_a_marker_is_carried_along_when_a_piece_holds_one_line():
+    chunks = plan_chunks(_marker_diff(), 5)
 
     joined = "\n".join(c.text for c in chunks)
     assert "+l1\n\\ No newline at end of file\n" in joined
@@ -173,12 +177,7 @@ def test_a_whitespace_only_diff_yields_no_chunks(blank):
 
 
 def test_a_tiny_bound_keeps_the_marker_with_its_line_even_one_line_over():
-    body = ["+l1", "\\ No newline at end of file", "+l2"]
-    diff = "\n".join(
-        ["diff --git a/x b/x", "--- a/x", "+++ b/x", "@@ -0,0 +1,2 @@"] + body
-    ) + "\n"
-
-    chunks = plan_chunks(diff, 5)
+    chunks = plan_chunks(_marker_diff(), 5)
 
     # The 3-line file header leaves a 2-line budget: one hunk header plus one
     # body line. The piece carrying the marker needs a second body line, so
@@ -188,6 +187,29 @@ def test_a_tiny_bound_keeps_the_marker_with_its_line_even_one_line_over():
         lines = chunk.text.splitlines()
         marker_at = [i for i, ln in enumerate(lines) if ln.startswith("\\")]
         assert all(lines[i - 1].startswith("+") for i in marker_at)
+
+
+@pytest.mark.parametrize("max_lines", [4, 5])
+def test_a_file_header_one_line_under_the_bound_still_splits_and_loses_no_line(max_lines):
+    # The 3-line file header leaves a budget of exactly one line at a bound of
+    # 4: the smallest budget the splitter can be handed. It must terminate,
+    # keep every line, and give every piece at least one body line.
+    diff = make_diff({"x": 6}).replace("index 1111111..2222222 100644\n", "")
+    assert len(diff.splitlines()[:3]) == 3
+
+    chunks = plan_chunks(diff, max_lines)
+
+    assert len(chunks) > 1
+    joined = "\n".join(c.text for c in chunks) + "\n"
+    for i in range(1, 7):
+        assert f"+line {i} of x\n" in joined
+    for chunk in chunks:
+        lines = chunk.text.splitlines()
+        assert lines[:3] == ["diff --git a/x b/x", "--- a/x", "+++ b/x"]
+        assert any(line.startswith("+line") for line in lines)
+        # A hunk header plus one body line is the floor, so the overshoot is
+        # bounded by one line.
+        assert chunk.lines <= max_lines + 1
 
 
 def test_malformed_hunk_header_is_kept_not_replaced_with_invented_offsets():

@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from clagentic_loadout.review.carrier import (
     KIND_FAILED,
@@ -38,6 +42,12 @@ def test_exit_127_is_unavailable(tmp_path):
     assert result.kind == KIND_UNAVAILABLE
 
 
+needs_proc = pytest.mark.skipif(
+    sys.platform != "linux", reason="reads process state from /proc"
+)
+
+
+@needs_proc
 def test_timeout_kills_a_grandchild_that_holds_stdout_open(tmp_path):
     pid_file = tmp_path / "grandchild.pid"
     script = tmp_path / "engine.py"
@@ -50,20 +60,26 @@ def test_timeout_kills_a_grandchild_that_holds_stdout_open(tmp_path):
         encoding="utf-8",
     )
 
-    started = time.monotonic()
-    result = run_engine([sys.executable, str(script)], "p", 2, cwd=tmp_path)
-    elapsed = time.monotonic() - started
+    try:
+        started = time.monotonic()
+        result = run_engine([sys.executable, str(script)], "p", 2, cwd=tmp_path)
+        elapsed = time.monotonic() - started
 
-    assert result.kind == KIND_TIMEOUT
-    assert "partial" in result.stdout_excerpt
-    # Without a group kill the grandchild keeps the pipe open and the call
-    # blocks for its full 60s sleep.
-    assert elapsed < 30
-    grandchild = int(pid_file.read_text(encoding="utf-8"))
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and _is_running(grandchild):
-        time.sleep(0.05)
-    assert not _is_running(grandchild)
+        assert result.kind == KIND_TIMEOUT
+        assert "partial" in result.stdout_excerpt
+        # Without a group kill the grandchild keeps the pipe open and the call
+        # blocks for its full 60s sleep.
+        assert elapsed < 30
+        grandchild = int(pid_file.read_text(encoding="utf-8"))
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and _is_running(grandchild):
+            time.sleep(0.05)
+        assert not _is_running(grandchild)
+    finally:
+        # A failed assertion must not leave a 60s sleeper behind.
+        if pid_file.exists():
+            with contextlib.suppress(ProcessLookupError, ValueError):
+                os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
 
 
 def _is_running(pid: int) -> bool:
@@ -119,6 +135,7 @@ def test_a_nonzero_exit_triggers_exactly_one_retry(tmp_path):
     assert len(calls) == 2
 
 
+@needs_proc
 def test_the_direct_child_is_reaped_when_a_descendant_outlives_the_group(tmp_path, monkeypatch):
     from clagentic_loadout.review import carrier
 

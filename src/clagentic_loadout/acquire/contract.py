@@ -153,8 +153,46 @@ class AcquireBackend(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class RangeDiff:
+    """The change between two commits of one repository, from the host API.
+
+    `fast_forward` is True only when `head_sha` is a strict descendant of
+    `base_sha`: the one shape in which "what changed since base" is a
+    meaningful, linear delta. Any other relation (identical, behind,
+    diverged after a force-push or rebase) is False and `diff_text` is empty.
+    """
+
+    base_sha: str
+    head_sha: str
+    fast_forward: bool
+    diff_text: str = ""
+
+
+@runtime_checkable
+class RangeDiffBackend(Protocol):
+    """Optional capability of a transport: the net diff between two commits.
+
+    Separate from AcquireBackend so a transport that cannot answer it stays a
+    valid AcquireBackend; callers that need it check for this Protocol.
+    """
+
+    def fetch_range_diff(
+        self, *, owner: str, repo: str, base_sha: str, head_sha: str
+    ) -> RangeDiff:
+        """Read the base..head relation and, for a fast-forward, its diff.
+
+        Raises:
+            acquire.errors.AcquireFetchError: the range could not be read
+                (an unknown commit, a non-2xx response, a network failure).
+        """
+        ...
+
+
 __all__ = [
     "AcquireBackend",
     "AcquiredPr",
     "ChangedFile",
+    "RangeDiff",
+    "RangeDiffBackend",
 ]

@@ -66,10 +66,10 @@ STUB_SCRIPT = textwrap.dedent(
         sys.stderr.flush()
         time.sleep(30)
     elif mode == "stall_marker":
-        stalls = sum(
-            1 for entry in os.listdir(logdir)
-            if "STALL_ME" in open(os.path.join(logdir, entry)).read()
-        )
+        stalls = 0
+        for entry in os.listdir(logdir):
+            with open(os.path.join(logdir, entry)) as logged:
+                stalls += "STALL_ME" in logged.read()
         if "STALL_ME" in prompt and stalls <= 2:
             time.sleep(30)
         print(array)
@@ -232,9 +232,13 @@ def github_opener(
     head_sha: str = HEAD_SHA,
     login: str = "reviewer",
     state: dict | None = None,
+    compare: dict | None = None,
 ):
     """Serves the acquire reads and the review-post comment writes for one PR.
-    `state` collects the posted body and every request URL."""
+    `state` collects the posted body and every request URL. `compare`, when
+    given, serves the commit-range endpoint: {"status": "ahead", "diff": "..."}
+    (or "http_status" for a failing read); without it a compare request is an
+    unexpected call."""
     recorded = state if state is not None else {}
     recorded.setdefault("posted_body", None)
     recorded.setdefault("requests", [])
@@ -250,6 +254,12 @@ def github_opener(
             return _json({"base": {"sha": base_sha}, "head": {"sha": head_sha}})
         if method == "GET" and url.endswith(f"/pulls/{pr_number}/files"):
             return _json([])
+        if method == "GET" and "/compare/" in url and compare is not None:
+            if compare.get("http_status", 200) != 200:
+                return _Response(compare["http_status"], b"{}")
+            if accept == "application/vnd.github.v3.diff":
+                return _Response(200, compare["diff"].encode("utf-8"), "text/plain")
+            return _json({"status": compare["status"]})
         if method == "POST" and url.endswith(f"/issues/{pr_number}/comments"):
             recorded["posted_body"] = json.loads(req.data.decode("utf-8"))["body"]
             return _json({"id": 5, "html_url": "http://post"})

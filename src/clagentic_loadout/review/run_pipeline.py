@@ -37,6 +37,15 @@ from clagentic_loadout.review.chunk_review import (
     review_chunk,
 )
 from clagentic_loadout.review.chunking import Chunk, plan_chunks
+from clagentic_loadout.review.delta import (
+    MODE_DELTA,
+    MODE_FULL,
+    STATUS_DELTA,
+    STATUS_FALLBACK,
+    DeltaContext,
+    carried_findings,
+    render_delta_note,
+)
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
 from clagentic_loadout.sha import FULL_SHA_RE
@@ -74,24 +83,48 @@ class RunOutcome:
     stages: list[dict[str, Any]] = field(default_factory=list)
 
 
-def default_run_dir(run_root: Path, owner: str, repo: str, pr_number: int, head_sha: str) -> Path:
-    """Stable run directory for (repo, pr, head_sha) under *run_root*.
+def default_run_dir(
+    run_root: Path,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    since_head: str | None = None,
+) -> Path:
+    """Stable run directory for (repo, pr, head_sha) under *run_root*; a delta
+    review since *since_head* gets its own directory beside the full one.
 
-    Raises ValueError for a head_sha that is not 40 lowercase hex characters:
-    it becomes a path segment, so an unvalidated value could escape *run_root*."""
-    if not FULL_SHA_RE.match(head_sha):
-        raise ValueError(f"head sha must be 40 lowercase hex characters, got {head_sha!r}")
+    Raises ValueError for a head_sha (or since_head) that is not 40 lowercase
+    hex characters: it becomes a path segment, so an unvalidated value could
+    escape *run_root*."""
+    for sha in (head_sha, since_head):
+        if sha is not None and not FULL_SHA_RE.match(sha):
+            raise ValueError(f"head sha must be 40 lowercase hex characters, got {sha!r}")
     owner_repo = _SAFE_SEGMENT_RE.sub("_", f"{owner}__{repo}")
-    return run_root / owner_repo / f"pr-{pr_number}" / head_sha[:12]
+    leaf = head_sha[:12] if since_head is None else f"{head_sha[:12]}-since-{since_head[:12]}"
+    return run_root / owner_repo / f"pr-{pr_number}" / leaf
 
 
-def bind_run_dir(run_dir: Path, owner: str, repo: str, pr_number: int, head_sha: str) -> None:
-    """Tie *run_dir* to (repo, pr, head_sha). Chunk state is already keyed on
-    the head, so an old head's chunks are never resumed; this additionally
-    drops a merged findings file left by any other binding, so a caller cannot
-    pick up findings for a head that has since moved. Raises OSError when the
-    directory cannot be written."""
-    binding = {"repo": f"{owner}/{repo}".lower(), "pr_number": pr_number, "head_sha": head_sha}
+def bind_run_dir(
+    run_dir: Path,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    since_head: str | None = None,
+) -> None:
+    """Tie *run_dir* to (repo, pr, head_sha, since_head). Chunk state is already
+    keyed on the head, so an old head's chunks are never resumed; this
+    additionally drops a merged findings file left by any other binding, so a
+    caller cannot pick up findings for a head that has since moved, or a
+    delta's findings for a full review. Raises OSError when the directory
+    cannot be written."""
+    binding = {
+        "repo": f"{owner}/{repo}".lower(),
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "since_head": since_head,
+    }
     path = run_dir / BINDING_FILENAME
     try:
         recorded = json.loads(path.read_text(encoding="utf-8"))
@@ -114,11 +147,14 @@ def _write_json(path: Path, data: Any) -> None:
         raise
 
 
-def _resume_key(chunks: list[Chunk], profile: ReviewProfile, head_sha: str) -> str:
+def _resume_key(
+    chunks: list[Chunk], profile: ReviewProfile, head_sha: str, delta_note: str = ""
+) -> str:
     digest = hashlib.sha256()
     for part in (
         PIPELINE_VERSION,
         head_sha,
+        delta_note,
         json.dumps(profile.carrier),
         json.dumps(profile.fallback),
         profile.rulebook_text,
@@ -192,6 +228,22 @@ def _blocked(stage: str, reason: str, detail: str, stages: list[dict[str, Any]],
     return RunOutcome(EXIT_BLOCKED, RESULT_BLOCKED, payload, stages)
 
 
+def unusable_acquire_outcome(acquired: AcquiredPr, *, emit: StageEmitter) -> RunOutcome | None:
+    """A blocked outcome when the host returned a base/head SHA that is not 40
+    lowercase hex characters, else None. The head becomes a path segment, so
+    callers check this before touching any run directory."""
+    if FULL_SHA_RE.match(acquired.head_sha) and FULL_SHA_RE.match(acquired.base_sha):
+        return None
+    emit("acquired", "failed", reason=REASON_ACQUIRE_INVALID)
+    return _blocked(
+        "acquired",
+        REASON_ACQUIRE_INVALID,
+        f"the host API returned a base/head SHA that is not 40 lowercase hex "
+        f"characters (base={acquired.base_sha!r}, head={acquired.head_sha!r})",
+        [{"stage": "acquired", "status": "failed", "reason": REASON_ACQUIRE_INVALID}],
+    )
+
+
 def run_review(
     acquired: AcquiredPr,
     profile: ReviewProfile,
@@ -199,24 +251,26 @@ def run_review(
     *,
     emit: StageEmitter,
     runner: Runner = run_in_process_group,
+    delta: DeltaContext | None = None,
+    delta_stage: dict[str, str] | None = None,
 ) -> RunOutcome:
-    """Drive one invocation of the review pipeline for *acquired*."""
+    """Drive one invocation of the review pipeline for *acquired*. With
+    *delta*, *acquired* already holds the delta diff and each chunk is framed
+    by review.delta; *delta_stage* is the decision between delta and full,
+    reported once right after "acquired"."""
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, status: str, **fields: Any) -> None:
         stages.append({"stage": name, "status": status, **fields})
         emit(name, status, **fields)
 
-    if not FULL_SHA_RE.match(acquired.head_sha) or not FULL_SHA_RE.match(acquired.base_sha):
-        stage("acquired", "failed", reason=REASON_ACQUIRE_INVALID)
-        return _blocked(
-            "acquired",
-            REASON_ACQUIRE_INVALID,
-            f"the host API returned a base/head SHA that is not 40 lowercase hex "
-            f"characters (base={acquired.base_sha!r}, head={acquired.head_sha!r})",
-            stages,
-        )
+    refused = unusable_acquire_outcome(acquired, emit=emit)
+    if refused is not None:
+        return refused
     stage("acquired", "ok", head_sha=acquired.head_sha, base_sha=acquired.base_sha)
+    if delta_stage is not None:
+        stage("delta", STATUS_DELTA if delta is not None else STATUS_FALLBACK, **delta_stage)
+    delta_note = render_delta_note(delta) if delta is not None else ""
 
     chunks = plan_chunks(acquired.diff_text, profile.chunk_lines)
     if not chunks:
@@ -229,7 +283,7 @@ def run_review(
             stages,
         )
 
-    state_dir = run_dir / f"state-{_resume_key(chunks, profile, acquired.head_sha)}"
+    state_dir = run_dir / f"state-{_resume_key(chunks, profile, acquired.head_sha, delta_note)}"
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -265,6 +319,7 @@ def run_review(
             attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
             cwd=run_dir,
             runner=runner,
+            delta_note=delta_note,
         )
         try:
             _write_json(_result_path(state_dir, chunk.index), record)
@@ -330,9 +385,13 @@ def run_review(
             stages,
         )
 
-    findings = merge_findings(
-        [(index, record.get("findings", [])) for index, record in sorted(records.items())]
-    )
+    per_chunk = [(index, record.get("findings", [])) for index, record in sorted(records.items())]
+    carried: list[dict[str, Any]] = []
+    if delta is not None:
+        touched = {name for chunk in chunks for name in chunk.files}
+        carried = carried_findings(delta, touched)
+        per_chunk.append((0, carried))
+    findings = merge_findings(per_chunk)
     findings_path = run_dir / FINDINGS_FILENAME
     document = {
         "schema": FINDINGS_SCHEMA,
@@ -341,6 +400,9 @@ def run_review(
         "pr_number": acquired.pr_number,
         "head_sha": acquired.head_sha,
         "base_sha": acquired.base_sha,
+        "mode": MODE_DELTA if delta is not None else MODE_FULL,
+        "since_head": delta.since_head if delta is not None else None,
+        "carried_count": len(carried),
         "chunk_count": len(chunks),
         "chunks": [
             {
@@ -366,8 +428,10 @@ def run_review(
             "run_dir": str(run_dir),
             "head_sha": acquired.head_sha,
             "base_sha": acquired.base_sha,
+            "mode": MODE_DELTA if delta is not None else MODE_FULL,
             "chunk_count": len(chunks),
             "finding_count": len(findings),
+            "carried_count": len(carried),
         },
         stages,
     )

@@ -36,6 +36,7 @@ from clagentic_loadout.acquire import verb as acquire_verb
 from clagentic_loadout.cli import EXIT_UMBRELLA_USAGE, main as umbrella_main
 from clagentic_loadout.doctor import cli as doctor_cli
 from clagentic_loadout.merge import close_verb as merge_close_verb
+from clagentic_loadout.merge import reviewer_login_verb
 from clagentic_loadout.merge import verb as merge_verb
 from clagentic_loadout.provisioning import cli as provisioning_cli
 from clagentic_loadout.push import verb as push_verb
@@ -63,6 +64,7 @@ _ARGPARSE_VERBS = [
     ("loadout-review", review_cli.main, "--version"),
     ("merge", merge_verb.main, "--version"),
     ("close-pr", merge_close_verb.main, "--version"),
+    ("reviewer-login", reviewer_login_verb.main, "--version"),
     ("git-host-api", git_host_api.main, "--version"),
     ("stage-body", stage_body_verb.main, "--version"),
     ("release-dispatch", release_dispatch.main, "--cli-version"),
@@ -150,7 +152,7 @@ def test_umbrella_help_exits_ok_and_lists_verbs(capsys) -> None:
     rc = umbrella_main(["--help"])
     assert rc == 0
     out = capsys.readouterr().out
-    for expected in ("push", "merge", "review", "git-host-api", "stage-body", "provision-allowlist", "doctor", "release dispatch", "release detect", "wait poll", "wait scoped-test"):
+    for expected in ("push", "merge", "review", "reviewer-login", "git-host-api", "stage-body", "provision-allowlist", "doctor", "release dispatch", "release detect", "wait poll", "wait scoped-test"):
         assert expected in out, f"umbrella --help missing verb listing for {expected!r}"
 
 
@@ -189,6 +191,7 @@ def test_umbrella_unknown_grouped_subverb_reports_reserved_exit_code(capsys) -> 
         ["merge"],
         ["review"],
         ["pr-review"],
+        ["reviewer-login"],
         ["git-host-api"],
         ["stage-body"],
         ["provision-allowlist"],

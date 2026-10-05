@@ -19,6 +19,12 @@ endpoints):
         -> raw unified-diff text for the whole PR (base_sha..head_sha),
            NOT JSON — the same /api/v1-prefixed route tree, authenticated
            identically to every other call here.
+  - GET  /api/v1/repos/{owner}/{repo}/compare/{a}...{b}
+        -> {"total_commits": n, "commits": [...]} — commits only, no diff;
+           used in both directions to tell a strict fast-forward apart.
+  - GET  /{owner}/{repo}/compare/{a}...{b}.diff
+        -> raw net unified diff (the web route; the API tree has no
+           equivalent). Used by fetch_range_diff only.
   - GET  /api/v1/repos/{owner}/{repo}/contents/{filepath}?ref={sha}
         -> {"content": "<base64>", "encoding": "base64", ...} for a text
            file; used only when include_file_contents=True (scanner-staging
@@ -32,7 +38,7 @@ import json
 import urllib.parse
 from typing import Any
 
-from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile
+from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile, RangeDiff
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport import git_host_api
 
@@ -163,6 +169,83 @@ def _get_file_content(
         return ""
 
 
+def _compare_commit_count(
+    git_host_base: str, token: str, owner: str, repo: str, base: str, head: str, *, opener=None
+) -> int:
+    """Number of commits reachable from *head* but not from *base*."""
+    try:
+        status, raw = git_host_api.request(
+            git_host_base,
+            "GET",
+            f"/api/v1/repos/{owner}/{repo}/compare/{base}...{head}",
+            token,
+            opener=opener,
+        )
+    except git_host_api.GitHostApiError as exc:
+        raise AcquireFetchError(
+            f"cannot compare {base[:12]}...{head[:12]} in {owner}/{repo}: {exc}"
+        ) from exc
+    if status != 200:
+        raise AcquireFetchError(
+            f"cannot compare {base[:12]}...{head[:12]} in {owner}/{repo}: HTTP {status}"
+        )
+    total = git_host_api.parse_json_body(raw).get("total_commits")
+    if isinstance(total, bool) or not isinstance(total, int):
+        raise AcquireFetchError(
+            f"compare {base[:12]}...{head[:12]} in {owner}/{repo} returned no commit count"
+        )
+    return total
+
+
+def fetch_range_diff(
+    git_host_base: str,
+    token: str,
+    owner: str,
+    repo: str,
+    base_sha: str,
+    head_sha: str,
+    *,
+    opener=None,
+) -> RangeDiff:
+    """Net diff between two commits. The API's compare route reports commits
+    only, so the relation is derived from commit counts in both directions
+    (a strict fast-forward has commits one way and none the other) and the
+    net diff comes from the web compare route's `.diff` form, which the same
+    token authorises."""
+    forward = _compare_commit_count(
+        git_host_base, token, owner, repo, base_sha, head_sha, opener=opener
+    )
+    backward = _compare_commit_count(
+        git_host_base, token, owner, repo, head_sha, base_sha, opener=opener
+    )
+    if forward == 0 or backward != 0:
+        return RangeDiff(base_sha=base_sha, head_sha=head_sha, fast_forward=False)
+    try:
+        status, raw = git_host_api.request(
+            git_host_base,
+            "GET",
+            f"/{owner}/{repo}/compare/{base_sha}...{head_sha}.diff",
+            token,
+            opener=opener,
+        )
+    except git_host_api.GitHostApiError as exc:
+        raise AcquireFetchError(
+            f"cannot read the diff of {base_sha[:12]}...{head_sha[:12]} in "
+            f"{owner}/{repo}: {exc}"
+        ) from exc
+    if status != 200:
+        raise AcquireFetchError(
+            f"cannot read the diff of {base_sha[:12]}...{head_sha[:12]} in "
+            f"{owner}/{repo}: HTTP {status}"
+        )
+    return RangeDiff(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        fast_forward=True,
+        diff_text=raw.decode("utf-8", errors="replace"),
+    )
+
+
 def fetch_pr_content(
     git_host_base: str,
     token: str,
@@ -244,8 +327,22 @@ class ForgejoAcquireBackend:
             opener=self._opener,
         )
 
+    def fetch_range_diff(
+        self, *, owner: str, repo: str, base_sha: str, head_sha: str
+    ) -> RangeDiff:
+        return fetch_range_diff(
+            self._git_host_base,
+            self._token,
+            owner,
+            repo,
+            base_sha,
+            head_sha,
+            opener=self._opener,
+        )
+
 
 __all__ = [
     "ForgejoAcquireBackend",
     "fetch_pr_content",
+    "fetch_range_diff",
 ]

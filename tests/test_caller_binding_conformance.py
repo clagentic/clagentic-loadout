@@ -374,6 +374,27 @@ class TestCallerRoleHelpTextIsShared:
         assert "required" in text
 
 
+class TestReviewerLoginVerbBindsNoCaller:
+    """loadout-reviewer-login resolves reviewer logins from deployment config
+    only: no credential mint, no merge-authority check, no network call. It
+    therefore declares no --caller/--role, which is why the enumeration above
+    correctly leaves it out of the bound set. This test pins that reasoning:
+    if the verb ever gains either flag, it must also be wired to
+    bind_caller and listed in _MINIMAL_ARGV_BY_SCRIPT, and this test fails
+    until that is done."""
+
+    def test_the_verb_is_a_shipped_entry_point_and_declares_neither_flag(self):
+        scripts = _load_project_scripts()
+        assert scripts["loadout-reviewer-login"] == (
+            "clagentic_loadout.merge.reviewer_login_verb:main"
+        )
+        parser = _build_arg_parser_for("clagentic_loadout.merge.reviewer_login_verb")
+        assert _caller_role_flag(parser) is None
+
+    def test_the_verb_is_not_in_the_bound_set(self):
+        assert "loadout-reviewer-login" not in _MINIMAL_ARGV_BY_SCRIPT
+
+
 class _RefusingTokenProvider:
     """A TokenProvider that raises if ever asked to resolve a token -- used
     to prove a mismatched --caller/--role NEVER reaches a mint."""

@@ -236,7 +236,8 @@ def test_changed_rulebook_does_not_reuse_cached_chunks(env, capsys, tmp_path):
     rulebook = tmp_path / "rulebook.md"
     rulebook.write_text("rule one", encoding="utf-8")
     env.configure(rulebook=str(rulebook))
-    env.run(capsys=capsys)
+    first_code, _ = env.run(capsys=capsys)
+    assert first_code == 0
     rulebook.write_text("rule two", encoding="utf-8")
 
     code, _ = env.run(capsys=capsys)

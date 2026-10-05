@@ -60,11 +60,13 @@ def test_run_then_post_is_two_commands_and_lands_a_verified_fence(env, tmp_path,
     assert f'"head_sha": "{HEAD_SHA}"' in posted
     assert '"reviewer": "reviewer"' in posted
     # The staged body pair was consumed by the post. The staging directory
-    # must exist, or the empty glob below would pass without proving anything.
+    # must exist, or the emptiness check below would pass without proving
+    # anything; listing the whole directory (rather than globbing one name
+    # pattern) also catches a leftover under any other file name.
     staging = tmp_path / "tmp" / "clagentic-loadout"
     assert staging.is_dir()
     assert env.opener_state["posted_body"] is not None
-    assert list(staging.glob("body.reviewer*")) == []
+    assert [entry.name for entry in staging.iterdir()] == []
 
 
 def test_posted_body_has_no_caller_prose(env, tmp_path, capsys):
@@ -306,6 +308,78 @@ def test_a_head_that_moves_between_the_first_read_and_the_post_is_refused(
     assert code == review_cli.EXIT_STALE_HEAD
     assert len(reads) == 2
     assert env.opener_state["posted_body"] is None
+
+
+def _acquire_moving_after(real_acquire, reads: list, *, stable_reads: int):
+    """An _acquire that reports the original head for the first *stable_reads*
+    reads and a moved head afterwards."""
+    import dataclasses
+
+    def moving_acquire(*args, **kwargs):
+        acquired = real_acquire(*args, **kwargs)
+        reads.append(1)
+        if len(reads) <= stable_reads:
+            return acquired
+        return dataclasses.replace(acquired, head_sha="c" * 40)
+
+    return moving_acquire
+
+
+def test_a_landed_verdict_whose_head_has_moved_is_reported_not_called_posted(
+    env, tmp_path, capsys, monkeypatch
+):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+    reads: list[int] = []
+    monkeypatch.setattr(
+        review_cli, "_acquire", _acquire_moving_after(review_cli._acquire, reads, stable_reads=2)
+    )
+
+    code, payload = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
+
+    # The comment cannot be taken back, so it stays; the caller is told it no
+    # longer covers the PR.
+    assert code == review_cli.EXIT_STALE_HEAD
+    assert env.opener_state["posted_body"] is not None
+    assert payload["result"] == "posted_head_moved"
+    assert payload["verified_id"] == 5
+    assert payload["head_sha"] == HEAD_SHA
+    assert payload["current_head_sha"] == "c" * 40
+    assert payload["head_recheck"] == "moved"
+    assert len(reads) == 3
+
+
+def test_a_landed_verdict_on_an_unmoved_head_is_confirmed_current(env, tmp_path, capsys):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+
+    code, payload = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
+
+    assert code == 0
+    assert payload["result"] == "posted"
+    assert payload["head_recheck"] == "current"
+
+
+def test_a_failed_closing_head_read_does_not_turn_a_landed_verdict_into_a_failure(
+    env, tmp_path, capsys, monkeypatch
+):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+    real_acquire = review_cli._acquire
+    reads: list[int] = []
+
+    def acquire_failing_last(*args, **kwargs):
+        reads.append(1)
+        if len(reads) > 2:
+            raise review_cli.ReviewCliError("host unreachable", review_cli.EXIT_ACQUIRE_FAILED)
+        return real_acquire(*args, **kwargs)
+
+    monkeypatch.setattr(review_cli, "_acquire", acquire_failing_last)
+
+    code, out, err = env.invoke(
+        "post", "--findings", str(findings), "--status", "blocking", capsys=capsys
+    )
+
+    assert code == 0
+    assert json.loads(out.strip().splitlines()[-1])["head_recheck"] == "unavailable"
+    assert "could not be re-checked" in err
 
 
 def test_a_head_that_moves_before_the_post_is_refused_on_forgejo_too(

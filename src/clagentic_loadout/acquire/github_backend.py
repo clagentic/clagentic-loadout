@@ -20,6 +20,10 @@ Endpoint shapes (real, documented GitHub REST API):
         -> [{"filename", "status", "patch", ...}, ...] — `patch` (a
            per-file unified-diff hunk) IS present here, unlike Gitea/
            Forgejo's equivalent endpoint.
+  - GET /repos/{owner}/{repo}/compare/{base}...{head}
+        -> {"status": "ahead"|"behind"|"diverged"|"identical", ...}; the same
+           URL with the diff media type returns the net diff text. Used by
+           fetch_range_diff only.
   - GET /repos/{owner}/{repo}/contents/{path}?ref={sha}
         -> {"content": "<base64>", "encoding": "base64", ...} for a text
            file; used only when include_file_contents=True (scanner-staging
@@ -31,7 +35,7 @@ from __future__ import annotations
 import base64
 import urllib.parse
 
-from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile
+from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile, RangeDiff
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport.github_client import GITHUB_API_BASE, request_json
 from clagentic_loadout.transport.redirect_guard import no_redirect_opener
@@ -129,6 +133,36 @@ def _get_file_content(
         return ""
 
 
+def fetch_range_diff(
+    owner: str, repo: str, base_sha: str, head_sha: str, token: str, *, opener=None
+) -> RangeDiff:
+    """Net diff between two commits via GitHub's compare endpoint. Its JSON
+    `status` names the relation ("ahead" is a strict fast-forward); the diff
+    media type of the same URL carries the text, fetched only for "ahead"."""
+    base = urllib.parse.quote(base_sha, safe="")
+    head = urllib.parse.quote(head_sha, safe="")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/compare/{base}...{head}"
+    status, body = _github_get(url, token, opener=opener)
+    if status != 200 or not isinstance(body, dict):
+        raise AcquireFetchError(
+            f"cannot compare {base_sha[:12]}...{head_sha[:12]} in {owner}/{repo}: HTTP {status}"
+        )
+    if body.get("status") != "ahead":
+        return RangeDiff(base_sha=base_sha, head_sha=head_sha, fast_forward=False)
+    status, text = _github_get(url, token, accept=_DIFF_ACCEPT, opener=opener)
+    if status != 200:
+        raise AcquireFetchError(
+            f"cannot read the diff of {base_sha[:12]}...{head_sha[:12]} in "
+            f"{owner}/{repo}: HTTP {status}"
+        )
+    return RangeDiff(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        fast_forward=True,
+        diff_text=text if isinstance(text, str) else "",
+    )
+
+
 def fetch_pr_content(
     owner: str,
     repo: str,
@@ -206,8 +240,16 @@ class GithubAcquireBackend:
             opener=self._opener,
         )
 
+    def fetch_range_diff(
+        self, *, owner: str, repo: str, base_sha: str, head_sha: str
+    ) -> RangeDiff:
+        return fetch_range_diff(
+            owner, repo, base_sha, head_sha, self._token, opener=self._opener
+        )
+
 
 __all__ = [
     "GithubAcquireBackend",
     "fetch_pr_content",
+    "fetch_range_diff",
 ]
