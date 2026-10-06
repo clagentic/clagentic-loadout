@@ -121,6 +121,7 @@ from clagentic_loadout.merge.fence_state import (
     state_from_fence,
     unresolved_prior_findings,
 )
+from clagentic_loadout.merge.fence_syntax import find_fence_syntax
 from clagentic_loadout.sha import InvalidShaError, compare_sha_values, validate_sha
 
 #: The fence language token that marks a machine-readable verdict block.
@@ -144,24 +145,16 @@ _VALID_STATUSES = frozenset({"clean", "blocking"})
 #: correctly treated as "no block found," not silently accepted.
 _FENCE_RE = re.compile(r"```review-result\s*\n(.*?)\n```", re.DOTALL)
 
-#: Fence-delimiter sequences that MUST NOT appear in caller-supplied findings
-#: fields inserted into a build_findings_verdict_body prose/bullet line
-#: (security-audit finding, lr-c26110): a bare triple-backtick can open
-#: an unrelated fenced block, and the literal fence-language marker can
-#: masquerade as (or help forge) a second review-result block. Neither is
-#: gate-bypassable on its own — assert_single_own_verdict_block counts every
-#: fence and fails closed on more than one — but a tool-CONSTRUCTED body
-#: should never contain fence-shaped syntax it did not itself emit; letting
-#: caller data smuggle one in defeats the enforce-good-behavior intent this
-#: function exists for. REJECT (fail pre-post), not escape: matches this
-#: module's existing posture (missing-field validation above also raises
-#: before any body is built) rather than adding a second, silent transform
-#: a caller could get out of sync with the fence contract above.
-_FORBIDDEN_FENCE_SEQUENCES = ("```", VERDICT_FENCE)
-
 
 def _reject_fence_delimiters(value: str, finding_index: int, field_name: str) -> None:
     """Raise ValueError if *value* contains a fence-delimiter sequence.
+
+    Fence-shaped means what merge.fence_syntax.find_fence_syntax says, the one
+    definition shared with the findings-state validator; the plain word
+    review-result is not fence syntax. Caller data that could open or close a
+    block is rejected (fail pre-post), not escaped, because a tool-CONSTRUCTED
+    body must never contain fence syntax it did not itself emit (security-audit
+    finding, lr-c26110).
 
     Called on every findings[idx]['file'|'rule_id'|'message'] field before
     it is inserted into the body's prose/bullet lines — the only findings
@@ -170,15 +163,15 @@ def _reject_fence_delimiters(value: str, finding_index: int, field_name: str) ->
     caller-typed as an int per this function's documented contract, not a
     string a fence could hide inside).
     """
-    for sequence in _FORBIDDEN_FENCE_SEQUENCES:
-        if sequence in value:
-            raise ValueError(
-                f"findings[{finding_index}]['{field_name}'] contains the "
-                f"fence-delimiter sequence {sequence!r}: {value!r}. A "
-                f"tool-constructed verdict body must never contain "
-                f"fence-shaped syntax from caller-supplied data — this "
-                f"field is rejected rather than escaped."
-            )
+    offending = find_fence_syntax(value)
+    if offending is not None:
+        raise ValueError(
+            f"findings[{finding_index}]['{field_name}'] contains the "
+            f"fence-delimiter sequence {offending!r}: {value!r}. A "
+            f"tool-constructed verdict body must never contain "
+            f"fence-shaped syntax from caller-supplied data — this "
+            f"field is rejected rather than escaped."
+        )
 
 
 def build_verdict_block(
@@ -286,6 +279,15 @@ def build_findings_verdict_body(
     lr-c26110).
     """
     required_keys = ("file", "line", "rule_id", "message")
+    # The reviewer name is written raw into the header line, so it goes through
+    # the same predicate as the findings fields.
+    offending_reviewer = find_fence_syntax(reviewer)
+    if offending_reviewer is not None:
+        raise ValueError(
+            f"reviewer contains the fence-delimiter sequence {offending_reviewer!r}: "
+            f"{reviewer!r}. A tool-constructed verdict body must never contain "
+            f"fence-shaped syntax from caller-supplied data."
+        )
     for idx, finding in enumerate(findings):
         missing = [k for k in required_keys if k not in finding]
         if missing:
@@ -505,6 +507,10 @@ class ReviewerVerdict:
     #: Findings an earlier fence held open that this verdict leaves
     #: unaccounted for. Enforced by assert_prior_findings_resolved.
     unresolved_prior_findings: tuple[dict[str, Any], ...] = ()
+    #: The comment id this fence says it replaces, when no earlier verdict
+    #: comment from the reviewer on the PR has that id. None when the fence
+    #: supersedes nothing or the id resolves.
+    unresolved_supersedes: int | None = None
 
 
 def parse_verdict_block(comment_body: str) -> dict[str, Any] | None:
@@ -810,6 +816,21 @@ def read_reviewer_verdict(
         verdict_sha,
     )
 
+    # Supersession is provenance, not resolution, but a claim to replace a
+    # comment this reviewer never posted a verdict in is worth surfacing: it
+    # means the history the fence describes is not the history on the PR.
+    earlier_verdict_ids = {
+        candidate.get("id")
+        for candidate in ordered_comments[selected_index + 1 :]
+        if _FENCE_RE.search(candidate.get("body", "")) is not None
+    }
+    unresolved_supersedes = (
+        current_state.supersedes
+        if current_state.supersedes is not None
+        and current_state.supersedes not in earlier_verdict_ids
+        else None
+    )
+
     return ReviewerVerdict(
         reviewer=verdict_reviewer,
         review_status=review_status,
@@ -820,6 +841,7 @@ def read_reviewer_verdict(
         model_attested=verdict_data.get("model_attested"),
         state=current_state,
         unresolved_prior_findings=tuple(unresolved),
+        unresolved_supersedes=unresolved_supersedes,
     )
 
 
@@ -972,6 +994,12 @@ def check_required_scanners(
             f"(ran, or not_applicable/not_invoked with a reason), then retry the merge gate."
         )
     warnings: list[str] = []
+    if verdict.unresolved_supersedes is not None:
+        warnings.append(
+            f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) says it supersedes "
+            f"comment #{verdict.unresolved_supersedes}, which is not an earlier verdict "
+            f"comment from that reviewer on this PR"
+        )
     if not verdict.state.scanners_run:
         warnings.append(
             f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) is clean but "

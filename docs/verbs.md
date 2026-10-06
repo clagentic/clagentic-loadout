@@ -1418,8 +1418,13 @@ refuses, as does one that records no scanner outcomes for a role that has
 required scanners; a scanner name listed twice in a fence is malformed. An
 earlier fence of the same reviewer whose `head_sha` is malformed refuses too,
 since it cannot be trusted to clear anything. An explicit `null` for a state
-field is malformed input, never "not supplied". A version 1 fence, with no state, asserts nothing and is never an
-error. A verdict at a stale head never authorizes a merge; when the same
+field is malformed input, never "not supplied"; so is any non-object state value. Only an absent state, or an empty
+object, means "no state". A version 1 fence, with no state, asserts nothing and is never an
+error. Caller text in the tool-built body and fence (file, message, rule id,
+reviewer, evidence, scanner fields) is refused when it is fence syntax: a run
+of three or more backticks anywhere, or a line starting with a run of three or
+more tildes. The plain word `review-result` is ordinary text, so a path such as
+`schemas/review-result.schema.json` posts normally. A verdict at a stale head never authorizes a merge; when the same
 reviewer commented afterwards without posting a verdict, the refusal says so.
 
 **Repo-config homes for the gate DECLARATION (see

@@ -1306,6 +1306,17 @@ def _run(
                 f"pass --ignore-repo-gate to override it (logged and attested)."
             ) from exc
         required_reviewers = {**required_reviewers, **floor_only_reviewers}
+        unreachable = repo_gate.unreachable_scanner_roles(required_reviewers)
+        if unreachable:
+            raise MergeUsageError(
+                f"merge.required_scanners declares scanners for role(s) {unreachable!r}, "
+                f"which are not required reviewers (required: {sorted(required_reviewers)!r}). "
+                f"Scanners are checked on a required reviewer's verdict, so this "
+                f"declaration could never gate anything. Add the role to "
+                f"merge.required_reviewer_roles or --required-reviewer, or remove it from "
+                f"merge.required_scanners; --ignore-repo-gate overrides it (logged and "
+                f"attested)."
+            )
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
 
     # 1. Namespace guard — runs FIRST, before any credential or network call.

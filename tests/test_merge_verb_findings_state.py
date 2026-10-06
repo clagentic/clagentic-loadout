@@ -266,6 +266,68 @@ class TestRequiredScanners:
         assert "required_scanners NOT ENFORCED" in err
 
 
+class TestScannerRolesMustBeReachable:
+    def test_scanners_declared_for_a_role_nobody_requires_refuse_naming_it(self, tmp_path, capsys):
+        _write_config(
+            tmp_path, {"required_reviewer_roles": [], "required_scanners": {"orphan": ["alpha"]}}
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_USAGE
+        assert "'orphan'" in err
+        assert "--ignore-repo-gate" in err
+
+    def test_ignore_repo_gate_lifts_the_unreachable_refusal(self, tmp_path):
+        _write_config(
+            tmp_path, {"required_reviewer_roles": [], "required_scanners": {"orphan": ["alpha"]}}
+        )
+        code, _ = _merge(
+            [_comment(1, _fence("clean", HEAD_B))],
+            repo_path=tmp_path,
+            extra_args=["--ignore-repo-gate"],
+        )
+        assert code == verb.EXIT_OK
+
+    def test_a_role_required_only_by_the_floor_is_reachable(self, tmp_path):
+        _write_config(
+            tmp_path,
+            {"required_reviewer_roles": [NAME], "required_scanners": {NAME: ["alpha"]}},
+        )
+        state = {"scanners_run": [{"scanner": "alpha", "status": "ran"}]}
+        code, _ = _merge([_comment(1, _fence("clean", HEAD_B, state))], repo_path=tmp_path)
+        assert code == verb.EXIT_OK
+
+    def test_an_empty_scanner_list_for_an_unrequired_role_declares_nothing(self, tmp_path):
+        _write_config(tmp_path, {"required_reviewer_roles": [], "required_scanners": {"orphan": []}})
+        code, _ = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path)
+        assert code == verb.EXIT_OK
+
+
+class TestSupersedesResolution:
+    def test_a_supersedes_naming_an_earlier_verdict_comment_does_not_warn(self, capsys):
+        comments = [
+            _comment(1, _fence("blocking", HEAD_A)),
+            _comment(2, _fence("clean", HEAD_B, {"supersedes": 1})),
+        ]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "supersedes" not in err
+
+    def test_a_supersedes_naming_no_earlier_verdict_comment_is_surfaced(self, capsys):
+        comments = [_comment(2, _fence("clean", HEAD_B, {"supersedes": 99}))]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "supersedes comment #99" in err
+
+    def test_supersession_still_resolves_no_finding(self, capsys):
+        comments = [
+            _comment(1, _fence("blocking", HEAD_A, F1_OPEN)),
+            _comment(2, _fence("clean", HEAD_B, {"supersedes": 1})),
+        ]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "F1" in err
+
+
 class TestStaleVerdictWording:
     """A fenced verdict at a stale head never authorizes a merge; only the
     explanation differs."""

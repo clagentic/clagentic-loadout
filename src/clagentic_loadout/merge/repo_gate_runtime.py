@@ -18,13 +18,16 @@ bootstrap-safety policy that makes consuming them safe:
 
 A config that loads cleanly but cannot be satisfied is NOT handled here: that
 is a real refusal, overridable only by the verb's explicit, logged
-`--ignore-repo-gate`, which covers every repo gate key.
+`--ignore-repo-gate`, which covers every repo gate key. This includes
+`required_scanners` declared for a role that is not a required reviewer:
+`RepoGate.unreachable_scanner_roles` names such roles so the verb can refuse.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Iterable
 
 from clagentic_loadout.merge.gate_config import (
     InvalidMergeGateConfigError,
@@ -43,6 +46,16 @@ class RepoGate:
 
     def scanners_for(self, reviewer_name: str) -> tuple[str, ...]:
         return (self.required_scanners or {}).get(reviewer_name, ())
+
+    def unreachable_scanner_roles(self, required_roles: Iterable[str]) -> list[str]:
+        """Roles with declared required scanners that no required reviewer covers.
+
+        Scanners are only ever checked on a role's verdict, so a declaration
+        for a role outside the effective required-reviewer set could never
+        gate anything. That is reported, never silently ignored.
+        """
+        covered = set(required_roles)
+        return [role for role, names in (self.required_scanners or {}).items() if names and role not in covered]
 
 
 def load_repo_gate(repo_path: str | Path | None) -> RepoGate:

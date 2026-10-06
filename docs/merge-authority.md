@@ -181,6 +181,11 @@ keep a broken config from blocking the merge that would fix it:
   deliberate escape hatch for **all** repo gates, reviewer roles and required
   scanners alike: it is logged to stderr, printed in the merge output, and
   recorded in the merge-completion attestation.
+- A `required_scanners` entry for a role that is not a required reviewer (not in
+  `required_reviewer_roles` and not named by `--required-reviewer`) could never
+  gate anything, so it refuses the merge naming the role, with the same
+  `--ignore-repo-gate` escape hatch. An entry with an empty scanner list
+  declares nothing.
 - Role names and scanner names in these keys are trimmed of surrounding
   whitespace when loaded; two `required_scanners` keys that collide after
   trimming are a malformed config.

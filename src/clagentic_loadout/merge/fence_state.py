@@ -37,6 +37,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from clagentic_loadout.merge.fence_syntax import find_fence_syntax
 from clagentic_loadout.sha import FULL_SHA_RE
 
 #: Fence schema version stamped on a fence that carries any state field. A
@@ -59,7 +60,6 @@ SCANNER_FAILED = "failed"
 SCANNER_STATUSES = (SCANNER_RAN, SCANNER_NOT_APPLICABLE, SCANNER_NOT_INVOKED, SCANNER_FAILED)
 
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
-_FORBIDDEN_SEQUENCES = ("```", "review-result")
 
 
 @dataclass(frozen=True)
@@ -78,12 +78,12 @@ def _text(value: Any, where: str, *, single_line: bool = True) -> str:
         raise ValueError(f"{where} must be a non-empty string, got {value!r}")
     if single_line and ("\n" in value or "\r" in value):
         raise ValueError(f"{where} must be a single line")
-    for sequence in _FORBIDDEN_SEQUENCES:
-        if sequence in value:
-            raise ValueError(
-                f"{where} contains the fence-delimiter sequence {sequence!r}; a "
-                f"tool-constructed fence never carries fence-shaped caller text"
-            )
+    offending = find_fence_syntax(value)
+    if offending is not None:
+        raise ValueError(
+            f"{where} contains the fence-delimiter sequence {offending!r}; a "
+            f"tool-constructed fence never carries fence-shaped caller text"
+        )
     return value
 
 
@@ -141,14 +141,18 @@ def normalize_findings_state(
 ) -> dict[str, Any]:
     """Validate caller-supplied state and return the fence fields to render.
 
-    Returns an empty dict when *raw* is None or empty, so a caller that
-    supplies no state produces exactly the fence it always did. Raises
+    Returns an empty dict for None or an empty mapping, the two spellings of
+    "no state supplied", so a caller that supplies none produces exactly the
+    fence it always did. Any other value that is not a mapping, falsy ones
+    included (an empty string, 0, False, an empty list), is malformed. Raises
     ValueError on any malformed or contradictory input; nothing is repaired.
     """
-    if not raw:
+    if raw is None:
         return {}
     if not isinstance(raw, Mapping):
         raise ValueError(f"findings state must be a JSON object, got {type(raw).__name__}")
+    if not raw:
+        return {}
     unknown = sorted(set(raw) - set(STATE_KEYS))
     if unknown:
         raise ValueError(f"findings state has unknown field(s) {unknown}; allowed: {list(STATE_KEYS)}")

@@ -100,10 +100,25 @@ class TestNormalize:
         with pytest.raises(ValueError, match="clean verdict"):
             _normalize({"findings_open": [_finding()]}, status="clean")
 
-    @pytest.mark.parametrize("text", ["```", "review-result"])
+    @pytest.mark.parametrize("text", ["see ```", "see ```review-result", "~~~review-result"])
     def test_fence_shaped_text_is_rejected(self, text):
         with pytest.raises(ValueError, match="fence-delimiter"):
-            _normalize({"cleared_claims": [{**_claim(), "evidence": f"see {text}"}]})
+            _normalize({"cleared_claims": [{**_claim(), "evidence": text}]})
+
+    def test_the_plain_word_review_result_is_ordinary_text(self):
+        out = _normalize(
+            {
+                "cleared_claims": [
+                    {**_claim(), "evidence": "edited schemas/review-result.schema.json"}
+                ]
+            }
+        )
+        assert "review-result.schema.json" in out["cleared_claims"][0]["evidence"]
+
+    @pytest.mark.parametrize("raw", ["", 0, False, [], "x"])
+    def test_a_falsy_or_non_object_state_is_malformed_not_absent(self, raw):
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            _normalize(raw)
 
 
 class TestFenceRoundTrip:
