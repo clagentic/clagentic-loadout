@@ -20,15 +20,14 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
-import os
 import re
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.acquire.contract import AcquiredPr
+from clagentic_loadout.review.atomic_io import write_json_atomic as _write_json
 from clagentic_loadout.review.carrier import Runner, run_in_process_group
 from clagentic_loadout.review.chunk_review import (
     ENGINE_FALLBACK,
@@ -135,17 +134,6 @@ def bind_run_dir(
         return
     (run_dir / FINDINGS_FILENAME).unlink(missing_ok=True)
     _write_json(path, binding)
-
-
-def _write_json(path: Path, data: Any) -> None:
-    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        # Leave no half-written temp file in the state directory.
-        tmp.unlink(missing_ok=True)
-        raise
 
 
 def _resume_key(

@@ -21,6 +21,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from clagentic_loadout.review.atomic_io import write_json_atomic
+
 DEFAULT_TTL_SECONDS = 900.0
 BREAKER_FILENAME = "engine-breaker.json"
 
@@ -62,10 +64,11 @@ class EngineBreaker:
         if self._path is None:
             return
         try:
-            self._path.write_text(json.dumps(self._entries, sort_keys=True), encoding="utf-8")
+            write_json_atomic(self._path, self._entries)
         except OSError:
             # Persistence only saves a later resume some calls; failing to
-            # write it must not fail the review that is in progress.
+            # write it must not fail the review that is in progress, and the
+            # atomic writer leaves the previous file intact.
             return
 
     def trip(self, engine: str, reason: str, evidence: dict[str, Any] | None = None) -> None:

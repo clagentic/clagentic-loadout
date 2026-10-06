@@ -19,6 +19,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.review.atomic_io import write_bytes_atomic
+
 EXIT_COMMAND_NOT_FOUND = 127
 EXCERPT_LIMIT = 2000
 #: Head kept ahead of the elision marker in a tail excerpt.
@@ -128,7 +130,7 @@ def _save_stderr(stderr: bytes | str | None, log_dir: Path | None, label: str) -
     path = log_dir / f"{label}-{uuid.uuid4().hex[:12]}.stderr"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data[-STDERR_FILE_LIMIT:])
+        write_bytes_atomic(path, data[-STDERR_FILE_LIMIT:])
     except OSError:
         return ""
     return str(path)
