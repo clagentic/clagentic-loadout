@@ -1205,6 +1205,56 @@ without explicit configuration, this default must be revisited — see
 `clagentic_loadout.task_id_guard`'s own module docstring for the same note colocated with
 the code.
 
+**Repo-declared verification — `push.verify`, DEFAULT NO-OP:** a repo can declare the
+commands that prove a change works, and `loadout-push` runs them as part of pushing, so
+"it was actually run" does not depend on the builder remembering. No `push.verify` key
+means behavior is byte-identical to a build without this feature.
+
+```yaml
+# .clagentic/loadout/config.yaml
+push:
+  verify:
+    - name: unit tests
+      argv: ["python3", "-m", "pytest", "-q"]
+      timeout_seconds: 900     # optional, default 600
+```
+
+- `name` (non-empty string, unique) — shown in the PR body and in a refusal.
+- `argv` (non-empty list of strings) — an argument list, executed with **no shell**: no
+  expansion, pipes, or redirection. Wrap a shell pipeline in an explicit
+  `["sh", "-c", "..."]` entry if you need one.
+- `timeout_seconds` (positive number, optional) — on expiry the command's whole process
+  group is killed and the check fails as a timeout.
+
+**When it runs.** On the create-PR path, in the pushing checkout at the head being
+pushed (after bot-identity re-authoring settles it), before any ref moves and before the
+PR is created. Entries run in order and stop at the first failure. On `--update-pr` it
+runs only when a body is being written (the body is where the outcome is recorded), in
+the checkout's current HEAD; a title-only update does not run it. `--dry-run` pushes
+nothing and does not run it.
+
+**What it records.** On success a `## Verification` section is appended to the PR body:
+each check's name, exit status, and the bounded tail (last 2000 characters) of its stdout
+and stderr, passed through the same redaction as other push output.
+
+**Failure.** A non-zero exit, a timeout, or a command that cannot start refuses the
+push, exit `EXIT_VERIFY_FAILED` (38), naming the check and printing its output tail.
+A malformed `push.verify` value exits `EXIT_VERIFY_CONFIG_INVALID` (39).
+
+**`--skip-verify`** bypasses the run. It is never silent: it is logged to stderr and a
+`## Verification` section stating the checks were SKIPPED (with their names) is written
+into the PR body. With no `push.verify` configured it does nothing.
+
+**Trust model.** Like the review carrier above, `push.verify` names commands this
+process executes, but the repo-level placement is deliberate and differs from the
+carrier rule: a review carrier runs where a cloned, untrusted repository could pick the
+command, whereas these commands run in the pushing checkout, as the pushing user, against
+that same checkout's own content — the person who can edit this file can already run
+code there (a Makefile, a git hook, a test file). No credential-minting or cross-repo
+surface is involved, so it stays repo-local rather than user-level-only. Do not run
+`loadout-push` from a checkout you do not trust. The child inherits the caller's own
+environment; loadout does not add the minted push credential to it.
+
 ### `loadout-merge` — the merge gate
 
 `clagentic_loadout.merge.verb`. **This is the load-bearing release gate**
