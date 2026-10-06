@@ -400,6 +400,49 @@ def test_chunked_is_reported_once_when_the_state_dir_cannot_be_created(tmp_path)
     assert chunked == ["failed"]
 
 
+def test_a_usage_limit_trips_the_breaker_for_the_rest_of_the_run_and_is_reported(tmp_path):
+    import subprocess
+
+    from clagentic_loadout.acquire.contract import AcquiredPr
+    from clagentic_loadout.review.profile_config import ReviewProfile
+    from clagentic_loadout.review.run_pipeline import run_review
+
+    array = json.dumps(
+        [{"file": "a.py", "line": 1, "rule_id": "R1", "severity": "nit", "message": "m"}]
+    )
+    calls: list[str] = []
+
+    def runner(argv, *, input, capture_output, timeout, cwd):
+        calls.append(argv[0])
+        if argv[0] == "carrier-engine":
+            stderr = b"prompt echo\n" * 2000 + b"ERROR: You've hit your usage limit.\n"
+            return subprocess.CompletedProcess(argv, 1, b"", stderr)
+        return subprocess.CompletedProcess(argv, 0, array.encode(), b"")
+
+    acquired = AcquiredPr(
+        owner="some-owner", repo="some-repo", pr_number=42, base_sha="a" * 40,
+        head_sha="b" * 40, diff_text=make_diff({"a.py": 6, "b.py": 6, "c.py": 6}),
+    )
+    profile = ReviewProfile(
+        name="reviewer", carrier=("carrier-engine",), fallback=("fallback-engine",),
+        rulebook_text="", chunk_lines=8, timeout_seconds=5.0, fallback_timeout_seconds=5.0,
+        max_attempts=3, parallel=1,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    outcome = run_review(acquired, profile, run_dir, emit=lambda *a, **k: None, runner=runner)
+
+    assert outcome.exit_code == 0
+    assert calls.count("carrier-engine") == 1
+    assert calls.count("fallback-engine") == outcome.payload["chunk_count"] >= 2
+    assert outcome.payload["carrier_unavailable_reason"] == "usage_limit"
+    assert outcome.payload["engines"] == {"fallback": outcome.payload["chunk_count"]}
+    chunk_stages = [s for s in outcome.stages if s["stage"].startswith("chunk-")]
+    assert all(s["status"] == "fallback" for s in chunk_stages)
+    assert all(s["note"] == "carrier unavailable: usage_limit" for s in chunk_stages)
+
+
 @pytest.mark.parametrize("bad_sha", ["../..", "abc123", "B" * 40])
 def test_default_run_dir_refuses_a_head_sha_that_is_not_40_lowercase_hex(tmp_path, bad_sha):
     from clagentic_loadout.review.run_pipeline import default_run_dir

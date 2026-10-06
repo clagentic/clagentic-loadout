@@ -168,3 +168,73 @@ def test_the_direct_child_is_reaped_when_a_descendant_outlives_the_group(tmp_pat
                 os.kill(int(escapee_pid_file.read_text(encoding="utf-8")), 9)
             except ProcessLookupError:
                 pass
+
+
+def test_a_failure_behind_a_long_prompt_echo_keeps_the_error_line(tmp_path):
+    script = (
+        "import sys\n"
+        "sys.stderr.write('user You are reviewing a diff\\n' + 'prompt line\\n' * 5000)\n"
+        "sys.stderr.write('ERROR: model rejected the request\\n')\n"
+        "raise SystemExit(1)\n"
+    )
+
+    result = run_engine(
+        [sys.executable, "-c", script], "p", 10, cwd=tmp_path, log_dir=tmp_path / "logs"
+    )
+
+    assert result.kind == KIND_FAILED
+    assert "ERROR: model rejected the request" in result.stderr_excerpt
+    assert result.stderr_excerpt.startswith("user You are reviewing a diff")
+    assert "characters elided" in result.stderr_excerpt
+    assert len(result.stderr_excerpt) < 2500
+    assert result.stderr_last_line == "ERROR: model rejected the request"
+    kept = Path(result.stderr_file)
+    assert kept.parent == tmp_path / "logs"
+    assert kept.read_text(encoding="utf-8").rstrip().endswith("model rejected the request")
+
+
+def test_the_kept_stderr_file_is_bounded(tmp_path):
+    from clagentic_loadout.review import carrier
+
+    script = "import sys\nsys.stderr.write('x' * 600000 + '\\nlast\\n')\nraise SystemExit(2)\n"
+
+    result = run_engine(
+        [sys.executable, "-c", script], "p", 10, cwd=tmp_path, log_dir=tmp_path / "logs"
+    )
+
+    kept = Path(result.stderr_file)
+    assert kept.stat().st_size == carrier.STDERR_FILE_LIMIT
+    assert kept.read_text(encoding="utf-8").endswith("last\n")
+
+
+def test_a_usage_limit_at_the_end_of_stderr_is_unavailable_and_not_retried(tmp_path):
+    import subprocess
+
+    from clagentic_loadout.review.carrier import run_engine_with_retry
+
+    calls: list[int] = []
+
+    def limited_runner(argv, **kwargs):
+        calls.append(1)
+        return subprocess.CompletedProcess(
+            argv, 1, b"", b"prompt echo\nERROR: You've hit your usage limit.\n"
+        )
+
+    result = run_engine_with_retry(["engine"], "p", 5, cwd=tmp_path, runner=limited_runner)
+
+    assert result.kind == KIND_UNAVAILABLE
+    assert result.unavailable_reason == "usage_limit"
+    assert len(calls) == 1
+
+
+def test_a_usage_limit_phrase_inside_the_echoed_prompt_is_not_a_usage_limit(tmp_path):
+    import subprocess
+
+    def runner(argv, **kwargs):
+        stderr = b"diff mentions usage_limit_exceeded\n" + b"filler line\n" * 1000 + b"boom\n"
+        return subprocess.CompletedProcess(argv, 1, b"", stderr)
+
+    result = run_engine(["engine"], "p", 5, cwd=tmp_path, runner=runner)
+
+    assert result.kind == KIND_FAILED
+    assert result.unavailable_reason == ""

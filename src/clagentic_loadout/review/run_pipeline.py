@@ -46,6 +46,7 @@ from clagentic_loadout.review.delta import (
     carried_findings,
     render_delta_note,
 )
+from clagentic_loadout.review.engine_breaker import EngineBreaker
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
 from clagentic_loadout.sha import FULL_SHA_RE
@@ -222,6 +223,34 @@ def _stage_status(record: dict[str, Any]) -> str:
     return "fallback" if record.get("engine") == ENGINE_FALLBACK else "ok"
 
 
+def _stage_note(record: dict[str, Any]) -> str | None:
+    """Why this chunk was answered by, or failed on, the engine it names: the
+    last stderr line is where an engine says what went wrong."""
+    unavailable = record.get("carrier_unavailable_reason")
+    if unavailable and record.get("engine") == ENGINE_FALLBACK:
+        return f"carrier unavailable: {unavailable}"
+    failure = record.get("carrier_failure")
+    if failure:
+        return f"carrier failed: {failure.get('stderr_last_line') or failure.get('detail')}"
+    if record.get("status") == STATUS_FAILED:
+        return record.get("stderr_last_line") or None
+    return None
+
+
+def _engine_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """Which engine answered how many chunks, and why the carrier did not."""
+    summary: dict[str, Any] = {"engines": {}}
+    for record in records.values():
+        engine = record.get("engine")
+        summary["engines"][engine] = summary["engines"].get(engine, 0) + 1
+        reason = record.get("carrier_unavailable_reason")
+        if reason:
+            summary["carrier_unavailable_reason"] = reason
+        if record.get("carrier_failure"):
+            summary["carrier_failed_chunks"] = summary.get("carrier_failed_chunks", 0) + 1
+    return summary
+
+
 def _blocked(stage: str, reason: str, detail: str, stages: list[dict[str, Any]], **extra: Any) -> RunOutcome:
     payload = {"result": RESULT_BLOCKED, "stage": stage, "reason": reason, "detail": detail}
     payload.update({k: v for k, v in extra.items() if v not in (None, "")})
@@ -310,6 +339,8 @@ def run_review(
                 fresh_budget.add(chunk.index)
             pending.append(chunk)
 
+    breaker = EngineBreaker()
+
     def work(chunk: Chunk) -> dict[str, Any]:
         previous = _load_record(state_dir, chunk.index) or {}
         record = review_chunk(
@@ -320,6 +351,7 @@ def run_review(
             cwd=run_dir,
             runner=runner,
             delta_note=delta_note,
+            breaker=breaker,
         )
         try:
             _write_json(_result_path(state_dir, chunk.index), record)
@@ -344,6 +376,8 @@ def run_review(
                     nonce=record.get("nonce"),
                     attempts=record.get("attempts"),
                     reason=record.get("reason"),
+                    engine=record.get("engine"),
+                    note=_stage_note(record),
                 )
 
     blocking = [
@@ -365,6 +399,8 @@ def run_review(
             engine=first.get("engine"),
             reply_excerpt=first.get("reply_excerpt"),
             stderr_excerpt=first.get("stderr_excerpt"),
+            stderr_last_line=first.get("stderr_last_line"),
+            stderr_file=first.get("stderr_file"),
             run_dir=str(run_dir),
         )
 
@@ -407,7 +443,10 @@ def run_review(
         "chunks": [
             {
                 key: records[chunk.index].get(key)
-                for key in ("index", "engine", "nonce", "attempts", "exit_code", "files")
+                for key in (
+                    "index", "engine", "nonce", "attempts", "exit_code", "files",
+                    "carrier_unavailable_reason", "carrier_failure",
+                )
             }
             for chunk in chunks
         ],
@@ -432,6 +471,7 @@ def run_review(
             "chunk_count": len(chunks),
             "finding_count": len(findings),
             "carried_count": len(carried),
+            **_engine_summary({i: records[i] for i in (c.index for c in chunks)}),
         },
         stages,
     )
