@@ -199,9 +199,8 @@ def _default_exists_check(path: Path) -> bool:
     keys on the config file being a FILE, never a bare directory) — this is
     the correct default for the six config-reading consumers. A caller with
     a genuinely different presence contract (e.g. release.detector's
-    marker-DIRECTORY check, which predates lr-18f46a and is deliberately
-    UNCHANGED by this task — only the walk-up is new, not the marker's own
-    file-vs-dir semantics) passes its own `exists_check`.
+    per-marker check: config FILE for the current home, DIRECTORY for the
+    legacy home) passes its own `exists_check`.
     """
     return path.is_file()
 

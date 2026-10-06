@@ -178,12 +178,38 @@ class TestIsSemanticReleaseOwned:
         assert detector.is_semantic_release_owned(repo) is True
 
     def test_loadout_marker_present_is_owned(self, tmp_path):
-        """.clagentic is the current per-repo loadout config marker
-        (lr-446c35) — the successor marker to the source's .crew marker."""
+        """loadout's own config file is the current per-repo marker."""
         repo = tmp_path / "repo"
-        repo.mkdir()
-        (repo / ".clagentic").mkdir()
+        config_dir = repo / ".clagentic" / "loadout"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.yaml").write_text("{}\n")
         assert detector.is_semantic_release_owned(repo) is True
+
+    def test_other_product_clagentic_dir_is_not_owned(self, tmp_path):
+        """A .clagentic/ holding only another product's subdir is not a
+        loadout marker."""
+        repo = tmp_path / "repo"
+        (repo / ".clagentic" / "othertool").mkdir(parents=True)
+        assert detector.is_semantic_release_owned(repo) is False
+
+    def test_bare_clagentic_dir_is_not_owned(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".clagentic").mkdir(parents=True)
+        assert detector.is_semantic_release_owned(repo) is False
+
+    def test_other_product_dir_in_wrapper_is_not_owned(self, tmp_path):
+        wrapper = tmp_path / "wrapper"
+        repo = wrapper / "repo"
+        _init_repo(repo)
+        (wrapper / ".clagentic" / "othertool").mkdir(parents=True)
+        assert detector.is_semantic_release_owned(repo) is False
+
+    def test_other_product_dir_in_ancestor_above_wrapper_is_not_owned(self, tmp_path):
+        repo = tmp_path / "a" / "wrapper" / "repo"
+        _init_repo(repo)
+        (tmp_path / ".clagentic" / "othertool").mkdir(parents=True)
+        (tmp_path / "a" / ".clagentic").mkdir()
+        assert detector.is_semantic_release_owned(repo) is False
 
     def test_legacy_loadout_marker_present_is_owned(self, tmp_path):
         """Transitional back-compat (lr-446c35): a repo that has not yet
@@ -193,6 +219,24 @@ class TestIsSemanticReleaseOwned:
         repo.mkdir()
         (repo / ".loadout").mkdir()
         assert detector.is_semantic_release_owned(repo) is True
+
+    def test_directory_named_like_config_file_is_not_owned(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".clagentic" / "loadout" / "config.yaml").mkdir(parents=True)
+        assert detector.is_semantic_release_owned(repo) is False
+
+    def test_directory_named_like_config_file_in_wrapper_is_not_owned(self, tmp_path):
+        wrapper = tmp_path / "wrapper"
+        repo = wrapper / "repo"
+        _init_repo(repo)
+        (wrapper / ".clagentic" / "loadout" / "config.yaml").mkdir(parents=True)
+        assert detector.is_semantic_release_owned(repo) is False
+
+    def test_legacy_marker_as_file_is_not_owned(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".loadout").write_text("")
+        assert detector.is_semantic_release_owned(repo) is False
 
     def test_neither_marker_is_not_owned(self, tmp_path):
         repo = tmp_path / "repo"
@@ -205,7 +249,8 @@ class TestIsSemanticReleaseOwned:
         wrapper = tmp_path / "wrapper"
         repo = wrapper / "repo"
         _init_repo(repo)
-        (wrapper / ".clagentic").mkdir()
+        (wrapper / ".clagentic" / "loadout").mkdir(parents=True)
+        (wrapper / ".clagentic" / "loadout" / "config.yaml").write_text("{}\n")
         assert detector.is_semantic_release_owned(repo) is True
 
     def test_self_contained_repo_does_not_climb_past_its_own_absence(self, tmp_path):
