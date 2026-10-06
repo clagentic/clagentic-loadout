@@ -60,6 +60,12 @@ def _merge_main(argv: list[str]) -> int:
     return merge_main(argv)
 
 
+def _reviewer_login_main(argv: list[str]) -> int:
+    from clagentic_loadout.merge.reviewer_login_verb import main as reviewer_login_main
+
+    return reviewer_login_main(argv)
+
+
 def _git_host_api_main(argv: list[str]) -> int:
     from clagentic_loadout.transport.git_host_api import main as git_host_api_main
 
@@ -130,6 +136,10 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         _pr_review_main,
     ),
     "merge": ("Run the merge-gate chain, then merge a PR.", _merge_main),
+    "reviewer-login": (
+        "Print the platform login each named reviewer posts under.",
+        _reviewer_login_main,
+    ),
     "git-host-api": ("Make one authenticated Forgejo REST call.", _git_host_api_main),
     "stage-body": (
         "Stage a --body-env body + identity stamp (write side).",

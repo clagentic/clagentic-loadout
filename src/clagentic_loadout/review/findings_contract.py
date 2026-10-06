@@ -49,7 +49,23 @@ class InvalidReplyError(ValueError):
     """A chunk reply is not a valid findings array."""
 
 
-def _validate_finding(item: Any, position: int) -> dict[str, Any]:
+def validate_finding(
+    item: Any,
+    position: int,
+    *,
+    lenient_severity: bool = False,
+    truncate_message: bool = True,
+) -> dict[str, Any]:
+    """Validate one finding object and return it in canonical shape.
+
+    The default is the strict form a carrier reply must satisfy: a severity
+    from SEVERITIES, exactly as written, and a message cut to
+    MAX_MESSAGE_CHARS. ``lenient_severity`` is for findings a person has
+    edited: the severity may be absent (returned as None), and a present one
+    is matched ignoring case and surrounding whitespace, then returned
+    normalized, so "Blocking" can never slip past a clean-vs-blocking check.
+    ``truncate_message`` keeps an edited message whole.
+    """
     if not isinstance(item, dict):
         raise InvalidReplyError(f"finding {position} is not an object")
     file_value = item.get("file")
@@ -67,9 +83,14 @@ def _validate_finding(item: Any, position: int) -> dict[str, Any]:
         raise InvalidReplyError(f"finding {position} line is not an integer")
     if line < 1:
         raise InvalidReplyError(f"finding {position} line must be >= 1, got {line}")
-    if severity not in SEVERITIES:
-        raise InvalidReplyError(f"finding {position} severity is not one of {SEVERITIES}")
-    if len(message) > MAX_MESSAGE_CHARS:
+    if lenient_severity and severity is not None:
+        severity = severity.strip().lower() if isinstance(severity, str) else None
+    if not (lenient_severity and item.get("severity") is None) and severity not in SEVERITIES:
+        raise InvalidReplyError(
+            f"finding {position} severity must be one of {', '.join(SEVERITIES)}, "
+            f"got {item.get('severity')!r}"
+        )
+    if truncate_message and len(message) > MAX_MESSAGE_CHARS:
         # A good finding with a long message is kept, not discarded; the
         # contract's bound is enforced by truncation.
         message = message[: MAX_MESSAGE_CHARS - 3] + "..."
@@ -100,7 +121,7 @@ def parse_chunk_reply(text: str) -> list[dict[str, Any]]:
         raise InvalidReplyError(f"reply is not valid JSON: {exc.msg}") from exc
     if not isinstance(data, list):
         raise InvalidReplyError("reply is not a JSON array")
-    return [_validate_finding(item, i + 1) for i, item in enumerate(data)]
+    return [validate_finding(item, i + 1) for i, item in enumerate(data)]
 
 
 def merge_findings(

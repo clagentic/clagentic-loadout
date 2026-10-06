@@ -7,7 +7,9 @@ one to post its judgement, and nothing else:
         checkout), chunk it, run the configured carrier per chunk with bounded
         retry and fallback, validate the findings contract, and merge. Exit 0
         complete, 10 resume (run the identical command again; finished chunks
-        are cached), 20 blocked with the stage named.
+        are cached), 20 blocked with the stage named. With --prior-findings /
+        --prior-head-sha it reviews only the delta since the caller's own last
+        verdict (see review.delta), falling back to the full diff otherwise.
   post  stage and post the findings through the existing review-post path with
         the tool-constructed verdict fence, and verify the landed comment.
         The comment carries structured findings only; there is deliberately
@@ -42,7 +44,8 @@ from clagentic_loadout.platform_detect import (
     resolve_platform,
 )
 from clagentic_loadout.review import verb as review_post_verb
-from clagentic_loadout.review.findings_contract import SEVERITIES
+from clagentic_loadout.review.delta import resolve_delta
+from clagentic_loadout.review.findings_contract import InvalidReplyError, validate_finding
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
     ReviewProfileError,
@@ -52,9 +55,11 @@ from clagentic_loadout.review.profile_config import (
 from clagentic_loadout.review.run_pipeline import (
     EXIT_BLOCKED,
     RESULT_BLOCKED,
+    RunOutcome,
     bind_run_dir,
     default_run_dir,
     run_review,
+    unusable_acquire_outcome,
 )
 from clagentic_loadout.sha import FULL_SHA_RE
 from clagentic_loadout.transport.attestation import (
@@ -89,13 +94,15 @@ EXIT_RESUME = 10
 EXIT_RUN_BLOCKED = EXIT_BLOCKED
 #: `post`: the findings were not posted or the posted comment did not verify.
 EXIT_POST_FAILED = 30
-#: `post`: the findings were produced for a head that is no longer the PR head.
+#: `post`: the findings were produced for a head that is no longer the PR head,
+#: either caught before posting (nothing posted) or found on the landed
+#: comment afterwards (posted, result "posted_head_moved").
 EXIT_STALE_HEAD = 31
 #: `post`: the findings file or --status is internally inconsistent.
 EXIT_FINDINGS_INVALID = 32
 
 _GIT_PROBE_TIMEOUT_SECONDS = 10
-RUN_ROOT_ENV_VAR ="CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT"
+RUN_ROOT_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT"
 _STATUSES = ("clean", "blocking")
 _FINDING_KEYS = ("file", "line", "rule_id", "message")
 
@@ -196,6 +203,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "keyed on (repo, pr, head sha) under review.run_root (or "
         f"${RUN_ROOT_ENV_VAR}) so a re-dispatched run resumes its finished chunks.",
     )
+    run.add_argument(
+        "--prior-findings",
+        default=None,
+        help="Delta mode: the findings file of this role's own last posted "
+        "verdict on this PR (a previous `run` output, or a JSON array of its "
+        "findings with --prior-head-sha). Reviews only the changes since that "
+        "verdict's head and answers for its open findings. Falls back to a "
+        "full-diff review, naming the reason, when the current head is not a "
+        "fast-forward of that head.",
+    )
+    run.add_argument(
+        "--prior-head-sha",
+        default=None,
+        help="Delta mode: the head SHA the last posted verdict was stamped "
+        "for. Required when --prior-findings is a bare array; may be given "
+        "alone to review a delta with no open findings to answer for.",
+    )
 
     post = subparsers.add_parser(
         "post",
@@ -269,7 +293,7 @@ def _resolve_platform(args: argparse.Namespace, repo_path: Path) -> str:
         _fail(f"{exc} Pass --platform github or --platform forgejo.", EXIT_USAGE)
 
 
-def _acquire(
+def _build_acquire_backend(
     args: argparse.Namespace,
     *,
     owner: str,
@@ -278,9 +302,9 @@ def _acquire(
     platform: str,
     token_provider: TokenProvider | None,
     opener,
-) -> AcquiredPr:
+):
     try:
-        backend = build_backend(
+        return build_backend(
             platform,
             owner=owner,
             repo=repo,
@@ -293,6 +317,26 @@ def _acquire(
         _fail(str(exc), EXIT_WRONG_PLATFORM)
     except AcquireVerbError as exc:
         _fail(str(exc), exc.code)
+
+
+def _acquire(
+    args: argparse.Namespace,
+    *,
+    owner: str,
+    repo: str,
+    caller: str,
+    platform: str,
+    token_provider: TokenProvider | None,
+    opener,
+) -> AcquiredPr:
+    backend = _build_acquire_backend(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener,
+    )
+    return _fetch_acquired(backend, args, owner=owner, repo=repo)
+
+
+def _fetch_acquired(backend, args: argparse.Namespace, *, owner: str, repo: str) -> AcquiredPr:
     try:
         acquired = backend.fetch_pr_content(owner=owner, repo=repo, pr_number=args.pr)
     except AcquireFetchError as exc:
@@ -353,32 +397,57 @@ def _run_command(
     except ReviewProfileError as exc:
         _fail(str(exc), EXIT_PROFILE_INVALID)
 
-    acquired = _acquire(
+    since_head, prior_findings = _load_prior_review(args, owner=owner, repo=repo)
+
+    backend = _build_acquire_backend(
         args, owner=owner, repo=repo, caller=caller, platform=platform,
         token_provider=token_provider, opener=opener,
     )
+    acquired = _fetch_acquired(backend, args, owner=owner, repo=repo)
 
-    head_sha_usable = FULL_SHA_RE.match(acquired.head_sha) is not None
-    if args.out:
-        run_dir = Path(args.out)
-    elif head_sha_usable:
-        run_dir = default_run_dir(
-            _resolve_run_root(run_root, config_root), owner, repo, args.pr, acquired.head_sha
+    # An unusable head SHA must never become a path segment, so it is refused
+    # here, before any run directory is derived from it or touched.
+    refused = unusable_acquire_outcome(acquired, emit=_emit_stage)
+    if refused is not None:
+        return _report_outcome(refused)
+
+    delta = None
+    delta_stage = None
+    if since_head is not None:
+        resolution = resolve_delta(backend, acquired, since_head, prior_findings)
+        acquired, delta = resolution.acquired, resolution.context
+        delta_stage = resolution.stage_fields()
+        if delta is None:
+            print(
+                f"loadout-review: delta review not used ({resolution.reason}): "
+                f"{resolution.detail}; reviewing the full diff",
+                file=sys.stderr,
+            )
+
+    delta_since = delta.since_head if delta is not None else None
+    run_dir = (
+        Path(args.out)
+        if args.out
+        else default_run_dir(
+            _resolve_run_root(run_root, config_root), owner, repo, args.pr,
+            acquired.head_sha, delta_since,
         )
-    else:
-        # An unusable head SHA must never become a path segment. run_review
-        # blocks at the "acquired" stage before it touches the run directory,
-        # so the run root stands in as a placeholder that is never written.
-        run_dir = _resolve_run_root(run_root, config_root)
-    if head_sha_usable:
-        try:
-            run_dir.mkdir(parents=True, exist_ok=True)
-            bind_run_dir(run_dir, owner, repo, args.pr, acquired.head_sha)
-        except OSError as exc:
-            _fail(f"cannot prepare the run directory {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
+    )
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        bind_run_dir(run_dir, owner, repo, args.pr, acquired.head_sha, delta_since)
+    except OSError as exc:
+        _fail(f"cannot prepare the run directory {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
 
     kwargs = {"runner": runner} if runner is not None else {}
-    outcome = run_review(acquired, profile, run_dir, emit=_emit_stage, **kwargs)
+    outcome = run_review(
+        acquired, profile, run_dir, emit=_emit_stage, delta=delta, delta_stage=delta_stage,
+        **kwargs,
+    )
+    return _report_outcome(outcome)
+
+
+def _report_outcome(outcome: RunOutcome) -> int:
     payload = dict(outcome.payload)
     payload["stages"] = outcome.stages
     print(json.dumps(payload))
@@ -392,8 +461,18 @@ def _run_command(
 
 
 def _load_findings(
-    path: str, args: argparse.Namespace, *, owner: str, repo: str
+    path: str,
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha_arg: str | None,
+    head_flag: str,
 ) -> tuple[str, list[dict[str, Any]]]:
+    """Read a findings file (a `run` output or a bare array) for this PR and
+    return its head SHA and its findings, validated by the shared findings
+    contract. Severity is optional and matched ignoring case, since a person
+    may have edited the file; messages are kept whole."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -405,67 +484,81 @@ def _load_findings(
         # Compared against the parsed owner/repo, not the raw argument, so a
         # padded --repo value that acquire accepted is not rejected here.
         requested = f"{owner}/{repo}"
-        if owner_repo.lower() != requested.lower() or data.get("pr_number") != args.pr:
+        if owner_repo.lower() != requested.lower() or data.get("pr_number") != pr_number:
             _fail(
                 f"findings file {path!r} is for {owner_repo}#{data.get('pr_number')}, "
-                f"but {requested}#{args.pr} was requested",
+                f"but {requested}#{pr_number} was requested",
                 EXIT_FINDINGS_INVALID,
             )
-        if args.head_sha is not None and args.head_sha != head_sha:
+        if head_sha_arg is not None and head_sha_arg != head_sha:
             _fail(
-                f"--head-sha {args.head_sha} conflicts with the head SHA {head_sha} recorded "
-                f"in the findings file {path!r}; drop --head-sha or regenerate the findings",
+                f"{head_flag} {head_sha_arg} conflicts with the head SHA {head_sha} recorded "
+                f"in the findings file {path!r}; drop {head_flag} or regenerate the findings",
                 EXIT_FINDINGS_INVALID,
             )
     else:
-        head_sha = args.head_sha
+        head_sha = head_sha_arg
         findings = data
     if not isinstance(head_sha, str) or not FULL_SHA_RE.match(head_sha):
         _fail(
             "the findings head SHA is missing or not 40 lowercase hex characters "
-            "(a bare findings array needs --head-sha)",
+            f"(a bare findings array needs {head_flag})",
             EXIT_FINDINGS_INVALID,
         )
     if not isinstance(findings, list):
         _fail(f"findings in {path!r} must be a JSON array", EXIT_FINDINGS_INVALID)
-    cleaned: list[dict[str, Any]] = []
+    validated: list[dict[str, Any]] = []
     for position, item in enumerate(findings, start=1):
-        if not isinstance(item, dict) or any(key not in item for key in _FINDING_KEYS):
+        try:
+            validated.append(
+                validate_finding(
+                    item, position, lenient_severity=True, truncate_message=False
+                )
+            )
+        except InvalidReplyError as exc:
+            _fail(str(exc), EXIT_FINDINGS_INVALID)
+    return head_sha, validated
+
+
+def _load_prior_review(
+    args: argparse.Namespace, *, owner: str, repo: str
+) -> tuple[str | None, list[dict[str, Any]]]:
+    """The caller's own last verdict for delta mode: its head and the findings
+    it posted. (None, []) when the caller asked for a full review."""
+    if args.prior_findings is None:
+        if args.prior_head_sha is None:
+            return None, []
+        if not FULL_SHA_RE.match(args.prior_head_sha):
             _fail(
-                f"finding {position} must be an object with {', '.join(_FINDING_KEYS)}",
+                "--prior-head-sha must be 40 lowercase hex characters, "
+                f"got {args.prior_head_sha!r}",
+                EXIT_USAGE,
+            )
+        return args.prior_head_sha, []
+    head_sha, findings = _load_findings(
+        args.prior_findings, owner=owner, repo=repo, pr_number=args.pr,
+        head_sha_arg=args.prior_head_sha, head_flag="--prior-head-sha",
+    )
+    for position, finding in enumerate(findings, start=1):
+        if finding["severity"] is None:
+            _fail(
+                f"prior finding {position} has no severity; a delta review needs each "
+                "open finding's severity to carry it forward",
                 EXIT_FINDINGS_INVALID,
             )
-        if (
-            not all(isinstance(item[key], str) and item[key] for key in ("file", "rule_id", "message"))
-            or isinstance(item["line"], bool)
-            or not isinstance(item["line"], int)
-        ):
-            _fail(f"finding {position} has a field of the wrong type", EXIT_FINDINGS_INVALID)
-        if item["line"] < 1:
-            _fail(f"finding {position} line must be >= 1, got {item['line']}", EXIT_FINDINGS_INVALID)
-        severity = item.get("severity")
-        if severity is not None:
-            # Normalized so "Blocking" or " blocking" cannot slip past the
-            # clean-vs-blocking contradiction check in the caller.
-            normalized = severity.strip().lower() if isinstance(severity, str) else None
-            if normalized not in SEVERITIES:
-                _fail(
-                    f"finding {position} severity must be one of {', '.join(SEVERITIES)}, "
-                    f"got {severity!r}",
-                    EXIT_FINDINGS_INVALID,
-                )
-            severity = normalized
-        message = f"({severity}) {item['message']}" if severity else item["message"]
-        cleaned.append(
-            {
-                "file": item["file"],
-                "line": item["line"],
-                "rule_id": item["rule_id"],
-                "message": message,
-                "severity": severity,
-            }
-        )
-    return head_sha, cleaned
+    return head_sha, findings
+
+
+def _render_for_post(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Findings as the posted body carries them: the review-post contract has
+    no severity field, so a present severity leads the message."""
+    return [
+        {
+            **f,
+            "message": f"({f['severity']}) {f['message']}" if f["severity"] else f["message"],
+        }
+        for f in findings
+    ]
 
 
 def _post_command(
@@ -479,7 +572,10 @@ def _post_command(
     opener,
     identity_provider,
 ) -> int:
-    head_sha, findings = _load_findings(args.findings, args, owner=owner, repo=repo)
+    head_sha, findings = _load_findings(
+        args.findings, owner=owner, repo=repo, pr_number=args.pr,
+        head_sha_arg=args.head_sha, head_flag="--head-sha",
+    )
     if args.status == "clean" and any(f["severity"] == "blocking" for f in findings):
         _fail(
             "--status clean contradicts the findings file, which carries a blocking finding; "
@@ -503,7 +599,7 @@ def _post_command(
 
     body = {
         "review_status": args.status,
-        "findings": [{k: f[k] for k in _FINDING_KEYS} for f in findings],
+        "findings": [{k: f[k] for k in _FINDING_KEYS} for f in _render_for_post(findings)],
     }
     try:
         stage_caller_body(
@@ -580,21 +676,48 @@ def _post_command(
             file=sys.stderr,
         )
         return EXIT_POST_FAILED
-    print(
-        json.dumps(
-            {
-                "result": "posted",
-                "status": args.status,
-                "head_sha": head_sha,
-                "pr_number": args.pr,
-                "finding_count": len(findings),
-                "verified_id": posted.get("verified_id"),
-                "verified_url": posted.get("verified_url"),
-                "verified_by_login": posted.get("verified_by_login"),
-                "verdict_block_verified": True,
-            }
+    result = {
+        "result": "posted",
+        "status": args.status,
+        "head_sha": head_sha,
+        "pr_number": args.pr,
+        "finding_count": len(findings),
+        "verified_id": posted.get("verified_id"),
+        "verified_url": posted.get("verified_url"),
+        "verified_by_login": posted.get("verified_by_login"),
+        "verdict_block_verified": True,
+    }
+
+    # The late re-read above narrows the GitHub race but cannot close it: a
+    # push can still land between that read and the post. The comment cannot
+    # be taken back (a landed verdict is never deleted), so the closing check
+    # runs on the landed comment and reports honestly when its head is gone.
+    try:
+        live_head = _acquire(
+            args, owner=owner, repo=repo, caller=caller, platform=platform,
+            token_provider=token_provider, opener=opener,
+        ).head_sha
+    except ReviewCliError as exc:
+        print(
+            f"loadout-review: the posted verdict could not be re-checked against the PR head: {exc}",
+            file=sys.stderr,
         )
-    )
+        # Success is only ever reported against a head confirmed current, so an
+        # unreadable head is a failure exit even though the comment landed.
+        result.update(result="posted_head_unconfirmed", head_recheck="unavailable")
+        print(json.dumps(result))
+        return EXIT_POST_FAILED
+    if live_head != head_sha:
+        result.update(result="posted_head_moved", head_recheck="moved", current_head_sha=live_head)
+        print(json.dumps(result))
+        print(
+            f"loadout-review: the verdict landed for head {head_sha}, but the PR head is now "
+            f"{live_head}; that verdict no longer covers the PR. Run the review again.",
+            file=sys.stderr,
+        )
+        return EXIT_STALE_HEAD
+    result["head_recheck"] = "current"
+    print(json.dumps(result))
     return EXIT_OK
 
 

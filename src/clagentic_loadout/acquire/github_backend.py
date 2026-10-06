@@ -20,6 +20,10 @@ Endpoint shapes (real, documented GitHub REST API):
         -> [{"filename", "status", "patch", ...}, ...] — `patch` (a
            per-file unified-diff hunk) IS present here, unlike Gitea/
            Forgejo's equivalent endpoint.
+  - GET /repos/{owner}/{repo}/compare/{base}...{head}
+        -> {"status": "ahead"|"behind"|"diverged"|"identical", ...}; the same
+           URL with the diff media type returns the net diff text. Used by
+           fetch_range_diff only.
   - GET /repos/{owner}/{repo}/contents/{path}?ref={sha}
         -> {"content": "<base64>", "encoding": "base64", ...} for a text
            file; used only when include_file_contents=True (scanner-staging
@@ -29,9 +33,11 @@ Endpoint shapes (real, documented GitHub REST API):
 from __future__ import annotations
 
 import base64
+import json
+import urllib.error
 import urllib.parse
 
-from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile
+from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile, RangeDiff
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport.github_client import GITHUB_API_BASE, request_json
 from clagentic_loadout.transport.redirect_guard import no_redirect_opener
@@ -49,15 +55,23 @@ def _github_get(
     accept: str = "application/vnd.github+json",
     opener=None,
 ):
-    return request_json(
-        "GET",
-        url,
-        token,
-        accept=accept,
-        parse_mode="content_type",
-        opener=opener,
-        opener_factory=no_redirect_opener,
-    )
+    # request_json lets a malformed 2xx JSON body and network failures
+    # propagate raw; translate both so every fetch here fails with the shared
+    # AcquireFetchError, never a parser or socket exception.
+    try:
+        return request_json(
+            "GET",
+            url,
+            token,
+            accept=accept,
+            parse_mode="content_type",
+            opener=opener,
+            opener_factory=no_redirect_opener,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise AcquireFetchError(f"GET {url} returned a body that is not valid JSON") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise AcquireFetchError(f"GET {url} failed: {exc}") from exc
 
 
 def _get_pr_info(owner: str, repo: str, pr_number: int, token: str, *, opener=None) -> dict:
@@ -127,6 +141,36 @@ def _get_file_content(
         return base64.b64decode(encoded).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return ""
+
+
+def fetch_range_diff(
+    owner: str, repo: str, base_sha: str, head_sha: str, token: str, *, opener=None
+) -> RangeDiff:
+    """Net diff between two commits via GitHub's compare endpoint. Its JSON
+    `status` names the relation ("ahead" is a strict fast-forward); the diff
+    media type of the same URL carries the text, fetched only for "ahead"."""
+    base = urllib.parse.quote(base_sha, safe="")
+    head = urllib.parse.quote(head_sha, safe="")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/compare/{base}...{head}"
+    status, body = _github_get(url, token, opener=opener)
+    if status != 200 or not isinstance(body, dict):
+        raise AcquireFetchError(
+            f"cannot compare {base_sha[:12]}...{head_sha[:12]} in {owner}/{repo}: HTTP {status}"
+        )
+    if body.get("status") != "ahead":
+        return RangeDiff(base_sha=base_sha, head_sha=head_sha, fast_forward=False)
+    status, text = _github_get(url, token, accept=_DIFF_ACCEPT, opener=opener)
+    if status != 200:
+        raise AcquireFetchError(
+            f"cannot read the diff of {base_sha[:12]}...{head_sha[:12]} in "
+            f"{owner}/{repo}: HTTP {status}"
+        )
+    return RangeDiff(
+        base_sha=base_sha,
+        head_sha=head_sha,
+        fast_forward=True,
+        diff_text=text if isinstance(text, str) else "",
+    )
 
 
 def fetch_pr_content(
@@ -206,8 +250,16 @@ class GithubAcquireBackend:
             opener=self._opener,
         )
 
+    def fetch_range_diff(
+        self, *, owner: str, repo: str, base_sha: str, head_sha: str
+    ) -> RangeDiff:
+        return fetch_range_diff(
+            owner, repo, base_sha, head_sha, self._token, opener=self._opener
+        )
+
 
 __all__ = [
     "GithubAcquireBackend",
     "fetch_pr_content",
+    "fetch_range_diff",
 ]

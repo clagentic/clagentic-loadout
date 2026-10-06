@@ -59,12 +59,15 @@ _REVIEW_ONLY_PREFIX = (
 )
 
 
-def build_prompt(chunk: Chunk, total: int, rulebook_text: str) -> str:
+def build_prompt(chunk: Chunk, total: int, rulebook_text: str, delta_note: str = "") -> str:
     """Chunk prompt with the output contract placed LAST, where a model
-    weighs it most."""
+    weighs it most. *delta_note*, when given, frames the chunk as part of an
+    incremental review (see review.delta)."""
     parts = [_REVIEW_ONLY_PREFIX]
     if rulebook_text.strip():
         parts.append("## Rulebook\n\n" + rulebook_text.strip() + "\n\n")
+    if delta_note.strip():
+        parts.append(delta_note.strip() + "\n\n")
     parts.append(f"## Diff chunk {chunk.index} of {total}\n\n" + chunk.text + "\n")
     parts.append(OUTPUT_CONTRACT)
     return "".join(parts)
@@ -96,6 +99,13 @@ def _transient_reason(result: EngineResult) -> str:
     return REASON_CHUNK_TIMEOUT if result.kind == KIND_TIMEOUT else REASON_CARRIER_FAILED
 
 
+def _record_unavailable(record: dict[str, Any], engine: str, result: EngineResult) -> None:
+    """Keep an absent engine's diagnostic on the record. Keyed per engine so a
+    fallback's own absence never overwrites the carrier's."""
+    record[f"{engine}_unavailable_detail"] = result.detail
+    record[f"{engine}_unavailable_stderr_excerpt"] = result.stderr_excerpt
+
+
 def _run_one_engine(
     engine: str,
     argv: tuple[str, ...],
@@ -110,10 +120,7 @@ def _run_one_engine(
     when the engine is absent (the caller decides whether a fallback exists)."""
     result = run_engine_with_retry(argv, prompt, timeout, cwd=cwd, runner=runner)
     if result.kind == KIND_UNAVAILABLE:
-        # Keyed per engine so a fallback's own absence never overwrites the
-        # carrier's diagnostic.
-        record[f"{engine}_unavailable_detail"] = result.detail
-        record[f"{engine}_unavailable_stderr_excerpt"] = result.stderr_excerpt
+        _record_unavailable(record, engine, result)
         return None
     if result.kind in (KIND_TIMEOUT, KIND_FAILED):
         return _failure(
@@ -130,8 +137,7 @@ def _run_one_engine(
         if retry.kind == KIND_UNAVAILABLE:
             # The engine vanished between the two calls: same as being absent
             # on the first, so the caller still hands the chunk to the fallback.
-            record[f"{engine}_unavailable_detail"] = retry.detail
-            record[f"{engine}_unavailable_stderr_excerpt"] = retry.stderr_excerpt
+            _record_unavailable(record, engine, retry)
             return None
         if retry.kind in (KIND_TIMEOUT, KIND_FAILED):
             return _failure(
@@ -179,10 +185,11 @@ def review_chunk(
     attempts_before: int,
     cwd: Path,
     runner: Runner = run_in_process_group,
+    delta_note: str = "",
 ) -> dict[str, Any]:
     """Review *chunk*; returns its persistable record. Never raises for an
     engine problem: every outcome is a record with a status."""
-    prompt = build_prompt(chunk, total, profile.rulebook_text)
+    prompt = build_prompt(chunk, total, profile.rulebook_text, delta_note)
     record: dict[str, Any] = {
         "index": chunk.index,
         "files": list(chunk.files),

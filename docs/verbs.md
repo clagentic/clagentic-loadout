@@ -554,6 +554,29 @@ LOCAL repo root resolved from a wrapper directory with no `.git` of its own —
 lower priority than this verb, since API-based acquisition avoids local git
 entirely.
 
+### `loadout-reviewer-login` — the login a reviewer role posts under
+
+`clagentic_loadout.merge.reviewer_login_verb` (also `clagentic-loadout reviewer-login`).
+
+```
+loadout-reviewer-login --platform forgejo|github <name> [<name> ...]
+```
+
+Prints one login per name, in argument order, one per line on stdout and nothing
+else. Names are bare reviewer role names supplied by the caller; the verb has no
+built-in names or roster. Resolution is exactly the derivation `loadout-merge`
+binds a reviewer verdict to (`merge.reviewer_login.resolve_reviewer_login`): on
+`forgejo` the bare name is the login; on `github` it is the deployment's
+configured GitHub App slug for that name (`github_app.slugs.<name>`, or the
+single global slug) plus `[bot]`. The whole batch is resolved before anything is
+printed, so a failure never leaves a partial list.
+
+Read-only and offline: it reads deployment config, mints no credential and makes
+no network call, so it takes no `--caller` and has no identity to bind. Exit
+codes: **0** resolved, **1** usage (including a `name:login` pair or any name
+that is not a bare name), **8** a name has no login configured for the platform
+(named on stderr, nothing on stdout).
+
 ### `loadout-review` — run a PR review end to end, then post it
 
 `clagentic_loadout.review.cli` (also `clagentic-loadout pr-review`). One verb
@@ -621,6 +644,37 @@ JSON result goes to stdout. Exit codes: **0** complete, **10** resume, **20**
 blocked with the stage and reason named. `1` usage (including any argument
 parsing error), `2` token, `3` profile invalid, `4` wrong platform, `5` acquire
 failed, `7` caller/attested-identity mismatch.
+
+**Delta mode.** A re-review of a PR that already has a verdict from this role
+need not re-read unchanged lines. Pass the role's own last verdict to `run`:
+
+```
+loadout-review run --caller <role> --repo <owner/repo> --pr <n> \
+    --prior-findings <findings file of that verdict> [--prior-head-sha <sha>]
+```
+
+`--prior-findings` is the findings file the role last posted (a previous `run`
+output, whose recorded head is used, or a bare array with `--prior-head-sha`);
+`--prior-head-sha` alone reviews a delta with no open findings to answer for.
+The range `<prior head>..<current head>` is read from the host API (GitHub's
+compare endpoint; on Forgejo the compare API for the relation and the web
+compare `.diff` route for the net diff). Each chunk is framed as an incremental
+review: report new defects only on lines the delta changes, and say whether each
+open finding (everything but praise) is resolved. An open finding on a file the
+delta does not touch cannot have been resolved, so it is carried into the merged
+findings (`chunk` 0, counted in `carried_count`) and a delta review never turns
+clean by not looking. The findings file records `mode` (`delta`|`full`) and
+`since_head`; a delta run has its own run directory (`<head>-since-<prior>`).
+Delta mode works the same for every reviewer role and both platforms, each role
+keyed on its own last verdict. A range that includes merges from the base
+branch includes their changes.
+
+The full diff stays the default, and delta mode falls back to it, with a
+`delta` stage naming the reason and a line on stderr, when the head has not
+moved (`SAME_HEAD`), is not a strict fast-forward of the prior head
+(`NON_FAST_FORWARD`, e.g. after a rebase), the range cannot be read
+(`RANGE_UNAVAILABLE`), holds no reviewable change (`DELTA_EMPTY`), or the
+transport cannot read a range (`RANGE_UNSUPPORTED`).
 
 **Resume.** A stall (timeout or carrier exit) that survives the in-call retry is
 persisted and `run` exits **10**: run the identical command again and only the
@@ -701,7 +755,12 @@ fence re-parsed field for field; the JSON result carries `verified_by_login` and
 `verdict_block_verified` is true, so an inner post path that exits 0 with an
 unparseable result, a null comment id, or an unverified fence is a failure (the
 landed comment is unverified). On a non-zero inner exit its output is echoed to
-stderr. With a findings file written by `run`, a `--head-sha` that differs from
+stderr. The head is read once more after the post: because the late re-read
+cannot close the GitHub race, a landed verdict whose head has since moved is
+reported as `posted_head_moved` (exit **31**, with `current_head_sha`) rather
+than `posted`; the comment stays, and the review must be run again. A failed
+closing read leaves `posted` with `head_recheck` `unavailable`; otherwise
+`head_recheck` is `current`. With a findings file written by `run`, a `--head-sha` that differs from
 the file's recorded head is refused (exit **32**).
 
 ### `loadout-push` — bot-attributed commit push + PR open/update
