@@ -342,7 +342,8 @@ comments never needs to declare it at all. See its own bullet below for the
   clean verdict from that role that reports one of them as `failed` in its
   fence refuses the merge. `not_applicable` and `not_invoked` (with a reason)
   are accepted. A clean verdict from a role that has an entry here, but that
-  records no scanner outcomes at all, refuses the merge naming the missing
+  records no outcome for one of the named scanners (no record at all, or a
+  partial record that omits one), refuses the merge naming the missing
   record; for a role with no entry, no record only warns. `--ignore-repo-gate`
   lifts this requirement along with the reviewer floor. Scanner names are
   deployment vocabulary; none is built in. A malformed declaration drops the

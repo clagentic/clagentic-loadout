@@ -170,6 +170,30 @@ class TestRequiredScanners:
         assert "'alpha'" in err
         assert "--ignore-repo-gate" in err
 
+    def test_a_required_scanner_absent_from_a_non_empty_record_refuses_naming_it(
+        self, tmp_path, capsys
+    ):
+        _write_config(
+            tmp_path, {"required_reviewer_roles": [], "required_scanners": {NAME: ["alpha", "beta"]}}
+        )
+        state = self._scanners("ran")
+        code, err = _merge(
+            [_comment(1, _fence("clean", HEAD_B, state))], repo_path=tmp_path, capsys=capsys
+        )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "'beta'" in err
+        assert "'alpha'" not in err
+
+    def test_every_required_scanner_recorded_beside_an_extra_one_proceeds(self, tmp_path):
+        state = {
+            "scanners_run": [
+                {"scanner": "alpha", "status": "ran"},
+                {"scanner": "extra", "status": "ran"},
+            ]
+        }
+        code, _ = _merge([_comment(1, _fence("clean", HEAD_B, state))], repo_path=self._config(tmp_path))
+        assert code == verb.EXIT_OK
+
     def test_a_clean_verdict_with_no_scanner_record_only_warns_when_none_are_required(
         self, tmp_path, capsys
     ):

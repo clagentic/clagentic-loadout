@@ -931,8 +931,9 @@ def check_required_scanners(
     records no scanner outcomes at all (VerdictScannersMissingError), or when
     a required scanner is reported failed (VerdictScannerFailedError).
     not_applicable and not_invoked, with their reason, are legitimate. With no
-    required scanners declared, absence only warns; a required scanner the
-    verdict does not mention among others it does record also only warns.
+    required scanners declared, absence only warns. A required scanner the
+    verdict does not record, even beside others it does record, also refuses
+    (VerdictScannersMissingError): a declared gate gates.
     A repeated scanner name is malformed (VerdictMalformedError), never
     last-write-wins.
     """
@@ -961,19 +962,21 @@ def check_required_scanners(
                 f"coverage. Re-run it, or have the reviewer record it as not_applicable or "
                 f"not_invoked with a reason, then retry the merge gate."
             )
+    unrecorded = [scanner for scanner in required_scanners if scanner not in reported]
+    if unrecorded:
+        raise VerdictScannersMissingError(
+            f"{reviewer_name.upper()} verdict (comment #{verdict.comment_id} on PR "
+            f"#{verdict.pr_number}) records no outcome for required scanner(s) "
+            f"{unrecorded!r}. A declared scanner requirement is not met by a partial "
+            f"record. Have the reviewer re-post it with each required scanner recorded "
+            f"(ran, or not_applicable/not_invoked with a reason), then retry the merge gate."
+        )
     warnings: list[str] = []
     if not verdict.state.scanners_run:
         warnings.append(
             f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) is clean but "
             f"records no scanner outcomes; it may rest on judgment alone"
         )
-    else:
-        for scanner in required_scanners:
-            if scanner not in reported:
-                warnings.append(
-                    f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) does not "
-                    f"mention required scanner {scanner!r}"
-                )
     return warnings
 
 
