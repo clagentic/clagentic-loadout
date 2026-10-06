@@ -238,3 +238,25 @@ def test_a_usage_limit_phrase_inside_the_echoed_prompt_is_not_a_usage_limit(tmp_
 
     assert result.kind == KIND_FAILED
     assert result.unavailable_reason == ""
+
+
+def test_a_usage_limit_phrase_in_the_last_lines_of_an_echoed_prompt_does_not_trip(tmp_path):
+    import subprocess
+
+    # A short echo puts the diff's own phrase inside the final 4 KiB; the
+    # engine's real error comes after the prompt's closing contract text.
+    def runner(argv, **kwargs):
+        stderr = (
+            b"user You are reviewing a diff\n"
+            b"+ raise RuntimeError('usage_limit_exceeded')\n"
+            b"+ print('You hit your usage limit')\n"
+            b"Return ONLY a JSON array.\n"
+            b"[]\n"
+            b"ERROR: model rejected the request\n"
+        )
+        return subprocess.CompletedProcess(argv, 1, b"", stderr)
+
+    result = run_engine(["engine"], "p", 5, cwd=tmp_path, runner=runner)
+
+    assert result.kind == KIND_FAILED
+    assert result.unavailable_reason == ""

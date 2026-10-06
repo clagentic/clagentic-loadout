@@ -46,7 +46,7 @@ from clagentic_loadout.review.delta import (
     carried_findings,
     render_delta_note,
 )
-from clagentic_loadout.review.engine_breaker import EngineBreaker
+from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
 from clagentic_loadout.sha import FULL_SHA_RE
@@ -339,7 +339,9 @@ def run_review(
                 fresh_budget.add(chunk.index)
             pending.append(chunk)
 
-    breaker = EngineBreaker()
+    # Kept beside the chunk results so a resume of this exact run reuses it;
+    # every terminal outcome below clears it so a fresh run starts clean.
+    breaker = EngineBreaker(state_dir / BREAKER_FILENAME)
 
     def work(chunk: Chunk) -> dict[str, Any]:
         previous = _load_record(state_dir, chunk.index) or {}
@@ -384,6 +386,12 @@ def run_review(
         (index, r) for index, r in sorted(records.items())
         if _is_terminal(r, profile.max_attempts)
     ]
+    unfinished = sorted(
+        index for index in (c.index for c in chunks)
+        if records.get(index, {}).get("status") != STATUS_OK
+    )
+    if blocking or not unfinished:
+        breaker.clear()
     if blocking:
         first_index, first = blocking[0]
         exhausted = _is_exhausted(first, profile.max_attempts)
@@ -404,10 +412,6 @@ def run_review(
             run_dir=str(run_dir),
         )
 
-    unfinished = sorted(
-        index for index in (c.index for c in chunks)
-        if records.get(index, {}).get("status") != STATUS_OK
-    )
     if unfinished:
         return RunOutcome(
             EXIT_RESUME,

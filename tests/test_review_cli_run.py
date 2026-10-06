@@ -576,3 +576,68 @@ def test_findings_order_is_the_same_for_a_resumed_run_and_a_fresh_run(env, capsy
         (f["chunk"], f["file"]) for f in _chunk_records(payload)["findings"]
     ]
     assert order(resumed) == order(fresh) == [(1, "a.py"), (2, "STALL_ME.py"), (3, "c.py")]
+
+
+def _limit_run_fixture(tmp_path, fallback_exit):
+    import subprocess
+
+    from clagentic_loadout.acquire.contract import AcquiredPr
+    from clagentic_loadout.review.profile_config import ReviewProfile
+
+    array = json.dumps(
+        [{"file": "a.py", "line": 1, "rule_id": "R1", "severity": "nit", "message": "m"}]
+    )
+    calls: list[str] = []
+
+    def runner(argv, *, input, capture_output, timeout, cwd):
+        calls.append(argv[0])
+        if argv[0] == "carrier-engine":
+            stderr = b"prompt echo\n" * 50 + b"ERROR: You've hit your usage limit.\n"
+            return subprocess.CompletedProcess(argv, 1, b"", stderr)
+        if fallback_exit[0]:
+            return subprocess.CompletedProcess(argv, fallback_exit[0], b"", b"fallback down")
+        return subprocess.CompletedProcess(argv, 0, array.encode(), b"")
+
+    acquired = AcquiredPr(
+        owner="some-owner", repo="some-repo", pr_number=42, base_sha="a" * 40,
+        head_sha="b" * 40, diff_text=make_diff({"a.py": 6}),
+    )
+    profile = ReviewProfile(
+        name="reviewer", carrier=("carrier-engine",), fallback=("fallback-engine",),
+        rulebook_text="", chunk_lines=600, timeout_seconds=5.0, fallback_timeout_seconds=5.0,
+        max_attempts=3, parallel=1,
+    )
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    return acquired, profile, run_dir, runner, calls
+
+
+def test_a_resume_does_not_call_a_carrier_that_hit_its_usage_limit(tmp_path):
+    from clagentic_loadout.review.run_pipeline import run_review
+
+    fallback_exit = [1]
+    acquired, profile, run_dir, runner, calls = _limit_run_fixture(tmp_path, fallback_exit)
+
+    first = run_review(acquired, profile, run_dir, emit=lambda *a, **k: None, runner=runner)
+    carrier_calls_after_first = calls.count("carrier-engine")
+    fallback_exit[0] = 0
+    second = run_review(acquired, profile, run_dir, emit=lambda *a, **k: None, runner=runner)
+
+    assert first.exit_code == 10
+    assert carrier_calls_after_first == 1
+    assert second.exit_code == 0
+    assert calls.count("carrier-engine") == 1
+    assert list(run_dir.glob("state-*/engine-breaker.json")) == []
+
+
+def test_a_fresh_run_after_a_completed_one_calls_the_carrier_again(tmp_path):
+    from clagentic_loadout.review.run_pipeline import run_review
+
+    acquired, profile, run_dir, runner, calls = _limit_run_fixture(tmp_path, [0])
+
+    run_review(acquired, profile, run_dir, emit=lambda *a, **k: None, runner=runner)
+    for result in run_dir.glob("state-*/result-*.json"):
+        result.unlink()
+    run_review(acquired, profile, run_dir, emit=lambda *a, **k: None, runner=runner)
+
+    assert calls.count("carrier-engine") == 2

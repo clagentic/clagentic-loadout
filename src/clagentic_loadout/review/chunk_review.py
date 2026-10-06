@@ -121,10 +121,21 @@ def _record_unavailable(
     record[f"{engine}_unavailable_detail"] = result.detail
     record[f"{engine}_unavailable_stderr_excerpt"] = result.stderr_excerpt
     record[f"{engine}_unavailable_stderr_last_line"] = result.stderr_last_line
+    record[f"{engine}_unavailable_stderr_file"] = result.stderr_file
+    record[f"{engine}_unavailable_exit_code"] = result.exit_code
     if result.unavailable_reason:
         record[f"{engine}_unavailable_reason"] = result.unavailable_reason
         if breaker is not None:
-            breaker.trip(engine, result.unavailable_reason)
+            breaker.trip(
+                engine,
+                result.unavailable_reason,
+                {
+                    "detail": result.detail,
+                    "stderr_last_line": result.stderr_last_line,
+                    "stderr_file": result.stderr_file,
+                    "exit_code": result.exit_code,
+                },
+            )
 
 
 def _run_one_engine(
@@ -283,6 +294,9 @@ def review_chunk(
             f"carrier not called: unavailable earlier in this run ({skipped})"
         )
         record[f"{ENGINE_CARRIER}_unavailable_reason"] = skipped
+        for key, value in breaker.evidence(ENGINE_CARRIER).items():
+            if key != "detail":
+                record[f"{ENGINE_CARRIER}_unavailable_{key}"] = value
         finished = None
     else:
         finished = _run_one_engine(

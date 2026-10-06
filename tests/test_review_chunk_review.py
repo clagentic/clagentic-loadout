@@ -249,3 +249,55 @@ def test_exhausted_carrier_failures_without_a_fallback_block_with_the_tail(tmp_p
     assert record["reason"] == REASON_CARRIER_FAILED
     assert "ERROR: login expired" in record["stderr_excerpt"]
     assert record["stderr_last_line"] == "ERROR: login expired"
+
+
+def test_a_fallback_record_carries_the_carriers_stderr_file_and_last_line(tmp_path):
+    record, _ = _review_with(
+        tmp_path,
+        {_CARRIER: [(1, "", _LIMIT_STDERR)], _FALLBACK: [(0, _ARRAY, "")]},
+        fallback=True,
+    )
+
+    assert record["carrier_unavailable_stderr_last_line"] == "ERROR: You've hit your usage limit."
+    assert record["carrier_unavailable_exit_code"] == 1
+    assert record["carrier_unavailable_stderr_file"].startswith(str(tmp_path))
+
+
+def test_a_chunk_that_skips_a_tripped_carrier_still_names_the_carriers_error(tmp_path):
+    breaker = EngineBreaker()
+    _review_with(
+        tmp_path,
+        {_CARRIER: [(1, "", _LIMIT_STDERR)], _FALLBACK: [(0, _ARRAY, "")]},
+        fallback=True,
+        breaker=breaker,
+    )
+
+    record, _ = _review_with(
+        tmp_path, {_CARRIER: [], _FALLBACK: [(0, _ARRAY, "")]}, fallback=True, breaker=breaker
+    )
+
+    assert record["carrier_unavailable_stderr_last_line"] == "ERROR: You've hit your usage limit."
+    assert record["carrier_unavailable_stderr_file"]
+
+
+def test_a_breaker_persists_across_instances_and_expires(tmp_path):
+    path = tmp_path / "breaker.json"
+    now = [1000.0]
+    first = EngineBreaker(path, ttl_seconds=60, clock=lambda: now[0])
+    first.trip("carrier", "usage_limit", {"stderr_last_line": "x"})
+
+    assert EngineBreaker(path, ttl_seconds=60, clock=lambda: now[0]).reason("carrier") == "usage_limit"
+    assert EngineBreaker(path, ttl_seconds=60, clock=lambda: now[0]).evidence("carrier") == {
+        "stderr_last_line": "x"
+    }
+    now[0] += 61
+    assert EngineBreaker(path, ttl_seconds=60, clock=lambda: now[0]).reason("carrier") == ""
+    first.clear()
+    assert not path.exists()
+
+
+def test_a_corrupt_breaker_file_is_ignored(tmp_path):
+    path = tmp_path / "breaker.json"
+    path.write_text("{not json", encoding="utf-8")
+
+    assert EngineBreaker(path).reason("carrier") == ""

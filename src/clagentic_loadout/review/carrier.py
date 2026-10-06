@@ -27,6 +27,8 @@ LAST_LINE_LIMIT = 300
 #: Upper bound on the full-stderr file kept per failed call.
 STDERR_FILE_LIMIT = 256 * 1024
 _CLASSIFY_WINDOW = 4096
+#: How many trailing non-empty stderr lines are searched for an engine error.
+_CLASSIFY_LINES = 3
 
 UNAVAILABLE_REASON_USAGE_LIMIT = "usage_limit"
 #: Lowercase phrases an engine prints when its account quota is spent.
@@ -104,10 +106,13 @@ def last_line(data: bytes | str | None) -> str:
 
 
 def classify_unavailable(stderr: bytes | str | None) -> str:
-    """Reason an engine that ran is out of service, read from the END of its
-    stderr only: the engine echoes the prompt first, and a reviewed diff may
-    legitimately contain these phrases."""
-    window = _decode(stderr)[-_CLASSIFY_WINDOW:].lower()
+    """Reason an engine that ran is out of service, read from the last few
+    non-empty stderr lines only: the engine echoes the prompt first and its own
+    error comes after, and a reviewed diff may legitimately contain these
+    phrases. The echoed prompt ends with the output contract, so a phrase from
+    the diff never sits in the final lines."""
+    lines = [line for line in _decode(stderr)[-_CLASSIFY_WINDOW:].splitlines() if line.strip()]
+    window = "\n".join(lines[-_CLASSIFY_LINES:]).lower()
     if any(marker in window for marker in _USAGE_LIMIT_MARKERS):
         return UNAVAILABLE_REASON_USAGE_LIMIT
     return ""

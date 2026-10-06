@@ -639,7 +639,14 @@ detection, never for the diff.
    message (`usage_limit_exceeded` or `hit your usage limit`) is treated as
    unavailable, not as a retriable failure: no retry is spent on it, the chunk
    goes straight to the fallback, and the run's circuit breaker sends every
-   remaining chunk there too without calling the carrier again. Chunks already
+   remaining chunk there too without calling the carrier again. Only the last
+   few non-empty stderr lines are inspected, so a diff that merely contains the
+   phrase and is echoed back never trips it. The fallback record also carries
+   `carrier_unavailable_stderr_last_line`, `carrier_unavailable_stderr_file` and
+   `carrier_unavailable_exit_code`. The breaker is persisted in the run's state
+   directory (`engine-breaker.json`) so a resumed invocation does not call the
+   carrier again; it expires after 15 minutes and is removed when the run
+   completes or blocks, so a fresh run always tries the carrier. Chunks already
    in flight when the limit is first seen still complete their own call. Each
    chunk record names the answering `engine` and
    `carrier_unavailable_reason: usage_limit`; the final result adds `engines`
