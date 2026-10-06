@@ -626,6 +626,40 @@ detection, never for the diff.
    file that cannot be executed) is never retried, and exits **20** at once
    rather than **10**: repeating the call cannot change the outcome. A timeout
    kills the carrier's whole process group and reaps the direct child.
+
+   *Failure diagnostics.* A failed call keeps the **end** of its stderr and
+   stdout (a short head, an explicit `[N characters elided]` marker, then the
+   tail), because an engine that echoes its prompt prints the actual error
+   last. The record also carries `stderr_last_line` (the last non-empty stderr
+   line, repeated in the blocked result and the stage's `note`) and
+   `stderr_file`, a bounded copy (last 256 KiB) of the full stderr under
+   `carrier-logs/` in the run directory.
+
+   *Quota-exhausted carrier.* A carrier whose stderr ends with a usage-limit
+   message (`usage_limit_exceeded` or `hit your usage limit`) is treated as
+   unavailable, not as a retriable failure: no retry is spent on it, the chunk
+   goes straight to the fallback, and the run's circuit breaker sends every
+   remaining chunk there too without calling the carrier again. Only the last
+   few non-empty stderr lines are inspected, so a diff that merely contains the
+   phrase and is echoed back never trips it. The fallback record also carries
+   `carrier_unavailable_stderr_last_line`, `carrier_unavailable_stderr_file` and
+   `carrier_unavailable_exit_code`. The breaker is persisted in the run's state
+   directory (`engine-breaker.json`) so a resumed invocation does not call the
+   carrier again; it expires after 15 minutes and is removed when the run
+   completes or blocks, so a fresh run always tries the carrier. Chunks already
+   in flight when the limit is first seen still complete their own call. Each
+   chunk record names the answering `engine` and
+   `carrier_unavailable_reason: usage_limit`; the final result adds `engines`
+   (chunks per answering engine) and `carrier_unavailable_reason`.
+
+   *Exhausted carrier attempts.* When a chunk's last permitted attempt
+   (`max_attempts`) ends in `CARRIER_FAILED` and a fallback is configured, the
+   fallback reviews that chunk. It is never silent: the record has
+   `engine: fallback` and `carrier_failure` (`exit_code`, `detail`,
+   `stderr_last_line`, `stderr_excerpt`, `stderr_file`), and the stage line
+   reads `status=fallback note="carrier failed: <last line>"`. Without a
+   configured fallback the chunk blocks as `CARRIER_FAILED` with the stderr
+   tail.
 4. **Validate.** Each reply must be one JSON array of findings (`file`, `line`
    of 1 or greater, `rule_id`, `severity` of `blocking|nit|praise`, `message`
    of at most 200 characters; a longer message is truncated). Prose is never

@@ -20,15 +20,14 @@ from __future__ import annotations
 import concurrent.futures
 import hashlib
 import json
-import os
 import re
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.acquire.contract import AcquiredPr
+from clagentic_loadout.review.atomic_io import write_json_atomic as _write_json
 from clagentic_loadout.review.carrier import Runner, run_in_process_group
 from clagentic_loadout.review.chunk_review import (
     ENGINE_FALLBACK,
@@ -46,6 +45,7 @@ from clagentic_loadout.review.delta import (
     carried_findings,
     render_delta_note,
 )
+from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
 from clagentic_loadout.sha import FULL_SHA_RE
@@ -136,17 +136,6 @@ def bind_run_dir(
     _write_json(path, binding)
 
 
-def _write_json(path: Path, data: Any) -> None:
-    tmp = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
-    try:
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
-        # Leave no half-written temp file in the state directory.
-        tmp.unlink(missing_ok=True)
-        raise
-
-
 def _resume_key(
     chunks: list[Chunk], profile: ReviewProfile, head_sha: str, delta_note: str = ""
 ) -> str:
@@ -220,6 +209,34 @@ def _stage_status(record: dict[str, Any]) -> str:
     if record.get("status") == STATUS_FAILED:
         return "failed"
     return "fallback" if record.get("engine") == ENGINE_FALLBACK else "ok"
+
+
+def _stage_note(record: dict[str, Any]) -> str | None:
+    """Why this chunk was answered by, or failed on, the engine it names: the
+    last stderr line is where an engine says what went wrong."""
+    unavailable = record.get("carrier_unavailable_reason")
+    if unavailable and record.get("engine") == ENGINE_FALLBACK:
+        return f"carrier unavailable: {unavailable}"
+    failure = record.get("carrier_failure")
+    if failure:
+        return f"carrier failed: {failure.get('stderr_last_line') or failure.get('detail')}"
+    if record.get("status") == STATUS_FAILED:
+        return record.get("stderr_last_line") or None
+    return None
+
+
+def _engine_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """Which engine answered how many chunks, and why the carrier did not."""
+    summary: dict[str, Any] = {"engines": {}}
+    for record in records.values():
+        engine = record.get("engine")
+        summary["engines"][engine] = summary["engines"].get(engine, 0) + 1
+        reason = record.get("carrier_unavailable_reason")
+        if reason:
+            summary["carrier_unavailable_reason"] = reason
+        if record.get("carrier_failure"):
+            summary["carrier_failed_chunks"] = summary.get("carrier_failed_chunks", 0) + 1
+    return summary
 
 
 def _blocked(stage: str, reason: str, detail: str, stages: list[dict[str, Any]], **extra: Any) -> RunOutcome:
@@ -310,6 +327,10 @@ def run_review(
                 fresh_budget.add(chunk.index)
             pending.append(chunk)
 
+    # Kept beside the chunk results so a resume of this exact run reuses it;
+    # every terminal outcome below clears it so a fresh run starts clean.
+    breaker = EngineBreaker(state_dir / BREAKER_FILENAME)
+
     def work(chunk: Chunk) -> dict[str, Any]:
         previous = _load_record(state_dir, chunk.index) or {}
         record = review_chunk(
@@ -320,6 +341,7 @@ def run_review(
             cwd=run_dir,
             runner=runner,
             delta_note=delta_note,
+            breaker=breaker,
         )
         try:
             _write_json(_result_path(state_dir, chunk.index), record)
@@ -344,12 +366,20 @@ def run_review(
                     nonce=record.get("nonce"),
                     attempts=record.get("attempts"),
                     reason=record.get("reason"),
+                    engine=record.get("engine"),
+                    note=_stage_note(record),
                 )
 
     blocking = [
         (index, r) for index, r in sorted(records.items())
         if _is_terminal(r, profile.max_attempts)
     ]
+    unfinished = sorted(
+        index for index in (c.index for c in chunks)
+        if records.get(index, {}).get("status") != STATUS_OK
+    )
+    if blocking or not unfinished:
+        breaker.clear()
     if blocking:
         first_index, first = blocking[0]
         exhausted = _is_exhausted(first, profile.max_attempts)
@@ -365,13 +395,11 @@ def run_review(
             engine=first.get("engine"),
             reply_excerpt=first.get("reply_excerpt"),
             stderr_excerpt=first.get("stderr_excerpt"),
+            stderr_last_line=first.get("stderr_last_line"),
+            stderr_file=first.get("stderr_file"),
             run_dir=str(run_dir),
         )
 
-    unfinished = sorted(
-        index for index in (c.index for c in chunks)
-        if records.get(index, {}).get("status") != STATUS_OK
-    )
     if unfinished:
         return RunOutcome(
             EXIT_RESUME,
@@ -407,7 +435,10 @@ def run_review(
         "chunks": [
             {
                 key: records[chunk.index].get(key)
-                for key in ("index", "engine", "nonce", "attempts", "exit_code", "files")
+                for key in (
+                    "index", "engine", "nonce", "attempts", "exit_code", "files",
+                    "carrier_unavailable_reason", "carrier_failure",
+                )
             }
             for chunk in chunks
         ],
@@ -432,6 +463,7 @@ def run_review(
             "chunk_count": len(chunks),
             "finding_count": len(findings),
             "carried_count": len(carried),
+            **_engine_summary({i: records[i] for i in (c.index for c in chunks)}),
         },
         stages,
     )
