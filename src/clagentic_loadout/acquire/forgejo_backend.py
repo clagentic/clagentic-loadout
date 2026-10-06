@@ -43,6 +43,24 @@ from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport import git_host_api
 
 
+def _parse_json(raw: bytes, expect: type, what: str) -> Any:
+    """Parse a 200 response body as JSON of type *expect*, or raise
+    AcquireFetchError. Every JSON read in this module goes through here so a
+    malformed, empty, or wrong-shaped body is a fetch failure, never a raw
+    parser error, an AttributeError on a wrong-typed value, or a silent
+    empty result that reads as "no data"."""
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise AcquireFetchError(f"{what} returned a body that is not valid JSON") from exc
+    if not isinstance(parsed, expect):
+        raise AcquireFetchError(
+            f"{what} returned JSON of the wrong shape (expected a {expect.__name__}, "
+            f"got {type(parsed).__name__})"
+        )
+    return parsed
+
+
 def _get_pr_info(
     git_host_base: str, token: str, owner: str, repo: str, pr_number: int, *, opener=None
 ) -> dict[str, Any]:
@@ -62,7 +80,7 @@ def _get_pr_info(
         raise AcquireFetchError(
             f"cannot read PR #{pr_number} in {owner}/{repo}: HTTP {status}"
         )
-    return git_host_api.parse_json_body(raw)
+    return _parse_json(raw, dict, f"PR #{pr_number} in {owner}/{repo}")
 
 
 def _get_changed_files(
@@ -86,12 +104,11 @@ def _get_changed_files(
             f"cannot read changed-file list for PR #{pr_number} in "
             f"{owner}/{repo}: HTTP {status}"
         )
-    body = json.loads(raw.decode("utf-8")) if raw else []
-    if not isinstance(body, list):
-        raise AcquireFetchError(
-            f"changed-file list endpoint returned a non-list body for PR "
-            f"#{pr_number} in {owner}/{repo}"
-        )
+    body = (
+        _parse_json(raw, list, f"changed-file list for PR #{pr_number} in {owner}/{repo}")
+        if raw
+        else []
+    )
     return [
         ChangedFile(filename=f.get("filename", "<unknown>"), status=f.get("status", ""))
         for f in body
@@ -159,7 +176,7 @@ def _get_file_content(
             f"cannot read content of {filepath!r} at {ref!r} in "
             f"{owner}/{repo}: HTTP {status}"
         )
-    body = git_host_api.parse_json_body(raw)
+    body = _parse_json(raw, dict, f"content of {filepath!r} at {ref!r} in {owner}/{repo}")
     encoded = body.get("content", "")
     if not encoded or body.get("encoding") != "base64":
         return ""
@@ -189,7 +206,9 @@ def _compare_commit_count(
         raise AcquireFetchError(
             f"cannot compare {base[:12]}...{head[:12]} in {owner}/{repo}: HTTP {status}"
         )
-    total = git_host_api.parse_json_body(raw).get("total_commits")
+    total = _parse_json(
+        raw, dict, f"compare {base[:12]}...{head[:12]} in {owner}/{repo}"
+    ).get("total_commits")
     if isinstance(total, bool) or not isinstance(total, int):
         raise AcquireFetchError(
             f"compare {base[:12]}...{head[:12]} in {owner}/{repo} returned no commit count"

@@ -358,7 +358,7 @@ def test_a_landed_verdict_on_an_unmoved_head_is_confirmed_current(env, tmp_path,
     assert payload["head_recheck"] == "current"
 
 
-def test_a_failed_closing_head_read_does_not_turn_a_landed_verdict_into_a_failure(
+def test_a_failed_closing_head_read_never_reports_success(
     env, tmp_path, capsys, monkeypatch
 ):
     findings = _write_findings(tmp_path / "f.json", [_NIT])
@@ -377,8 +377,10 @@ def test_a_failed_closing_head_read_does_not_turn_a_landed_verdict_into_a_failur
         "post", "--findings", str(findings), "--status", "blocking", capsys=capsys
     )
 
-    assert code == 0
-    assert json.loads(out.strip().splitlines()[-1])["head_recheck"] == "unavailable"
+    assert code == review_cli.EXIT_POST_FAILED
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["result"] == "posted_head_unconfirmed"
+    assert payload["head_recheck"] == "unavailable"
     assert "could not be re-checked" in err
 
 

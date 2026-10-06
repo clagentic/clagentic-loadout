@@ -33,6 +33,8 @@ Endpoint shapes (real, documented GitHub REST API):
 from __future__ import annotations
 
 import base64
+import json
+import urllib.error
 import urllib.parse
 
 from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile, RangeDiff
@@ -53,15 +55,23 @@ def _github_get(
     accept: str = "application/vnd.github+json",
     opener=None,
 ):
-    return request_json(
-        "GET",
-        url,
-        token,
-        accept=accept,
-        parse_mode="content_type",
-        opener=opener,
-        opener_factory=no_redirect_opener,
-    )
+    # request_json lets a malformed 2xx JSON body and network failures
+    # propagate raw; translate both so every fetch here fails with the shared
+    # AcquireFetchError, never a parser or socket exception.
+    try:
+        return request_json(
+            "GET",
+            url,
+            token,
+            accept=accept,
+            parse_mode="content_type",
+            opener=opener,
+            opener_factory=no_redirect_opener,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise AcquireFetchError(f"GET {url} returned a body that is not valid JSON") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise AcquireFetchError(f"GET {url} failed: {exc}") from exc
 
 
 def _get_pr_info(owner: str, repo: str, pr_number: int, token: str, *, opener=None) -> dict:

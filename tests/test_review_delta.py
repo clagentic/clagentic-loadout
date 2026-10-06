@@ -142,6 +142,22 @@ def test_the_listing_is_bounded_and_says_how_many_were_left_out():
     assert "and 3 more not listed" in note
 
 
+def test_no_open_finding_is_dropped_past_the_listing_cap_even_on_a_touched_file():
+    total = MAX_LISTED_FINDINGS + 25
+    findings = tuple(_finding(file="a.py", line=n + 1, rule=f"R{n}") for n in range(total))
+    context = DeltaContext(_SINCE, findings)
+
+    carried = carried_findings(context, {"a.py"})
+
+    # The first MAX_LISTED_FINDINGS are shown to the reviewer to re-judge; every
+    # one beyond the cap is carried forward, so nothing is silently lost.
+    assert [f["rule_id"] for f in carried] == [f"R{n}" for n in range(MAX_LISTED_FINDINGS, total)]
+    listed_rules = {f"[R{n}]" for n in range(MAX_LISTED_FINDINGS)}
+    note = render_delta_note(context)
+    assert all(rule in note for rule in listed_rules)
+    assert "and 25 more not listed; they are carried forward" in note
+
+
 def test_only_findings_on_files_the_delta_did_not_touch_are_carried():
     context = DeltaContext(_SINCE, (_finding(file="a.py"), _finding(file="b.py", rule="R2")))
 

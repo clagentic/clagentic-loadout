@@ -702,9 +702,11 @@ def _post_command(
             f"loadout-review: the posted verdict could not be re-checked against the PR head: {exc}",
             file=sys.stderr,
         )
-        result["head_recheck"] = "unavailable"
+        # Success is only ever reported against a head confirmed current, so an
+        # unreadable head is a failure exit even though the comment landed.
+        result.update(result="posted_head_unconfirmed", head_recheck="unavailable")
         print(json.dumps(result))
-        return EXIT_OK
+        return EXIT_POST_FAILED
     if live_head != head_sha:
         result.update(result="posted_head_moved", head_recheck="moved", current_head_sha=live_head)
         print(json.dumps(result))

@@ -20,7 +20,8 @@ range, or a transport that cannot answer the question) falls back to the full
 diff, naming the reason, because reviewing less than the whole PR is only
 sound when the narrower question is well defined.
 
-An open finding on a file the delta does not touch stays open by construction:
+An open finding on a file the delta does not touch, or one too far down the
+listing cap to be shown to the reviewer, stays open by construction:
 `carried_findings` returns it so the merged result still describes the whole
 PR, and a delta review can never turn "clean" by simply not looking.
 """
@@ -47,8 +48,8 @@ MODE_FULL = "full"
 MODE_DELTA = "delta"
 
 #: A prompt that lists every open finding of a very large review would crowd
-#: out the diff; the rest are still carried or re-reported by file, only the
-#: listing is bounded.
+#: out the diff, so only the listing is bounded: findings past the cap are
+#: carried forward as still open (see carried_findings), never dropped.
 MAX_LISTED_FINDINGS = 50
 
 
@@ -143,7 +144,7 @@ def render_delta_note(context: DeltaContext) -> str:
         "",
         "Open findings from the last review:",
     ]
-    listed = context.open_findings[:MAX_LISTED_FINDINGS]
+    listed = _listed(context)
     if not listed:
         lines.append("- none")
     for finding in listed:
@@ -153,13 +154,27 @@ def render_delta_note(context: DeltaContext) -> str:
         )
     omitted = len(context.open_findings) - len(listed)
     if omitted > 0:
-        lines.append(f"- ... and {omitted} more not listed")
+        lines.append(
+            f"- ... and {omitted} more not listed; they are carried forward "
+            "unchanged and stay open"
+        )
     return "\n".join(lines)
+
+
+def _listed(context: DeltaContext) -> tuple[dict[str, Any], ...]:
+    return context.open_findings[:MAX_LISTED_FINDINGS]
 
 
 def carried_findings(
     context: DeltaContext, touched_files: set[str]
 ) -> list[dict[str, Any]]:
-    """Open findings on files the delta did not touch. They stay open: the
-    delta cannot have resolved what it never changed."""
-    return [dict(f) for f in context.open_findings if f["file"] not in touched_files]
+    """Open findings the delta review is not asked to re-judge, so they stay
+    open: those on files the delta did not touch (it cannot have resolved what
+    it never changed), and every finding past the listing cap regardless of
+    file (the reviewer never saw it, so it cannot have resolved it). An open
+    finding is never dropped."""
+    return [
+        dict(f)
+        for position, f in enumerate(context.open_findings)
+        if position >= MAX_LISTED_FINDINGS or f["file"] not in touched_files
+    ]
