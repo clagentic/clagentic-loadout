@@ -1414,7 +1414,11 @@ At the gate, the reviewer's earlier fences are walked in order: a finding an
 earlier fence held open that the current verdict neither clears at its own
 head (with evidence) nor re-raises refuses the merge and names the finding. A
 clean verdict reporting a `merge.required_scanners` scanner as `failed`
-refuses. A version 1 fence, with no state, asserts nothing and is never an
+refuses, as does one that records no scanner outcomes for a role that has
+required scanners; a scanner name listed twice in a fence is malformed. An
+earlier fence of the same reviewer whose `head_sha` is malformed refuses too,
+since it cannot be trusted to clear anything. An explicit `null` for a state
+field is malformed input, never "not supplied". A version 1 fence, with no state, asserts nothing and is never an
 error. A verdict at a stale head never authorizes a merge; when the same
 reviewer commented afterwards without posting a verdict, the refusal says so.
 

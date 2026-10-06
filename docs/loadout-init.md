@@ -154,7 +154,8 @@ at two severities, not one:
 
 This check is diagnostic-only: it runs inside `loadout-doctor`, never inside
 `loadout-push`. `loadout-merge` does enforce `required_reviewer_roles`, but a
-config it cannot load falls back to flags-only with a warning, and a loadable
+config it cannot load falls back to flags-only with a warning (the whole repo
+gate config, not key by key), and a loadable
 but unsatisfiable one can be overridden with `--ignore-repo-gate`, so a repo
 can always land the fix for its own config. See
 `clagentic_loadout.merge.gate_config`'s module docstring ("BLAST RADIUS OF

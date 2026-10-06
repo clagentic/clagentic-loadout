@@ -86,6 +86,12 @@ class VerdictScannerFailedError(Exception):
     coverage."""
 
 
+class VerdictScannersMissingError(VerdictScannerFailedError):
+    """A clean verdict carries no scanner outcomes although the deployment
+    declares required scanners for that reviewer. A declared gate gates: no
+    record is not a pass."""
+
+
 class VerdictBlockingError(Exception):
     """Raised when a reviewer's verdict block's review_status is
     'blocking'. The reviewer found an issue that must be resolved before
@@ -187,6 +193,7 @@ __all__ = [
     "VerdictPriorFindingsOpenError",
     "VerdictRoleMismatchError",
     "VerdictScannerFailedError",
+    "VerdictScannersMissingError",
     "VerdictStaleAfterCommentsError",
     "VerdictStaleError",
 ]

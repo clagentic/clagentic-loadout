@@ -158,8 +158,8 @@ def build_attestation_body(
         (--required-reviewer omitted entirely), in which case the line is
         omitted entirely rather than claiming reviews were "required".
       - `repo_gate_ignored`: True when the invocation passed
-        --ignore-repo-gate, so the repo's declared reviewer floor was
-        deliberately not enforced. Rendered as a `Repo reviewer gate` row so
+        --ignore-repo-gate, so the repo's declared gates (reviewer floor and
+        required scanners) were deliberately not enforced. Rendered as a `Repo gate` row so
         the override is never silent; omitted otherwise.
       - `ci_disposition`: the CI-status gate's own disposition string,
         already computed by merge.ci_status / the platform CI-status
@@ -199,7 +199,7 @@ def build_attestation_body(
         escaped_logins = [_escape_table_cell(login) for login in required_reviewer_logins]
         rows.append(("Reviews", ", ".join(escaped_logins)))
     if repo_gate_ignored:
-        rows.append(("Repo reviewer gate", "ignored via --ignore-repo-gate"))
+        rows.append(("Repo gate", "ignored via --ignore-repo-gate"))
     rows.append(("CI status", _escape_table_cell(ci_disposition)))
     if task_id:
         rows.append(("task_id", _escape_table_cell(task_id)))

@@ -105,11 +105,13 @@ floor. That makes a broken gate config capable of blocking the very merge that
 would fix it, so the wiring lives in ONE place, `merge.repo_gate_runtime`, and
 obeys two rules:
 
-  - A config that cannot be loaded (unreadable YAML, a `merge:` section that is
-    not a mapping, a malformed role list, or a `merge:` section that omits
-    `required_reviewer_roles`) falls back to flags-only with a loud stderr
-    warning naming the file and the error. The fix-the-config merge always
-    lands. Every error this module raises is therefore caught there, never
+  - A config in which ANY gate key (`required_reviewer_roles`,
+    `required_scanners`) cannot be loaded (unreadable YAML, a `merge:` section
+    that is not a mapping, a malformed role list or scanner mapping, or a
+    `merge:` section that omits `required_reviewer_roles`) falls back as a
+    WHOLE to flags-only, with a loud stderr warning naming the file and the
+    error: neither key is enforced, not even the one that loaded. One rule,
+    no partial enforcement. The fix-the-config merge always lands. Every error this module raises is therefore caught there, never
     propagated out of `loadout-merge` or `loadout-push`.
   - A config that loads cleanly but cannot be satisfied (a declared role with
     no resolvable login, or no verdict from it) refuses the merge, with
@@ -256,7 +258,10 @@ def _validate_role_list(value: object, *, key: str, config_path: Path) -> tuple[
                 f"{config_path}: {CONFIG_SECTION_MERGE}.{key} entries must be "
                 f"non-empty role-name strings, got {entry!r}."
             )
-        roles.append(entry)
+        # One normalization rule for every role and scanner name read here:
+        # surrounding whitespace is stripped at load, so a padded entry can
+        # never silently miss the exact-match lookup that consumes it.
+        roles.append(entry.strip())
     return tuple(roles)
 
 
@@ -453,7 +458,14 @@ def load_required_scanners(
                 f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_REQUIRED_SCANNERS} keys must "
                 f"be non-empty role-name strings, got {role!r}."
             )
-        resolved[role] = _validate_role_list(
+        normalized_role = role.strip()
+        if normalized_role in resolved:
+            raise InvalidMergeGateConfigError(
+                f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_REQUIRED_SCANNERS} names "
+                f"role {normalized_role!r} more than once (after trimming surrounding "
+                f"whitespace)."
+            )
+        resolved[normalized_role] = _validate_role_list(
             scanners,
             key=f"{CONFIG_KEY_REQUIRED_SCANNERS}.{role}",
             config_path=config_path,

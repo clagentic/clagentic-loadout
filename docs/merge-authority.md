@@ -168,13 +168,22 @@ roles it requires are the union of that list (read through `--repo-path`) and
 any `--required-reviewer` flags. Declaring the key gates the merge. Two rules
 keep a broken config from blocking the merge that would fix it:
 
-- A gate config that cannot be loaded (unreadable, malformed, or a `merge:`
-  section that omits the key) falls back to flags-only, with a stderr warning
-  naming the file and the error.
+- If **any** repo gate key (`required_reviewer_roles`, `required_scanners`)
+  cannot be loaded (unreadable, malformed, or a `merge:` section that omits
+  `required_reviewer_roles`), the **whole** repo gate config falls back to
+  flags-only: no repo gate key is enforced, including one that was valid. A
+  stderr warning names the file and the error. The fallback is deliberate, so
+  the merge that lands the corrected config is never blocked by the broken one.
 - A config that loads but cannot be satisfied (a declared role with no
-  verdict, or no resolvable login) refuses the merge. `--ignore-repo-gate`
-  is the deliberate escape hatch: it is logged to stderr, printed in the
-  merge output, and recorded in the merge-completion attestation.
+  verdict, or no resolvable login; a clean verdict that records no scanner
+  outcomes, or reports a required scanner failed, for a role with
+  `required_scanners`) refuses the merge. `--ignore-repo-gate` is the
+  deliberate escape hatch for **all** repo gates, reviewer roles and required
+  scanners alike: it is logged to stderr, printed in the merge output, and
+  recorded in the merge-completion attestation.
+- Role names and scanner names in these keys are trimmed of surrounding
+  whitespace when loaded; two `required_scanners` keys that collide after
+  trimming are a malformed config.
 
 **Upgrading.** This is a breaking change for a repo that declared
 `required_reviewer_roles` decoratively. Its merges now need those verdicts.

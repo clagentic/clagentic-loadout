@@ -81,6 +81,13 @@ class TestNormalize:
         with pytest.raises(ValueError):
             _normalize(raw)
 
+    @pytest.mark.parametrize(
+        "key", ["findings_open", "supersedes", "cleared_claims", "scanners_run"]
+    )
+    def test_an_explicit_null_is_malformed_not_absent(self, key):
+        with pytest.raises(ValueError):
+            _normalize({key: None})
+
     def test_a_claim_must_be_at_the_head_under_review(self):
         with pytest.raises(ValueError, match="not the head this verdict is for"):
             _normalize({"cleared_claims": [_claim("F1", head=HEAD_A)]}, head=HEAD_B)
@@ -118,6 +125,18 @@ class TestFenceRoundTrip:
         data = parse_verdict_block(build_verdict_block("reviewer", "clean", HEAD_B, 7))
         assert "fence_schema_version" not in data
         assert state_from_fence(data) == FindingsState()
+
+    def test_a_repeated_scanner_name_is_rejected_on_read(self):
+        from clagentic_loadout.merge.errors import VerdictMalformedError
+
+        body = (
+            '```review-result\n{"reviewer": "r", "review_status": "clean", "head_sha": "%s", '
+            '"pr_number": 1, "fence_schema_version": 2, "scanners_run": '
+            '[{"scanner": "a", "status": "failed", "reason": "x"}, {"scanner": "a", "status": "ran"}]}\n```'
+            % HEAD_B
+        )
+        with pytest.raises(VerdictMalformedError, match="more than once"):
+            parse_verdict_block(body)
 
     def test_unknown_fence_field_is_still_rejected_by_the_schema(self):
         from clagentic_loadout.merge.errors import VerdictMalformedError

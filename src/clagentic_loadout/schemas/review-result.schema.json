@@ -72,7 +72,7 @@
     },
     "scanners_run": {
       "type": "array",
-      "description": "Per scanner, whether it ran. A clean verdict is only as strong as the scanners behind it.",
+      "description": "Per scanner, whether it ran. A clean verdict is only as strong as the scanners behind it. Each scanner name must appear at most once; JSON Schema cannot express uniqueness on a property, so the verdict reader and the emit side reject a repeated name.",
       "items": {
         "type": "object",
         "additionalProperties": false,

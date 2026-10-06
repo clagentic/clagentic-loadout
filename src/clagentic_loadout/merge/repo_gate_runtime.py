@@ -7,17 +7,18 @@ bootstrap-safety policy that makes consuming them safe:
 
   - `required_reviewer_roles` is a FLOOR beneath `--required-reviewer`: the
     roles actually required are the union of the two.
-  - `required_scanners` maps a reviewer role to scanner names that must not be
-    reported failed on that role's clean verdict.
-  - A key that cannot be loaded never blocks the merge. It degrades to the
-    flags-only behaviour with a warning naming the file and the error, so the
-    merge that lands the corrected config is always possible. Each key is
-    loaded independently, so a malformed scanner declaration does not
-    discard a valid reviewer floor.
+  - `required_scanners` maps a reviewer role to scanner names a clean verdict
+    from that role must record, and must not report as failed.
+  - FALLBACK GRANULARITY IS THE WHOLE CONFIG. If any gate key cannot be
+    loaded, none of the repo's gate keys is enforced: the merge degrades to
+    the flags-only behaviour with a warning naming the file and the error, so
+    the merge that lands the corrected config is always possible. A config
+    that is half-trusted is harder to reason about than one that is either
+    enforced or visibly not.
 
 A config that loads cleanly but cannot be satisfied is NOT handled here: that
 is a real refusal, overridable only by the verb's explicit, logged
-`--ignore-repo-gate`.
+`--ignore-repo-gate`, which covers every repo gate key.
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ class RepoGate:
 
 
 def load_repo_gate(repo_path: str | Path | None) -> RepoGate:
-    """Load the repo's declared gate, degrading each key independently.
+    """Load the repo's declared gate; any unloadable key drops the whole gate.
 
     *repo_path* None (no local tree) declares nothing, matching every other
     repo-tier key in the merge verb.
@@ -53,26 +54,18 @@ def load_repo_gate(repo_path: str | Path | None) -> RepoGate:
     if repo_path is None:
         return RepoGate()
 
-    warnings: list[str] = []
-    roles: tuple[str, ...] = ()
-    scanners: dict[str, tuple[str, ...]] = {}
     try:
         roles = load_required_reviewer_roles(repo_path)
-    except InvalidMergeGateConfigError as exc:
-        warnings.append(
-            f"merge.required_reviewer_roles NOT ENFORCED -- the repo gate config could not be "
-            f"loaded, so only --required-reviewer applies: {exc}"
-        )
-    try:
         scanners = load_required_scanners(repo_path)
     except InvalidMergeGateConfigError as exc:
-        warnings.append(
-            f"merge.required_scanners NOT ENFORCED -- the repo gate config could not be "
-            f"loaded: {exc}"
+        return RepoGate(
+            warnings=(
+                f"merge.required_reviewer_roles NOT ENFORCED and merge.required_scanners "
+                f"NOT ENFORCED -- the repo gate config could not be loaded, so only "
+                f"--required-reviewer applies: {exc}",
+            )
         )
-    return RepoGate(
-        reviewer_roles=roles, required_scanners=scanners, warnings=tuple(warnings)
-    )
+    return RepoGate(reviewer_roles=roles, required_scanners=scanners)
 
 
 __all__ = ["RepoGate", "load_repo_gate"]

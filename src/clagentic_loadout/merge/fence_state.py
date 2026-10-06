@@ -118,6 +118,24 @@ def _exact_keys(entry: Mapping[str, Any], allowed: Iterable[str], where: str) ->
         raise ValueError(f"{where} has unknown field(s) {unknown}; allowed: {sorted(allowed)}")
 
 
+def index_scanners(entries: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    """Map scanner name to its outcome entry, refusing a repeated name.
+
+    The one place that decides what a repeated scanner means: it is an error,
+    never last-write-wins, because a later `ran` must not be able to hide an
+    earlier `failed` for the same scanner. The JSON schema cannot express
+    uniqueness on a property, so the writer (normalize_findings_state) and every
+    reader (parse_verdict_block, the scanner gate) go through here.
+    """
+    indexed: dict[str, Mapping[str, Any]] = {}
+    for entry in entries:
+        name = entry["scanner"]
+        if name in indexed:
+            raise ValueError(f"scanners_run lists scanner {name!r} more than once")
+        indexed[name] = entry
+    return indexed
+
+
 def normalize_findings_state(
     raw: Mapping[str, Any] | None, *, head_sha: str, review_status: str
 ) -> dict[str, Any]:
@@ -135,9 +153,11 @@ def normalize_findings_state(
     if unknown:
         raise ValueError(f"findings state has unknown field(s) {unknown}; allowed: {list(STATE_KEYS)}")
 
+    # A key that is present is validated, whatever its value: an explicit null
+    # is malformed input, never a synonym for "not supplied".
     out: dict[str, Any] = {}
     open_ids: set[str] = set()
-    if raw.get(KEY_FINDINGS_OPEN) is not None:
+    if KEY_FINDINGS_OPEN in raw:
         rendered = []
         for index, entry in enumerate(_entries(raw[KEY_FINDINGS_OPEN], KEY_FINDINGS_OPEN)):
             where = f"{KEY_FINDINGS_OPEN}[{index}]"
@@ -160,7 +180,7 @@ def normalize_findings_state(
             )
         out[KEY_FINDINGS_OPEN] = rendered
 
-    if raw.get(KEY_SUPERSEDES) is not None:
+    if KEY_SUPERSEDES in raw:
         value = raw[KEY_SUPERSEDES]
         if isinstance(value, str) and value.isdigit():
             value = int(value)
@@ -168,7 +188,7 @@ def normalize_findings_state(
             raise ValueError(f"{KEY_SUPERSEDES} must be a positive comment id, got {raw[KEY_SUPERSEDES]!r}")
         out[KEY_SUPERSEDES] = value
 
-    if raw.get(KEY_CLEARED_CLAIMS) is not None:
+    if KEY_CLEARED_CLAIMS in raw:
         rendered = []
         seen: set[str] = set()
         for index, entry in enumerate(_entries(raw[KEY_CLEARED_CLAIMS], KEY_CLEARED_CLAIMS)):
@@ -195,9 +215,8 @@ def normalize_findings_state(
             )
         out[KEY_CLEARED_CLAIMS] = rendered
 
-    if raw.get(KEY_SCANNERS_RUN) is not None:
+    if KEY_SCANNERS_RUN in raw:
         rendered = []
-        names: set[str] = set()
         for index, entry in enumerate(_entries(raw[KEY_SCANNERS_RUN], KEY_SCANNERS_RUN)):
             where = f"{KEY_SCANNERS_RUN}[{index}]"
             _exact_keys(entry, ("scanner", "status", "reason"), where)
@@ -205,15 +224,13 @@ def normalize_findings_state(
             status = entry.get("status")
             if status not in SCANNER_STATUSES:
                 raise ValueError(f"{where}.status must be one of {list(SCANNER_STATUSES)}, got {status!r}")
-            if name in names:
-                raise ValueError(f"{where}.scanner {name!r} is listed twice")
-            names.add(name)
             item: dict[str, Any] = {"scanner": name, "status": status}
             # A reason is optional only for a scanner that ran; every other
             # status has to say why.
             if status != SCANNER_RAN or entry.get("reason") is not None:
                 item["reason"] = _text(entry.get("reason"), f"{where}.reason")
             rendered.append(item)
+        index_scanners(rendered)
         out[KEY_SCANNERS_RUN] = rendered
 
     if out:
@@ -274,6 +291,7 @@ __all__ = [
     "SCANNER_STATUSES",
     "STATE_KEYS",
     "FindingsState",
+    "index_scanners",
     "normalize_findings_state",
     "state_from_fence",
     "unresolved_prior_findings",

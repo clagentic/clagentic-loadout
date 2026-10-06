@@ -123,6 +123,19 @@ class TestPriorFindingsMustBeResolved:
         assert code == verb.EXIT_OK
 
 
+    def test_an_earlier_fence_with_a_malformed_head_is_unreadable_evidence_and_refuses(self, capsys):
+        malformed = (
+            '\n```review-result\n{"reviewer": "%s", "review_status": "blocking", "head_sha": "abc", '
+            '"pr_number": 1, "fence_schema_version": 2, "findings_open": '
+            '[{"id": "F1", "rule_id": "R1", "head": "abc"}]}\n```\n' % NAME
+        )
+        comments = [_comment(1, malformed), _comment(2, _fence("clean", HEAD_B, F1_CLEARED))]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "malformed head_sha" in err
+        assert "#1" in err
+
+
 class TestRequiredScanners:
     def _config(self, tmp_path):
         _write_config(tmp_path, {"required_reviewer_roles": [], "required_scanners": {NAME: ["alpha"]}})
@@ -146,12 +159,75 @@ class TestRequiredScanners:
         code, _ = _merge([_comment(1, _fence("clean", HEAD_B, state))], repo_path=self._config(tmp_path))
         assert code == verb.EXIT_OK
 
-    def test_a_clean_verdict_with_no_scanner_record_proceeds_with_a_warning(self, tmp_path, capsys):
+    def test_a_clean_verdict_with_no_scanner_record_refuses_when_scanners_are_required(
+        self, tmp_path, capsys
+    ):
         code, err = _merge(
             [_comment(1, _fence("clean", HEAD_B))], repo_path=self._config(tmp_path), capsys=capsys
         )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "records no scanner outcomes" in err
+        assert "'alpha'" in err
+        assert "--ignore-repo-gate" in err
+
+    def test_a_clean_verdict_with_no_scanner_record_only_warns_when_none_are_required(
+        self, tmp_path, capsys
+    ):
+        _write_config(tmp_path, {"required_reviewer_roles": []})
+        code, err = _merge(
+            [_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys
+        )
         assert code == verb.EXIT_OK
         assert "records no scanner outcomes" in err
+
+    def test_ignore_repo_gate_also_lifts_the_scanner_requirement(self, tmp_path, capsys):
+        config = self._config(tmp_path)
+        for state in (None, self._scanners("failed", "timed out")):
+            code, err = _merge(
+                [_comment(1, _fence("clean", HEAD_B, state))],
+                repo_path=config,
+                extra_args=["--ignore-repo-gate"],
+                capsys=capsys,
+            )
+            assert code == verb.EXIT_OK
+            assert "IGNORED via --ignore-repo-gate" in err
+
+    def test_a_required_scanner_is_not_ignored_without_the_flag(self, tmp_path):
+        state = self._scanners("failed", "timed out")
+        code, _ = _merge([_comment(1, _fence("clean", HEAD_B, state))], repo_path=self._config(tmp_path))
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+
+    def test_a_padded_role_key_still_gates_the_role(self, tmp_path):
+        _write_config(
+            tmp_path, {"required_reviewer_roles": [], "required_scanners": {f"  {NAME} ": [" alpha "]}}
+        )
+        state = self._scanners("failed", "timed out")
+        code, _ = _merge([_comment(1, _fence("clean", HEAD_B, state))], repo_path=tmp_path)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+
+    def test_role_keys_colliding_after_trimming_are_a_malformed_declaration(self, tmp_path, capsys):
+        _write_config(
+            tmp_path,
+            {
+                "required_reviewer_roles": [],
+                "required_scanners": {NAME: ["alpha"], f" {NAME}": ["beta"]},
+            },
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "more than once" in err
+        assert "required_scanners NOT ENFORCED" in err
+
+    def test_a_duplicate_scanner_entry_in_a_posted_fence_refuses(self, tmp_path):
+        # Hand-built JSON: the emit side would refuse to construct this.
+        fence = (
+            '\n```review-result\n{"reviewer": "%s", "review_status": "clean", "head_sha": "%s", '
+            '"pr_number": 1, "fence_schema_version": 2, "scanners_run": '
+            '[{"scanner": "alpha", "status": "failed", "reason": "x"}, '
+            '{"scanner": "alpha", "status": "ran"}]}\n```\n' % (NAME, HEAD_B)
+        )
+        code, _ = _merge([_comment(1, fence)], repo_path=self._config(tmp_path))
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
 
     def test_a_failed_scanner_is_ignored_when_no_scanner_is_required(self, tmp_path):
         _write_config(tmp_path, {"required_reviewer_roles": []})
@@ -252,6 +328,22 @@ class TestRepoReviewerFloor:
         assert "required_reviewer_roles NOT ENFORCED" in err
         assert str(tmp_path) in err
 
+    def test_a_malformed_reviewer_key_drops_the_whole_gate_even_beside_a_valid_scanners_key(
+        self, tmp_path, capsys
+    ):
+        _write_config(
+            tmp_path,
+            {
+                "required_reviewer_roles": "reviewer",
+                "required_scanners": {NAME: ["alpha"]},
+            },
+        )
+        failed = {"scanners_run": [{"scanner": "alpha", "status": "failed", "reason": "timed out"}]}
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B, failed))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "required_reviewer_roles NOT ENFORCED" in err
+        assert "required_scanners NOT ENFORCED" in err
+
     def test_an_unsatisfiable_floor_refuses_unless_ignored_and_the_override_is_recorded(
         self, tmp_path, capsys
     ):
@@ -290,7 +382,7 @@ class TestRepoReviewerFloor:
             opener=recording,
         )
         assert code == verb.EXIT_OK
-        assert any("Repo reviewer gate" in body and "ignored" in body for body in posted)
+        assert any("Repo gate" in body and "ignored" in body for body in posted)
         assert '"repo_gate_ignored": ["never-posts"]' in capsys.readouterr().out
 
     def test_a_role_with_no_resolvable_login_refuses_and_names_the_override(self, tmp_path, capsys):

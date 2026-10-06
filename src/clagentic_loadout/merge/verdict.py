@@ -87,7 +87,8 @@ Verdict enforcement (read_reviewer_verdict)
    walked in order; a finding one of them held open that the selected fence
    neither clears at its own head nor re-raises refuses via
    assert_prior_findings_resolved. check_required_scanners refuses a clean
-   verdict whose required scanner is reported failed. A fence with no state
+   verdict whose required scanner is reported failed, or that records no
+   scanner outcomes while scanners are required. A fence with no state
    fields asserts nothing and is never an error.
 """
 
@@ -108,12 +109,14 @@ from clagentic_loadout.merge.errors import (
     VerdictPriorFindingsOpenError,
     VerdictRoleMismatchError,
     VerdictScannerFailedError,
+    VerdictScannersMissingError,
     VerdictStaleAfterCommentsError,
     VerdictStaleError,
 )
 from clagentic_loadout.merge.fence_state import (
     SCANNER_FAILED,
     FindingsState,
+    index_scanners,
     normalize_findings_state,
     state_from_fence,
     unresolved_prior_findings,
@@ -533,6 +536,10 @@ def parse_verdict_block(comment_body: str) -> dict[str, Any] | None:
         if missing:
             raise VerdictMalformedError(f"verdict block missing required fields: {missing}")
         raise VerdictMalformedError(f"verdict block failed schema validation: {'; '.join(errors)}")
+    try:
+        index_scanners(data.get("scanners_run") or ())
+    except ValueError as exc:
+        raise VerdictMalformedError(f"verdict block failed validation: {exc}") from exc
     return data
 
 
@@ -827,7 +834,10 @@ def _earlier_fence_states(
     A fence that cannot be parsed, that names another reviewer, or that is for
     another PR is not this reviewer's verdict and is skipped: it was never a
     valid verdict, so it cannot have held a finding open. Fenceless comments
-    are skipped the same way.
+    are skipped the same way. A fence that parses and is this reviewer's but
+    whose head_sha is malformed is NOT skipped: it refuses
+    (VerdictMalformedError), since it cannot be trusted to clear or supersede
+    anything yet may have held findings open.
     """
     states: list[tuple[str, FindingsState]] = []
     for comment in earlier_oldest_first:
@@ -841,7 +851,21 @@ def _earlier_fence_states(
             continue
         if data.get("pr_number") != pr_number:
             continue
-        states.append((data["head_sha"], state_from_fence(data)))
+        fence_head = data["head_sha"]
+        try:
+            validate_sha(fence_head, allow_abbreviated=False)
+        except InvalidShaError as exc:
+            # Its claims are matched against its head, so an unreadable head
+            # could otherwise clear or supersede a finding by matching
+            # another malformed value. Unreadable evidence refuses.
+            raise VerdictMalformedError(
+                f"An earlier verdict comment #{comment.get('id')!r} from "
+                f"{expected_reviewer_name!r} on PR #{pr_number} has a malformed head_sha "
+                f"stamp ({fence_head!r}): {exc}. It cannot clear or supersede any finding, "
+                f"and the findings history cannot be read past it; the reviewer must "
+                f"re-run and post a valid verdict."
+            ) from exc
+        states.append((fence_head, state_from_fence(data)))
     return states
 
 
@@ -903,13 +927,30 @@ def check_required_scanners(
     """Check a verdict's scanner outcomes against the scanners the
     deployment requires for this reviewer, and return warnings to surface.
 
-    Refuses (VerdictScannerFailedError) only when a required scanner is
-    reported failed. not_applicable and not_invoked, with their reason, are
-    legitimate. Everything weaker than a full scan is returned as a warning
-    rather than hidden: no scanner outcomes at all, or a required scanner the
-    verdict does not mention.
+    Refuses when the deployment declares required scanners and the verdict
+    records no scanner outcomes at all (VerdictScannersMissingError), or when
+    a required scanner is reported failed (VerdictScannerFailedError).
+    not_applicable and not_invoked, with their reason, are legitimate. With no
+    required scanners declared, absence only warns; a required scanner the
+    verdict does not mention among others it does record also only warns.
+    A repeated scanner name is malformed (VerdictMalformedError), never
+    last-write-wins.
     """
-    reported = {entry["scanner"]: entry for entry in verdict.state.scanners_run}
+    try:
+        reported = index_scanners(verdict.state.scanners_run)
+    except ValueError as exc:
+        raise VerdictMalformedError(
+            f"{reviewer_name.upper()} verdict comment #{verdict.comment_id} is malformed: {exc}"
+        ) from exc
+    if required_scanners and not verdict.state.scanners_run:
+        raise VerdictScannersMissingError(
+            f"{reviewer_name.upper()} verdict (comment #{verdict.comment_id} on PR "
+            f"#{verdict.pr_number}) records no scanner outcomes, but this deployment requires "
+            f"scanner(s) {list(required_scanners)!r} for it. A clean verdict without a "
+            f"scanners_run record is not coverage. Have the reviewer re-post it with each "
+            f"scanner recorded (ran, or not_applicable/not_invoked with a reason), then retry "
+            f"the merge gate."
+        )
     for scanner in required_scanners:
         entry = reported.get(scanner)
         if entry is not None and entry["status"] == SCANNER_FAILED:

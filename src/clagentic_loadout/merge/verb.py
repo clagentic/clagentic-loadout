@@ -935,13 +935,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         dest="ignore_repo_gate",
-        help="Do not require the reviewer roles the repo declares in "
-        "merge.required_reviewer_roles; only --required-reviewer applies. For "
-        "a repo whose declared gate cannot be satisfied (for example while "
-        "landing the config that fixes it). Logged to stderr and recorded in "
-        "the merge-completion attestation. A repo gate config that cannot be "
-        "loaded at all already falls back to flags-only with a warning and "
-        "does not need this flag.",
+        help="Do not enforce any gate the repo declares in its merge config: "
+        "neither the reviewer roles in merge.required_reviewer_roles nor the "
+        "scanners in merge.required_scanners; only --required-reviewer "
+        "applies. For a repo whose declared gate cannot be satisfied (for "
+        "example while landing the config that fixes it). Logged to stderr "
+        "and recorded in the merge-completion attestation. A repo gate "
+        "config that cannot be loaded at all already falls back to "
+        "flags-only with a warning and does not need this flag.",
     )
     parser.add_argument(
         "--max-changed-files",
@@ -1289,8 +1290,10 @@ def _run(
     floor_only_reviewers: dict[str, str] = {}
     if args.ignore_repo_gate:
         print(
-            f"merge: repo reviewer gate IGNORED via --ignore-repo-gate (declared "
-            f"roles: {list(repo_gate.reviewer_roles)!r}); only --required-reviewer applies",
+            f"merge: repo gate IGNORED via --ignore-repo-gate (declared reviewer "
+            f"roles: {list(repo_gate.reviewer_roles)!r}, declared required scanners: "
+            f"{ {r: list(s) for r, s in (repo_gate.required_scanners or {}).items()}!r}); "
+            f"only --required-reviewer applies",
             file=sys.stderr,
         )
     else:
@@ -1412,8 +1415,11 @@ def _run(
                 )
                 verdict.assert_clean_verdict(verdict_obj, reviewer_name)
                 verdict.assert_prior_findings_resolved(verdict_obj, reviewer_name)
+                required_scanners = (
+                    () if args.ignore_repo_gate else repo_gate.scanners_for(reviewer_name)
+                )
                 for scanner_warning in verdict.check_required_scanners(
-                    verdict_obj, reviewer_name, repo_gate.scanners_for(reviewer_name)
+                    verdict_obj, reviewer_name, required_scanners
                 ):
                     print(f"merge: WARNING -- {scanner_warning}", file=sys.stderr)
                 # lr-95543d: mirrors assert_clean_verdict's disposition --
@@ -1436,10 +1442,14 @@ def _run(
                 ModelAttestationMissingError,
                 ModelAttestationInvalidError,
             ) as exc:
+                from_repo_gate = reviewer_name in floor_only_reviewers or (
+                    isinstance(exc, VerdictScannerFailedError)
+                )
                 hint = (
-                    " This reviewer is required by the repo's merge.required_reviewer_roles; "
-                    "--ignore-repo-gate overrides it (logged and attested)."
-                    if reviewer_name in floor_only_reviewers
+                    " This requirement comes from the repo's merge gate config "
+                    "(required_reviewer_roles / required_scanners); --ignore-repo-gate "
+                    "overrides it (logged and attested)."
+                    if from_repo_gate
                     else ""
                 )
                 _fail(f"{exc}{hint}", code=EXIT_GATE_RESULT_BLOCKED)

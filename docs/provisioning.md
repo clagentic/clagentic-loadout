@@ -341,9 +341,14 @@ comments never needs to declare it at all. See its own bullet below for the
 - **`required_scanners`** — a mapping of reviewer role to scanner names. A
   clean verdict from that role that reports one of them as `failed` in its
   fence refuses the merge. `not_applicable` and `not_invoked` (with a reason)
-  are accepted; a clean verdict that records no scanner outcomes merges with a
-  stderr warning. Scanner names are deployment vocabulary; none is built in.
-  A malformed declaration warns and is not enforced.
+  are accepted. A clean verdict from a role that has an entry here, but that
+  records no scanner outcomes at all, refuses the merge naming the missing
+  record; for a role with no entry, no record only warns. `--ignore-repo-gate`
+  lifts this requirement along with the reviewer floor. Scanner names are
+  deployment vocabulary; none is built in. A malformed declaration drops the
+  whole repo gate config to flags-only with a warning (see
+  [docs/merge-authority.md](merge-authority.md)). Role and scanner names are
+  trimmed of surrounding whitespace on load.
 - **`authorized_roles`** — the merge-authority roster (role names, feeds
   `merge.authority.StaticRoleAuthorityProvider` exactly like the repeated
   `--authorized-role` flag does today). Absent means no role holds merge

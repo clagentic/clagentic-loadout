@@ -125,8 +125,9 @@ class TestStateCannotArriveAnyOtherWay:
             ("clean", OPEN),
             ("blocking", {"cleared_claims": [{"id": "F1", "head": OLDER, "evidence": "x"}]}),
             ("blocking", {"findings_open": [{"id": "F1", "rule_id": "R1"}]}),
+            ("blocking", {"scanners_run": None}),
         ],
-        ids=["clean-with-open", "claim-at-other-head", "missing-field"],
+        ids=["clean-with-open", "claim-at-other-head", "missing-field", "explicit-null"],
     )
     def test_malformed_or_contradictory_state_is_refused_before_any_post(
         self, monkeypatch, status, state
@@ -141,10 +142,12 @@ class TestStateCannotArriveAnyOtherWay:
         assert code == verb.EXIT_VERDICT_BLOCK_USAGE
 
 
-def test_a_fence_that_lands_without_its_state_fails_the_readback(monkeypatch):
-    # Appending a stateless fence keeps the ordinary post readback satisfied
-    # (the posted body is a prefix) while the re-parsed last fence has lost
-    # the state, isolating the state round-trip check.
+def test_a_fence_that_lands_without_its_state_fails_the_readback(monkeypatch, capsys):
+    # The transport readback only accepts a landed body that contains the posted
+    # one, so a fence cannot be replaced in place; a trailing stateless fence
+    # (which the last-fence-wins parse reads) is the one reachable shape. The
+    # state round-trip check runs before the single-fence backstop, and the
+    # assertions below pin that it, not the backstop, is what refused.
     def drop_state(posted):
         return posted + build_verdict_block("reviewer", "blocking", HEAD, 42)
 
@@ -156,3 +159,6 @@ def test_a_fence_that_lands_without_its_state_fails_the_readback(monkeypatch):
         monkeypatch=monkeypatch,
     )
     assert code == verb.EXIT_VERDICT_BLOCK_MISMATCH
+    err = capsys.readouterr().err
+    assert "findings_open: expected" in err
+    assert "fence_schema_version: expected" in err
