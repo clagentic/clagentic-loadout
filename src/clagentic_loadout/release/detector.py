@@ -203,6 +203,15 @@ def is_repo_authorized_for_auto_dispatch(
     return owner in allowed_orgs
 
 
+def _loadout_marker_present(path: Path) -> bool:
+    """Per-marker presence check: the current marker is a config FILE, the
+    legacy marker is a DIRECTORY. A directory squatting on the config
+    file's name must not count as loadout config."""
+    if path.name == Path(_LOADOUT_CONFIG_MARKER).name:
+        return path.is_file()
+    return path.is_dir()
+
+
 def is_semantic_release_owned(repo_path: Path) -> bool:
     """
     True if *repo_path* already self-releases via semantic-release and this
@@ -228,11 +237,12 @@ def is_semantic_release_owned(repo_path: Path) -> bool:
         repo_path,
         _LOADOUT_CONFIG_MARKER,
         _LEGACY_LOADOUT_CONFIG_MARKER,
-        exists_check=Path.exists,
+        exists_check=_loadout_marker_present,
     )
-    return (config_root / _LOADOUT_CONFIG_MARKER).exists() or (
-        config_root / _LEGACY_LOADOUT_CONFIG_MARKER
-    ).exists()
+    return any(
+        _loadout_marker_present(config_root / marker)
+        for marker in (_LOADOUT_CONFIG_MARKER, _LEGACY_LOADOUT_CONFIG_MARKER)
+    )
 
 
 def _run_git(repo_path: Path, args: list[str]) -> str:
@@ -592,8 +602,8 @@ def main(argv: list[str] | None = None) -> int:
     if is_semantic_release_owned(repo_path):
         print(
             f"release-detector: {repo_path} is semantic-release-owned "
-            "(release.config.js/.cjs/.mjs or a .clagentic/.loadout marker "
-            "present) — skipping entirely (idempotency, no signal).",
+            "(release.config.js/.cjs/.mjs or a loadout config marker "
+            "(.clagentic/loadout/config.yaml or legacy .loadout/) present) — skipping entirely (idempotency, no signal).",
             file=sys.stderr,
         )
         return EXIT_OK

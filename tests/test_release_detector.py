@@ -220,6 +220,24 @@ class TestIsSemanticReleaseOwned:
         (repo / ".loadout").mkdir()
         assert detector.is_semantic_release_owned(repo) is True
 
+    def test_directory_named_like_config_file_is_not_owned(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".clagentic" / "loadout" / "config.yaml").mkdir(parents=True)
+        assert detector.is_semantic_release_owned(repo) is False
+
+    def test_directory_named_like_config_file_in_wrapper_is_not_owned(self, tmp_path):
+        wrapper = tmp_path / "wrapper"
+        repo = wrapper / "repo"
+        _init_repo(repo)
+        (wrapper / ".clagentic" / "loadout" / "config.yaml").mkdir(parents=True)
+        assert detector.is_semantic_release_owned(repo) is False
+
+    def test_legacy_marker_as_file_is_not_owned(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".loadout").write_text("")
+        assert detector.is_semantic_release_owned(repo) is False
+
     def test_neither_marker_is_not_owned(self, tmp_path):
         repo = tmp_path / "repo"
         repo.mkdir()
