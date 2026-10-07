@@ -540,3 +540,173 @@ class TestRepoReviewerFloor:
     def test_no_repo_path_declares_nothing(self):
         code, _ = _merge([_comment(1, _fence("clean", HEAD_B))])
         assert code == verb.EXIT_OK
+
+
+def _raw_fence(**fields):
+    """A fence assembled outside the tool, to model history the emit side would
+    refuse to construct."""
+    payload = {"reviewer": NAME, "review_status": "blocking", "head_sha": HEAD_A, "pr_number": 1}
+    payload.update(fields)
+    return "\n```review-result\n" + json.dumps(payload) + "\n```\n"
+
+
+_F1_RAW_OPEN = [{"id": "F1", "rule_id": "R1", "head": HEAD_A}]
+_DUP_SCANNERS = [
+    {"scanner": "alpha", "status": "failed", "reason": "x"},
+    {"scanner": "alpha", "status": "ran"},
+]
+_CLEAN_B = _fence("clean", HEAD_B)
+
+
+def _classify(body, **overrides):
+    from clagentic_loadout.merge.verdict import classify_earlier_fence
+
+    return classify_earlier_fence(
+        {"id": 7, "body": body}, **{"pr_number": 1, "reviewer_name": NAME, **overrides}
+    )
+
+
+class TestEarlierFenceClassification:
+    """One row per cell of the earlier-fence disposition table. A row's body is
+    the earlier comment (#1); the later clean verdict at HEAD_B is always
+    well-formed and clears nothing."""
+
+    IGNORED_ROWS = {
+        "unparseable-stateless": _fence("blocking", HEAD_A).replace("{", "{,", 1),
+        "json-not-an-object-stateless": "\n```review-result\n[1, 2]\n```\n",
+        "other-reviewer-stateful": _fence("blocking", HEAD_A, F1_OPEN, name="other-reviewer"),
+        "other-pr-stateful": build_verdict_block(NAME, "blocking", HEAD_A, 2, findings_state=F1_OPEN),
+        "schema-error-stateless": _raw_fence(review_status="maybe"),
+        "two-fences-stateless": _fence("blocking", HEAD_A) + _fence("blocking", HEAD_A),
+        "malformed-head-sha-stateless": _raw_fence(head_sha="abc"),
+    }
+    REFUSED_ROWS = {
+        "unparseable-stateful": _raw_fence().replace('"pr_number": 1}', '"findings_open": [}'),
+        "json-not-an-object-stateful": '\n```review-result\n[{"findings_open": []}]\n```\n',
+        "unparseable-version-2-stamp-only": _raw_fence().replace('"pr_number": 1}', '"fence_schema_version": 2,}'),
+        "schema-error-explicit-null-state": _raw_fence(findings_open=None),
+        "schema-error-version-2-without-state-keys": _raw_fence(
+            fence_schema_version=2, review_status="maybe"
+        ),
+        "duplicate-scanners": _raw_fence(fence_schema_version=2, scanners_run=_DUP_SCANNERS),
+        "two-fences-stateful": _fence("blocking", HEAD_A) + _fence("blocking", HEAD_A, F1_OPEN),
+        "malformed-finding-head": _raw_fence(
+            fence_schema_version=2, findings_open=[{"id": "F1", "rule_id": "R1", "head": "abc"}]
+        ),
+        "malformed-claim-head": _raw_fence(
+            fence_schema_version=2, cleared_claims=[{"id": "F1", "head": "abc", "evidence": "e"}]
+        ),
+        "malformed-head-sha-stateful": _raw_fence(
+            head_sha="abc", fence_schema_version=2, findings_open=_F1_RAW_OPEN
+        ),
+        "malformed-head-sha-version-2-stamp-only": _raw_fence(head_sha="abc", fence_schema_version=2),
+    }
+
+    def test_a_comment_without_a_fence_is_not_a_verdict(self):
+        assert _classify("I looked again, fine.") is None
+        assert _classify("") is None
+
+    def test_a_well_formed_fence_is_valid_and_carries_its_head_and_state(self):
+        fence = _classify(_fence("blocking", HEAD_A, F1_OPEN))
+        assert (fence.kind, fence.comment_id, fence.head) == ("valid", 7, HEAD_A)
+        assert [f["id"] for f in fence.state.findings_open] == ["F1"]
+
+    @pytest.mark.parametrize("row", sorted(IGNORED_ROWS))
+    def test_ignored_row_classifies_as_ignored_with_a_reason(self, row):
+        fence = _classify(self.IGNORED_ROWS[row])
+        assert (fence.kind, fence.comment_id) == ("ignored", 7)
+        assert fence.reason
+
+    @pytest.mark.parametrize("row", sorted(REFUSED_ROWS))
+    def test_unreadable_stateful_row_classifies_as_unreadable_stateful(self, row):
+        fence = _classify(self.REFUSED_ROWS[row])
+        assert fence.kind == "unreadable_stateful"
+        assert fence.reason
+
+    @pytest.mark.parametrize("row", sorted(IGNORED_ROWS))
+    def test_an_ignored_earlier_fence_never_blocks_a_later_clean_verdict(self, row, capsys):
+        comments = [_comment(1, self.IGNORED_ROWS[row]), _comment(2, _CLEAN_B)]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "earlier comment #1" in err
+        assert "is ignored" in err
+
+    @pytest.mark.parametrize("row", sorted(REFUSED_ROWS))
+    def test_an_unreadable_stateful_earlier_fence_refuses_naming_the_comment(self, row, capsys):
+        comments = [_comment(1, self.REFUSED_ROWS[row]), _comment(2, _CLEAN_B)]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "#1" in err
+        assert "may hold findings open" in err
+
+    def test_every_unreadable_stateful_comment_is_named(self, capsys):
+        comments = [
+            _comment(1, self.REFUSED_ROWS["duplicate-scanners"]),
+            _comment(2, self.REFUSED_ROWS["schema-error-explicit-null-state"]),
+            _comment(3, _CLEAN_B),
+        ]
+        _, err = _merge(comments, capsys=capsys)
+        assert "#1" in err and "#2" in err
+
+    def test_stateless_fence_with_a_malformed_head_does_not_hide_an_earlier_open_finding(self, capsys):
+        comments = [
+            _comment(1, _fence("blocking", HEAD_A, F1_OPEN)),
+            _comment(2, self.IGNORED_ROWS["malformed-head-sha-stateless"]),
+            _comment(3, _CLEAN_B),
+        ]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "F1" in err
+
+    def test_the_ignored_fences_are_reported_on_the_verdict_with_their_reasons(self):
+        verdict = read_reviewer_verdict(
+            [
+                {**c, "created_at": f"2026-01-01T00:00:{c['id']:02d}Z"}
+                for c in [_comment(1, self.IGNORED_ROWS["unparseable-stateless"]), _comment(2, _CLEAN_B)]
+            ],
+            LOGIN, HEAD_B, 1, "o", "r", expected_reviewer_name=NAME,
+        )
+        assert [comment_id for comment_id, _ in verdict.ignored_earlier_fences] == [1]
+        assert verdict.ignored_earlier_fences[0][1]
+
+    def test_a_valid_fence_is_the_supersession_target_and_the_carry_forward_source(self, capsys):
+        comments = [
+            _comment(1, _fence("blocking", HEAD_A, F1_OPEN)),
+            _comment(2, _fence("clean", HEAD_B, {**F1_CLEARED, "supersedes": 1})),
+        ]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "supersedes" not in err
+
+    def test_an_unreadable_fence_is_not_a_supersession_target(self, capsys):
+        comments = [
+            _comment(1, self.IGNORED_ROWS["malformed-head-sha-stateless"]),
+            _comment(2, _fence("clean", HEAD_B, {"supersedes": 1})),
+        ]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "supersedes comment #1" in err
+
+    def test_the_newest_fence_stays_strict(self, capsys):
+        comments = [_comment(1, _fence("blocking", HEAD_A)), _comment(2, self.IGNORED_ROWS["schema-error-stateless"])]
+        code, _ = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+
+
+class TestExplicitNullGateKeys:
+    @pytest.mark.parametrize("key", ["required_reviewer_roles", "required_scanners"])
+    def test_an_explicit_null_is_malformed_and_drops_the_whole_gate(self, tmp_path, capsys, key):
+        section = {"required_reviewer_roles": [], "required_scanners": {NAME: ["alpha"]}}
+        section[key] = None
+        _write_config(tmp_path, section)
+        code, err = _merge([_comment(1, _CLEAN_B)], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert f"merge.{key}" in err
+        assert "required_reviewer_roles NOT ENFORCED" in err
+        assert "required_scanners NOT ENFORCED" in err
+
+    def test_an_absent_scanners_key_is_still_no_requirement(self, tmp_path, capsys):
+        _write_config(tmp_path, {"required_reviewer_roles": []})
+        code, err = _merge([_comment(1, _CLEAN_B)], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "NOT ENFORCED" not in err

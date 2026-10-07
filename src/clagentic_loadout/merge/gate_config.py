@@ -107,8 +107,9 @@ obeys two rules:
 
   - A config in which ANY gate key (`required_reviewer_roles`,
     `required_scanners`) cannot be loaded (unreadable YAML, a `merge:` section
-    that is not a mapping, a malformed role list or scanner mapping, or a
-    `merge:` section that omits `required_reviewer_roles`) falls back as a
+    that is not a mapping, a malformed role list or scanner mapping, an
+    explicit null for either key, or a `merge:` section that omits
+    `required_reviewer_roles`) falls back as a
     WHOLE to flags-only, with a loud stderr warning naming the file and the
     error: neither key is enforced, not even the one that loaded. One rule,
     no partial enforcement. The fix-the-config merge always lands. Every error this module raises is therefore caught there, never
@@ -481,9 +482,12 @@ def load_repo_gate_declarations(
 def _required_scanners_from_section(
     config_path: Path, merge_section: dict
 ) -> dict[str, tuple[str, ...]]:
-    raw = merge_section.get(CONFIG_KEY_REQUIRED_SCANNERS)
-    if raw is None:
+    # Same rule as required_reviewer_roles: a key that is present is validated
+    # whatever its value, so an explicit null is malformed (it falls back with
+    # a warning), never a silent synonym for "no scanners required".
+    if CONFIG_KEY_REQUIRED_SCANNERS not in merge_section:
         return {}
+    raw = merge_section[CONFIG_KEY_REQUIRED_SCANNERS]
     if not isinstance(raw, dict):
         raise InvalidMergeGateConfigError(
             f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_REQUIRED_SCANNERS} must be a "

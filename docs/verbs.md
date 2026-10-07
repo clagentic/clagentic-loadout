@@ -1415,9 +1415,18 @@ earlier fence held open that the current verdict neither clears at its own
 head (with evidence) nor re-raises refuses the merge and names the finding. A
 clean verdict reporting a `merge.required_scanners` scanner as `failed`
 refuses, as does one that records no scanner outcomes for a role that has
-required scanners; a scanner name listed twice in a fence is malformed. An
-earlier fence of the same reviewer whose `head_sha` is malformed refuses too,
-since it cannot be trusted to clear anything. An explicit `null` for a state
+required scanners; a scanner name listed twice in a fence is malformed. Each
+earlier comment with a fence is classified once, and that one classification
+feeds both the carry-forward and the `supersedes` check. An earlier fence that
+cannot be read (JSON that does not parse into an object, a schema error, a
+repeated scanner, more than one fence in the comment, or a malformed
+`head_sha` or finding/claim head) refuses the merge, naming the comment, when
+it carries findings state: any state key present (an explicit `null` counts),
+`fence_schema_version` 2, or, for text that does not parse, a state key name
+anywhere in it. The same defect in a fence with no findings state asserts
+nothing and clears nothing, so it is ignored with a warning naming the
+comment, as is a fence naming another reviewer or another PR. The newest
+fence stays strict. An explicit `null` for a state
 field is malformed input, never "not supplied"; so is any non-object state value. Only an absent state, or an empty
 object, means "no state". A version 1 fence, with no state, asserts nothing and is never an
 error. Caller text in the tool-built body and fence (file, message, rule id,

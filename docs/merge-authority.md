@@ -169,8 +169,8 @@ any `--required-reviewer` flags. Declaring the key gates the merge. Two rules
 keep a broken config from blocking the merge that would fix it:
 
 - If **any** repo gate key (`required_reviewer_roles`, `required_scanners`)
-  cannot be loaded (unreadable, malformed, or a `merge:` section that omits
-  `required_reviewer_roles`), the **whole** repo gate config falls back to
+  cannot be loaded (unreadable, malformed, an explicit `null` for either key,
+  or a `merge:` section that omits `required_reviewer_roles`), the **whole** repo gate config falls back to
   flags-only: no repo gate key is enforced, including one that was valid. A
   stderr warning names the file and the error. The fallback is deliberate, so
   the merge that lands the corrected config is never blocked by the broken one.

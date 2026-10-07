@@ -242,6 +242,26 @@ def normalize_findings_state(
     return out
 
 
+def has_findings_state(data: Mapping[str, Any]) -> bool:
+    """True when a fence payload carries findings state: any state key present
+    (an explicit null counts, it is a malformed assertion, not silence) or the
+    version 2 stamp. The one definition of "stateful" the reader uses."""
+    return any(key in data for key in STATE_KEYS) or (
+        data.get(KEY_FENCE_SCHEMA_VERSION) == FENCE_SCHEMA_VERSION
+    )
+
+
+_RAW_VERSION_2_RE = re.compile(rf"{KEY_FENCE_SCHEMA_VERSION}\W+{FENCE_SCHEMA_VERSION}\b")
+
+
+def raw_mentions_findings_state(raw: str) -> bool:
+    """has_findings_state for fence text that is not a readable JSON object:
+    true when the raw text names a state key or the version 2 stamp. A plain
+    substring scan on purpose, so it errs toward "stateful" and a damaged fence
+    that may have held a finding open is never mistaken for silence."""
+    return any(key in raw for key in STATE_KEYS) or _RAW_VERSION_2_RE.search(raw) is not None
+
+
 def state_from_fence(data: Mapping[str, Any]) -> FindingsState:
     """Read the state fields out of an already schema-validated fence payload."""
     supersedes = data.get(KEY_SUPERSEDES)
@@ -295,8 +315,10 @@ __all__ = [
     "SCANNER_STATUSES",
     "STATE_KEYS",
     "FindingsState",
+    "has_findings_state",
     "index_scanners",
     "normalize_findings_state",
+    "raw_mentions_findings_state",
     "state_from_fence",
     "unresolved_prior_findings",
 ]

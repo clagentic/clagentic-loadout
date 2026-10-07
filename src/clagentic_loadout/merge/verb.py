@@ -1426,6 +1426,13 @@ def _run(
                     expected_reviewer_name=reviewer_name,
                     enforce_single_fence=enforce_single_verdict_fence,
                 )
+                for ignored_id, ignored_reason in verdict_obj.ignored_earlier_fences:
+                    print(
+                        f"merge: WARNING -- earlier comment #{ignored_id} from {reviewer_name!r} "
+                        f"is ignored: {ignored_reason}; it holds no findings open for this "
+                        f"reviewer on this PR and clears nothing",
+                        file=sys.stderr,
+                    )
                 verdict.assert_clean_verdict(verdict_obj, reviewer_name)
                 verdict.assert_prior_findings_resolved(verdict_obj, reviewer_name)
                 required_scanners = (
