@@ -6,8 +6,8 @@ section owner resolves through (`repo_config.resolve_repo_config_path`); this
 module owns the `push.verify` key: a list of `{name, argv, timeout_seconds}`
 entries.
 
-DEFAULT NO-OP: a repo with no file, no `push:` section, or no `verify` key
-gets an empty entry tuple, and the push path is byte-identical to a build
+DEFAULT NO-OP: a repo with no file, no `push:` section, or an ABSENT `verify`
+key (an explicit `verify: null` is malformed) gets an empty entry tuple, and the push path is byte-identical to a build
 without this feature.
 
 TRUST MODEL: this is REPO-LOCAL config, like `push.scratch_patterns`, but
@@ -119,8 +119,9 @@ def load_verify_entries(
         return ()
 
     raw_entries = push_section[CONFIG_KEY_VERIFY]
-    if raw_entries is None:
-        return ()
+    # An explicit `verify: null` is malformed, not "unconfigured": only an
+    # absent key means not configured, so a half-edited config cannot silently
+    # disable the checks.
     if not isinstance(raw_entries, list):
         raise InvalidVerifyConfigError(
             f"{config_path}: {CONFIG_SECTION_PUSH}.{CONFIG_KEY_VERIFY} must be a list, "

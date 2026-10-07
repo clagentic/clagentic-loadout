@@ -14,18 +14,31 @@ PR body or an error message.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.push.bounded_capture import (
+    TailBuffer,
+    join_capture,
+    start_tail_capture,
+)
 from clagentic_loadout.push.push_redaction import redact_push_secrets
 from clagentic_loadout.push.verify_config import VerifyEntry
 
 #: Characters of each captured stream kept in a result. The TAIL is kept:
 #: the failing assertion or compiler error is at the end, not the start.
 OUTPUT_TAIL_CHARS = 2000
+
+#: Bytes retained per stream while the command runs: enough for
+#: OUTPUT_TAIL_CHARS characters at the widest UTF-8 encoding.
+_CAPTURE_BYTES = OUTPUT_TAIL_CHARS * 4
+
+#: Seconds to wait for the pipe readers after the process group is killed.
+_DRAIN_SECONDS = 5
 
 #: Heading of the PR-body section; one constant so the writer and any reader
 #: agree on the exact text.
@@ -70,12 +83,9 @@ class VerificationFailedError(Exception):
         )
 
 
-def _tail(raw: bytes | str | None) -> str:
-    if raw is None:
-        return ""
-    text = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else raw
-    text = redact_push_secrets(text).strip()
-    if len(text) > OUTPUT_TAIL_CHARS:
+def _tail(buffer: TailBuffer) -> str:
+    text = redact_push_secrets(buffer.value().decode("utf-8", errors="replace")).strip()
+    if buffer.dropped or len(text) > OUTPUT_TAIL_CHARS:
         return "...[truncated]\n" + text[-OUTPUT_TAIL_CHARS:]
     return text
 
@@ -99,23 +109,30 @@ def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
             start_error=f"{type(exc).__name__}: {exc}",
         )
 
+    out_buf, err_buf, readers = start_tail_capture(proc, _CAPTURE_BYTES)
+    timed_out = False
     try:
-        out, err = proc.communicate(timeout=entry.timeout_seconds)
+        proc.wait(timeout=entry.timeout_seconds)
     except subprocess.TimeoutExpired:
-        try:
+        timed_out = True
+        with contextlib.suppress(ProcessLookupError):
             os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        out, err = proc.communicate()
-        return VerifyResult(
-            name=entry.name, argv=entry.argv, exit_code=None, timed_out=True,
-            timeout_seconds=entry.timeout_seconds,
-            stdout_tail=_tail(out), stderr_tail=_tail(err),
-        )
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_DRAIN_SECONDS)
+    except BaseException:
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        proc.wait()
+        raise
 
+    # The bounded join keeps a daemonised descendant that still holds a pipe
+    # from hanging the push.
+    join_capture(readers, _DRAIN_SECONDS)
     return VerifyResult(
-        name=entry.name, argv=entry.argv, exit_code=proc.returncode, timed_out=False,
-        timeout_seconds=entry.timeout_seconds, stdout_tail=_tail(out), stderr_tail=_tail(err),
+        name=entry.name, argv=entry.argv,
+        exit_code=None if timed_out else proc.returncode, timed_out=timed_out,
+        timeout_seconds=entry.timeout_seconds,
+        stdout_tail=_tail(out_buf), stderr_tail=_tail(err_buf),
     )
 
 

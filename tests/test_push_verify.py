@@ -12,6 +12,7 @@ import pytest
 import yaml
 
 from clagentic_loadout.push import verb
+from clagentic_loadout.push.bounded_capture import TailBuffer
 from clagentic_loadout.push.verify_config import (
     InvalidVerifyConfigError,
     VerifyEntry,
@@ -103,6 +104,72 @@ class TestConfig:
         _write_verify(tmp_path, bad)
         with pytest.raises(InvalidVerifyConfigError):
             load_verify_entries(tmp_path)
+
+
+class TestNullVerifyKey:
+    def test_explicit_null_is_malformed(self, tmp_path):
+        _write_verify(tmp_path, None)
+        with pytest.raises(InvalidVerifyConfigError):
+            load_verify_entries(tmp_path)
+
+    def test_explicit_null_exits_config_invalid(self, repo_with_remote, monkeypatch):
+        repo, remote = repo_with_remote
+        _write_verify(repo, None)
+        sent: list = []
+        code = _run_main(
+            _create_argv(repo),
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_create_opener(sent),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERIFY_CONFIG_INVALID == 39
+        assert not _remote_has_branch(remote)
+        assert sent == []
+
+
+class TestBoundedCapture:
+    def test_tail_buffer_never_exceeds_twice_the_limit(self):
+        buf = TailBuffer(100)
+        for _ in range(1000):
+            buf.append(b"x" * 37)
+            assert len(buf._data) <= 200 + 37
+        assert len(buf.value()) == 100 and buf.dropped
+
+    def test_tail_buffer_under_limit_is_not_marked_dropped(self):
+        buf = TailBuffer(100)
+        buf.append(b"abc")
+        assert buf.value() == b"abc" and not buf.dropped
+
+    def test_fifty_megabytes_of_output_records_only_the_tail(self, tmp_path):
+        code = (
+            "import sys\n"
+            "chunk = b'a' * (1024 * 1024)\n"
+            "for _ in range(50):\n"
+            "    sys.stdout.buffer.write(chunk)\n"
+            "    sys.stderr.buffer.write(chunk)\n"
+            "sys.stdout.buffer.write(b'\\nEND-OUT\\n')\n"
+            "sys.stderr.buffer.write(b'\\nEND-ERR\\n')\n"
+        )
+        entry = VerifyEntry("flood", (PY, "-c", code), 120)
+        (result,) = run_verifications((entry,), tmp_path)
+        assert result.passed
+        assert len(result.stdout_tail) < 2100 and len(result.stderr_tail) < 2100
+        assert result.stdout_tail.startswith("...[truncated]")
+        assert result.stdout_tail.endswith("END-OUT")
+        assert result.stderr_tail.endswith("END-ERR")
+
+    def test_flood_then_timeout_still_kills_and_keeps_tail(self, tmp_path):
+        code = (
+            "import sys, time\n"
+            "sys.stdout.write('a' * 5000000 + '\\nLAST\\n'); sys.stdout.flush()\n"
+            "time.sleep(30)\n"
+        )
+        entry = VerifyEntry("hang", (PY, "-c", code), 1.5)
+        with pytest.raises(VerificationFailedError) as info:
+            run_verifications((entry,), tmp_path)
+        assert info.value.failed.timed_out
+        assert info.value.failed.stdout_tail.endswith("LAST")
 
 
 class TestRunner:

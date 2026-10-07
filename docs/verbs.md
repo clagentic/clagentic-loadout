@@ -1243,7 +1243,10 @@ and stderr, passed through the same redaction as other push output.
 
 **Failure.** A non-zero exit, a timeout, or a command that cannot start refuses the
 push, exit `EXIT_VERIFY_FAILED` (38), naming the check and printing its output tail.
-A malformed `push.verify` value exits `EXIT_VERIFY_CONFIG_INVALID` (39).
+A malformed `push.verify` value exits `EXIT_VERIFY_CONFIG_INVALID` (39); that includes an
+explicit `verify: null` (only an absent key means "not configured"). Output is captured
+incrementally and only the bounded tail is kept, so memory stays flat however much a
+check prints.
 
 **`--skip-verify`** bypasses the run. It is never silent: it is logged to stderr and a
 `## Verification` section stating the checks were SKIPPED (with their names) is written
