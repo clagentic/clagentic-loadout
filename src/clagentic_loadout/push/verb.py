@@ -247,6 +247,7 @@ from clagentic_loadout.push.cleanliness_config import load_scratch_patterns
 from clagentic_loadout.push.contention_check import (
     WorkingTreeContentionError,
     check_working_tree_contention,
+    own_branch_refs,
 )
 from clagentic_loadout.push.contention_config import load_contention_config
 from clagentic_loadout.push.errors import (
@@ -307,6 +308,7 @@ from clagentic_loadout.push.verify_config import (
 from clagentic_loadout.push.verify_run import (
     VerificationFailedError,
     append_section,
+    append_to_existing,
     render_skipped_section,
     render_verification_section,
     run_verifications,
@@ -1086,7 +1088,9 @@ def _run_task_id_guard_title_check(args: argparse.Namespace, *, project_root: Pa
         print(f"push: WARNING -- {warning}", file=sys.stderr)
 
 
-def _run_contention_check(project_root: Path, *, override: bool) -> None:
+def _run_contention_check(
+    project_root: Path, *, override: bool, branch: str, remote: str
+) -> None:
     """Optional, config-gated pre-flight working-tree contention check
     (lr-78a584, push.contention_check) -- refuses when another unit of work
     already appears to be in flight in this checkout.
@@ -1104,6 +1108,10 @@ def _run_contention_check(project_root: Path, *, override: bool) -> None:
     via new commit objects + `git update-ref`, lr-ac7bb0) -- a refusal here
     must never spend a token mint or touch history first.
 
+    *branch*/*remote* name the branch this invocation is itself pushing and
+    its remote; that branch is never counted as other work in flight (it is
+    always the checked-out branch, so counting it refused every push).
+
     Raises push.contention_check.WorkingTreeContentionError when contention
     is found and *override* is False; caught at the CLI boundary in main()
     and mapped to EXIT_WORKING_TREE_CONTENTION. When *override* is True and
@@ -1120,6 +1128,7 @@ def _run_contention_check(project_root: Path, *, override: bool) -> None:
             enabled=config.enabled,
             branch_pattern=config.branch_pattern,
             override=override,
+            own_branches=own_branch_refs(branch, remote),
         )
     except WorkingTreeContentionError as exc:
         _fail(str(exc), code=EXIT_WORKING_TREE_CONTENTION)
@@ -1503,6 +1512,7 @@ def _perform_remote_readback(
     branch: str,
     project_root: Path,
     expected_bot_email: str | None,
+    token: str | None = None,
 ) -> dict:
     """Post-push authoritative remote state (lr-4e8a43): read the branch's
     HEAD back FROM THE REMOTE via `git ls-remote` (push.remote_readback,
@@ -1521,6 +1531,11 @@ def _perform_remote_readback(
     honestly reports that the remote fact could not be confirmed rather than
     silently omitting the field or substituting a local value (which would
     reintroduce the exact defect this task exists to close).
+
+    *token* is the minted push credential: the read runs through the same
+    credentialed, hermetic envelope as the push, so it can see a remote the
+    process's ambient identity cannot (without it, the read failed on exactly
+    those remotes and a landed push looked unconfirmed).
 
     Returns a dict merged directly into the JSON success envelope:
       remote_head_sha: the SHA `git ls-remote` reported, or None on failure.
@@ -1556,7 +1571,7 @@ def _perform_remote_readback(
     full rationale.
     """
     try:
-        readback = read_remote_head(remote, branch, project_root)
+        readback = read_remote_head(remote, branch, project_root, token=token)
     except RemoteReadbackError as exc:
         print(
             f"push: WARNING -- post-push remote readback could not confirm "
@@ -2100,8 +2115,8 @@ def _run_update_pr(
                 current_body = forgejo_get_pr_body(api_base, owner, repo, args.pr_number, token=token, opener=opener)
         except PrOpenError as exc:
             _fail(str(exc), code=EXIT_PR_FAILED)
-        effective_body = (
-            f"{current_body}{_APPEND_BODY_SEPARATOR}{body}" if current_body else body
+        effective_body = append_to_existing(
+            current_body, body, separator=_APPEND_BODY_SEPARATOR
         )
 
     try:
@@ -2155,6 +2170,7 @@ def _run_create_pr(
 
     _run_contention_check(
         project_root, override=args.override_contention_check,
+        branch=branch, remote=git_coords.tracking_remote(branch, project_root),
     )
 
     if args.platform == PLATFORM_GITHUB:
@@ -2445,7 +2461,7 @@ def _run_create_pr(
     # caller most needs to know the push landed).
     remote_readback_envelope = _perform_remote_readback(
         remote=remote_name, branch=branch, project_root=project_root,
-        expected_bot_email=effective_bot_email,
+        expected_bot_email=effective_bot_email, token=token,
     )
 
     try:
@@ -2482,7 +2498,12 @@ def _run_create_pr(
             f"confirmed via a fresh {remote_readback_envelope.get('remote_head_sha_source')!r} "
             f"readback before this PR-open call was attempted."
             if remote_readback_envelope.get("remote_head_sha")
-            else ""
+            else (
+                " git push itself exited 0 before this PR-open call, so the "
+                "push landed; only the post-push remote readback could not "
+                "confirm the remote head (see the readback warning above) -- "
+                "do not treat this exit as a failed push."
+            )
         )
         likely_redundant = (
             f" HTTP {exc.status_code} may mean a PR for this head/base pair "

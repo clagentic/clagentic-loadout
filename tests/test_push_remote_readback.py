@@ -136,6 +136,56 @@ class TestReadRemoteHead:
             read_remote_head("origin", "feature", repo)
 
 
+class TestCredentialedReadback:
+    """With the minted token, the read goes through the same credentialed,
+    hermetic envelope the push used, not the process's ambient credentials."""
+
+    def test_token_read_matches_the_remote(self, repo_with_remote):
+        repo, _remote = repo_with_remote
+        _git(["push", "origin", "feature"], repo)
+        plain = read_remote_head("origin", "feature", repo)
+        credentialed = read_remote_head("origin", "feature", repo, token="tok-abc")
+        assert credentialed.remote_head_sha == plain.remote_head_sha
+
+    def test_token_read_runs_with_askpass_and_isolated_home(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        _git(["push", "origin", "feature"], repo)
+        seen: dict = {}
+        real_run = subprocess.run
+
+        def _spy(cmd, **kwargs):
+            if "ls-remote" in cmd:
+                seen["cmd"] = cmd
+                seen["env"] = kwargs["env"]
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr("clagentic_loadout.push.git_push.subprocess.run", _spy)
+        monkeypatch.setenv("HOME", "/ambient/home")
+        read_remote_head("origin", "feature", repo, token="tok-abc")
+
+        assert seen["env"]["GIT_ASKPASS"]
+        assert seen["env"]["HOME"] != "/ambient/home"
+        assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert "tok-abc" not in " ".join(seen["cmd"])
+
+    def test_without_a_token_the_ambient_read_is_unchanged(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        _git(["push", "origin", "feature"], repo)
+
+        def _boom(*_a, **_k):
+            raise AssertionError("credentialed path used without a token")
+
+        monkeypatch.setattr("clagentic_loadout.push.remote_readback.git_ls_remote_with_token", _boom)
+        assert read_remote_head("origin", "feature", repo).remote_head_sha
+
+    def test_hermeticity_refusal_surfaces_as_a_readback_error(self, repo_with_remote):
+        repo, _remote = repo_with_remote
+        _git(["push", "origin", "feature"], repo)
+        _git(["config", "credential.helper", "store"], repo)
+        with pytest.raises(RemoteReadbackError):
+            read_remote_head("origin", "feature", repo, token="tok-abc")
+
+
 class TestVerifyRemoteAuthorship:
     def test_no_expected_email_is_a_noop_pass(self, repo_with_remote):
         repo, _remote = repo_with_remote

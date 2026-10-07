@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 import signal
 import subprocess
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,6 +45,36 @@ _DRAIN_SECONDS = 5
 #: Heading of the PR-body section; one constant so the writer and any reader
 #: agree on the exact text.
 VERIFICATION_SECTION_HEADING = "## Verification"
+
+#: Delimiters of the stable block that holds the section, so a later update
+#: finds and replaces it instead of stacking a second one.
+SECTION_BEGIN_MARKER = "<!-- clagentic-loadout:verification:begin -->"
+SECTION_END_MARKER = "<!-- clagentic-loadout:verification:end -->"
+
+_SECTION_BLOCK_RE = re.compile(
+    rf"^{re.escape(VERIFICATION_SECTION_HEADING)}\n{re.escape(SECTION_BEGIN_MARKER)}\n"
+    rf".*?{re.escape(SECTION_END_MARKER)}\n?",
+    re.DOTALL | re.MULTILINE,
+)
+
+#: Environment variables a verification child inherits from the pushing
+#: process. Everything else (tokens, API keys, cloud credentials) is dropped
+#: unless an entry names it in `env_passthrough`.
+CHILD_ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "TMPDIR")
+_CHILD_ENV_PREFIXES = ("LC_",)
+
+
+def build_child_env(
+    source: Mapping[str, str], passthrough: Iterable[str] = ()
+) -> dict[str, str]:
+    """The environment a verification command runs under: the allowlisted
+    variables of *source* plus any explicitly named in *passthrough*."""
+    extra = frozenset(passthrough)
+    return {
+        key: value
+        for key, value in source.items()
+        if key in CHILD_ENV_ALLOWLIST or key.startswith(_CHILD_ENV_PREFIXES) or key in extra
+    }
 
 
 @dataclass(frozen=True)
@@ -78,9 +110,17 @@ class VerificationFailedError(Exception):
         self.results = results
         super().__init__(
             f"verification check {failed.name!r} failed ({failed.status_label}); "
-            f"the push was refused. Command: {' '.join(failed.argv)!r}.\n"
+            f"the push was refused. Command: {describe_command(failed.argv)}.\n"
             f"{format_output_tails(failed)}"
         )
+
+
+def describe_command(argv: tuple[str, ...]) -> str:
+    """User-facing description of a command: the executable and an argument
+    count, never the arguments themselves, which may carry tokens or paths."""
+    hidden = len(argv) - 1
+    shown = repr(argv[0]) if argv else "''"
+    return shown if hidden <= 0 else f"{shown} (+{hidden} argument(s) not shown)"
 
 
 def _tail(buffer: TailBuffer) -> str:
@@ -98,6 +138,7 @@ def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
             list(entry.argv),
             cwd=str(cwd),
             stdin=subprocess.DEVNULL,
+            env=build_child_env(os.environ, entry.env_passthrough),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -174,30 +215,56 @@ def _fence_for(text: str) -> str:
 def render_verification_section(results: tuple[VerifyResult, ...]) -> str:
     """Markdown `## Verification` section: one entry per check with its name,
     exit status, and bounded output tails."""
-    lines = [VERIFICATION_SECTION_HEADING, ""]
+    lines = []
     for result in results:
         mark = "PASS" if result.passed else "FAIL"
         lines.append(f"- **{result.name}**: {mark} ({result.status_label})")
         tails = format_output_tails(result)
         if tails:
+            # Captured output must not be able to forge or close the block.
+            tails = tails.replace(SECTION_BEGIN_MARKER, "[marker removed]").replace(
+                SECTION_END_MARKER, "[marker removed]"
+            )
             fence = _fence_for(tails)
             lines.extend(["", f"{fence}text", tails, fence, ""])
-    return "\n".join(lines).rstrip() + "\n"
+    return _wrap_section("\n".join(lines).rstrip())
 
 
 def render_skipped_section(entries: tuple[VerifyEntry, ...]) -> str:
     """Section recording an explicit --skip-verify, so a skipped
     verification is visible to every reader of the PR, never silent."""
     names = ", ".join(e.name for e in entries)
+    return _wrap_section(f"- **SKIPPED** via --skip-verify; declared checks NOT run: {names}")
+
+
+def _wrap_section(content: str) -> str:
     return (
-        f"{VERIFICATION_SECTION_HEADING}\n\n"
-        f"- **SKIPPED** via --skip-verify; declared checks NOT run: {names}\n"
+        f"{VERIFICATION_SECTION_HEADING}\n{SECTION_BEGIN_MARKER}\n\n"
+        f"{content}\n{SECTION_END_MARKER}\n"
     )
 
 
 def append_section(body: str, section: str) -> str:
+    """*body* with *section* in it exactly once: an existing verification
+    block is replaced where it stands, otherwise *section* is appended."""
+    existing = _SECTION_BLOCK_RE.search(body)
+    if existing is not None:
+        return body[: existing.start()] + section + body[existing.end():]
     separator = "\n" if body.endswith("\n") else "\n\n"
     return f"{body}{separator}{section}"
+
+
+def append_to_existing(current: str, addition: str, *, separator: str) -> str:
+    """Join *addition* onto an existing PR body *current* (the --append-body
+    path). A verification block inside *addition* replaces the one already in
+    *current* rather than stacking beside it; the rest of *addition* is
+    appended as ordinary text."""
+    block = _SECTION_BLOCK_RE.search(addition)
+    if block is None:
+        return f"{current}{separator}{addition}" if current else addition
+    rest = (addition[: block.start()] + addition[block.end():]).strip()
+    joined = f"{current}{separator}{rest}" if current and rest else (current or rest)
+    return append_section(joined, block.group(0)) if joined else block.group(0)
 
 
 __all__ = [
@@ -206,6 +273,9 @@ __all__ = [
     "VerificationFailedError",
     "VerifyResult",
     "append_section",
+    "append_to_existing",
+    "build_child_env",
+    "describe_command",
     "format_output_tails",
     "render_skipped_section",
     "render_verification_section",

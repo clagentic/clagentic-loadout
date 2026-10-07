@@ -831,6 +831,47 @@ def git_fetch_with_token(
             )
 
 
+def git_ls_remote_with_token(
+    remote: str,
+    ref: str,
+    token: str,
+    git_cwd: Path | None = None,
+) -> subprocess.CompletedProcess:
+    """Run `git ls-remote --exit-code <remote> refs/heads/<ref>` through the
+    SAME credentialed, hermetic envelope the push itself used, and return the
+    completed process unexamined (stdout/stderr redacted of *token*).
+
+    The post-push readback needs this: an ls-remote under the caller's
+    ambient credentials fails against any remote the ambient identity cannot
+    read, which made a push that had landed look unconfirmed. Same
+    hermeticity pre-flight as push and fetch, same fail-closed errors.
+    """
+    check_git_version(git_cwd=git_cwd)
+    hazards = check_repo_local_config_hazards(git_cwd)
+    if hazards:
+        raise RepoLocalConfigHazardError(
+            f"refusing to read back {ref!r} from {remote!r}: the target "
+            f"repo's LOCAL .git/config carries a hermeticity hazard "
+            f"{sorted(set(hazards))!r} that environment isolation cannot "
+            f"neutralize (credential.*, http.*.extraheader, includeIf.*, "
+            f"or url.*.insteadOf/pushInsteadOf)."
+        )
+    with _credentialed_git_env(token) as env:
+        result = subprocess.run(
+            ["git", *_HERMETIC_ARGV_PREFIX, "ls-remote", "--exit-code", remote, f"refs/heads/{ref}"],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=str(git_cwd) if git_cwd is not None else None,
+        )
+    return subprocess.CompletedProcess(
+        result.args,
+        result.returncode,
+        stdout=result.stdout,
+        stderr=redact_push_secrets(result.stderr, known_secrets=(token,)),
+    )
+
+
 def git_push_with_token(
     remote: str,
     branch: str,
@@ -1055,6 +1096,7 @@ __all__ = [
     "GitVersionTooOldError",
     "RepoLocalConfigHazardError",
     "git_fetch_with_token",
+    "git_ls_remote_with_token",
     "git_push_with_token",
     "make_askpass_script",
 ]

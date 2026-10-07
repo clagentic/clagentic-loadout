@@ -27,6 +27,7 @@ import pytest
 from clagentic_loadout.push.contention_check import (
     WorkingTreeContentionError,
     check_working_tree_contention,
+    own_branch_refs,
 )
 from clagentic_loadout.push.contention_config import DEFAULT_IN_FLIGHT_BRANCH_PATTERN
 
@@ -143,6 +144,62 @@ class TestDirtinessIsOnlyASecondarySignal:
             )
         assert exc_info.value.dirty is True
         assert "dirty" in str(exc_info.value)
+
+
+class TestPushedBranchIsNeverOtherWork:
+    """The branch a caller is itself pushing is the checked-out branch, so it
+    matches the in-flight pattern by construction. It must not be refused;
+    only a different matching branch holding the tree is other work."""
+
+    def test_own_matching_branch_with_no_other_work_is_not_refused(self, git_repo):
+        _git(["checkout", "-b", "feat/lr-1-thing"], git_repo)
+        verdict = check_working_tree_contention(
+            git_repo, enabled=True, branch_pattern=_PATTERN, override=False,
+            own_branches=own_branch_refs("feat/lr-1-thing", "origin"),
+        )
+        assert verdict.in_flight is False
+        assert verdict.overridden is False
+        assert "being pushed" in verdict.reason
+
+    def test_own_matching_dirty_branch_is_not_refused(self, git_repo):
+        _git(["checkout", "-b", "feat/lr-1-thing"], git_repo)
+        (git_repo / "README.md").write_text("mid-edit\n")
+        verdict = check_working_tree_contention(
+            git_repo, enabled=True, branch_pattern=_PATTERN, override=False,
+            own_branches=own_branch_refs("feat/lr-1-thing"),
+        )
+        assert verdict.in_flight is False
+
+    def test_a_different_matching_branch_holding_the_tree_is_refused(self, git_repo):
+        _git(["checkout", "-b", "feat/lr-2-other"], git_repo)
+        with pytest.raises(WorkingTreeContentionError) as exc_info:
+            check_working_tree_contention(
+                git_repo, enabled=True, branch_pattern=_PATTERN, override=False,
+                own_branches=own_branch_refs("feat/lr-1-thing", "origin"),
+            )
+        assert exc_info.value.branch == "feat/lr-2-other"
+
+    def test_a_branch_sharing_only_a_prefix_with_the_pushed_one_is_refused(self, git_repo):
+        _git(["checkout", "-b", "feat/lr-1-thing-v2"], git_repo)
+        with pytest.raises(WorkingTreeContentionError):
+            check_working_tree_contention(
+                git_repo, enabled=True, branch_pattern=_PATTERN, override=False,
+                own_branches=own_branch_refs("feat/lr-1-thing", "origin"),
+            )
+
+    def test_override_on_a_different_branch_is_still_reported(self, git_repo):
+        _git(["checkout", "-b", "feat/lr-2-other"], git_repo)
+        verdict = check_working_tree_contention(
+            git_repo, enabled=True, branch_pattern=_PATTERN, override=True,
+            own_branches=own_branch_refs("feat/lr-1-thing", "origin"),
+        )
+        assert verdict.overridden is True
+
+    def test_own_branch_refs_covers_remote_tracking_spellings(self):
+        refs = own_branch_refs("feat/x", "origin")
+        assert {"feat/x", "refs/heads/feat/x", "origin/feat/x", "refs/remotes/origin/feat/x"} == refs
+        assert own_branch_refs("feat/x") == {"feat/x", "refs/heads/feat/x"}
+        assert own_branch_refs("") == frozenset()
 
 
 class TestOverrideFlagIsMandatoryAndAlwaysHonored:

@@ -103,6 +103,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -173,12 +174,26 @@ def _is_dirty(repo_root: Path) -> bool:
     return bool(result.stdout.strip())
 
 
+def own_branch_refs(branch: str, remote: str = "") -> frozenset[str]:
+    """Every spelling under which the branch a caller is about to push may
+    show up as the checked-out branch: the short name, its full ref, and (when
+    *remote* is known) its remote-tracking form. A checked-out branch in this
+    set is the caller's OWN work, not another unit's."""
+    if not branch:
+        return frozenset()
+    refs = {branch, f"refs/heads/{branch}"}
+    if remote:
+        refs.update({f"{remote}/{branch}", f"refs/remotes/{remote}/{branch}"})
+    return frozenset(refs)
+
+
 def check_working_tree_contention(
     repo_root: str | Path,
     *,
     enabled: bool,
     branch_pattern: str,
     override: bool,
+    own_branches: Iterable[str] = (),
 ) -> ContentionVerdict:
     """Run the pre-flight contention read (see module docstring for the full
     design rationale — no state, mandatory override, sees every caller).
@@ -198,6 +213,12 @@ def check_working_tree_contention(
             proceeding with no record of the decision (see module docstring,
             defect (2): an override that cannot be seen to have fired is not
             meaningfully different from one that does not exist).
+        own_branches: ref spellings (see `own_branch_refs`) of the branch the
+            caller is itself about to push. A push always operates on the
+            checked-out branch, so without this exclusion the branch being
+            pushed matched the in-flight pattern on every call and the check
+            refused the caller against itself. Only a DIFFERENT matching
+            branch holding the tree counts as other work in flight.
 
     Returns a ContentionVerdict describing what was found. Raises
     WorkingTreeContentionError when contention is found AND override is
@@ -219,6 +240,15 @@ def check_working_tree_contention(
 
     repo_root = Path(repo_root)
     branch = _current_branch(repo_root)
+
+    if branch and branch in frozenset(own_branches):
+        return ContentionVerdict(
+            in_flight=False, overridden=False, branch=branch, dirty=False,
+            reason=(
+                f"checked-out branch {branch!r} is the branch being pushed, "
+                f"not other work in flight"
+            ),
+        )
 
     branch_matches = bool(branch) and re.search(branch_pattern, branch) is not None
 
@@ -282,4 +312,5 @@ __all__ = [
     "ContentionVerdict",
     "WorkingTreeContentionError",
     "check_working_tree_contention",
+    "own_branch_refs",
 ]

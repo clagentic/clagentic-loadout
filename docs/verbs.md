@@ -1127,6 +1127,11 @@ showing modified — stale residue from a PR that had already merged hours earli
 correctly **not** treated as contention. A naive "dirty implies busy" rule would have
 refused a legitimate write in exactly that state.
 
+**The branch being pushed is never "other work".** A push always operates on the
+checked-out branch, so that branch matches `in_flight_branch_pattern` on every call. It
+(and its remote-tracking spellings) is excluded from the match; only a **different**
+matching branch holding the tree counts as other work in flight.
+
 **`--override-contention-check` — the required operator escape hatch:** when this check
 refuses (`EXIT_WORKING_TREE_CONTENTION`, 34), pass `--override-contention-check` to
 proceed anyway. The refusal and the override are both printed to stderr — an override
@@ -1225,6 +1230,8 @@ push:
   `["sh", "-c", "..."]` entry if you need one.
 - `timeout_seconds` (finite positive number, optional; `.nan` and `.inf` are rejected) — on expiry the command's whole process
   group is killed and the check fails as a timeout.
+- `env_passthrough` (list of environment variable names, optional) — variables copied from
+  the pushing process into this check's environment on top of the built-in allowlist.
 
 **When it runs.** On the create-PR path, in the pushing checkout at the head being
 pushed (after bot-identity re-authoring settles it), before any ref moves and before the
@@ -1239,10 +1246,12 @@ not run it.
 
 **What it records.** On success a `## Verification` section is appended to the PR body:
 each check's name, exit status, and the bounded tail (last 2000 characters) of its stdout
-and stderr, passed through the same redaction as other push output.
+and stderr, passed through the same redaction as other push output. The section sits in a
+marked block, so a later `--update-pr` replaces it in place instead of adding a second one.
 
 **Failure.** A non-zero exit, a timeout, or a command that cannot start refuses the
-push, exit `EXIT_VERIFY_FAILED` (38), naming the check and printing its output tail.
+push, exit `EXIT_VERIFY_FAILED` (38), naming the check and printing its output tail. The
+message shows the executable and how many arguments were hidden, never the arguments.
 A malformed `push.verify` value exits `EXIT_VERIFY_CONFIG_INVALID` (39); that includes an
 explicit `verify: null` (only an absent key means "not configured"). Output is captured
 incrementally and only the bounded tail is kept, so memory stays flat however much a
@@ -1259,8 +1268,10 @@ command, whereas these commands run in the pushing checkout, as the pushing user
 that same checkout's own content — the person who can edit this file can already run
 code there (a Makefile, a git hook, a test file). No credential-minting or cross-repo
 surface is involved, so it stays repo-local rather than user-level-only. Do not run
-`loadout-push` from a checkout you do not trust. The child inherits the caller's own
-environment; loadout does not add the minted push credential to it.
+`loadout-push` from a checkout you do not trust. The child runs with an allowlisted
+environment, not the caller's own: `PATH`, `HOME`, `LANG`, `LC_*` and `TMPDIR` only, so
+tokens and API keys in the pushing process are not inherited, and the minted push
+credential is never added. An entry that needs more names them in `env_passthrough`.
 
 ### `loadout-merge` — the merge gate
 
