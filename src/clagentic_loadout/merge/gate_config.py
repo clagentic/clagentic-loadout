@@ -63,6 +63,15 @@ step, `max_changed_files` feeds `merge.diff_scope.check_diff_scope`'s
 existing `max_changed_files` parameter directly, same as `--max-changed-files`
 does today).
 
+GATE KEYS COME FROM A TRACKED FILE AT THE PR BASE COMMIT. `loadout-merge`
+never reads `required_reviewer_roles`, `required_scanners` or `pre_checks`
+from the working tree: a tree that holds the PR head would let the PR under
+review relax its own gate. `merge.repo_gate_runtime` reads them from the
+tracked gate file (`repo_config.TRACKED_GATE_RELATIVE_PATH`) as it exists at
+the PR's base commit, via `parse_tracked_gate_text` below. The single-key
+loaders in this module still read the working-tree file; they serve doctor
+and callers building their own invocation, not the merge gate.
+
 SCOPE NOTE: this module ships the repo-config READ side. `merge.verb` now
 consumes `required_reviewer_roles` as a FLOOR beneath `--required-reviewer`
 (required = union of the two), and `required_scanners`, through
@@ -190,22 +199,47 @@ class RequiredReviewerRolesNotDeclaredError(InvalidMergeGateConfigError):
     as an explicit, deliberate opt-out."""
 
 
-def _read_yaml_mapping(path: Path) -> dict:
-    if not path.exists():
-        return {}
+def _parse_yaml_mapping(text: str, source: object) -> dict:
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        raw = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
         raise InvalidMergeGateConfigError(
-            f"{path}: could not be read as YAML: {exc}."
+            f"{source}: could not be read as YAML: {exc}."
         ) from exc
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         raise InvalidMergeGateConfigError(
-            f"{path}: top-level document must be a mapping, got {type(raw).__name__}."
+            f"{source}: top-level document must be a mapping, got {type(raw).__name__}."
         )
     return raw
+
+
+def _read_yaml_mapping(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise InvalidMergeGateConfigError(
+            f"{path}: could not be read as YAML: {exc}."
+        ) from exc
+    return _parse_yaml_mapping(text, path)
+
+
+def _merge_section_from_mapping(
+    raw: dict, source: object
+) -> tuple[dict, bool]:
+    section_present = CONFIG_SECTION_MERGE in raw
+    merge_section = raw.get(CONFIG_SECTION_MERGE)
+    if merge_section is None:
+        return {}, section_present
+    if not isinstance(merge_section, dict):
+        raise InvalidMergeGateConfigError(
+            f"{source}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
+            f"got {type(merge_section).__name__}."
+        )
+    return merge_section, section_present
 
 
 def _read_merge_section_with_presence(
@@ -218,21 +252,38 @@ def _read_merge_section_with_presence(
     opposed to merely defaulting to `{}` because it was absent) -- the
     distinction `load_required_reviewer_roles` needs to tell "no merge:
     section at all" (nothing to be explicit about) apart from "merge:
-    section present but this key omitted" (an ambiguous gate, lr-638945)."""
+    section present but this key omitted" (an ambiguous gate)."""
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     raw = _read_yaml_mapping(config_path)
-    section_present = CONFIG_SECTION_MERGE in raw
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return config_path, {}, section_present
-    if not isinstance(merge_section, dict):
-        raise InvalidMergeGateConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section, section_present = _merge_section_from_mapping(raw, config_path)
     return config_path, merge_section, section_present
+
+
+def parse_tracked_gate_text(
+    text: str, *, source: str
+) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]], dict]:
+    """Parse the TRACKED repo gate file's text (as read at the PR base commit)
+    into (required_reviewer_roles, required_scanners, merge_section).
+
+    Same `merge:` section shape and same validation, absence rules and
+    explicit-null rules as the working-tree loaders above, from ONE parse of
+    *source*, so every key describes the same snapshot. The raw merge section
+    is returned so the caller can validate the sibling `pre_checks` key from
+    the same parse.
+
+    Raises:
+        InvalidMergeGateConfigError: any error the single-key loaders raise.
+    """
+    raw = _parse_yaml_mapping(text, source)
+    merge_section, section_present = _merge_section_from_mapping(raw, source)
+    config_path = Path(source)
+    return (
+        _reviewer_roles_from_section(config_path, merge_section, section_present),
+        _required_scanners_from_section(config_path, merge_section),
+        merge_section,
+    )
 
 
 def _read_merge_section(
@@ -532,4 +583,5 @@ __all__ = [
     "load_required_reviewer_roles",
     "load_repo_gate_declarations",
     "load_required_scanners",
+    "parse_tracked_gate_text",
 ]

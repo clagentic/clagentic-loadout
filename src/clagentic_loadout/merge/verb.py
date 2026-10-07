@@ -56,8 +56,10 @@ documented step ordering):
      `merge: enforce_single_verdict_fence: false` — see that resolver's own
      docstring for the full trade-off. The roles required are the UNION of
      --required-reviewer and the repo's declared
-     `merge: required_reviewer_roles` (a floor; merge.repo_gate_runtime). A
-     repo gate config that cannot be loaded falls back to flags-only with a
+     `merge: required_reviewer_roles` (a floor; merge.repo_gate_runtime),
+     read from the tracked gate file at the PR's BASE commit, never the
+     working tree, so the PR under review cannot relax its own gate. A repo
+     gate config that cannot be loaded falls back to flags-only with a
      stderr warning; a loadable but unsatisfiable floor refuses, overridable
      only by --ignore-repo-gate (logged, attested). Findings state: a
      finding an earlier fence held open that the current verdict neither
@@ -105,11 +107,12 @@ documented step ordering):
   8b. Pre-merge checks gate (merge.pre_checks_config, lr-843900) — an
      OPTIONAL, repo-declared `merge: pre_checks:` list (same step shape as
      post_merge_steps, reusing merge.post_merge.run_post_merge_steps
-     VERBATIM — same cwd, same on_failure semantics, same PASS/FAIL/exit-
-     code stderr record on every step). Read from the SAME --repo-path
-     config root every other repo-tier gate key here resolves through — a
-     repo with no local tree (--no-post-merge-tree/--skip-post-merge)
-     resolves to [], the same pre-existing "no tree, no repo-local config
+     VERBATIM — same on_failure semantics, same PASS/FAIL/exit-code stderr
+     record on every step). DECLARED by the tracked gate file at the PR's
+     BASE commit (the same read as `required_reviewer_roles`, see step 5) and
+     EXECUTED in --repo-path, as always; only their configuration comes from
+     base. A repo with no local tree (--no-post-merge-tree/--skip-post-merge)
+     declares none, the same pre-existing "no tree, no repo-local config
      readable at all" boundary every other repo-tier key in this chain
      already has, not a new gap this step introduces. See "PRE-MERGE
      CHECKS" further down for the full history/contract this closes.
@@ -194,10 +197,10 @@ REAL gate step, executed via the SAME merge.post_merge.run_post_merge_steps
 executor post_merge_steps already uses (same cmd shape, same shell-operator-
 token rejection, same on_failure semantics) — a repo's `on_failure: fail`
 pre_check that exits non-zero now REFUSES the merge (EXIT_PRE_CHECKS_FAILED)
-BEFORE step 9's merge_pr call is ever reached, and a malformed/unreadable
-pre_checks config at load time refuses the SAME way — a config the verb
-cannot be shown to have actually validated and run is never treated as a
-pass. `--skip-pre-checks` is the explicit, logged bypass (mirroring
+BEFORE step 9's merge_pr call is ever reached. A tracked gate file at
+base that is malformed or unreadable falls back, as a whole, to flags-only
+with a warning (merge.repo_gate_runtime) so the PR that repairs it can land;
+it is then enforced again from the next merge. `--skip-pre-checks` is the explicit, logged bypass (mirroring
 --skip-post-merge exactly); the gate is enforced by default. Every step,
 success or failure, now emits an explicit PASS/FAIL line carrying the raw
 exit code and the RESOLVED cwd it executed in (see merge.post_merge.
@@ -518,8 +521,7 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_require_model_attestation,
     resolve_sync_tree_after_merge,
 )
-from clagentic_loadout.merge.pre_checks_config import load_pre_checks
-from clagentic_loadout.merge.repo_gate_runtime import load_repo_gate
+from clagentic_loadout.merge.repo_gate_runtime import load_repo_gate_at_base
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
@@ -532,8 +534,10 @@ from clagentic_loadout.merge.tree_sync import (
     fetch_merged_sha_object,
     land_on_base_branch,
     resolve_base_branch,
+    resolve_base_sha,
 )
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.task_id_guard import (
     TaskIdGuardViolation,
     load_task_id_guard_config,
@@ -1028,11 +1032,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         dest="repo_path",
         help="Local working-tree root the merged repo lives in. When given, "
-        "pre_checks (see merge.pre_checks_config) are read from the SAME "
-        f"<repo-path>/{DEFAULT_POST_MERGE_CONFIG_RELATIVE_PATH} and, if "
-        "present, run in this directory BEFORE the merge is authorized -- "
+        "the repo's merge gate (merge.required_reviewer_roles, "
+        "merge.required_scanners, merge.pre_checks) is read from "
+        f"{TRACKED_GATE_RELATIVE_PATH} as it exists at the PR's BASE commit, "
+        "never from the working tree. pre_checks "
+        "(declared at base) run in this directory BEFORE the merge is authorized -- "
         "an on_failure: fail pre_check refuses the merge (see "
-        "--skip-pre-checks). post_merge_steps are read from the same file "
+        "--skip-pre-checks). post_merge_steps are read from "
+        f"<repo-path>/{DEFAULT_POST_MERGE_CONFIG_RELATIVE_PATH} "
         "and, if present, run in this directory ONLY after the merge in "
         "step 9 actually succeeds. This is an OPTIONAL override, not a "
         "required input -- the caller (a dispatcher with its own project "
@@ -1281,44 +1288,6 @@ def _run(
     bind_caller(role, caller_explicit=True, identity=attested_identity)
 
     required_reviewers = _parse_required_reviewers(args.required_reviewers, args.platform)
-
-    # The repo's declared reviewer roles are a floor beneath --required-reviewer
-    # (merge.repo_gate_runtime owns the unloadable-config fallback). A role
-    # already named by a flag keeps the flag's login binding.
-    repo_gate = load_repo_gate(args.repo_path)
-    for warning in repo_gate.warnings:
-        print(f"merge: WARNING -- {warning}", file=sys.stderr)
-    floor_only_reviewers: dict[str, str] = {}
-    if args.ignore_repo_gate:
-        print(
-            f"merge: merge.required_reviewer_roles and merge.required_scanners IGNORED "
-            f"via --ignore-repo-gate (declared reviewer "
-            f"roles: {list(repo_gate.reviewer_roles)!r}, declared required scanners: "
-            f"{ {r: list(s) for r, s in (repo_gate.required_scanners or {}).items()}!r}); "
-            f"only --required-reviewer applies",
-            file=sys.stderr,
-        )
-    else:
-        undeclared = [r for r in repo_gate.reviewer_roles if r not in required_reviewers]
-        try:
-            floor_only_reviewers = _parse_required_reviewers(undeclared, args.platform)
-        except MergeUsageError as exc:
-            raise MergeUsageError(
-                f"{exc} This role is required by the repo's merge.required_reviewer_roles; "
-                f"pass --ignore-repo-gate to override it (logged and attested)."
-            ) from exc
-        required_reviewers = {**required_reviewers, **floor_only_reviewers}
-        unreachable = repo_gate.unreachable_scanner_roles(required_reviewers)
-        if unreachable:
-            raise MergeUsageError(
-                f"merge.required_scanners declares scanners for role(s) {unreachable!r}, "
-                f"which are not required reviewers (required: {sorted(required_reviewers)!r}). "
-                f"Scanners are checked on a required reviewer's verdict, so this "
-                f"declaration could never gate anything. Add the role to "
-                f"merge.required_reviewer_roles or --required-reviewer, or remove it from "
-                f"merge.required_scanners; --ignore-repo-gate overrides it (logged and "
-                f"attested)."
-            )
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
 
     # 1. Namespace guard — runs FIRST, before any credential or network call.
@@ -1371,6 +1340,49 @@ def _run(
         )
     except StaleHeadShaError as exc:
         _fail(str(exc), code=EXIT_STALE_HEAD_SHA)
+
+    # The repo's gate is read from the PR's BASE commit (merge.repo_gate_runtime),
+    # which is why it can only be loaded now that the PR payload is in hand. Its
+    # declared reviewer roles are a floor beneath --required-reviewer; a role
+    # already named by a flag keeps the flag's login binding.
+    repo_gate = load_repo_gate_at_base(
+        args.repo_path,
+        base_sha=resolve_base_sha(pr_info),
+        base_branch=resolve_base_branch(pr_info),
+    )
+    for warning in repo_gate.warnings:
+        print(f"merge: WARNING -- {warning}", file=sys.stderr)
+    floor_only_reviewers: dict[str, str] = {}
+    if args.ignore_repo_gate:
+        print(
+            f"merge: merge.required_reviewer_roles and merge.required_scanners IGNORED "
+            f"via --ignore-repo-gate (declared reviewer "
+            f"roles: {list(repo_gate.reviewer_roles)!r}, declared required scanners: "
+            f"{ {r: list(s) for r, s in (repo_gate.required_scanners or {}).items()}!r}); "
+            f"only --required-reviewer applies",
+            file=sys.stderr,
+        )
+    else:
+        undeclared = [r for r in repo_gate.reviewer_roles if r not in required_reviewers]
+        try:
+            floor_only_reviewers = _parse_required_reviewers(undeclared, args.platform)
+        except MergeUsageError as exc:
+            raise MergeUsageError(
+                f"{exc} This role is required by the repo's merge.required_reviewer_roles; "
+                f"pass --ignore-repo-gate to override it (logged and attested)."
+            ) from exc
+        required_reviewers = {**required_reviewers, **floor_only_reviewers}
+        unreachable = repo_gate.unreachable_scanner_roles(required_reviewers)
+        if unreachable:
+            raise MergeUsageError(
+                f"merge.required_scanners declares scanners for role(s) {unreachable!r}, "
+                f"which are not required reviewers (required: {sorted(required_reviewers)!r}). "
+                f"Scanners are checked on a required reviewer's verdict, so this "
+                f"declaration could never gate anything. Add the role to "
+                f"merge.required_reviewer_roles or --required-reviewer, or remove it from "
+                f"merge.required_scanners; --ignore-repo-gate overrides it (logged and "
+                f"attested)."
+            )
 
     # 5. Reviewer-verdict fences — for each required reviewer.
     if required_reviewers:
@@ -1601,49 +1613,43 @@ def _run(
 
     # 8b. Pre-merge checks gate (merge.pre_checks_config, lr-843900) -- see
     # this module's docstring, "PRE-MERGE CHECKS", for the full contract.
-    # Reads the SAME --repo-path config root every other repo-tier gate key
-    # here resolves through; None (--no-post-merge-tree/--skip-post-merge)
-    # resolves load_pre_checks to [], a legitimate no-op -- there is no
-    # config file to read without a local tree, the same pre-existing
-    # boundary every other repo-tier key in this chain already has.
+    # The checks are DECLARED by the tracked gate file at the PR's base commit
+    # (repo_gate, loaded above) and EXECUTED in --repo-path, where they always
+    # ran; only their configuration comes from base. No local tree
+    # (--no-post-merge-tree/--skip-post-merge) declares no checks, the same
+    # pre-existing boundary every other repo-tier key has.
     if args.skip_pre_checks:
         print(
             f"merge: pre_checks gate BYPASSED via --skip-pre-checks for "
             f"PR #{args.pr_number} in {owner}/{repo}",
             file=sys.stderr,
         )
-    else:
+    elif repo_gate.pre_checks:
+        pre_checks = list(repo_gate.pre_checks)
+        print(
+            f"merge: pre_checks gate -- running {len(pre_checks)} declared "
+            f"check(s) in {args.repo_path!r} before authorizing PR "
+            f"#{args.pr_number} in {owner}/{repo} (declared at base "
+            f"{resolve_base_sha(pr_info)!r})",
+            file=sys.stderr,
+        )
         try:
-            pre_checks = load_pre_checks(args.repo_path)
-        except PostMergeConfigError as exc:
+            run_post_merge_steps(pre_checks, args.repo_path)
+        except (
+            PostMergeStepFailedError,
+            PostMergeStepTimeoutError,
+            PostMergeLivenessError,
+        ) as exc:
             _fail(
-                f"pre_checks config FAILED to load -- {exc}",
+                f"pre_checks gate FAILED -- {exc} -- refusing to merge "
+                f"PR #{args.pr_number} in {owner}/{repo}.",
                 code=EXIT_PRE_CHECKS_FAILED,
             )
-        if pre_checks:
-            print(
-                f"merge: pre_checks gate -- running {len(pre_checks)} "
-                f"declared check(s) in {args.repo_path!r} before authorizing "
-                f"PR #{args.pr_number} in {owner}/{repo}",
-                file=sys.stderr,
-            )
-            try:
-                run_post_merge_steps(pre_checks, args.repo_path)
-            except (
-                PostMergeStepFailedError,
-                PostMergeStepTimeoutError,
-                PostMergeLivenessError,
-            ) as exc:
-                _fail(
-                    f"pre_checks gate FAILED -- {exc} -- refusing to merge "
-                    f"PR #{args.pr_number} in {owner}/{repo}.",
-                    code=EXIT_PRE_CHECKS_FAILED,
-                )
-            print(
-                f"merge: pre_checks gate -- all {len(pre_checks)} check(s) "
-                f"PASSED for PR #{args.pr_number} in {owner}/{repo}",
-                file=sys.stderr,
-            )
+        print(
+            f"merge: pre_checks gate -- all {len(pre_checks)} check(s) "
+            f"PASSED for PR #{args.pr_number} in {owner}/{repo}",
+            file=sys.stderr,
+        )
 
     # 9. All gates passed -- execute the merge.
     print(

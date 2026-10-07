@@ -1,0 +1,16 @@
+# Tracked merge gate for this repo. loadout-merge reads it from the PR's BASE
+# commit (never the working tree), so a PR is judged by the gate that existed
+# before it, and a change to this file takes effect from the next merge.
+#
+# Only gate keys belong here: required_reviewer_roles, required_scanners,
+# pre_checks. Machine-local keys (post_merge_steps, host paths) stay in the
+# gitignored .clagentic/loadout/config.yaml.
+#
+# The roles below are this deployment's own reviewer roster: the same bare
+# names the merger passes as --required-reviewer, resolved to platform logins
+# exactly as that flag resolves them. They are deployment data, not product
+# code.
+merge:
+  required_reviewer_roles:
+    - peaches
+    - bobbie

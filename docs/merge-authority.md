@@ -163,17 +163,48 @@ merge:
   role-only — it never carries a login or account name, so this split does
   not create a second identity-bearing key inside the repo-tier section.
 
+#### Where the gate is read from
+
+The three **gate keys** (`merge.required_reviewer_roles`,
+`merge.required_scanners`, `merge.pre_checks`) are read from a **tracked** file,
+`.clagentic/loadout/gate.yaml` (same `merge:` section shape), exactly as it
+exists at the **PR's base commit** (`git show <base_sha>:<path>`, with the base
+SHA taken from the PR payload the merge already reads). They are never read
+from the working tree: a tree holding the PR head would otherwise let the PR
+under review delete its own required scanners, corrupt the file to force the
+flags-only fallback, or drop its pre_checks. Because the file is tracked, a
+change to the gate goes through review like any other change.
+
+| Key | Source |
+| --- | --- |
+| `merge.required_reviewer_roles`, `merge.required_scanners`, `merge.pre_checks` | tracked `.clagentic/loadout/gate.yaml` at the PR base commit |
+| `merge.post_merge_steps`, `merge.sync_tree_after_merge`, `merge.git_working_tree`, `merge.enforce_*`, `merge.require_model_attestation`, host paths, `push:` keys | per-deployment `.clagentic/loadout/config.yaml` (typically gitignored) |
+
+A gate key found in the deployment file is **ignored**, with a warning that
+names the tracked location, so a deployment that has not migrated is told
+rather than silently running a weaker gate than it believes it has. A tracked
+file that is absent at base declares nothing (no warning).
+
+**Bootstrap.** The PR that introduces the tracked file is judged by its base,
+which has none, so it runs flags-only; the declaration is enforced from the
+next merge on. A PR that fixes a broken gate file is judged by base's broken
+file (which falls back, below); its corrected file takes effect from the next
+merge.
+
 `loadout-merge` enforces `merge.required_reviewer_roles` as a **floor**: the
-roles it requires are the union of that list (read through `--repo-path`) and
+roles it requires are the union of that list and
 any `--required-reviewer` flags. Declaring the key gates the merge. Two rules
 keep a broken config from blocking the merge that would fix it:
 
-- If **any** repo gate key (`required_reviewer_roles`, `required_scanners`)
-  cannot be loaded (unreadable, malformed, an explicit `null` for either key,
-  or a `merge:` section that omits `required_reviewer_roles`), the **whole** repo gate config falls back to
+- If the tracked file at base cannot be read, or **any** repo gate key
+  (`required_reviewer_roles`, `required_scanners`, `pre_checks`) cannot be
+  loaded (unreadable, malformed, an explicit `null` for either of the first
+  two keys, or a `merge:` section that omits `required_reviewer_roles`), or the
+  PR payload carries no base SHA, the **whole** repo gate config falls back to
   flags-only: no repo gate key is enforced, including one that was valid. A
-  stderr warning names the file and the error. The fallback is deliberate, so
-  the merge that lands the corrected config is never blocked by the broken one.
+  stderr warning names the commit, the file and the error. The fallback is
+  deliberate, so the merge that lands the corrected config is never blocked by
+  the broken one.
 - A config that loads but cannot be satisfied (a declared role with no
   verdict, or no resolvable login; a clean verdict that records no scanner
   outcomes, or reports a required scanner failed, for a role with
@@ -193,7 +224,10 @@ keep a broken config from blocking the merge that would fix it:
 
 **Upgrading.** This is a breaking change for a repo that declared
 `required_reviewer_roles` decoratively. Its merges now need those verdicts.
-Declare `required_reviewer_roles: []` for no reviewer gate. `merge.authorized_roles`
+Declare `required_reviewer_roles: []` for no reviewer gate. A repo that kept
+its gate keys in the deployment file must move them to the tracked gate file:
+until then they are ignored (with a warning) and only the flags apply.
+`merge.authorized_roles`
 and `merge.merge_requirements` are still read only by `loadout-doctor` and by a
 caller building its own invocation.
 

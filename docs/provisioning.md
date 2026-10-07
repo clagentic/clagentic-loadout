@@ -221,9 +221,13 @@ from its own external config format LOST its merge gates the instant it
 switched to `.clagentic/loadout/config.yaml` alone.
 
 These sections close that gap. `loadout-merge` enforces
-`required_reviewer_roles` and `required_scanners` from this file at runtime;
-`merge_requirements` and `authorized_roles` are schema and doctor validation
-only, and wiring them as flag defaults is a named follow-up.
+`required_reviewer_roles`, `required_scanners` and `pre_checks` at runtime, read
+from the tracked `.clagentic/loadout/gate.yaml` as it exists at the PR's base
+commit rather than from this working-tree file (see
+[docs/merge-authority.md](merge-authority.md#where-the-gate-is-read-from) for
+which keys come from which source); `merge_requirements` and `authorized_roles`
+are schema and doctor validation only, and wiring them as flag defaults is a
+named follow-up.
 
 **`required_reviewer_roles` absence is not symmetric with `authorized_roles`
 absence.** Once a repo's `merge:` section exists at all, omitting

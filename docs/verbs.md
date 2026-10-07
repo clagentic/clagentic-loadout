@@ -1508,7 +1508,9 @@ reviewer commented afterwards without posting a verdict, the refusal says so.
 [docs/provisioning.md](provisioning.md)'s "Merge-gate config homes"
 section):** `required_reviewer_roles` is enforced as a floor beneath
 `--required-reviewer` (with `--ignore-repo-gate` as the logged escape hatch;
-see [docs/merge-authority.md](merge-authority.md)). `--authorized-role` and
+see [docs/merge-authority.md](merge-authority.md)), read from the tracked
+`.clagentic/loadout/gate.yaml` at the PR's base commit, never the working
+tree. `--authorized-role` and
 `--max-changed-files` above are still CLI flags with no repo-config
 default — a caller (a dispatch/lead layer) re-supplies them on every
 invocation. `merge.pre_checks_config` and `merge.gate_config` now give a
@@ -1525,9 +1527,11 @@ those two keys are schema + `loadout-doctor` validation only.
 **Pre-merge checks (`merge.pre_checks_config` / `merge.post_merge`):**
 an OPTIONAL, repo-declared `merge: pre_checks:` list (SAME
 step shape as `post_merge_steps` below — `{cmd, description, on_failure,
-detaches}`, read from the same `.clagentic/loadout/config.yaml` `merge:`
-section, reusing `merge.post_merge.run_post_merge_steps` verbatim), run
-against `--repo-path` BEFORE step 9's merge call, gating the merge itself:
+detaches}`, declared in the TRACKED `.clagentic/loadout/gate.yaml` as it
+exists at the PR's base commit, reusing `merge.post_merge.run_post_merge_steps`
+verbatim), run in `--repo-path` BEFORE step 9's merge call. Only their
+configuration comes from base, so the PR under review cannot drop or weaken its
+own checks. The check gates the merge itself:
 an `on_failure: fail` pre_check that exits non-zero (or times out, or a
 `detaches: true` step's `liveness_probe` never confirms) refuses the merge
 (`EXIT_PRE_CHECKS_FAILED`) BEFORE `merge_pr` is ever called. `pre_checks_config`
@@ -1545,9 +1549,11 @@ specific defect that let a red `pre_checks` gate go undetected across 100+
 merges in one deployment: a gate that says nothing when it passes is
 indistinguishable from a gate that says nothing because it never ran.
 `--repo-path` omitted (`--no-post-merge-tree`/`--skip-post-merge`)
-resolves `pre_checks` to `[]` — there is no repo-local config file to read
-without a local tree, the same pre-existing boundary every other
-repo-tier `merge:` key in this chain already has.
+resolves `pre_checks` to `[]` — there is no local tree to read the gate from,
+the same pre-existing boundary every other repo-tier `merge:` key in this
+chain already has. A tracked gate file that cannot be loaded at base falls
+back, with a warning, to flags-only (see
+[docs/merge-authority.md](merge-authority.md#where-the-gate-is-read-from)).
 
 **Merge-completion attestation (`merge.attestation`):**
 immediately after step 9 actually merges the PR — before any post-merge

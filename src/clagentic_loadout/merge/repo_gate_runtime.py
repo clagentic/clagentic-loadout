@@ -1,26 +1,48 @@
 """merge.repo_gate_runtime — the runtime consumer of a repo's declared merge
 gate keys.
 
-`merge.gate_config` reads and validates the repo's `merge:` gate declarations.
-This module is the ONLY place `loadout-merge` consumes them, and it owns the
-bootstrap-safety policy that makes consuming them safe:
+`merge.gate_config` parses and validates the repo's `merge:` gate declarations.
+This module is the ONLY place `loadout-merge` consumes them, and it owns two
+policies that make consuming them safe.
+
+WHERE THE GATE COMES FROM. Gate keys are read from the repo's TRACKED gate file
+(`repo_config.TRACKED_GATE_RELATIVE_PATH`) as it exists at the PR's BASE
+commit, with `git show <base_sha>:<path>`. Never from the working tree: a tree
+holding the PR head (or anything but base) would let the PR under review
+delete its own required scanners, corrupt the file to force the fallback below,
+or drop its pre_checks. The base commit is not something the PR controls.
 
   - `required_reviewer_roles` is a FLOOR beneath `--required-reviewer`: the
     roles actually required are the union of the two.
   - `required_scanners` maps a reviewer role to scanner names a clean verdict
     from that role must record, and must not report as failed.
-  - FALLBACK GRANULARITY IS THE WHOLE CONFIG. If any gate key cannot be
-    loaded, none of the repo's gate keys is enforced: the merge degrades to
-    the flags-only behaviour with a warning naming the file and the error, so
-    the merge that lands the corrected config is always possible. A config
-    that is half-trusted is harder to reason about than one that is either
-    enforced or visibly not.
+  - `pre_checks` are the commands run against the merge result before merging.
+
+Keys that are machine-local (`post_merge_steps`, host paths, the sync knobs)
+stay in the gitignored deployment file. A gate key found in that file is
+IGNORED, with a warning naming the tracked location, so a deployment that has
+not migrated is told instead of silently running with a weaker gate than it
+believes it has.
+
+BOOTSTRAP. The PR that introduces the tracked file is judged by a base that has
+none, so it runs flags-only; the file is enforced from the next merge on. A
+fix-the-config PR is likewise judged by base's (broken) file, which falls back,
+and its corrected file takes effect from the next merge.
+
+FALLBACK GRANULARITY IS THE WHOLE CONFIG. If the tracked file at base cannot be
+read or any gate key in it cannot be loaded, none of the repo's gate keys is
+enforced: the merge degrades to the flags-only behaviour with a warning naming
+the commit, the file and the error, so the merge that lands the corrected
+config is always possible. A config that is half-trusted is harder to reason
+about than one that is either enforced or visibly not. A tracked file that is
+simply absent at base declares nothing and is not a warning.
 
 A config that loads cleanly but cannot be satisfied is NOT handled here: that
 is a real refusal, overridable only by the verb's explicit, logged
-`--ignore-repo-gate`, which covers every repo gate key. This includes
-`required_scanners` declared for a role that is not a required reviewer:
-`RepoGate.unreachable_scanner_roles` names such roles so the verb can refuse.
+`--ignore-repo-gate`, which covers the reviewer roles and required scanners.
+This includes `required_scanners` declared for a role that is not a required
+reviewer: `RepoGate.unreachable_scanner_roles` names such roles so the verb can
+refuse.
 """
 
 from __future__ import annotations
@@ -29,10 +51,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import yaml
+
+from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
 from clagentic_loadout.merge.gate_config import (
+    CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
+    CONFIG_KEY_REQUIRED_SCANNERS,
+    CONFIG_SECTION_MERGE,
     InvalidMergeGateConfigError,
-    load_repo_gate_declarations,
+    parse_tracked_gate_text,
 )
+from clagentic_loadout.merge.post_merge import PostMergeConfigError
+from clagentic_loadout.merge.post_merge_config import resolve_git_working_tree
+from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS, pre_checks_from_section
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, resolve_repo_config_path
+
+#: Keys that belong to the tracked gate file and are never honoured from the
+#: per-deployment working-tree file.
+GATE_KEYS = (CONFIG_KEY_REQUIRED_REVIEWER_ROLES, CONFIG_KEY_REQUIRED_SCANNERS, CONFIG_KEY_PRE_CHECKS)
 
 
 @dataclass(frozen=True)
@@ -41,6 +77,7 @@ class RepoGate:
 
     reviewer_roles: tuple[str, ...] = ()
     required_scanners: dict[str, tuple[str, ...]] | None = None
+    pre_checks: tuple[dict, ...] = ()
     warnings: tuple[str, ...] = ()
 
     def scanners_for(self, reviewer_name: str) -> tuple[str, ...]:
@@ -57,26 +94,82 @@ class RepoGate:
         return [role for role, names in (self.required_scanners or {}).items() if names and role not in covered]
 
 
-def load_repo_gate(repo_path: str | Path | None) -> RepoGate:
-    """Load the repo's declared gate; any unloadable key drops the whole gate.
+def _ignored_deployment_gate_warnings(repo_path: str | Path) -> tuple[str, ...]:
+    """Warn for each gate key sitting in the working-tree deployment file.
+
+    An unreadable deployment file yields nothing here: the loaders that own it
+    report that failure themselves, and it carries no gate to warn about.
+    """
+    config_path = resolve_repo_config_path(repo_path, warn=False)
+    try:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.is_file() else None
+    except (OSError, yaml.YAMLError):
+        return ()
+    merge_section = raw.get(CONFIG_SECTION_MERGE) if isinstance(raw, dict) else None
+    if not isinstance(merge_section, dict):
+        return ()
+    return tuple(
+        f"merge.{key} in {config_path} is IGNORED -- repo gate keys are read only from "
+        f"{TRACKED_GATE_RELATIVE_PATH} at the PR base commit; declare it there"
+        for key in GATE_KEYS
+        if key in merge_section
+    )
+
+
+def _unloadable(warnings: tuple[str, ...], reason: str) -> RepoGate:
+    return RepoGate(
+        warnings=(
+            *warnings,
+            f"merge.required_reviewer_roles NOT ENFORCED, merge.required_scanners NOT "
+            f"ENFORCED and merge.pre_checks NOT ENFORCED -- the repo gate config could "
+            f"not be loaded, so only --required-reviewer applies: {reason}",
+        )
+    )
+
+
+def load_repo_gate_at_base(
+    repo_path: str | Path | None, *, base_sha: str, base_branch: str = ""
+) -> RepoGate:
+    """Load the repo's declared gate from the PR base commit.
 
     *repo_path* None (no local tree) declares nothing, matching every other
-    repo-tier key in the merge verb.
+    repo-tier key in the merge verb. An empty *base_sha* (a PR payload that did
+    not carry one) cannot be read and falls back like any unloadable config. A
+    tracked file absent at base declares nothing.
     """
     if repo_path is None:
         return RepoGate()
 
+    ignored = _ignored_deployment_gate_warnings(repo_path)
     try:
-        roles, scanners = load_repo_gate_declarations(repo_path)
+        declared_tree = resolve_git_working_tree(repo_path)
+    except PostMergeConfigError as exc:
+        return _unloadable(ignored, str(exc))
+    git_tree = declared_tree if declared_tree is not None else Path(repo_path)
+
+    if not base_sha:
+        return _unloadable(ignored, "the PR payload carried no base commit SHA to read it at")
+    source = f"{base_sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"
+    try:
+        text = read_file_at_commit(git_tree, base_sha, TRACKED_GATE_RELATIVE_PATH, base_branch=base_branch)
+    except CommitFileReadError as exc:
+        return _unloadable(ignored, f"{source}: {exc}")
+    if text is None:
+        return RepoGate(warnings=ignored)
+
+    try:
+        roles, scanners, merge_section = parse_tracked_gate_text(text, source=source)
+        pre_checks = pre_checks_from_section(merge_section)
     except InvalidMergeGateConfigError as exc:
-        return RepoGate(
-            warnings=(
-                f"merge.required_reviewer_roles NOT ENFORCED and merge.required_scanners "
-                f"NOT ENFORCED -- the repo gate config could not be loaded, so only "
-                f"--required-reviewer applies: {exc}",
-            )
-        )
-    return RepoGate(reviewer_roles=roles, required_scanners=scanners)
+        return _unloadable(ignored, str(exc))
+    except PostMergeConfigError as exc:
+        return _unloadable(ignored, f"{source}: pre_checks: {exc}")
+    return RepoGate(
+        reviewer_roles=roles,
+        required_scanners=scanners,
+        pre_checks=tuple(pre_checks),
+        warnings=ignored,
+    )
 
 
-__all__ = ["RepoGate", "load_repo_gate"]
+__all__ = ["GATE_KEYS", "RepoGate", "load_repo_gate_at_base"]
