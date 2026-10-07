@@ -2,8 +2,8 @@
 gate keys.
 
 `merge.gate_config` parses and validates the repo's `merge:` gate declarations.
-This module is the ONLY place `loadout-merge` consumes them, and it owns two
-policies that make consuming them safe.
+This module is the ONLY place the gate rules live, and it owns two policies
+that make consuming them safe.
 
 WHERE THE GATE COMES FROM. Gate keys are read from the repo's TRACKED gate file
 (`repo_config.TRACKED_GATE_RELATIVE_PATH`) as it exists at the PR's BASE
@@ -23,6 +23,13 @@ stay in the gitignored deployment file. A gate key found in that file is
 IGNORED, with a warning naming the tracked location, so a deployment that has
 not migrated is told instead of silently running with a weaker gate than it
 believes it has.
+
+ONE RULE SET, TWO CONSUMERS. `gate_from_tracked_text` is a pure function from a
+gate file's text to a `RepoGate`; every per-key rule below lives in it and in
+`with_resolvable_reviewer_roles`. `loadout-merge` feeds it the text at the PR
+base commit (`load_repo_gate_at_base`); `loadout-doctor` feeds it the text at
+HEAD (`load_gate_at_commit`) and prints the result's own warnings. A diagnostic
+therefore consumes these functions rather than re-deriving what merge would do.
 
 BOOTSTRAP. The PR that introduces the tracked file is judged by a base that has
 none, so it runs flags-only; the file is enforced from the next merge on. A
@@ -46,8 +53,8 @@ changes where the text comes from.
   - `pre_checks` NEVER falls back. A `pre_checks` declaration that cannot be
     read or validated at base (including a file that is not valid UTF-8, or a
     whole-file parse failure, or a base commit that cannot be fetched or shown,
-    or a PR payload that carries no base commit SHA) is reported in
-    `RepoGate.pre_checks_error`, and the merge verb REFUSES the merge, as it
+    or a PR payload that carries no base commit SHA, or a repo path that is not
+    a git tree) is reported in `RepoGate.pre_checks_error`, and the merge verb REFUSES the merge, as it
     did before the gate moved to base. No local tree at all (`repo_path` None)
     declares nothing. `--skip-pre-checks` is its bypass; `--ignore-repo-gate`
     does not lift it.
@@ -69,15 +76,13 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
-import yaml
-
 from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
 from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
     CONFIG_KEY_REQUIRED_SCANNERS,
-    CONFIG_SECTION_MERGE,
     InvalidMergeGateConfigError,
     parse_tracked_merge_section,
+    read_merge_section,
     reviewer_gate_from_section,
 )
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
@@ -118,7 +123,7 @@ class RepoGate:
         return [role for role, names in (self.required_scanners or {}).items() if names and role not in covered]
 
 
-def _ignored_deployment_gate_warnings(repo_path: str | Path) -> tuple[str, ...]:
+def ignored_deployment_gate_warnings(repo_path: str | Path) -> tuple[str, ...]:
     """Warn for each gate key sitting in the working-tree deployment file.
 
     An unreadable deployment file yields nothing here: the loaders that own it
@@ -126,11 +131,8 @@ def _ignored_deployment_gate_warnings(repo_path: str | Path) -> tuple[str, ...]:
     """
     config_path = resolve_repo_config_path(repo_path, warn=False)
     try:
-        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.is_file() else None
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
-        return ()
-    merge_section = raw.get(CONFIG_SECTION_MERGE) if isinstance(raw, dict) else None
-    if not isinstance(merge_section, dict):
+        merge_section = read_merge_section(config_path)
+    except InvalidMergeGateConfigError:
         return ()
     return tuple(
         f"merge.{key} in {config_path} is IGNORED -- repo gate keys are read only from "
@@ -157,54 +159,30 @@ def _nothing_readable(warnings: tuple[str, ...], reason: str) -> RepoGate:
     return RepoGate(warnings=_reviewer_pair_warnings(warnings, reason), pre_checks_error=reason)
 
 
-def load_repo_gate_at_base(
-    repo_path: str | Path | None, *, base_sha: str, base_branch: str = ""
+def gate_from_tracked_text(
+    text: str | None, *, source: str, ignored_warnings: tuple[str, ...] = ()
 ) -> RepoGate:
-    """Load the repo's declared gate from the PR base commit.
+    """The gate a tracked gate file's *text* declares: the one home of every
+    per-key rule in the module docstring, with no I/O.
 
-    *repo_path* None (no local tree) declares nothing, matching every other
-    repo-tier key in the merge verb. An empty *base_sha* (a PR payload that did
-    not carry one) has no trusted base to read: the reviewer pair falls back
-    with a warning and pre_checks refuse (fail closed). A malformed
-    `merge.git_working_tree` falls the pair back with a warning and leaves the
-    error to the post-merge tree sync that owns that key.
-    A tracked file absent at base declares nothing. The per-key failure rules
-    are in the module docstring.
+    *text* None means the file is absent, which declares nothing. *source* is
+    the label error messages carry. *ignored_warnings* lead the result's
+    warnings.
     """
-    if repo_path is None:
-        return RepoGate()
-
-    ignored = _ignored_deployment_gate_warnings(repo_path)
-    try:
-        declared_tree = resolve_git_working_tree(repo_path)
-    except PostMergeConfigError as exc:
-        # A malformed `merge.git_working_tree` is the post-merge tree sync's own
-        # config error and is reported there; it is not a gate declaration.
-        return RepoGate(warnings=_reviewer_pair_warnings(ignored, str(exc)))
-    git_tree = declared_tree if declared_tree is not None else Path(repo_path)
-
-    if not base_sha:
-        return _nothing_readable(ignored, "the PR payload carried no base commit SHA to read it at")
-    source = f"{base_sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"
-    try:
-        text = read_file_at_commit(git_tree, base_sha, TRACKED_GATE_RELATIVE_PATH, base_branch=base_branch)
-    except CommitFileReadError as exc:
-        return _nothing_readable(ignored, f"{source}: {exc}")
     if text is None:
-        return RepoGate(warnings=ignored)
-
+        return RepoGate(warnings=ignored_warnings)
     try:
         merge_section, section_present = parse_tracked_merge_section(text, source=source)
     except InvalidMergeGateConfigError as exc:
-        return _nothing_readable(ignored, str(exc))
+        return _nothing_readable(ignored_warnings, str(exc))
 
-    warnings = ignored
+    warnings = ignored_warnings
     roles: tuple[str, ...] = ()
     scanners: dict[str, tuple[str, ...]] | None = None
     try:
         roles, scanners = reviewer_gate_from_section(source, merge_section, section_present)
     except InvalidMergeGateConfigError as exc:
-        warnings = _reviewer_pair_warnings(ignored, str(exc))
+        warnings = _reviewer_pair_warnings(ignored_warnings, str(exc))
 
     pre_checks: tuple[dict, ...] = ()
     pre_checks_error = ""
@@ -219,6 +197,78 @@ def load_repo_gate_at_base(
         warnings=warnings,
         pre_checks_error=pre_checks_error,
     )
+
+
+def resolve_gate_git_tree(repo_path: str | Path) -> Path:
+    """The git tree the tracked gate file is read from: the deployment's
+    `merge.git_working_tree` when it declares one, else *repo_path* itself.
+
+    Raises:
+        PostMergeConfigError: `merge.git_working_tree` is malformed.
+    """
+    declared_tree = resolve_git_working_tree(repo_path)
+    return declared_tree if declared_tree is not None else Path(repo_path)
+
+
+def load_gate_at_commit(
+    git_tree: str | Path,
+    sha: str,
+    *,
+    base_branch: str = "",
+    ignored_warnings: tuple[str, ...] = (),
+) -> RepoGate:
+    """Read the tracked gate file at *sha* in *git_tree* and apply
+    `gate_from_tracked_text`. A commit or file that cannot be read is the same
+    "nothing readable" gate a malformed file is."""
+    source = f"{Path(git_tree).resolve()}@{sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"
+    try:
+        text = read_file_at_commit(git_tree, sha, TRACKED_GATE_RELATIVE_PATH, base_branch=base_branch)
+    except CommitFileReadError as exc:
+        return _nothing_readable(ignored_warnings, f"{source}: {exc}")
+    return gate_from_tracked_text(text, source=source, ignored_warnings=ignored_warnings)
+
+
+def load_repo_gate_at_base(
+    repo_path: str | Path | None, *, base_sha: str, base_branch: str = ""
+) -> RepoGate:
+    """Load the repo's declared gate from the PR base commit.
+
+    *repo_path* None (no local tree) declares nothing, matching every other
+    repo-tier key in the merge verb. An empty *base_sha* (a PR payload that did
+    not carry one) has no trusted base to read: the reviewer pair falls back
+    with a warning and pre_checks refuse (fail closed).
+
+    A malformed `merge.git_working_tree` is the post-merge tree sync's own
+    config error, reported only after the merge has landed, so it must not let
+    the gate be skipped. The reviewer pair falls back with a warning, and with
+    a base commit known pre_checks are read from *repo_path* itself instead: a
+    declared check still runs, and a *repo_path* that is not a git tree refuses
+    before anything merges. A tracked file absent at base declares nothing. The
+    per-key failure rules are in the module docstring.
+    """
+    if repo_path is None:
+        return RepoGate()
+
+    ignored = ignored_deployment_gate_warnings(repo_path)
+    try:
+        git_tree = resolve_gate_git_tree(repo_path)
+    except PostMergeConfigError as exc:
+        pair_warnings = _reviewer_pair_warnings(ignored, str(exc))
+        if not base_sha:
+            return RepoGate(warnings=pair_warnings)
+        # The key names no tree, so the reviewer pair falls back like any gate
+        # that cannot be loaded. pre_checks must not be skipped with it: they
+        # are read from *repo_path*'s own tree at the base commit, so declared
+        # checks still run and a tree that cannot supply them refuses.
+        from_repo_path = load_gate_at_commit(
+            Path(repo_path), base_sha, base_branch=base_branch, ignored_warnings=ignored
+        )
+        return replace(
+            from_repo_path, reviewer_roles=(), required_scanners=None, warnings=pair_warnings
+        )
+    if not base_sha:
+        return _nothing_readable(ignored, "the PR payload carried no base commit SHA to read it at")
+    return load_gate_at_commit(git_tree, base_sha, base_branch=base_branch, ignored_warnings=ignored)
 
 
 def with_resolvable_reviewer_roles(
@@ -268,4 +318,13 @@ def with_resolvable_reviewer_roles(
     )
 
 
-__all__ = ["GATE_KEYS", "RepoGate", "load_repo_gate_at_base", "with_resolvable_reviewer_roles"]
+__all__ = [
+    "GATE_KEYS",
+    "RepoGate",
+    "gate_from_tracked_text",
+    "ignored_deployment_gate_warnings",
+    "load_gate_at_commit",
+    "load_repo_gate_at_base",
+    "resolve_gate_git_tree",
+    "with_resolvable_reviewer_roles",
+]

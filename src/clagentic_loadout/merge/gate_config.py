@@ -68,9 +68,10 @@ never reads `required_reviewer_roles`, `required_scanners` or `pre_checks`
 from the working tree: a tree that holds the PR head would let the PR under
 review relax its own gate. `merge.repo_gate_runtime` reads them from the
 tracked gate file (`repo_config.TRACKED_GATE_RELATIVE_PATH`) as it exists at
-the PR's base commit, via `parse_tracked_gate_text` below. The single-key
-loaders in this module still read the working-tree file; they serve doctor
-and callers building their own invocation, not the merge gate.
+the PR's base commit, through `parse_tracked_merge_section` and
+`reviewer_gate_from_section` below. The single-key loaders in this module read
+the working-tree file; they serve callers building their own invocation, not
+the merge gate and not doctor, which consumes the runtime's own gate loader.
 
 SCOPE NOTE: this module ships the repo-config READ side. `merge.verb` now
 consumes `required_reviewer_roles` as a FLOOR beneath `--required-reviewer`
@@ -267,24 +268,18 @@ def _read_merge_section_with_presence(
     return config_path, merge_section, section_present
 
 
-def parse_tracked_gate_text(
-    text: str, *, source: str
-) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]], dict]:
-    """Parse the TRACKED repo gate file's text (as read at the PR base commit)
-    into (required_reviewer_roles, required_scanners, merge_section).
-
-    Same `merge:` section shape and same validation, absence rules and
-    explicit-null rules as the working-tree loaders above, from ONE parse of
-    *source*, so every key describes the same snapshot. The raw merge section
-    is returned so the caller can validate the sibling `pre_checks` key from
-    the same parse.
+def read_merge_section(path: str | Path) -> dict:
+    """The `merge:` section of the YAML file at *path* (`{}` when the file or the
+    section is absent). The one reader for callers that need a file's raw
+    section, so none re-implements the YAML and section-shape rules.
 
     Raises:
-        InvalidMergeGateConfigError: any error the single-key loaders raise.
+        InvalidMergeGateConfigError: unreadable or non-UTF-8 file, invalid YAML,
+            or a non-mapping document or `merge:` section.
     """
-    merge_section, section_present = parse_tracked_merge_section(text, source=source)
-    roles, scanners = reviewer_gate_from_section(source, merge_section, section_present)
-    return roles, scanners, merge_section
+    path = Path(path)
+    merge_section, _present = _merge_section_from_mapping(_read_yaml_mapping(path), path)
+    return merge_section
 
 
 def parse_tracked_merge_section(text: str, *, source: str) -> tuple[dict, bool]:
@@ -613,7 +608,7 @@ __all__ = [
     "load_required_reviewer_roles",
     "load_repo_gate_declarations",
     "load_required_scanners",
-    "parse_tracked_gate_text",
     "parse_tracked_merge_section",
+    "read_merge_section",
     "reviewer_gate_from_section",
 ]

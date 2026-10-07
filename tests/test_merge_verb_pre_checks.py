@@ -11,7 +11,9 @@ commit; they execute in --repo-path as they always have:
   - `--skip-pre-checks` is an explicit, logged bypass
   - a working tree holding a relaxed gate cannot relax what base declares
   - a malformed or unreadable pre_checks declaration at base REFUSES the
-    merge; only reviewer roles and scanners fall back, with a warning
+    merge, as does a repo path with no git tree to read it from (a malformed
+    `merge.git_working_tree`, or no git tree at all); only reviewer roles and
+    scanners fall back, with a warning
   - absent --repo-path (--no-post-merge-tree) declares nothing
 
 No real network call: the opener is a canned-response double.
@@ -27,7 +29,7 @@ import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
-from tests._gate_repo import commit_raw_gate_to_base, git, init_gate_repo, write_deployment_config
+from tests._gate_repo import GateRepo, commit_raw_gate_to_base, git, init_gate_repo, write_deployment_config
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
@@ -412,6 +414,31 @@ class TestNoBaseShaInThePayload:
         repo = _repo_with(tmp_path, [_FAIL_CHECK])
         pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
         assert _merge(repo, pr_info=pr_info, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
+
+
+class TestNoGitTreeToReadTheGateFrom:
+    """A gate that cannot be read from a git tree must refuse pre_checks before
+    the merge lands, not be skipped and left to the post-merge tree sync."""
+
+    def test_a_malformed_git_working_tree_with_pre_checks_refuses_before_merge_pr(self, tmp_path, capsys):
+        repo = _repo_with(tmp_path, [_FAIL_CHECK])
+        write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "git_working_tree": 42})
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+        assert "git_working_tree" in capsys.readouterr().err
+
+    def test_skip_pre_checks_is_the_bypass_for_a_malformed_git_working_tree(self, tmp_path):
+        repo = _repo_with(tmp_path, [_FAIL_CHECK])
+        write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "git_working_tree": 42})
+        assert _merge(repo, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
+
+    def test_a_repo_path_that_is_not_a_git_tree_refuses_pre_checks(self, tmp_path):
+        write_deployment_config(tmp_path, {"sync_tree_after_merge": False})
+        repo = GateRepo(path=tmp_path, base_sha="a" * 40, head_sha="b" * 40)
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
 
 
 class TestInvalidUtf8GateAtBase:

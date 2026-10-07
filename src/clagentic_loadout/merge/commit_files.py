@@ -43,6 +43,20 @@ def _git_bytes(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
         raise CommitFileReadError(f"git {args[0]} could not run in {cwd}: {exc}") from exc
 
 
+def resolve_commit(git_tree: str | Path, ref: str) -> str | None:
+    """The full SHA *ref* names in *git_tree*, or None when it names no commit
+    there (not a git tree, an unborn branch, an unknown ref). Never fetches, so a
+    read-only caller can tell an absent history from a readable one without
+    touching the network."""
+    if not ref or ref.startswith("-"):
+        return None
+    try:
+        resolved = _git(["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"], cwd=Path(git_tree))
+    except CommitFileReadError:
+        return None
+    return resolved.stdout.strip() or None if resolved.returncode == 0 else None
+
+
 def ensure_commit_present(git_tree: str | Path, sha: str, *, base_branch: str = "") -> None:
     """Guarantee *sha* names a commit in *git_tree*'s object database.
 
@@ -108,4 +122,4 @@ def read_file_at_commit(
         ) from exc
 
 
-__all__ = ["CommitFileReadError", "ensure_commit_present", "read_file_at_commit"]
+__all__ = ["CommitFileReadError", "ensure_commit_present", "read_file_at_commit", "resolve_commit"]

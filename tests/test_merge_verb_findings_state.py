@@ -534,6 +534,7 @@ class TestRepoReviewerFloor:
         code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
         assert code == verb.EXIT_OK
         assert "required_reviewer_roles NOT ENFORCED" in err
+        assert str(tmp_path) in err
         assert TRACKED_GATE_RELATIVE_PATH in err
 
     def test_a_malformed_reviewer_key_drops_the_whole_gate_even_beside_a_valid_scanners_key(
@@ -571,17 +572,18 @@ class TestRepoReviewerFloor:
 
     def test_both_gate_keys_are_read_from_one_snapshot(self, tmp_path, monkeypatch):
         repo = _write_config(tmp_path, {"required_reviewer_roles": [NAME], "required_scanners": {NAME: ["a"]}})
+        committed_gate_text = git(tmp_path, "show", f"{repo.base_sha}:{TRACKED_GATE_RELATIVE_PATH}")
         real = yaml.safe_load
-        gate_reads = []
+        gate_parses = []
 
-        def counting(*args, **kwargs):
-            if "required_reviewer_roles" in str(args[0]):
-                gate_reads.append(args)
-            return real(*args, **kwargs)
+        def counting(stream, *args, **kwargs):
+            if str(stream).strip() == committed_gate_text.strip():
+                gate_parses.append(stream)
+            return real(stream, *args, **kwargs)
 
         monkeypatch.setattr(yaml, "safe_load", counting)
         gate = load_repo_gate_at_base(tmp_path, base_sha=repo.base_sha, base_branch="main")
-        assert len(gate_reads) == 1
+        assert len(gate_parses) == 1
         assert gate.warnings == ()
         assert gate.reviewer_roles == (NAME,)
         assert gate.scanners_for(NAME) == ("a",)

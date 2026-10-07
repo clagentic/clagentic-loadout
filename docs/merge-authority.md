@@ -215,6 +215,11 @@ keep a broken config from blocking the merge that would fix it:
   read, so it fails closed: `pre_checks` **refuse** (the base SHA is the only
   source of the declaration, and an unverifiable declaration is never read as
   "no checks"), and the reviewer pair falls back with a warning.
+- A malformed `merge.git_working_tree` is the post-merge tree sync's own error,
+  reported only after the merge has landed, so it must not let the gate be
+  skipped. The reviewer pair falls back with a warning, and `pre_checks` are
+  read from the `--repo-path` tree itself at the base commit: declared checks
+  still run, and a `--repo-path` that is not a git tree **refuses**.
 - A declared reviewer role the deployment cannot resolve to a platform login
   degrades **per role**, not as a pair: that role is dropped from the reviewer
   floor and its own `required_scanners` entry is skipped (it can never be
@@ -222,9 +227,13 @@ keep a broken config from blocking the merge that would fix it:
   mapping. Every other resolvable role, and every scanner requirement on a
   resolvable role, stays enforced. It is never a refusal, so a repo's
   declaration cannot demand deployment config the deployment was not told
-  about. `loadout-doctor` reports such a role as a failure, and reports a
-  tracked gate file it cannot decode or parse as a failure too, never a crash.
-  A role named by `--required-reviewer` is the caller's assertion and still
+  about. `loadout-doctor` judges the tracked gate file at HEAD by asking the
+  merge runtime for the gate and printing that gate's own warnings and
+  `pre_checks` error verbatim, so it never describes a rule differently from
+  merge. A role merge would drop, and a gate file merge could not decode or
+  parse, are failures there, never a crash; a gate key sitting in the
+  deployment file is a warning (it is ignored, and its roles are not
+  resolved). A role named by `--required-reviewer` is the caller's assertion and still
   errors as before when it cannot resolve.
 - A config that loads but cannot be satisfied (a declared role with no
   verdict; a clean verdict that records no scanner

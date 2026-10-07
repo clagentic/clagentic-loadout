@@ -137,12 +137,13 @@ from clagentic_loadout.merge.gate_config import (
     InvalidMergeGateConfigError,
     load_authorized_roles,
     load_merge_requirements,
-    load_required_reviewer_roles,
-    parse_tracked_gate_text,
 )
-from clagentic_loadout.merge.reviewer_login import (
-    ReviewerLoginNotConfiguredError,
-    resolve_reviewer_login,
+from clagentic_loadout.merge.commit_files import resolve_commit
+from clagentic_loadout.merge.repo_gate_runtime import (
+    ignored_deployment_gate_warnings,
+    load_repo_gate_at_base,
+    resolve_gate_git_tree,
+    with_resolvable_reviewer_roles,
 )
 from clagentic_loadout.platform_detect import detect_platform_from_url
 from clagentic_loadout.push.git_coords import read_remote_url_best_effort
@@ -155,7 +156,6 @@ from clagentic_loadout.merge.post_merge_config import (
     load_post_merge_steps,
     post_merge_steps_key_declared,
 )
-from clagentic_loadout.merge.pre_checks_config import load_pre_checks
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.provisioning.roles import (
     CONFIG_SECTION_ROLES,
@@ -171,7 +171,6 @@ from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     LEGACY_CONFIG_MARKER,
     LEGACY_CONFIG_RELATIVE_PATH,
-    TRACKED_GATE_RELATIVE_PATH,
     resolve_repo_config_path,
 )
 from clagentic_loadout.review.login_config import (
@@ -827,52 +826,52 @@ def check_attestation_source_configured(
 KNOWN_CONFIG_SECTIONS: tuple[str, ...] = ("wait", "roles", "merge")
 
 
-def _unresolvable_reviewer_role_errors(
-    repo_root_path: Path, config_roles: tuple[str, ...]
-) -> list[str]:
-    """One error per declared reviewer role the deployment cannot resolve to a
-    login on the platform this repo's remote points at.
+@dataclass(frozen=True)
+class _GateFindings:
+    #: Roles the tracked gate declares, before any is dropped as unresolvable;
+    #: the roles-section satisfiability check judges what the repo asked for.
+    declared_roles: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
 
-    Roles come from the config file already loaded plus the tracked gate file
-    (`repo_config.TRACKED_GATE_RELATIVE_PATH`) when the working tree has one.
-    Resolution uses `merge.reviewer_login.resolve_reviewer_login`, the same
-    path `loadout-merge` takes. At merge time such a role is only a warning
-    (that role is dropped from the floor); doctor reports it as a failure so
-    the gap is visible. No detectable remote means no platform to resolve on,
-    so nothing is reported.
+
+def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
+    """What `loadout-merge` would make of this repo's tracked gate at HEAD.
+
+    Doctor does not re-derive merge's gate rules: it asks the merge runtime for
+    the gate (`load_repo_gate_at_base`, with HEAD standing in for the PR base
+    commit) and reports that result's own warnings and `pre_checks_error`
+    verbatim, so a change to what merge does cannot leave doctor describing the
+    old behaviour. Only severity is doctor's: the notice that a gate key sits in
+    the ignored deployment file is a warning; everything merge reports about a
+    gate it cannot enforce, or a role it drops, is an error here. A tree with no
+    readable HEAD commit has no tracked gate to judge, so nothing is reported.
     """
-    roles = list(config_roles)
-    errors: list[str] = []
-    gate_file = repo_root_path / TRACKED_GATE_RELATIVE_PATH
-    if gate_file.is_file():
-        try:
-            tracked_roles, _, _ = parse_tracked_gate_text(
-                gate_file.read_text(encoding="utf-8"), source=str(gate_file)
-            )
-        except (OSError, UnicodeDecodeError, InvalidMergeGateConfigError) as exc:
-            # A gate file that cannot be decoded or parsed is a finding, never a
-            # crash: at merge time it makes the reviewer pair fall back to flags.
-            errors.append(
-                f"merge (gate declaration): {gate_file} cannot be read as a gate "
-                f"declaration ({exc}); loadout-merge will not enforce the declared "
-                f"reviewer roles or required scanners until it can"
-            )
-            tracked_roles = ()
-        roles.extend(tracked_roles)
+    head = "HEAD"
+    try:
+        resolved_head = resolve_commit(resolve_gate_git_tree(repo_root_path), "HEAD")
+    except PostMergeConfigError:
+        # A malformed git_working_tree: the runtime reports it itself, as a gate
+        # it cannot read, before it looks at the SHA.
+        pass
+    else:
+        if resolved_head is None:
+            return _GateFindings()
+        head = resolved_head
+
+    ignored = ignored_deployment_gate_warnings(repo_root_path)
+    gate = load_repo_gate_at_base(repo_root_path, base_sha=head)
+    declared_roles = gate.reviewer_roles
     remote = read_remote_url_best_effort(repo_root_path)
-    if not remote:
-        return errors
-    platform = detect_platform_from_url(remote)
-    for role in dict.fromkeys(roles):
-        try:
-            resolve_reviewer_login(role, platform)
-        except ReviewerLoginNotConfiguredError as exc:
-            errors.append(
-                f"merge (gate declaration): required reviewer role {role!r} cannot be "
-                f"resolved to a {platform} login ({exc}); loadout-merge drops that role "
-                f"from the reviewer floor and skips its required_scanners entry until it can"
-            )
-    return errors
+    if remote:
+        gate = with_resolvable_reviewer_roles(gate, detect_platform_from_url(remote))
+
+    errors = [f"merge (gate declaration): {warning}" for warning in gate.warnings if warning not in ignored]
+    if gate.pre_checks_error:
+        errors.append(f"merge (gate declaration): {gate.pre_checks_error}")
+    return _GateFindings(
+        declared_roles=declared_roles, errors=tuple(errors), warnings=tuple(w for w in gate.warnings if w in ignored)
+    )
 
 
 def check_repo_loadout_schema(
@@ -916,6 +915,9 @@ def check_repo_loadout_schema(
     config_path = resolve_repo_config_path(
         repo_root_path, config_relative_path=config_relative_path, warn=False
     )
+    # The gate lives in the tracked file at HEAD, not in config.yaml, so it is
+    # judged whether or not the deployment file exists.
+    gate_findings = _repo_gate_findings(repo_root_path)
     if not config_path.exists():
         summary = f"{config_path}: not present (every section falls back to its own default)"
         if legacy_dir_present:
@@ -923,14 +925,18 @@ def check_repo_loadout_schema(
                 f"; WARN: legacy {LEGACY_CONFIG_MARKER}/ dir present with no "
                 f"config.yaml inside it -- migrate to {config_relative_path}"
             )
+        if gate_findings.errors:
+            summary += f"; {len(gate_findings.errors)} gate error(s) -- " + "; ".join(gate_findings.errors)
         return CheckResult(
             name="repo_loadout_schema",
-            ok=True,
+            ok=not gate_findings.errors,
             summary=summary,
             resolved={
                 "config_path": str(config_path),
                 "exists": False,
                 "legacy_dir_present": legacy_dir_present,
+                "gate_warnings": [],
+                "errors": list(gate_findings.errors),
             },
         )
 
@@ -984,18 +990,13 @@ def check_repo_loadout_schema(
     except PostMergeConfigError as exc:
         errors.append(f"merge: {exc}")
 
-    try:
-        load_pre_checks(repo_root, config_relative_path=config_relative_path)
-    except PostMergeConfigError as exc:
-        errors.append(f"merge.pre_checks: {exc}")
+    errors.extend(gate_findings.errors)
+    required_reviewer_roles = gate_findings.declared_roles
 
     unknown_gate_roles: list[str] = []
     unsatisfiable_gate_roles: list[str] = []
     try:
         load_merge_requirements(repo_root, config_relative_path=config_relative_path)
-        required_reviewer_roles = load_required_reviewer_roles(
-            repo_root, config_relative_path=config_relative_path
-        )
         authorized_roles = load_authorized_roles(
             repo_root, config_relative_path=config_relative_path
         )
@@ -1024,7 +1025,6 @@ def check_repo_loadout_schema(
         #     cannot see (e.g. an external harness/allowlist that never
         #     touched this repo's `roles:` section at all). WARN
         #     (`ok` stays True) is the correct severity for this shape only.
-        errors.extend(_unresolvable_reviewer_role_errors(repo_root_path, required_reviewer_roles))
         roles_section_present = CONFIG_SECTION_ROLES in raw
         known_roles = set(
             declared_role_verbs if declared_role_verbs is not None else DEFAULT_ROLE_VERBS
@@ -1085,6 +1085,8 @@ def check_repo_loadout_schema(
             f"; WARN: reading legacy {LEGACY_CONFIG_RELATIVE_PATH} -- migrate to "
             f"{config_relative_path}"
         )
+    for notice in gate_findings.warnings:
+        summary += f"; WARN: {notice}"
     if unknown_gate_roles:
         summary += (
             f"; WARN: gate role(s) {', '.join(unknown_gate_roles)} match no "
@@ -1107,6 +1109,7 @@ def check_repo_loadout_schema(
             "unknown_sections": unknown_sections,
             "unknown_gate_roles": unknown_gate_roles,
             "unsatisfiable_gate_roles": unsatisfiable_gate_roles,
+            "gate_warnings": list(gate_findings.warnings),
             "errors": errors,
         },
     )
