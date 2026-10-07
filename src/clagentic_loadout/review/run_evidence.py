@@ -61,7 +61,8 @@ def range_of(document: Mapping[str, Any]) -> dict[str, str] | None:
 def engines_of(document: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The engines that answered the run's chunks, one entry per distinct
     (engine, model, reason) in first-seen order, with how many chunks each
-    answered. Empty when the document records no chunk engines."""
+    answered. A carrier is named by the model label its chunk record carries,
+    the same source a fallback uses. Empty when the document records no chunk engines."""
     chunks = document.get("chunks")
     if not isinstance(chunks, list):
         return []
@@ -71,7 +72,7 @@ def engines_of(document: Mapping[str, Any]) -> list[dict[str, Any]]:
             continue
         engine = chunk.get("engine")
         if engine == ENGINE_CARRIER:
-            key = (ENGINE_CARRIER, None, None)
+            key = (ENGINE_CARRIER, _label(chunk.get("engine_label")), None)
         elif engine == ENGINE_FALLBACK:
             reason = _label(chunk.get("carrier_unavailable_reason"))
             if reason is None and chunk.get("carrier_failure"):

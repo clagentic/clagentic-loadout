@@ -448,13 +448,14 @@ def render_range(value: Mapping[str, Any]) -> str:
 
 def render_engines(entries: Iterable[Mapping[str, Any]]) -> str:
     """The verdict line for normalized engine entries: "engine: carrier", or
+    "engine: carrier: <model>" when the carrier's model is known, or
     "engine: fallback: <model>, reason <reason>" for a fallback run (the model
     and the reason each only when known); several engines in one run are
     joined with "; "."""
     parts = []
     for entry in entries:
         if entry["engine"] == ENGINE_CARRIER:
-            parts.append(ENGINE_CARRIER)
+            parts.append(f"{ENGINE_CARRIER}: {entry['model']}" if entry.get("model") else ENGINE_CARRIER)
             continue
         label = f"{ENGINE_FALLBACK}: {entry['model']}" if entry.get("model") else ENGINE_FALLBACK
         parts.append(f"{label}, reason {entry['reason']}" if entry.get("reason") else label)

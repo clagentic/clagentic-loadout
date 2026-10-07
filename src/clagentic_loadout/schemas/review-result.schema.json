@@ -119,6 +119,16 @@
       "type": "object",
       "description": "OPTIONAL evidence. The commit range the review covered: base..head for a full review, or since a previously reviewed head for a delta review.",
       "required": ["basis", "head"],
+      "allOf": [
+        {
+          "if": {"properties": {"basis": {"const": "base..head"}}, "required": ["basis"]},
+          "then": {"required": ["base"], "not": {"required": ["since"]}}
+        },
+        {
+          "if": {"properties": {"basis": {"const": "since"}}, "required": ["basis"]},
+          "then": {"required": ["since"], "not": {"required": ["base"]}}
+        }
+      ],
       "properties": {
         "basis": {"type": "string", "enum": ["base..head", "since"], "description": "Which kind of range this is."},
         "base": {"type": "string", "minLength": 1, "description": "Base SHA, for basis base..head."},

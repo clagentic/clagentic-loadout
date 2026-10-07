@@ -3,6 +3,8 @@ fence-side validation and rendering of every evidence field."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from clagentic_loadout.merge.fence_state import (
@@ -12,6 +14,11 @@ from clagentic_loadout.merge.fence_state import (
 )
 from clagentic_loadout.merge.verdict import build_findings_verdict_body, parse_verdict_block
 from clagentic_loadout.review.run_evidence import engines_of, evidence_from_document, range_of
+
+from clagentic_loadout import envelope
+from clagentic_loadout.envelope import validate_against_schema
+
+_SCHEMA = Path(envelope.__file__).parent / "schemas" / "review-result.schema.json"
 
 BASE = "1" * 40
 HEAD = "2" * 40
@@ -60,6 +67,22 @@ def test_engines_are_counted_per_distinct_engine_model_and_reason():
         {"engine": "fallback", "model": "m1", "reason": "usage_limit", "chunks": 2},
         {"engine": "fallback", "model": "m1", "reason": "carrier_failed", "chunks": 1},
     ]
+
+
+def test_a_configured_carrier_is_named_by_its_model_label():
+    chunks = [
+        {"engine": "carrier", "engine_label": "carrier-model"},
+        {"engine": "carrier", "engine_label": "carrier-model"},
+        {"engine": "carrier"},
+    ]
+
+    assert engines_of({"chunks": chunks}) == [
+        {"engine": "carrier", "model": "carrier-model", "chunks": 2},
+        {"engine": "carrier", "chunks": 1},
+    ]
+    evidence = evidence_from_document(_document(chunks=chunks))
+    normalize_findings_state(evidence, head_sha=HEAD, review_status="clean")
+    assert render_engines(evidence["engines"]) == "engine: carrier: carrier-model; carrier"
 
 
 def test_unknown_engines_and_unusable_labels_are_ignored_not_trusted():
@@ -114,6 +137,40 @@ def test_rendering_names_the_range_and_the_engine():
 def test_malformed_evidence_is_refused(state):
     with pytest.raises(ValueError):
         normalize_findings_state(state, head_sha=HEAD, review_status="clean")
+
+
+def _verdict(range_value):
+    return {
+        "reviewer": "r",
+        "review_status": "clean",
+        "head_sha": HEAD,
+        "pr_number": 1,
+        "range": range_value,
+    }
+
+
+@pytest.mark.parametrize(
+    "range_value",
+    [
+        {"basis": "base..head", "head": HEAD},
+        {"basis": "since", "head": HEAD},
+        {"basis": "base..head", "base": BASE, "since": SINCE, "head": HEAD},
+        {"basis": "since", "base": BASE, "since": SINCE, "head": HEAD},
+    ],
+)
+def test_the_schema_refuses_a_range_missing_its_basis_field(range_value):
+    assert validate_against_schema(_verdict(range_value), _SCHEMA) != []
+
+
+@pytest.mark.parametrize(
+    "range_value",
+    [
+        {"basis": "base..head", "base": BASE, "head": HEAD},
+        {"basis": "since", "since": SINCE, "head": HEAD},
+    ],
+)
+def test_the_schema_accepts_a_complete_range(range_value):
+    assert validate_against_schema(_verdict(range_value), _SCHEMA) == []
 
 
 def test_evidence_alone_does_not_raise_the_fence_schema_version():

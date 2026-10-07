@@ -75,6 +75,15 @@ def test_stderr_and_stdout_returned_to_the_caller_are_bounded(tmp_path, monkeypa
         "raise SystemExit(3)\n"
     )
 
+    retained: list[int] = []
+    original_append = bounded_capture.TailBuffer.append
+
+    def recording_append(self, chunk):
+        original_append(self, chunk)
+        retained.append(len(self._data))
+
+    monkeypatch.setattr(bounded_capture.TailBuffer, "append", recording_append)
+
     proc = carrier.run_in_process_group(
         [sys.executable, "-c", script], input=b"", capture_output=True, timeout=30, cwd=str(tmp_path)
     )
@@ -82,6 +91,10 @@ def test_stderr_and_stdout_returned_to_the_caller_are_bounded(tmp_path, monkeypa
     assert proc.returncode == 3
     assert len(proc.stdout) == 1000 and proc.stdout.endswith(b"OUT-END")
     assert len(proc.stderr) == carrier.STDERR_FILE_LIMIT and proc.stderr.endswith(b"ERR-END")
+    # Bounded while output is produced, not only after: a buffer-then-truncate
+    # implementation never appends incrementally, or peaks at the full 2 MB.
+    assert len(retained) > 4
+    assert max(retained) <= 2 * carrier.STDERR_FILE_LIMIT + 64 * 1024
 
 
 def test_a_timeout_still_reports_the_bounded_tail_it_captured(tmp_path):

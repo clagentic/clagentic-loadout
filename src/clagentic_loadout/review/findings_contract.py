@@ -77,8 +77,9 @@ def validate_finding(
     ``truncate_message`` keeps an edited message whole (and an edited
     failure_sequence).
 
-    ``failure_sequence`` is optional: it is carried through when it is a
-    non-empty string and silently left out otherwise, so a finding without it
+    ``failure_sequence`` is optional: it is carried through when the severity
+    is blocking and it is a non-empty string, and silently left out otherwise
+    (OUTPUT_CONTRACT asks for it on blocking findings only), so a finding without it
     is exactly as valid as before.
     """
     if not isinstance(item, dict):
@@ -117,7 +118,7 @@ def validate_finding(
         "message": message,
     }
     sequence = item.get(KEY_FAILURE_SEQUENCE)
-    if isinstance(sequence, str) and sequence.strip():
+    if severity == "blocking" and isinstance(sequence, str) and sequence.strip():
         sequence = sequence.strip()
         if truncate_message and len(sequence) > MAX_FAILURE_SEQUENCE_CHARS:
             sequence = sequence[: MAX_FAILURE_SEQUENCE_CHARS - 3] + "..."

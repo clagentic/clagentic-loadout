@@ -53,6 +53,21 @@ def test_anything_but_a_non_empty_string_is_left_out_not_rejected(value):
     assert "failure_sequence" not in validated
 
 
+@pytest.mark.parametrize("severity", ["nit", "praise"])
+def test_a_failure_sequence_on_a_non_blocking_finding_is_dropped(severity):
+    validated = validate_finding(_finding(severity=severity, failure_sequence="steps"), 1)
+
+    assert "failure_sequence" not in validated
+    assert set(validated) == {"file", "line", "rule_id", "severity", "message"}
+
+
+def test_a_lenient_finding_without_a_severity_does_not_keep_a_sequence():
+    item = _finding(failure_sequence="steps")
+    del item["severity"]
+
+    assert "failure_sequence" not in validate_finding(item, 1, lenient_severity=True)
+
+
 def test_a_finding_without_the_field_validates_to_exactly_the_five_keys():
     assert set(validate_finding(_finding(), 1)) == {"file", "line", "rule_id", "severity", "message"}
 
