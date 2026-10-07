@@ -6,8 +6,10 @@ A declared reviewer role the deployment cannot resolve to a platform login
 degrades PER ROLE at merge time (that role is dropped from the floor, its own
 required_scanners entry is skipped, every other role stays enforced). Doctor
 reports the runtime's warning for it as a FAIL so the gap is visible. Gate keys
-sitting in the deployment `config.yaml` are IGNORED by merge, so doctor
-reports that notice as a WARN and never resolves those roles."""
+sitting in the deployment `config.yaml` are IGNORED by merge when a tracked gate
+exists, so doctor reports that notice as a WARN and never resolves those roles.
+With no tracked gate they ARE the gate (merge's fallback), and doctor judges
+them through the same loader."""
 
 from __future__ import annotations
 
@@ -114,14 +116,39 @@ def test_no_remote_means_no_platform_and_nothing_is_resolved(tmp_path, monkeypat
     assert check_repo_loadout_schema(repo).ok is True
 
 
-def test_roles_only_in_the_deployment_file_are_ignored_not_resolved(tmp_path, monkeypatch):
+def test_roles_in_the_deployment_file_are_ignored_not_resolved_when_a_tracked_gate_exists(
+    tmp_path, monkeypatch
+):
     _slugs(monkeypatch, set())
-    repo = _repo(tmp_path, deployment_yaml="merge:\n  required_reviewer_roles: [reviewer]\n")
+    repo = _repo(
+        tmp_path,
+        tracked_gate="merge:\n  required_reviewer_roles: []\n",
+        deployment_yaml="merge:\n  required_reviewer_roles: [reviewer]\n",
+    )
     result = check_repo_loadout_schema(repo)
     assert result.ok is True
     assert "IGNORED" in result.summary and TRACKED_GATE_RELATIVE_PATH in result.summary
     assert result.resolved["gate_warnings"] == list(ignored_deployment_gate_warnings(repo))
     assert "cannot be resolved" not in result.summary
+
+
+def test_roles_only_in_the_deployment_file_are_judged_as_the_fallback_gate(tmp_path, monkeypatch):
+    _slugs(monkeypatch, set())
+    repo = _repo(tmp_path, deployment_yaml="merge:\n  required_reviewer_roles: [reviewer]\n")
+    result = check_repo_loadout_schema(repo)
+    assert "IGNORED" not in result.summary
+    assert "gate keys read from deployment config.yaml; no tracked gate.yaml at base" in result.summary
+    assert "'reviewer'" in result.summary and "DROPPED" in result.summary
+    assert result.ok is False
+
+
+def test_a_resolvable_fallback_gate_passes_with_only_the_notice(tmp_path, monkeypatch):
+    _slugs(monkeypatch, {"reviewer"})
+    repo = _repo(tmp_path, deployment_yaml="merge:\n  required_reviewer_roles: [reviewer]\n")
+    result = check_repo_loadout_schema(repo)
+    assert result.ok is True
+    assert len(result.resolved["gate_warnings"]) == 1
+    assert "no tracked gate.yaml at base" in result.resolved["gate_warnings"][0]
 
 
 def test_the_tracked_gate_is_judged_even_without_a_deployment_file(tmp_path):
@@ -151,6 +178,15 @@ _PARITY_FIXTURES = {
     "unresolvable-role": (b"merge:\n  required_reviewer_roles: [reviewer]\n", None),
     "clean": (b"merge:\n  required_reviewer_roles: []\n", None),
     "gate-key-only-in-config": (None, "merge:\n  required_reviewer_roles: [reviewer]\n"),
+    "gate-key-in-config-and-tracked": (
+        b"merge:\n  required_reviewer_roles: []\n",
+        "merge:\n  required_reviewer_roles: [reviewer]\n",
+    ),
+    "malformed-pre-checks-only-in-config": (
+        None,
+        "merge:\n  required_reviewer_roles: []\n  pre_checks: nope\n",
+    ),
+    "config-without-gate-keys": (None, "merge:\n  sync_tree_after_merge: false\n"),
 }
 
 
@@ -169,5 +205,5 @@ def test_doctor_reports_exactly_what_the_merge_runtime_produces(tmp_path, monkey
 
     result = check_repo_loadout_schema(repo)
     assert _gate_lines(result) == [_GATE_LINE_PREFIX + line for line in expected_errors]
-    assert result.resolved["gate_warnings"] == [w for w in gate.warnings if w in ignored]
+    assert result.resolved["gate_warnings"] == [w for w in gate.warnings if w in ignored] + list(gate.notices)
     assert result.ok is (not expected_errors)

@@ -663,8 +663,10 @@ class TestTheGateComesFromBaseNotTheWorkingTree:
         assert code == verb.EXIT_OK
         assert "NOT ENFORCED" not in err
 
-    def test_gate_keys_in_the_deployment_file_are_ignored_with_a_warning(self, tmp_path, capsys):
-        init_gate_repo(tmp_path, tracked_gate=None)
+    def test_gate_keys_in_the_deployment_file_are_ignored_with_a_warning_when_base_has_a_tracked_gate(
+        self, tmp_path, capsys
+    ):
+        init_gate_repo(tmp_path, tracked_gate={"required_reviewer_roles": []})
         write_deployment_config(
             tmp_path, {"sync_tree_after_merge": False, "required_reviewer_roles": ["never-posts"]}
         )
@@ -673,6 +675,38 @@ class TestTheGateComesFromBaseNotTheWorkingTree:
         assert "merge.required_reviewer_roles in" in err
         assert "IGNORED" in err
         assert TRACKED_GATE_RELATIVE_PATH in err
+
+    def test_reviewer_roles_only_in_the_deployment_file_are_enforced_when_base_has_no_tracked_gate(
+        self, tmp_path, capsys
+    ):
+        init_gate_repo(tmp_path, tracked_gate=None)
+        write_deployment_config(
+            tmp_path, {"sync_tree_after_merge": False, "required_reviewer_roles": ["never-posts"]}
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "never-posts" in err
+        assert "gate keys read from deployment config.yaml; no tracked gate.yaml at base" in err
+        assert "IGNORED" not in err
+
+    def test_an_unresolvable_deployment_role_degrades_per_role_like_a_tracked_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        TestRepoReviewerFloor._only_ghost_is_unresolvable(monkeypatch)
+        init_gate_repo(tmp_path, tracked_gate=None)
+        write_deployment_config(
+            tmp_path,
+            {
+                "sync_tree_after_merge": False,
+                "required_reviewer_roles": ["ghost", "never-posts"],
+                "required_scanners": {"ghost": ["beta"]},
+            },
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "'ghost'" in err and "DROPPED" in err
+        assert "NOT ENFORCED" not in err
+        assert "never-posts" in err
 
     def test_a_malformed_base_gate_falls_back_with_a_warning_even_if_the_working_tree_is_valid(
         self, tmp_path, capsys

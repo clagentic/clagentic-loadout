@@ -275,8 +275,10 @@ class TestTheGateIsReadFromBaseNotTheWorkingTree:
         git(tmp_path, "checkout", "-q", "main")
         assert _merge(repo) == verb.EXIT_PRE_CHECKS_FAILED
 
-    def test_a_gate_key_in_the_deployment_file_is_ignored_with_a_warning(self, tmp_path, capsys):
-        repo = init_gate_repo(tmp_path, tracked_gate=None)
+    def test_a_gate_key_in_the_deployment_file_is_ignored_when_base_has_a_tracked_gate(
+        self, tmp_path, capsys
+    ):
+        repo = init_gate_repo(tmp_path, tracked_gate={"required_reviewer_roles": []})
         write_deployment_config(
             tmp_path, {"sync_tree_after_merge": False, "pre_checks": [_FAIL_CHECK]}
         )
@@ -285,11 +287,101 @@ class TestTheGateIsReadFromBaseNotTheWorkingTree:
         err = capsys.readouterr().err
         assert "merge.pre_checks in" in err and "IGNORED" in err
         assert TRACKED_GATE_RELATIVE_PATH in err
+        assert "NOTICE" not in err
 
     def test_no_tracked_gate_at_base_declares_nothing_and_does_not_warn(self, tmp_path, capsys):
         repo = init_gate_repo(tmp_path, tracked_gate=None)
         assert _merge(repo) == verb.EXIT_OK
-        assert "NOT ENFORCED" not in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "NOT ENFORCED" not in err and "NOTICE" not in err and "IGNORED" not in err
+
+
+class TestUnmigratedRepoReadsTheDeploymentConfig:
+    """A repo whose base has no tracked gate file keeps the gate its deployment
+    config.yaml declares, exactly as before the gate moved. It is a notice, never
+    a refusal, and never reads as IGNORED."""
+
+    def _unmigrated(self, tmp_path, steps):
+        repo = init_gate_repo(tmp_path, tracked_gate=None)
+        write_deployment_config(
+            tmp_path,
+            {"sync_tree_after_merge": False, "required_reviewer_roles": [], "pre_checks": steps},
+        )
+        assert git(tmp_path, "status", "--porcelain") == "", "the deployment file is gitignored"
+        return repo
+
+    def test_a_failing_deployment_pre_check_refuses_the_merge(self, tmp_path):
+        repo = self._unmigrated(tmp_path, [_FAIL_CHECK])
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+
+    def test_a_passing_deployment_pre_check_runs_in_the_repo_path_and_lets_the_merge_land(
+        self, tmp_path, capsys
+    ):
+        marker = tmp_path.parent / f"{tmp_path.name}-fallback-ran.txt"
+        repo = self._unmigrated(
+            tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"], "on_failure": "fail"}]
+        )
+        assert _merge(repo) == verb.EXIT_OK
+        assert marker.exists()
+        err = capsys.readouterr().err
+        assert "pre_checks gate -- all 1 check(s) PASSED" in err
+        assert str(tmp_path) in err
+        assert git(tmp_path, "worktree", "list").count("\n") == 0
+
+    def test_one_notice_names_the_source_and_the_recommendation_and_never_says_ignored(
+        self, tmp_path, capsys
+    ):
+        repo = self._unmigrated(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
+        assert _merge(repo) == verb.EXIT_OK
+        err = capsys.readouterr().err
+        assert err.count("gate keys read from deployment config.yaml; no tracked gate.yaml at base") == 1
+        assert "is recommended" in err and TRACKED_GATE_RELATIVE_PATH in err
+        assert "IGNORED" not in err
+
+    def test_skip_pre_checks_still_bypasses_the_deployment_gate(self, tmp_path):
+        repo = self._unmigrated(tmp_path, [_FAIL_CHECK])
+        assert _merge(repo, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
+
+    def test_the_pr_cannot_relax_the_deployment_gate_by_adding_a_tracked_gate(self, tmp_path):
+        # Base has no gate file; the PR head adds one declaring nothing. The PR is
+        # judged by its base, so the deployment gate still applies to it.
+        repo = init_gate_repo(
+            tmp_path,
+            tracked_gate=None,
+            head_files={
+                TRACKED_GATE_RELATIVE_PATH: yaml.safe_dump({"merge": {"required_reviewer_roles": []}})
+            },
+        )
+        write_deployment_config(
+            tmp_path,
+            {"sync_tree_after_merge": False, "required_reviewer_roles": [], "pre_checks": [_FAIL_CHECK]},
+        )
+        assert _merge(repo) == verb.EXIT_PRE_CHECKS_FAILED
+
+    def test_a_malformed_deployment_pre_checks_refuses_as_it_did_before_the_gate_moved(self, tmp_path):
+        repo = init_gate_repo(tmp_path, tracked_gate=None)
+        write_deployment_config(
+            tmp_path,
+            {"sync_tree_after_merge": False, "required_reviewer_roles": [], "pre_checks": "not-a-list"},
+        )
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+
+    def test_a_malformed_git_working_tree_still_runs_the_deployment_pre_checks(self, tmp_path):
+        repo = init_gate_repo(tmp_path, tracked_gate=None)
+        write_deployment_config(
+            tmp_path,
+            {
+                "sync_tree_after_merge": False,
+                "git_working_tree": 42,
+                "required_reviewer_roles": [],
+                "pre_checks": [_FAIL_CHECK],
+            },
+        )
+        assert _merge(repo) == verb.EXIT_PRE_CHECKS_FAILED
 
 
 class TestMalformedGateAtBase:

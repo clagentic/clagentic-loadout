@@ -19,10 +19,20 @@ or drop its pre_checks. The base commit is not something the PR controls.
   - `pre_checks` are the commands run against the merge result before merging.
 
 Keys that are machine-local (`post_merge_steps`, host paths, the sync knobs)
-stay in the gitignored deployment file. A gate key found in that file is
-IGNORED, with a warning naming the tracked location, so a deployment that has
-not migrated is told instead of silently running with a weaker gate than it
-believes it has.
+stay in the gitignored deployment file. A gate key found in that file while the
+tracked file IS present at base is IGNORED, with a warning naming the tracked
+location, so a deployment is told instead of silently running with a weaker
+gate than it believes it has.
+
+UNMIGRATED REPOS. When the base commit has NO tracked gate file, the gate keys
+are read from the deployment file exactly as they were before the gate moved
+(`gate_from_deployment_config`), and `pre_checks` run in the repo path as they
+always did. Refusing or ignoring would turn a repo that declared a gate into
+one that silently gates nothing. The deployment file is gitignored operator
+config, not PR content, so the PR under review still cannot relax its own gate.
+The result carries one notice naming the source; it is never a refusal. Once a
+tracked file exists at base it is authoritative and the deployment gate keys
+fall back to IGNORED.
 
 ONE RULE SET, TWO CONSUMERS. `gate_from_tracked_text` is a pure function from a
 gate file's text to a `RepoGate`; every per-key rule below lives in it and in
@@ -66,8 +76,10 @@ changes where the text comes from.
     declares nothing. `--skip-pre-checks` is its bypass; `--ignore-repo-gate`
     does not lift it.
 
-A tracked file that is simply absent at base declares nothing and is neither a
-warning nor an error.
+A tracked file that is simply absent at base defers to the deployment file (see
+UNMIGRATED REPOS); with no gate key there either, nothing is declared, and that
+is neither a warning nor an error. The per-key failure rules above apply to the
+deployment file's text as they do to the tracked file's.
 
 A config that loads cleanly but cannot be satisfied is NOT handled here: that
 is a real refusal, overridable only by the verb's explicit, logged
@@ -111,6 +123,9 @@ class RepoGate:
     required_scanners: dict[str, tuple[str, ...]] | None = None
     pre_checks: tuple[dict, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: Informational lines that are never a finding: the gate was read from the
+    #: deployment file because the base commit has no tracked gate file.
+    notices: tuple[str, ...] = ()
     #: Why `pre_checks` could not be determined. Non-empty means the merge must
     #: be refused (unless pre_checks are explicitly skipped); it never means
     #: "no checks".
@@ -217,22 +232,71 @@ def resolve_gate_git_tree(repo_path: str | Path) -> Path:
     return declared_tree if declared_tree is not None else Path(repo_path)
 
 
+def gate_from_deployment_config(repo_path: str | Path) -> RepoGate:
+    """The gate the deployment `config.yaml` declares, for a repo whose PR base
+    commit has no tracked gate file.
+
+    Applies the same per-key rules as `gate_from_tracked_text`, so a repo that
+    has not migrated keeps exactly the gate it declared before the gate moved
+    to a tracked file. The file is gitignored operator config, never PR
+    content, so the PR under review cannot reach its own gate through it.
+
+    A file that is absent or unreadable, or a `merge:` section with no gate key
+    in it, declares nothing: this loader never refuses on its own account (the
+    loaders that own that file report its failures themselves). When gate keys
+    are read, the result carries a notice naming the source.
+    """
+    config_path = resolve_repo_config_path(repo_path, warn=False)
+    try:
+        text = config_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return RepoGate()
+    try:
+        merge_section, _present = parse_tracked_merge_section(text, source=str(config_path))
+    except InvalidMergeGateConfigError:
+        return RepoGate()
+    declared = [key for key in GATE_KEYS if key in merge_section]
+    if not declared:
+        return RepoGate()
+    gate = gate_from_tracked_text(text, source=str(config_path))
+    notice = (
+        f"gate keys read from deployment config.yaml; no tracked gate.yaml at base "
+        f"({', '.join(declared)} from {config_path}); moving them to "
+        f"{TRACKED_GATE_RELATIVE_PATH} is recommended so the gate is reviewed with the repo"
+    )
+    return replace(gate, notices=(notice,))
+
+
 def load_gate_at_commit(
     git_tree: str | Path,
     sha: str,
     *,
     base_branch: str = "",
-    ignored_warnings: tuple[str, ...] = (),
+    deployment_repo_path: str | Path | None = None,
 ) -> RepoGate:
     """Read the tracked gate file at *sha* in *git_tree* and apply
     `gate_from_tracked_text`. A commit or file that cannot be read is the same
-    "nothing readable" gate a malformed file is."""
+    "nothing readable" gate a malformed file is.
+
+    *deployment_repo_path*, when given, names the repo whose deployment
+    `config.yaml` is consulted: it is the gate when the tracked file is absent
+    at *sha* (`gate_from_deployment_config`), and its gate keys are reported as
+    IGNORED when the tracked file is present or unreadable.
+    """
     source = f"{Path(git_tree).resolve()}@{sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"
     try:
         text = read_file_at_commit(git_tree, sha, TRACKED_GATE_RELATIVE_PATH, base_branch=base_branch)
     except CommitFileReadError as exc:
-        return _nothing_readable(ignored_warnings, f"{source}: {exc}")
-    return gate_from_tracked_text(text, source=source, ignored_warnings=ignored_warnings)
+        return _nothing_readable(_ignored_or_none(deployment_repo_path), f"{source}: {exc}")
+    if text is None and deployment_repo_path is not None:
+        return gate_from_deployment_config(deployment_repo_path)
+    return gate_from_tracked_text(
+        text, source=source, ignored_warnings=_ignored_or_none(deployment_repo_path)
+    )
+
+
+def _ignored_or_none(repo_path: str | Path | None) -> tuple[str, ...]:
+    return () if repo_path is None else ignored_deployment_gate_warnings(repo_path)
 
 
 def load_repo_gate_at_base(
@@ -251,8 +315,8 @@ def load_repo_gate_at_base(
     a base commit known pre_checks are read from *repo_path* itself instead: a
     declared check still runs, and a *repo_path* that is not a git tree refuses
     before anything merges. With no base commit either, pre_checks refuse as
-    well, never skipped. A tracked file absent at base declares nothing. The
-    per-key failure rules are in the module docstring.
+    well, never skipped. A tracked file absent at base defers to the deployment
+    file's gate keys. The per-key failure rules are in the module docstring.
     """
     if repo_path is None:
         return RepoGate()
@@ -261,12 +325,11 @@ def load_repo_gate_at_base(
     try:
         git_tree = resolve_gate_git_tree(repo_path)
     except PostMergeConfigError as exc:
-        pair_warnings = _reviewer_pair_warnings(ignored, str(exc))
         if not base_sha:
             # No tree to name and no base commit to read from: nothing can
             # supply pre_checks, so they refuse rather than being skipped.
             return RepoGate(
-                warnings=pair_warnings,
+                warnings=_reviewer_pair_warnings(ignored, str(exc)),
                 pre_checks_error=(
                     f"{exc}; and the PR payload carried no base commit SHA to read the gate at"
                 ),
@@ -276,14 +339,22 @@ def load_repo_gate_at_base(
         # are read from *repo_path*'s own tree at the base commit, so declared
         # checks still run and a tree that cannot supply them refuses.
         from_repo_path = load_gate_at_commit(
-            Path(repo_path), base_sha, base_branch=base_branch, ignored_warnings=ignored
+            Path(repo_path), base_sha, base_branch=base_branch, deployment_repo_path=repo_path
         )
+        # Keep only the IGNORED notices the source itself raised: none when the
+        # deployment file is the gate, because then nothing in it is ignored.
+        kept_ignored = tuple(w for w in from_repo_path.warnings if w in ignored)
         return replace(
-            from_repo_path, reviewer_roles=(), required_scanners=None, warnings=pair_warnings
+            from_repo_path,
+            reviewer_roles=(),
+            required_scanners=None,
+            warnings=_reviewer_pair_warnings(kept_ignored, str(exc)),
         )
     if not base_sha:
         return _nothing_readable(ignored, "the PR payload carried no base commit SHA to read it at")
-    return load_gate_at_commit(git_tree, base_sha, base_branch=base_branch, ignored_warnings=ignored)
+    return load_gate_at_commit(
+        git_tree, base_sha, base_branch=base_branch, deployment_repo_path=repo_path
+    )
 
 
 def with_resolvable_reviewer_roles(
@@ -343,6 +414,7 @@ def with_resolvable_reviewer_roles(
 __all__ = [
     "GATE_KEYS",
     "RepoGate",
+    "gate_from_deployment_config",
     "gate_from_tracked_text",
     "ignored_deployment_gate_warnings",
     "load_gate_at_commit",
