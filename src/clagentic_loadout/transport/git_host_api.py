@@ -930,10 +930,19 @@ def parse_json_body(raw: bytes) -> dict[str, Any]:
     if not raw:
         return {}
     try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+        parsed = decode_json_body(raw)
+    except ValueError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def decode_json_body(raw: bytes) -> Any:
+    """Decode request()'s raw response bytes as JSON, strictly: the decoding
+    step parse_json_body tolerates failures of, for a caller that must fail on
+    a malformed body instead (a reader, where "no fields" would be mistaken
+    for "no data"). Raises ValueError (JSONDecodeError and UnicodeDecodeError
+    are both subclasses) on a body that is not UTF-8 JSON."""
+    return json.loads(raw.decode("utf-8"))
 
 
 # ---------------------------------------------------------------------------

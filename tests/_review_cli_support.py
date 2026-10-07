@@ -55,6 +55,15 @@ STUB_SCRIPT = textwrap.dedent(
     elif mode == "exit1":
         sys.stderr.write("carrier blew up\\n")
         sys.exit(1)
+    elif mode == "exit2":
+        sys.stderr.write(NAME + " blew up differently\\n")
+        sys.exit(2)
+    elif mode == "exit127_noisy":
+        sys.stderr.write(NAME + " engine is missing\\n")
+        sys.exit(127)
+    elif mode == "usage_limit":
+        sys.stderr.write("prompt echo\\nERROR: You've hit your usage limit.\\n")
+        sys.exit(1)
     elif mode == "timeout_then_array":
         if count == 0:
             time.sleep(30)

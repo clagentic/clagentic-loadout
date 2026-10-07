@@ -34,7 +34,6 @@ endpoints):
 from __future__ import annotations
 
 import base64
-import json
 import urllib.parse
 from typing import Any
 
@@ -50,8 +49,8 @@ def _parse_json(raw: bytes, expect: type, what: str) -> Any:
     parser error, an AttributeError on a wrong-typed value, or a silent
     empty result that reads as "no data"."""
     try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        parsed = git_host_api.decode_json_body(raw)
+    except ValueError as exc:
         raise AcquireFetchError(f"{what} returned a body that is not valid JSON") from exc
     if not isinstance(parsed, expect):
         raise AcquireFetchError(

@@ -67,7 +67,10 @@ def test_a_fast_forward_reviews_only_the_delta_and_frames_the_open_findings(env,
     assert "+line 1 of a.py" not in sent[0]
     assert "## Incremental review" in sent[0]
     assert SINCE_SHA[:12] in sent[0]
-    assert "- a.py:3 [R1] (blocking) bad" in sent[0]
+    # a.py is not in the delta, so the chunk cannot judge its finding: it is
+    # carried forward instead of listed.
+    assert "- a.py:3 [R1] (blocking) bad" not in sent[0]
+    assert "- none" in sent[0]
     assert "nice" not in sent[0]
     assert sent[0].rstrip().endswith("Reply [] when the chunk has no findings.")
     assert _stage(payload, "delta") == {
@@ -99,14 +102,36 @@ def test_a_finding_on_a_file_the_delta_touches_is_left_to_the_reviewer_not_carri
     env, tmp_path, capsys
 ):
     env.configure(carrier_mode="empty")
-    prior = _prior(tmp_path / "prior.json", [_BLOCKING])
-    compare = _ahead(make_diff({"a.py": 2}))
+    prior = _prior(tmp_path / "prior.json", [{**_BLOCKING, "line": 2}])
+    # The finding's line 2 is an existing line of the prior head, so the hunk
+    # must hold it on the OLD side: a pure addition to an empty file has none.
+    edit = "\n".join(
+        [
+            "diff --git a/a.py b/a.py", "index 1111111..2222222 100644",
+            "--- a/a.py", "+++ b/a.py",
+            "@@ -1,3 +1,3 @@", " line 1", "-line 2", "+line 2 edited", " line 3",
+        ]
+    ) + "\n"
+    compare = _ahead(edit)
 
     _, payload = env.run("--prior-findings", prior, capsys=capsys, compare=compare)
 
     document = _document(payload)
     assert document["carried_count"] == 0
     assert document["findings"] == []
+
+
+def test_a_finding_outside_the_hunks_of_a_touched_file_is_carried(env, tmp_path, capsys):
+    env.configure(carrier_mode="empty")
+    prior = _prior(tmp_path / "prior.json", [_BLOCKING])
+    compare = _ahead(make_diff({"a.py": 2}))
+
+    _, payload = env.run("--prior-findings", prior, capsys=capsys, compare=compare)
+
+    document = _document(payload)
+    assert document["carried_count"] == 1
+    assert [(f["file"], f["line"]) for f in document["findings"]] == [("a.py", 3)]
+    assert "- a.py:3 [R1]" not in prompts(env.stubs, "carrier")[0]
 
 
 def test_a_delta_run_has_its_own_run_directory_beside_the_full_one(env, tmp_path, capsys):

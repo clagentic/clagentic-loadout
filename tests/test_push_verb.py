@@ -48,58 +48,17 @@ from clagentic_loadout.push.host_guard import (
 from clagentic_loadout.sha import validate_sha
 from clagentic_loadout.transport import body_env, provider_config, stage_body_verb
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
-
-
-def _git(args: list[str], cwd) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True
-    )
-
-
-class _RecordingTokenProvider:
-    def __init__(self, token: str = "tok-123"):
-        self.resolved_for: list[str] = []
-        self._token = token
-
-    def resolve_token(self, role: str) -> str:
-        self.resolved_for.append(role)
-        return self._token
-
-
-class _RefusingTokenProvider:
-    def resolve_token(self, role: str) -> str:
-        raise AssertionError(f"token provider must not be called (role={role!r})")
-
-
-class _FakeResponse:
-    def __init__(self, status: int, body: bytes):
-        self.status = status
-        self._body = body
-
-    def read(self):
-        return self._body
-
-    def getcode(self):
-        return self.status
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _json_resp(status: int, payload) -> _FakeResponse:
-    return _FakeResponse(status, json.dumps(payload).encode("utf-8"))
-
-
-def _forgejo_create_opener(*, pr_number=42):
-    def opener(req, timeout=15):
-        if req.get_method() == "POST" and req.full_url.endswith("/pulls"):
-            return _json_resp(201, {"number": pr_number})
-        raise AssertionError(f"unexpected: {req.get_method()} {req.full_url}")
-
-    return opener
+from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root is an autouse fixture)
+    FakeResponse as _FakeResponse,
+    RecordingTokenProvider as _RecordingTokenProvider,
+    RefusingTokenProvider as _RefusingTokenProvider,
+    forgejo_create_opener as _forgejo_create_opener,
+    git as _git,
+    isolate_user_config_root,
+    json_resp as _json_resp,
+    repo_with_remote,
+    run_main as _run_main,
+)
 
 
 def _github_create_opener(*, pr_number=42):
@@ -109,101 +68,6 @@ def _github_create_opener(*, pr_number=42):
         raise AssertionError(f"unexpected: {req.get_method()} {req.full_url}")
 
     return opener
-
-
-@pytest.fixture
-def repo_with_remote(tmp_path):
-    """A local repo with a bare-repo 'origin' remote (real git, no
-    network), a base main + feature branch with one commit ahead."""
-    remote = tmp_path / "remote.git"
-    remote.mkdir()
-    _git(["init", "--bare", "-b", "main"], remote)
-
-    seed = tmp_path / "seed"
-    seed.mkdir()
-    _git(["init", "-b", "main"], seed)
-    _git(["config", "user.email", "base@example.com"], seed)
-    _git(["config", "user.name", "Base"], seed)
-    (seed / "README.md").write_text("hello\n")
-    _git(["add", "README.md"], seed)
-    _git(["commit", "-m", "initial"], seed)
-    _git(["remote", "add", "origin", str(remote)], seed)
-    _git(["push", "origin", "main"], seed)
-
-    repo = tmp_path / "repo"
-    _git(["clone", str(remote), str(repo)], tmp_path)
-    _git(["config", "user.email", "author@example.com"], repo)
-    _git(["config", "user.name", "Author"], repo)
-    _git(["checkout", "-b", "feature"], repo)
-    (repo / "feature.txt").write_text("work\n")
-    _git(["add", "feature.txt"], repo)
-    # Conventional-Commits-shaped (lr-dd1742, push.branch_commit_check):
-    # this fixture's commit is a stand-in for ordinary feature work, and
-    # every push-time gate in this module -- including the new branch
-    # commit-subject check -- validates real commit subjects, so the
-    # fixture's own content must conform rather than accidentally tripping
-    # a gate that isn't the one under test.
-    _git(["commit", "-m", "feat: add feature work"], repo)
-    _git(
-        ["remote", "set-url", "origin", "http://git-host.example.com/some-owner/some-repo.git"],
-        repo,
-    )
-    # git push's actual network target must be the real local bare repo (no
-    # real network access anywhere in this test file), while `git remote
-    # get-url origin` (used for owner/repo/api_base coordinate parsing) keeps
-    # returning the neutral placeholder Forgejo-shaped URL above unchanged.
-    #
-    # PREVIOUSLY: a repo-local `url.<remote>.pushInsteadOf` directive
-    # achieved this split. That directive is now correctly refused by
-    # push.git_hermeticity.check_repo_local_config_hazards (pre-merge
-    # security review finding, repo-local-hazard-coverage-gap): a
-    # url.*.insteadOf/pushInsteadOf rule can silently redirect a push to an
-    # attacker-chosen host in a REAL deployment, which would then receive
-    # the minted credential this package presents via GIT_ASKPASS -- fixing
-    # that gap correctly makes this exact directive shape unusable here too,
-    # since a fail-closed hazard check cannot distinguish this fixture's own
-    # benign use from a hostile one.
-    #
-    # THE FIX: `remote.origin.pushurl` -- a normal, first-class, single-
-    # remote push-URL override (distinct from a wildcard `url.*.insteadOf`
-    # rewrite rule, which can redirect ANY remote matching its base-URL
-    # prefix). It achieves the identical split this fixture needs (`git
-    # remote get-url origin` still returns the placeholder; `git push
-    # origin` reaches the real bare repo) without any of the four
-    # unsuppressable hazard shapes check_repo_local_config_hazards scans
-    # for (credential.*, http.*.extraheader, includeIf.*, url.*.insteadOf/
-    # pushInsteadOf) -- confirmed directly against that function during
-    # this fix.
-    _git(["config", "remote.origin.pushurl", str(remote)], repo)
-
-    return repo, remote
-
-
-def _run_main(
-    argv, *, token_provider=None, opener=None, stdin_text=None, monkeypatch=None,
-    host_config_root=None,
-):
-    if stdin_text is not None:
-        monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(stdin_text.encode("utf-8"))))
-    return verb.main(
-        argv, token_provider=token_provider, opener=opener, host_config_root=host_config_root,
-    )
-
-
-@pytest.fixture(autouse=True)
-def _isolate_user_config_root(tmp_path, monkeypatch):
-    """Belt-and-suspenders isolation, mirroring
-    test_transport_read_host_guard.py's own `_isolate_user_config_root`
-    fixture (lr-57573e): push.host_guard's config-ceiling tier
-    (PUSH_HOST_CONFIG_SECTION) reads through
-    transport.provider_config.load_user_config_section, which falls back to
-    provider_config.DEFAULT_USER_CONFIG_ROOT -- the REAL
-    ~/.config/clagentic/loadout/ directory -- for any call in this module
-    that omits host_config_root. A real deployment config.yaml on the host
-    running these tests must never leak a live allowlist into a test
-    asserting the config-UNSET (back-compat) precedence."""
-    isolated_root = tmp_path / "isolated-user-config-root"
-    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
 
 
 class TestArgumentValidation:

@@ -43,6 +43,7 @@ from clagentic_loadout.review.delta import (
     STATUS_FALLBACK,
     DeltaContext,
     carried_findings,
+    findings_for_chunk,
     render_delta_note,
 )
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
@@ -64,7 +65,7 @@ BINDING_FILENAME = "run-binding.json"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
-PIPELINE_VERSION = "3"
+PIPELINE_VERSION = "4"
 
 REASON_ACQUIRE_INVALID = "ACQUIRE_INVALID"
 REASON_DIFF_EMPTY = "DIFF_EMPTY"
@@ -146,6 +147,7 @@ def _resume_key(
         delta_note,
         json.dumps(profile.carrier),
         json.dumps(profile.fallback),
+        json.dumps([profile.carrier_model, profile.fallback_model]),
         profile.rulebook_text,
         str(profile.chunk_lines),
     ):
@@ -215,14 +217,22 @@ def _stage_note(record: dict[str, Any]) -> str | None:
     """Why this chunk was answered by, or failed on, the engine it names: the
     last stderr line is where an engine says what went wrong."""
     unavailable = record.get("carrier_unavailable_reason")
-    if unavailable and record.get("engine") == ENGINE_FALLBACK:
-        return f"carrier unavailable: {unavailable}"
     failure = record.get("carrier_failure")
-    if failure:
-        return f"carrier failed: {failure.get('stderr_last_line') or failure.get('detail')}"
+    if unavailable and record.get("engine") == ENGINE_FALLBACK:
+        context = f"carrier unavailable: {unavailable}"
+    elif failure:
+        context = f"carrier failed: {failure.get('stderr_last_line') or failure.get('detail')}"
+    else:
+        context = None
     if record.get("status") == STATUS_FAILED:
-        return record.get("stderr_last_line") or None
-    return None
+        # The engine that failed last is the one whose error matters: a
+        # fallback's own failure leads, with what made it the engine of record
+        # kept as context rather than standing in for it.
+        own = record.get("stderr_last_line") or record.get("detail") or None
+        if own and context:
+            return f"{own} ({context})"
+        return own or context
+    return context
 
 
 def _engine_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
@@ -287,7 +297,6 @@ def run_review(
     stage("acquired", "ok", head_sha=acquired.head_sha, base_sha=acquired.base_sha)
     if delta_stage is not None:
         stage("delta", STATUS_DELTA if delta is not None else STATUS_FALLBACK, **delta_stage)
-    delta_note = render_delta_note(delta) if delta is not None else ""
 
     chunks = plan_chunks(acquired.diff_text, profile.chunk_lines)
     if not chunks:
@@ -300,7 +309,17 @@ def run_review(
             stages,
         )
 
-    state_dir = run_dir / f"state-{_resume_key(chunks, profile, acquired.head_sha, delta_note)}"
+    # Each chunk is told only about the open findings it can actually judge
+    # (see review.delta.findings_for_chunk), so the notes differ per chunk and
+    # all of them are part of the resume key.
+    delta_notes: dict[int, str] = {}
+    if delta is not None:
+        delta_notes = {
+            chunk.index: render_delta_note(delta, findings_for_chunk(delta, chunk))
+            for chunk in chunks
+        }
+    resume_note = "\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else ""
+    state_dir = run_dir / f"state-{_resume_key(chunks, profile, acquired.head_sha, resume_note)}"
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -340,7 +359,7 @@ def run_review(
             attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
             cwd=run_dir,
             runner=runner,
-            delta_note=delta_note,
+            delta_note=delta_notes.get(chunk.index, ""),
             breaker=breaker,
         )
         try:
@@ -397,6 +416,10 @@ def run_review(
             stderr_excerpt=first.get("stderr_excerpt"),
             stderr_last_line=first.get("stderr_last_line"),
             stderr_file=first.get("stderr_file"),
+            carrier_stderr_file=first.get("carrier_stderr_file"),
+            fallback_stderr_file=first.get("fallback_stderr_file"),
+            carrier_failure=first.get("carrier_failure"),
+            carrier_unavailable_reason=first.get("carrier_unavailable_reason"),
             run_dir=str(run_dir),
         )
 
@@ -417,7 +440,7 @@ def run_review(
     carried: list[dict[str, Any]] = []
     if delta is not None:
         touched = {name for chunk in chunks for name in chunk.files}
-        carried = carried_findings(delta, touched)
+        carried = carried_findings(delta, touched, chunks)
         per_chunk.append((0, carried))
     findings = merge_findings(per_chunk)
     findings_path = run_dir / FINDINGS_FILENAME
@@ -436,7 +459,7 @@ def run_review(
             {
                 key: records[chunk.index].get(key)
                 for key in (
-                    "index", "engine", "nonce", "attempts", "exit_code", "files",
+                    "index", "engine", "engine_label", "nonce", "attempts", "exit_code", "files",
                     "carrier_unavailable_reason", "carrier_failure",
                 )
             }

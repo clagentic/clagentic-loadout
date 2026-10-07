@@ -10,11 +10,11 @@ import pytest
 from clagentic_loadout.merge.verdict import build_verdict_block, parse_verdict_block
 from clagentic_loadout.review import verb
 from clagentic_loadout.transport import provider_config
-from tests.test_review_verb import (
-    _github_verdict_opener,
-    _RecordingTokenProvider,
-    _RefusingTokenProvider,
-    _run_main,
+from tests._support.review_verb import (
+    RecordingTokenProvider as _RecordingTokenProvider,
+    RefusingTokenProvider as _RefusingTokenProvider,
+    github_verdict_opener as _github_verdict_opener,
+    run_main as _run_main,
 )
 
 HEAD = "a" * 40

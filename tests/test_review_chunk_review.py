@@ -3,9 +3,6 @@ scripted runner so no subprocess or real engine is involved."""
 
 from __future__ import annotations
 
-import json
-import subprocess
-
 from clagentic_loadout.review.chunk_review import (
     ENGINE_CARRIER,
     ENGINE_FALLBACK,
@@ -18,55 +15,15 @@ from clagentic_loadout.review.chunk_review import (
 )
 from clagentic_loadout.review.chunking import plan_chunks
 from clagentic_loadout.review.engine_breaker import EngineBreaker
-from clagentic_loadout.review.profile_config import ReviewProfile
 from tests._review_cli_support import make_diff
-
-_CARRIER = "carrier-engine"
-_FALLBACK = "fallback-engine"
-_ARRAY = json.dumps(
-    [{"file": "a.py", "line": 1, "rule_id": "R1", "severity": "nit", "message": "m"}]
+from tests._support.review_chunk import (
+    ARRAY as _ARRAY,
+    CARRIER as _CARRIER,
+    FALLBACK as _FALLBACK,
+    profile as _profile,
+    review as _review,
+    scripted_runner as _runner,
 )
-
-
-def _profile(*, fallback: bool) -> ReviewProfile:
-    return ReviewProfile(
-        name="reviewer",
-        carrier=(_CARRIER,),
-        fallback=(_FALLBACK,) if fallback else None,
-        rulebook_text="",
-        chunk_lines=600,
-        timeout_seconds=5.0,
-        fallback_timeout_seconds=5.0,
-        max_attempts=3,
-        parallel=1,
-    )
-
-
-def _runner(scripts: dict[str, list]):
-    """Each call to an engine pops its next scripted step: an exception
-    instance is raised, a (code, stdout, stderr) tuple is returned."""
-    calls: list[str] = []
-
-    def run(argv, *, input, capture_output, timeout, cwd):
-        name = argv[0]
-        calls.append(name)
-        step = scripts[name].pop(0)
-        if isinstance(step, BaseException):
-            raise step
-        code, stdout, stderr = step
-        return subprocess.CompletedProcess(argv, code, stdout.encode(), stderr.encode())
-
-    run.calls = calls
-    return run
-
-
-def _review(tmp_path, scripts, *, fallback: bool):
-    chunk = plan_chunks(make_diff({"a.py": 3}), 600)[0]
-    runner = _runner(scripts)
-    record = review_chunk(
-        chunk, 1, _profile(fallback=fallback), attempts_before=0, cwd=tmp_path, runner=runner
-    )
-    return record, runner
 
 
 def test_a_carrier_that_vanishes_during_the_format_reprompt_hands_the_chunk_to_the_fallback(

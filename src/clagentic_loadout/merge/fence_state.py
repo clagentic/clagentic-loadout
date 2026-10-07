@@ -17,6 +17,22 @@ Fields (all optional; fence_schema_version 2 whenever any is present):
                                          per scanner: ran, not_applicable,
                                          not_invoked or failed
 
+EVIDENCE fields ride in the same tool-built fence but are not state: they hold
+no finding open and clear none, so they never change the fence schema version
+and the merge gate does not read them. They are machine-readable copies of what
+the verdict prose shows:
+
+  failure_sequences [{file, line, rule_id, failure_sequence}]
+                                         the trigger steps and damage of each
+                                         blocking finding that stated them
+  dropped           [{file, line, rule_id, message, reason}]
+                                         candidates the reviewer examined and
+                                         dropped, each with the reason
+  range             {basis, base|since, head}
+                                         the commit range the review covered
+  engines           [{engine, model, reason, chunks}]
+                                         which engine answered the run's chunks
+
 COMPATIBILITY. A version-1 fence (no state fields) stays valid and readable.
 It reads as "no findings asserted open at that fence", never as an error: an
 absent field is silence, not a malformed verdict.
@@ -52,6 +68,21 @@ KEY_SCANNERS_RUN = "scanners_run"
 
 #: The caller-suppliable state fields, in the order they render.
 STATE_KEYS = (KEY_FINDINGS_OPEN, KEY_SUPERSEDES, KEY_CLEARED_CLAIMS, KEY_SCANNERS_RUN)
+
+KEY_FAILURE_SEQUENCES = "failure_sequences"
+KEY_DROPPED = "dropped"
+KEY_RANGE = "range"
+KEY_ENGINES = "engines"
+
+#: The caller-suppliable evidence fields, in the order they render. Kept apart
+#: from STATE_KEYS on purpose: the gate's "does this fence assert state" logic
+#: reads STATE_KEYS only.
+EVIDENCE_KEYS = (KEY_FAILURE_SEQUENCES, KEY_DROPPED, KEY_RANGE, KEY_ENGINES)
+
+RANGE_BASIS_BASE_HEAD = "base..head"
+RANGE_BASIS_SINCE = "since"
+ENGINE_CARRIER = "carrier"
+ENGINE_FALLBACK = "fallback"
 
 SCANNER_RAN = "ran"
 SCANNER_NOT_APPLICABLE = "not_applicable"
@@ -136,10 +167,103 @@ def index_scanners(entries: Iterable[Mapping[str, Any]]) -> dict[str, Mapping[st
     return indexed
 
 
+def _line_number(value: Any, where: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"{where} must be an integer of 1 or greater, got {value!r}")
+    return value
+
+
+def _normalize_failure_sequences(value: Any) -> list[dict[str, Any]]:
+    rendered = []
+    for index, entry in enumerate(_entries(value, KEY_FAILURE_SEQUENCES)):
+        where = f"{KEY_FAILURE_SEQUENCES}[{index}]"
+        _exact_keys(entry, ("file", "line", "rule_id", "failure_sequence"), where)
+        rendered.append(
+            {
+                "file": _text(entry.get("file"), f"{where}.file"),
+                "line": _line_number(entry.get("line"), f"{where}.line"),
+                "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+                "failure_sequence": _text(
+                    entry.get("failure_sequence"), f"{where}.failure_sequence", single_line=False
+                ),
+            }
+        )
+    return rendered
+
+
+def _normalize_dropped(value: Any) -> list[dict[str, Any]]:
+    rendered = []
+    for index, entry in enumerate(_entries(value, KEY_DROPPED)):
+        where = f"{KEY_DROPPED}[{index}]"
+        _exact_keys(entry, ("file", "line", "rule_id", "message", "reason"), where)
+        rendered.append(
+            {
+                "file": _text(entry.get("file"), f"{where}.file"),
+                "line": _line_number(entry.get("line"), f"{where}.line"),
+                "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+                "message": _text(entry.get("message"), f"{where}.message", single_line=False),
+                "reason": _text(entry.get("reason"), f"{where}.reason", single_line=False),
+            }
+        )
+    return rendered
+
+
+def _normalize_range(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{KEY_RANGE} must be a JSON object, got {type(value).__name__}")
+    basis = value.get("basis")
+    if basis == RANGE_BASIS_BASE_HEAD:
+        _exact_keys(value, ("basis", "base", "head"), KEY_RANGE)
+        return {
+            "basis": basis,
+            "base": _head(value.get("base"), f"{KEY_RANGE}.base"),
+            "head": _head(value.get("head"), f"{KEY_RANGE}.head"),
+        }
+    if basis == RANGE_BASIS_SINCE:
+        _exact_keys(value, ("basis", "since", "head"), KEY_RANGE)
+        return {
+            "basis": basis,
+            "since": _head(value.get("since"), f"{KEY_RANGE}.since"),
+            "head": _head(value.get("head"), f"{KEY_RANGE}.head"),
+        }
+    raise ValueError(
+        f"{KEY_RANGE}.basis must be {RANGE_BASIS_BASE_HEAD!r} or {RANGE_BASIS_SINCE!r}, "
+        f"got {basis!r}"
+    )
+
+
+def _normalize_engines(value: Any) -> list[dict[str, Any]]:
+    rendered = []
+    seen: set[tuple[Any, ...]] = set()
+    for index, entry in enumerate(_entries(value, KEY_ENGINES)):
+        where = f"{KEY_ENGINES}[{index}]"
+        _exact_keys(entry, ("engine", "model", "reason", "chunks"), where)
+        engine = entry.get("engine")
+        if engine not in (ENGINE_CARRIER, ENGINE_FALLBACK):
+            raise ValueError(
+                f"{where}.engine must be {ENGINE_CARRIER!r} or {ENGINE_FALLBACK!r}, got {engine!r}"
+            )
+        item: dict[str, Any] = {"engine": engine}
+        for key in ("model", "reason"):
+            if key in entry:
+                item[key] = _text(entry[key], f"{where}.{key}")
+        if "chunks" in entry:
+            item["chunks"] = _line_number(entry["chunks"], f"{where}.chunks")
+        identity = (engine, item.get("model"), item.get("reason"))
+        if identity in seen:
+            raise ValueError(f"{where} repeats engine {engine!r} with the same model and reason")
+        seen.add(identity)
+        rendered.append(item)
+    return rendered
+
+
 def normalize_findings_state(
     raw: Mapping[str, Any] | None, *, head_sha: str, review_status: str
 ) -> dict[str, Any]:
     """Validate caller-supplied state and return the fence fields to render.
+
+    Evidence fields (EVIDENCE_KEYS) are validated and returned beside the
+    state fields; only a state field raises the fence schema version.
 
     Returns an empty dict for None or an empty mapping, the two spellings of
     "no state supplied", so a caller that supplies none produces exactly the
@@ -153,9 +277,10 @@ def normalize_findings_state(
         raise ValueError(f"findings state must be a JSON object, got {type(raw).__name__}")
     if not raw:
         return {}
-    unknown = sorted(set(raw) - set(STATE_KEYS))
+    allowed = (*STATE_KEYS, *EVIDENCE_KEYS)
+    unknown = sorted(set(raw) - set(allowed))
     if unknown:
-        raise ValueError(f"findings state has unknown field(s) {unknown}; allowed: {list(STATE_KEYS)}")
+        raise ValueError(f"findings state has unknown field(s) {unknown}; allowed: {list(allowed)}")
 
     # A key that is present is validated, whatever its value: an explicit null
     # is malformed input, never a synonym for "not supplied".
@@ -239,6 +364,15 @@ def normalize_findings_state(
 
     if out:
         out[KEY_FENCE_SCHEMA_VERSION] = FENCE_SCHEMA_VERSION
+
+    if KEY_FAILURE_SEQUENCES in raw:
+        out[KEY_FAILURE_SEQUENCES] = _normalize_failure_sequences(raw[KEY_FAILURE_SEQUENCES])
+    if KEY_DROPPED in raw:
+        out[KEY_DROPPED] = _normalize_dropped(raw[KEY_DROPPED])
+    if KEY_RANGE in raw:
+        out[KEY_RANGE] = _normalize_range(raw[KEY_RANGE])
+    if KEY_ENGINES in raw:
+        out[KEY_ENGINES] = _normalize_engines(raw[KEY_ENGINES])
     return out
 
 
@@ -301,7 +435,77 @@ def unresolved_prior_findings(
     return [f for fid, f in still_open.items() if fid not in cleared_now and fid not in raised_now]
 
 
+_SHORT_SHA = 12
+
+
+def render_range(value: Mapping[str, Any]) -> str:
+    """The verdict line for a normalized range: "range: base..head" with short
+    SHAs for a full review, "range: since <sha>" for a delta review."""
+    if value["basis"] == RANGE_BASIS_SINCE:
+        return f"range: since {value['since'][:_SHORT_SHA]}"
+    return f"range: {value['base'][:_SHORT_SHA]}..{value['head'][:_SHORT_SHA]}"
+
+
+def render_engines(entries: Iterable[Mapping[str, Any]]) -> str:
+    """The verdict line for normalized engine entries: "engine: carrier", or
+    "engine: carrier: <model>" when the carrier's model is known, or
+    "engine: fallback: <model>, reason <reason>" for a fallback run (the model
+    and the reason each only when known); several engines in one run are
+    joined with "; "."""
+    parts = []
+    for entry in entries:
+        if entry["engine"] == ENGINE_CARRIER:
+            parts.append(f"{ENGINE_CARRIER}: {entry['model']}" if entry.get("model") else ENGINE_CARRIER)
+            continue
+        label = f"{ENGINE_FALLBACK}: {entry['model']}" if entry.get("model") else ENGINE_FALLBACK
+        parts.append(f"{label}, reason {entry['reason']}" if entry.get("reason") else label)
+    return "engine: " + "; ".join(parts)
+
+
+def failure_sequences_of(findings: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The fence's machine-readable copy of each finding's failure_sequence:
+    one entry per finding that carries a non-empty one, in finding order. The
+    one place that decides which findings contribute, so the prose under a
+    bullet and the fence cannot disagree."""
+    return [
+        {
+            "file": finding.get("file"),
+            "line": finding.get("line"),
+            "rule_id": finding.get("rule_id"),
+            "failure_sequence": finding["failure_sequence"],
+        }
+        for finding in findings
+        if isinstance(finding.get("failure_sequence"), str) and finding["failure_sequence"].strip()
+    ]
+
+
+def with_derived_failure_sequences(
+    state: Mapping[str, Any] | None, findings: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """*state* as a new dict whose failure_sequences are those derived from
+    *findings*. A caller-staged copy is replaced (or removed when no finding
+    states a sequence), so the fence can never contradict the bullets."""
+    merged = {k: v for k, v in (state or {}).items() if k != KEY_FAILURE_SEQUENCES}
+    sequences = failure_sequences_of(findings)
+    if sequences:
+        merged[KEY_FAILURE_SEQUENCES] = sequences
+    return merged
+
+
 __all__ = [
+    "with_derived_failure_sequences",
+    "ENGINE_CARRIER",
+    "ENGINE_FALLBACK",
+    "EVIDENCE_KEYS",
+    "KEY_DROPPED",
+    "KEY_ENGINES",
+    "KEY_FAILURE_SEQUENCES",
+    "KEY_RANGE",
+    "RANGE_BASIS_BASE_HEAD",
+    "RANGE_BASIS_SINCE",
+    "failure_sequences_of",
+    "render_engines",
+    "render_range",
     "FENCE_SCHEMA_VERSION",
     "KEY_CLEARED_CLAIMS",
     "KEY_FENCE_SCHEMA_VERSION",

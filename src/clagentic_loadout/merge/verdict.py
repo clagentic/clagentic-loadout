@@ -100,6 +100,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -119,15 +120,22 @@ from clagentic_loadout.merge.errors import (
 )
 from clagentic_loadout.merge.fence_state import (
     KEY_CLEARED_CLAIMS,
+    KEY_DROPPED,
+    KEY_ENGINES,
     KEY_FINDINGS_OPEN,
+    KEY_RANGE,
     SCANNER_FAILED,
     FindingsState,
+    failure_sequences_of,
     has_findings_state,
     index_scanners,
     normalize_findings_state,
     raw_mentions_findings_state,
+    render_engines,
+    render_range,
     state_from_fence,
     unresolved_prior_findings,
+    with_derived_failure_sequences,
 )
 from clagentic_loadout.merge.fence_syntax import find_fence_syntax
 from clagentic_loadout.sha import FULL_SHA_RE, InvalidShaError, compare_sha_values, validate_sha
@@ -273,7 +281,14 @@ def build_findings_verdict_body(
     model_attested: OPTIONAL — see build_verdict_block's own docstring for
                      the full contract; passed through unchanged.
     findings_state: OPTIONAL — see build_verdict_block; passed through
-                     unchanged. Structured fields only, never prose.
+                     unchanged. Structured fields only, never prose. Its
+                     evidence fields are also rendered into the body: a
+                     "range:" and an "engine:" line under the header, and a
+                     "Dropped candidates" section (counted in the header)
+                     after the bullets. A finding's optional
+                     'failure_sequence' string is rendered under its bullet;
+                     the fence's copy of it comes from the caller's
+                     findings_state ('failure_sequences').
 
     Returns the constructed body string: a header line, one bullet per
     finding (in the order given), then build_verdict_block's fence.
@@ -307,14 +322,56 @@ def build_findings_verdict_body(
         for field in ("file", "rule_id", "message"):
             _reject_fence_delimiters(finding[field], idx, field)
 
+    for idx, finding in enumerate(findings):
+        sequence = finding.get("failure_sequence")
+        if sequence is None:
+            continue
+        if not isinstance(sequence, str):
+            raise ValueError(
+                f"findings[{idx}]['failure_sequence'] must be a string when present, "
+                f"got {type(sequence).__name__}"
+            )
+        _reject_fence_delimiters(sequence, idx, "failure_sequence")
+
+    # The fence's copy of each failure sequence is always derived from the
+    # findings, replacing any staged copy, so the fence cannot contradict the
+    # bullets it sits under.
+    if findings_state is None or isinstance(findings_state, Mapping):
+        findings_state = with_derived_failure_sequences(findings_state, findings)
+    # Evidence is rendered from the same normalized fields the fence carries,
+    # so the prose and the machine-readable copy are one source.
+    evidence = normalize_findings_state(
+        findings_state, head_sha=head_sha, review_status=review_status
+    )
+    dropped = evidence.get(KEY_DROPPED, [])
+
     status_label = "clean" if review_status == "clean" else "blocking"
-    header = f"{reviewer.upper()} — {status_label} ({len(findings)} finding(s))"
-    lines = [header]
+    counts = f"{len(findings)} finding(s)"
+    if dropped:
+        counts += f", {len(dropped)} dropped"
+    lines = [f"{reviewer.upper()} — {status_label} ({counts})"]
+    if KEY_RANGE in evidence:
+        lines.append(render_range(evidence[KEY_RANGE]))
+    if KEY_ENGINES in evidence:
+        lines.append(render_engines(evidence[KEY_ENGINES]))
     for finding in findings:
         lines.append(
             f"- {finding['file']}:{finding['line']} [{finding['rule_id']}] "
             f"{finding['message']}"
         )
+        sequence = finding.get("failure_sequence")
+        if isinstance(sequence, str) and sequence.strip():
+            first, *rest = sequence.strip().splitlines()
+            lines.append(f"  failure sequence: {first}")
+            lines.extend(f"    {line}" for line in rest)
+    if dropped:
+        lines.append("")
+        lines.append(f"Dropped candidates ({len(dropped)}):")
+        for entry in dropped:
+            lines.append(
+                f"- {entry['file']}:{entry['line']} [{entry['rule_id']}] "
+                f"{entry['message']} (reason: {entry['reason']})"
+            )
     prose = "\n".join(lines)
     fence = build_verdict_block(
         reviewer, review_status, head_sha, pr_number, model_attested, findings_state

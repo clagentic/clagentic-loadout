@@ -43,10 +43,21 @@ from clagentic_loadout.platform_detect import (
     PlatformResolutionError,
     resolve_platform,
 )
-from clagentic_loadout.merge.fence_state import normalize_findings_state
+from clagentic_loadout.merge.fence_state import (
+    EVIDENCE_KEYS,
+    KEY_DROPPED,
+    KEY_FAILURE_SEQUENCES,
+    failure_sequences_of,
+    normalize_findings_state,
+)
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.delta import resolve_delta
-from clagentic_loadout.review.findings_contract import InvalidReplyError, validate_finding
+from clagentic_loadout.review.findings_contract import (
+    KEY_FAILURE_SEQUENCE,
+    InvalidReplyError,
+    validate_finding,
+)
+from clagentic_loadout.review.run_evidence import evidence_from_document
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
     ReviewProfileError,
@@ -106,6 +117,8 @@ _GIT_PROBE_TIMEOUT_SECONDS = 10
 RUN_ROOT_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT"
 _STATUSES = ("clean", "blocking")
 _FINDING_KEYS = ("file", "line", "rule_id", "message")
+#: Carried to the posted body only when the finding has them.
+_OPTIONAL_FINDING_KEYS = (KEY_FAILURE_SEQUENCE,)
 
 
 class ReviewCliError(Exception):
@@ -256,6 +269,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "'scanners_run' (scanner, status, reason). Rendered by the tool inside "
         "the fence, never as body text; every field is optional. A cleared "
         "claim's head must be this review's head.",
+    )
+    post.add_argument(
+        "--dropped",
+        default=None,
+        help="JSON file listing the candidate findings the reviewer examined "
+        "and dropped: an array (or an object with a 'dropped' array) of "
+        "objects with 'file', 'line', 'rule_id', 'message' and 'reason'. "
+        "Shown in a 'Dropped candidates' section, counted in the verdict "
+        "header, and copied into the fence. Dropped candidates are never "
+        "findings and do not change the verdict.",
     )
     return parser
 
@@ -479,11 +502,14 @@ def _load_findings(
     pr_number: int,
     head_sha_arg: str | None,
     head_flag: str,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Read a findings file (a `run` output or a bare array) for this PR and
-    return its head SHA and its findings, validated by the shared findings
+    return its head SHA, its findings, and the run evidence (commit range and
+    engines) a `run` output records, validated by the shared findings
     contract. Severity is optional and matched ignoring case, since a person
-    may have edited the file; messages are kept whole."""
+    may have edited the file; messages are kept whole. A bare array has no
+    run record, so its evidence is empty."""
+    evidence: dict[str, Any] = {}
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -507,6 +533,7 @@ def _load_findings(
                 f"in the findings file {path!r}; drop {head_flag} or regenerate the findings",
                 EXIT_FINDINGS_INVALID,
             )
+        evidence = evidence_from_document(data)
     else:
         head_sha = head_sha_arg
         findings = data
@@ -528,7 +555,27 @@ def _load_findings(
             )
         except InvalidReplyError as exc:
             _fail(str(exc), EXIT_FINDINGS_INVALID)
-    return head_sha, validated
+    return head_sha, validated, evidence
+
+
+def _load_dropped(path: str) -> list[dict[str, Any]]:
+    """Read the --dropped file: an array of dropped candidates, or an object
+    holding one under 'dropped'. Field validation (types, one-line fields, no
+    fence syntax) is the fence state validator's, run with the rest of the
+    evidence before any I/O; this only settles the file's shape."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        _fail(f"cannot read dropped file {path!r}: {exc}", EXIT_FINDINGS_INVALID)
+    if isinstance(data, dict):
+        data = data.get(KEY_DROPPED)
+    if not isinstance(data, list):
+        _fail(
+            f"dropped file {path!r} must be a JSON array of dropped candidates "
+            "(or an object with a 'dropped' array)",
+            EXIT_FINDINGS_INVALID,
+        )
+    return data
 
 
 def _load_prior_review(
@@ -546,7 +593,7 @@ def _load_prior_review(
                 EXIT_USAGE,
             )
         return args.prior_head_sha, []
-    head_sha, findings = _load_findings(
+    head_sha, findings, _ = _load_findings(
         args.prior_findings, owner=owner, repo=repo, pr_number=args.pr,
         head_sha_arg=args.prior_head_sha, head_flag="--prior-head-sha",
     )
@@ -583,10 +630,14 @@ def _post_command(
     opener,
     identity_provider,
 ) -> int:
-    head_sha, findings = _load_findings(
+    head_sha, findings, evidence = _load_findings(
         args.findings, owner=owner, repo=repo, pr_number=args.pr,
         head_sha_arg=args.head_sha, head_flag="--head-sha",
     )
+    if args.dropped:
+        dropped = _load_dropped(args.dropped)
+        if dropped:
+            evidence = {**evidence, KEY_DROPPED: dropped}
     if args.status == "clean" and any(f["severity"] == "blocking" for f in findings):
         _fail(
             "--status clean contradicts the findings file, which carries a blocking finding; "
@@ -605,6 +656,13 @@ def _post_command(
                 f"state file {args.state_file!r} must be a JSON object",
                 EXIT_FINDINGS_INVALID,
             )
+        derived = sorted(set(loaded) & set(EVIDENCE_KEYS))
+        if derived:
+            _fail(
+                f"state file {args.state_file!r} carries {derived}, which this verb derives "
+                "from the findings, the run record and --dropped; remove them from the state file",
+                EXIT_FINDINGS_INVALID,
+            )
         state = loaded
         # Validated here as well as when the fence is built, so a bad state
         # file fails before any I/O instead of after the head re-check.
@@ -612,6 +670,18 @@ def _post_command(
             normalize_findings_state(state, head_sha=head_sha, review_status=args.status)
         except ValueError as exc:
             _fail(f"state file {args.state_file!r}: {exc}", EXIT_FINDINGS_INVALID)
+
+    # The evidence is validated for the same reason: a malformed dropped
+    # candidate or a fence-shaped sequence fails here, before any I/O.
+    sequences = failure_sequences_of(findings)
+    try:
+        normalize_findings_state(
+            {**evidence, **({KEY_FAILURE_SEQUENCES: sequences} if sequences else {})},
+            head_sha=head_sha,
+            review_status=args.status,
+        )
+    except ValueError as exc:
+        _fail(f"findings evidence: {exc}", EXIT_FINDINGS_INVALID)
 
     def assert_head_unmoved() -> None:
         live = _acquire(
@@ -629,8 +699,12 @@ def _post_command(
 
     body = {
         "review_status": args.status,
-        "findings": [{k: f[k] for k in _FINDING_KEYS} for f in _render_for_post(findings)],
+        "findings": [
+            {k: f[k] for k in (*_FINDING_KEYS, *_OPTIONAL_FINDING_KEYS) if k in f}
+            for f in _render_for_post(findings)
+        ],
         **state,
+        **evidence,
     }
     try:
         stage_caller_body(
@@ -718,6 +792,8 @@ def _post_command(
         "verified_by_login": posted.get("verified_by_login"),
         "verdict_block_verified": True,
     }
+    if KEY_DROPPED in evidence:
+        result["dropped_count"] = len(evidence[KEY_DROPPED])
 
     # The late re-read above narrows the GitHub race but cannot close it: a
     # push can still land between that read and the post. The comment cannot

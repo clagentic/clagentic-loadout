@@ -30,13 +30,37 @@ _DEV_NULL = "/dev/null"
 
 
 @dataclass(frozen=True)
+class HunkSpan:
+    """The lines one hunk covers in one file, as inclusive ranges on both sides
+    of the diff: ``first``/``last`` in the new numbering, ``old_first``/
+    ``old_last`` in the old numbering."""
+
+    file: str
+    first: int
+    last: int
+    old_first: int
+    old_last: int
+
+
+@dataclass(frozen=True)
 class Chunk:
-    """One reviewable slice of a diff. ``index`` is 1-based."""
+    """One reviewable slice of a diff. ``index`` is 1-based. ``hunks`` lists
+    the hunks the chunk itself holds, which for a file split across chunks is
+    only that chunk's share of it."""
 
     index: int
     text: str
     files: tuple[str, ...]
     lines: int
+    hunks: tuple[HunkSpan, ...] = ()
+
+    def covers_prior_line(self, file: str, line: int) -> bool:
+        """True when *line* of *file*, numbered as in the diff's OLD side, lies
+        inside one of this chunk's hunks. A finding from an earlier review
+        carries the numbering of the head that review saw, which is the old
+        side of a since..head delta diff; matching it against new-side lines
+        would miss it whenever earlier insertions shifted the file."""
+        return any(s.file == file and s.old_first <= line <= s.old_last for s in self.hunks)
 
 
 @dataclass(frozen=True)
@@ -311,6 +335,46 @@ def _split_oversized_file(name: str, lines: list[str], max_lines: int) -> list[_
     return pieces
 
 
+def _hunk_spans(lines: tuple[str, ...], default_file: str) -> tuple[HunkSpan, ...]:
+    """The hunks in a chunk's lines, each with the file it belongs to. A span
+    keeps the two sides as separate ranges; a union would claim unchanged
+    lines between the two starts. A hunk whose header does not parse has no
+    span."""
+    spans: list[HunkSpan] = []
+    name = default_file
+    for position, line in enumerate(lines):
+        if line.startswith(_FILE_MARKER):
+            name = _file_name(line)
+            continue
+        if (
+            line.startswith("--- ")
+            and position + 2 < len(lines)
+            and lines[position + 1].startswith("+++ ")
+            and lines[position + 2].startswith(_HUNK_MARKER)
+        ):
+            name = _plain_name(line, lines[position + 1])
+            continue
+        match = _HUNK_HEADER_RE.match(line)
+        if match is None:
+            continue
+        old_start, old_count, new_start, new_count, _ = match.groups()
+        first, last = _side_range(int(new_start), new_count)
+        old_first, old_last = _side_range(int(old_start), old_count)
+        spans.append(HunkSpan(name, first, last, old_first, old_last))
+    return tuple(spans)
+
+
+def _side_range(start: int, count_text: str | None) -> tuple[int, int]:
+    """Inclusive line range one side of a hunk header covers. A zero-count side
+    (a pure deletion on the new side, a pure addition on the old side) has no
+    lines of its own; it is anchored at the line it sits next to."""
+    count = int(count_text) if count_text is not None else 1
+    if count > 0:
+        return start, start + count - 1
+    anchor = max(start, 1)
+    return anchor, anchor
+
+
 def _merge_tiny(pieces: list[_Piece], max_lines: int, min_lines: int) -> list[_Piece]:
     merged: list[_Piece] = []
     for piece in pieces:
@@ -370,6 +434,7 @@ def plan_chunks(diff_text: str, max_lines: int = DEFAULT_CHUNK_LINES) -> list[Ch
             text="\n".join(piece.lines) + "\n",
             files=tuple(dict.fromkeys(piece.files)),
             lines=len(piece.lines),
+            hunks=_hunk_spans(piece.lines, piece.files[0] if piece.files else ""),
         )
         for position, piece in enumerate(final, start=1)
     ]
