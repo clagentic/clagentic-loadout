@@ -18,12 +18,16 @@ run arbitrary code there (a Makefile, a git hook, a test file). It is not a
 credential-minting or cross-repo surface, so unlike the user-level-only
 `credentials:` tier it stays repo-local. Hardening that DOES apply: `argv` is
 an argument LIST executed without a shell (no expansion, no pipes, no
-injection through a branch name or PR title), and loadout does not add the
-minted push credential to the child's environment.
+injection through a branch name or PR title), and the child runs with an
+ALLOWLISTED environment (push.verify_run.build_child_env): the minted push
+credential is never added, and credential-shaped variables of the pushing
+process are not inherited. An entry may name further variables to pass
+through with `env_passthrough`.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,6 +59,12 @@ class VerifyEntry:
     name: str
     argv: tuple[str, ...]
     timeout_seconds: float
+    #: Names of extra environment variables copied into the child's
+    #: environment on top of the built-in allowlist (see push.verify_run).
+    env_passthrough: tuple[str, ...] = ()
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _parse_entry(raw: object, index: int, config_path: Path) -> VerifyEntry:
@@ -84,7 +94,19 @@ def _parse_entry(raw: object, index: int, config_path: Path) -> VerifyEntry:
             f"{where}.timeout_seconds must be a positive number, got {timeout!r}."
         )
 
-    return VerifyEntry(name=name.strip(), argv=tuple(argv), timeout_seconds=float(timeout))
+    passthrough = raw.get("env_passthrough", [])
+    if not isinstance(passthrough, list) or not all(
+        isinstance(n, str) and _ENV_NAME_RE.match(n) for n in passthrough
+    ):
+        raise InvalidVerifyConfigError(
+            f"{where}.env_passthrough must be a list of environment variable "
+            f"names, got {passthrough!r}."
+        )
+
+    return VerifyEntry(
+        name=name.strip(), argv=tuple(argv), timeout_seconds=float(timeout),
+        env_passthrough=tuple(passthrough),
+    )
 
 
 def load_verify_entries(

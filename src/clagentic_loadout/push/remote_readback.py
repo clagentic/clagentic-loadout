@@ -78,6 +78,11 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.push.git_push import (
+    GitVersionTooOldError,
+    RepoLocalConfigHazardError,
+    git_ls_remote_with_token,
+)
 from clagentic_loadout.sha import InvalidShaError, validate_sha
 
 #: Provenance tag stamped on every RemoteReadback this module produces. A
@@ -152,6 +157,8 @@ def read_remote_head(
     remote: str,
     ref: str,
     project_root: Path,
+    *,
+    token: str | None = None,
 ) -> RemoteReadback:
     """Read *ref*'s current SHA on *remote* via `git ls-remote` — an actual
     round-trip to the remote, never a local/cached value.
@@ -159,9 +166,12 @@ def read_remote_head(
     Works identically for a Forgejo or a GitHub remote: both are plain
     git-over-HTTP(S) for this purpose, and `git ls-remote` needs no
     platform-specific API call for the ref-advance half of the readback
-    (see module docstring). Credentials are whatever the calling process's
-    git/credential-helper state already has configured for *remote* at call
-    time — this function performs no separate auth of its own.
+    (see module docstring). With *token* the read runs through the same
+    credentialed, hermetic envelope the push used (push.git_push); without
+    it, credentials are whatever the calling process's git/credential-helper
+    state already has configured for *remote* at call time — a read that
+    cannot see a private remote then fails even though the push landed, so a
+    caller that pushed with a minted token should pass it.
 
     Raises RemoteReadbackError if the `git ls-remote` call itself fails
     (non-zero exit — network/transport/auth failure) or returns no line
@@ -170,9 +180,18 @@ def read_remote_head(
     to a local `git rev-parse` on any failure path — see module docstring,
     "ADDITIVE HALF ONLY."
     """
-    result = _run_git(
-        ["ls-remote", "--exit-code", remote, f"refs/heads/{ref}"], cwd=project_root
-    )
+    if token:
+        try:
+            result = git_ls_remote_with_token(remote, ref, token, project_root)
+        except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
+            raise RemoteReadbackError(
+                f"post-push remote readback FAILED -- hermeticity pre-flight "
+                f"refused the read: {exc}"
+            ) from exc
+    else:
+        result = _run_git(
+            ["ls-remote", "--exit-code", remote, f"refs/heads/{ref}"], cwd=project_root
+        )
     if result.returncode != 0:
         raise RemoteReadbackError(
             f"post-push remote readback FAILED -- `git ls-remote {remote} "

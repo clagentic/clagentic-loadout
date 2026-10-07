@@ -39,6 +39,7 @@ import subprocess
 import pytest
 
 from clagentic_loadout.push import verb
+from clagentic_loadout.push.contention_check import ContentionVerdict
 from clagentic_loadout.push.github_backend import GITHUB_API_BASE
 from clagentic_loadout.push.host_guard import (
     PUSH_HOST_CONFIG_KEY,
@@ -1216,24 +1217,57 @@ class TestContentionCheck:
         )
         assert code == verb.EXIT_OK
 
-    def test_enabled_matching_branch_refuses_before_token_resolution(
-        self, repo_with_remote, monkeypatch
+    def test_enabled_branch_being_pushed_is_never_refused(self, repo_with_remote, monkeypatch):
+        """The pushed branch is always the checked-out one, so it matches the
+        in-flight pattern on every push. It must not count as other work in
+        flight: no refusal, no override needed, and the push lands."""
+        repo, remote = repo_with_remote
+        self._write_config(repo, enabled=True, pattern=r"^feature")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_create_opener(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        branches = subprocess.run(
+            ["git", "branch"], cwd=str(remote), capture_output=True, text=True, check=True
+        ).stdout
+        assert "feature" in branches
+
+    def test_default_pattern_does_not_refuse_a_fresh_feature_branch(
+        self, repo_with_remote, monkeypatch, capsys
     ):
         repo, _remote = repo_with_remote
-        self._write_config(repo, enabled=True, pattern=r"^feature")
+        _git(["branch", "-m", "feature", "feat/x-fresh-branch"], repo)
+        self._write_config(repo, enabled=True)
 
         code = _run_main(
             ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
-            token_provider=_RefusingTokenProvider(),
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_create_opener(),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
         )
-        assert code == verb.EXIT_WORKING_TREE_CONTENTION
+        assert code == verb.EXIT_OK
+        assert "OVERRIDDEN" not in capsys.readouterr().err
 
-    def test_refusal_names_the_branch(self, repo_with_remote, monkeypatch, capsys):
+    def test_contention_found_refuses_before_token_resolution(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """A refusal still maps to its reserved exit code, before any token
+        is resolved, and names the branch it found."""
         repo, _remote = repo_with_remote
-        self._write_config(repo, enabled=True, pattern=r"^feature")
+        self._write_config(repo, enabled=True)
 
+        def _found(*_args, **_kwargs):
+            raise verb.WorkingTreeContentionError(
+                "working-tree contention detected: other-branch", branch="other-branch", dirty=False
+            )
+
+        monkeypatch.setattr(verb, "check_working_tree_contention", _found)
         code = _run_main(
             ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
             token_provider=_RefusingTokenProvider(),
@@ -1241,8 +1275,28 @@ class TestContentionCheck:
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_WORKING_TREE_CONTENTION
-        stderr = capsys.readouterr().err
-        assert "feature" in stderr
+        assert "other-branch" in capsys.readouterr().err
+
+    def test_verb_excludes_its_own_branch_from_the_check(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        self._write_config(repo, enabled=True)
+        seen: dict = {}
+        real = verb.check_working_tree_contention
+
+        def _spy(*args, **kwargs):
+            seen.update(kwargs)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(verb, "check_working_tree_contention", _spy)
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_create_opener(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert set(seen["own_branches"]) == {"refs/heads/feature"}
 
     def test_enabled_non_matching_branch_proceeds(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
@@ -1266,8 +1320,15 @@ class TestContentionCheck:
         repo, _remote = repo_with_remote
         provider = _RecordingTokenProvider()
         opener = _forgejo_create_opener()
-        self._write_config(repo, enabled=True, pattern=r"^feature")
+        self._write_config(repo, enabled=True)
 
+        def _overridden(*_args, **_kwargs):
+            return ContentionVerdict(
+                in_flight=True, overridden=True, branch="other-branch", dirty=False,
+                reason="other-branch matches the in-flight pattern",
+            )
+
+        monkeypatch.setattr(verb, "check_working_tree_contention", _overridden)
         code = _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
@@ -3785,6 +3846,75 @@ class TestKnownTrapPrCreate409:
         err = capsys.readouterr().err
         assert "already landed" in err
         assert "may mean a PR for this head/base pair already exists" in err
+
+    @staticmethod
+    def _conflict_opener():
+        def opener(req, timeout=15):
+            import urllib.error
+
+            if req.get_method() == "POST" and req.full_url.endswith("/pulls"):
+                raise urllib.error.HTTPError(
+                    req.full_url, 422, "Unprocessable",
+                    {}, io.BytesIO(b'{"message": "pull request already exists"}'),
+                )
+            raise AssertionError(f"unexpected: {req.get_method()} {req.full_url}")
+
+        return opener
+
+    def _create_argv(self, repo):
+        return [
+            "--repo-path", str(repo), "--platform", "github",
+            "--repo", "some-owner/some-repo", "--title", "feat: t", "--body-stdin",
+        ]
+
+    def test_readback_is_read_with_the_minted_token(self, tmp_path, monkeypatch):
+        """The readback must use the push credential; an ambient read cannot
+        see a private remote and left a landed push unconfirmed."""
+        repo, _remote = _repo_with_directly_resolvable_remote(tmp_path)
+        seen: dict = {}
+        real = verb.read_remote_head
+
+        def _spy(remote, ref, root, *, token=None):
+            seen["token"] = token
+            return real(remote, ref, root, token=token)
+
+        monkeypatch.setattr(verb, "read_remote_head", _spy)
+        code = _run_main(
+            self._create_argv(repo),
+            token_provider=_RecordingTokenProvider("tok-readback"),
+            opener=self._conflict_opener(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PR_FAILED
+        assert seen["token"] == "tok-readback"
+
+    def test_unconfirmed_readback_still_says_the_push_landed(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """When the readback itself fails, the exit-4 artifact must still not
+        read as a total failure: git push exited 0 before the PR call."""
+        repo, remote = _repo_with_directly_resolvable_remote(tmp_path)
+
+        def _unreadable(*_a, **_k):
+            raise verb.RemoteReadbackError("could not read the remote")
+
+        monkeypatch.setattr(verb, "read_remote_head", _unreadable)
+        code = _run_main(
+            self._create_argv(repo),
+            token_provider=_RecordingTokenProvider(),
+            opener=self._conflict_opener(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PR_FAILED
+        branches = subprocess.run(
+            ["git", "branch"], cwd=str(remote), capture_output=True, text=True, check=True
+        ).stdout
+        assert "feature" in branches
+        err = capsys.readouterr().err
+        assert "push landed" in err
+        assert "do not treat this exit as a failed push" in err
 
 
 class TestBodyEnvUnwrapsJsonEnvelope:

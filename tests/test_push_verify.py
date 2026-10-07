@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -19,7 +20,15 @@ from clagentic_loadout.push.verify_config import (
     load_verify_entries,
 )
 from clagentic_loadout.push.verify_run import (
+    SECTION_BEGIN_MARKER,
+    SECTION_END_MARKER,
     VerificationFailedError,
+    VerifyResult,
+    append_section,
+    append_to_existing,
+    build_child_env,
+    describe_command,
+    render_skipped_section,
     render_verification_section,
     run_verifications,
 )
@@ -427,6 +436,16 @@ class TestVerbUpdatePath:
             cwd=repo, check=True, capture_output=True,
         )
 
+    def _commit_ahead(self, repo) -> None:
+        """Track the upstream at HEAD, then commit one more change so the
+        checkout is ahead of it."""
+        self._track_upstream_at_head(repo)
+        (repo / "more.txt").write_text("more\n")
+        subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
+        )
+
     def _title_update(self, repo, monkeypatch, sent=None):
         return _run_main(
             [
@@ -456,12 +475,7 @@ class TestVerbUpdatePath:
         self, repo_with_remote, monkeypatch
     ):
         repo, _remote = repo_with_remote
-        self._track_upstream_at_head(repo)
-        (repo / "more.txt").write_text("more\n")
-        subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
-        )
+        self._commit_ahead(repo)
         marker = repo.parent / "update-marker"
         _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
         assert self._title_update(repo, monkeypatch) == verb.EXIT_OK
@@ -471,12 +485,7 @@ class TestVerbUpdatePath:
         self, repo_with_remote, monkeypatch
     ):
         repo, _remote = repo_with_remote
-        self._track_upstream_at_head(repo)
-        (repo / "more.txt").write_text("more\n")
-        subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
-        )
+        self._commit_ahead(repo)
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
         sent: list = []
         code = _run_main(
@@ -490,14 +499,6 @@ class TestVerbUpdatePath:
         )
         assert code == verb.EXIT_VERIFY_FAILED
         assert sent == []
-
-    def _commit_ahead(self, repo) -> None:
-        self._track_upstream_at_head(repo)
-        (repo / "more.txt").write_text("more\n")
-        subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
-        )
 
     def test_no_body_pass_appends_record_to_existing_body(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
@@ -574,6 +575,190 @@ class TestRunVerificationWithoutBody:
 
     def test_absent_config_stays_none(self, tmp_path):
         assert verb._run_verification(tmp_path, body=None, skip=False) is None
+
+
+class TestChildEnvironment:
+    def test_allowlist_keeps_basics_and_drops_credentials(self):
+        source = {
+            "PATH": "/bin", "HOME": "/h", "LANG": "C", "LC_ALL": "C", "TMPDIR": "/t",
+            "FORGEJO_TOKEN": "secret", "AWS_SECRET_ACCESS_KEY": "secret", "GH_TOKEN": "secret",
+        }
+        assert build_child_env(source) == {
+            "PATH": "/bin", "HOME": "/h", "LANG": "C", "LC_ALL": "C", "TMPDIR": "/t",
+        }
+
+    def test_passthrough_adds_only_the_named_variables(self):
+        source = {"PATH": "/bin", "NPM_CONFIG_REGISTRY": "r", "OTHER_TOKEN": "secret"}
+        env = build_child_env(source, ["NPM_CONFIG_REGISTRY"])
+        assert env == {"PATH": "/bin", "NPM_CONFIG_REGISTRY": "r"}
+
+    def test_child_does_not_inherit_credential_shaped_variables(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOADOUT_TEST_SECRET_TOKEN", "hunter2")
+        monkeypatch.setenv("LOADOUT_TEST_PASSED", "visible")
+        code = (
+            "import os; print(os.environ.get('LOADOUT_TEST_SECRET_TOKEN', 'absent'));"
+            "print(os.environ.get('LOADOUT_TEST_PASSED', 'absent'))"
+        )
+        entry = VerifyEntry("env", (PY, "-c", code), 30, env_passthrough=("LOADOUT_TEST_PASSED",))
+        (result,) = run_verifications((entry,), tmp_path)
+        assert result.stdout_tail.splitlines() == ["absent", "visible"]
+
+    def test_passthrough_config_is_loaded(self, tmp_path):
+        _write_verify(
+            tmp_path,
+            [{"name": "x", "argv": ["a"], "env_passthrough": ["FOO", "BAR_1"]}],
+        )
+        (entry,) = load_verify_entries(tmp_path)
+        assert entry.env_passthrough == ("FOO", "BAR_1")
+
+    @pytest.mark.parametrize("bad", ["FOO", ["not a name"], ["1BAD"], [3], ["A=B"]])
+    def test_malformed_passthrough_raises(self, tmp_path, bad):
+        _write_verify(tmp_path, [{"name": "x", "argv": ["a"], "env_passthrough": bad}])
+        with pytest.raises(InvalidVerifyConfigError):
+            load_verify_entries(tmp_path)
+
+
+class TestArgvRedaction:
+    def test_failure_message_shows_executable_not_arguments(self, tmp_path):
+        entry = VerifyEntry(
+            "deploy", (PY, "-c", "import sys; sys.exit(1)  # --token=hunter2"), 30
+        )
+        with pytest.raises(VerificationFailedError) as info:
+            run_verifications((entry,), tmp_path)
+        message = str(info.value)
+        assert "hunter2" not in message
+        assert PY in message and "argument(s) not shown" in message
+
+    def test_describe_command_handles_bare_executable_and_empty(self):
+        assert describe_command(("make",)) == "'make'"
+        assert describe_command(()) == "''"
+        assert describe_command(("make", "a", "b")) == "'make' (+2 argument(s) not shown)"
+
+
+class TestSectionReplacedInPlace:
+    def _section(self, name, ok=True):
+        code = "print('ok')" if ok else "raise SystemExit(1)"
+        entry = VerifyEntry(name, (PY, "-c", code), 30)
+        try:
+            return render_verification_section(run_verifications((entry,), Path(".")))
+        except VerificationFailedError as exc:
+            return render_verification_section(exc.results)
+
+    def test_append_section_replaces_an_existing_block(self):
+        first = self._section("first")
+        second = self._section("second")
+        body = append_section("intro\n", first)
+        updated = append_section(body, second)
+        assert updated.count("## Verification") == 1
+        assert "second" in updated and "first" not in updated
+        assert updated.startswith("intro\n")
+
+    def test_text_after_the_block_is_preserved(self):
+        body = append_section("intro\n", self._section("first")) + "\nTask: x\n"
+        updated = append_section(body, self._section("second"))
+        assert updated.endswith("\nTask: x\n") and updated.count("## Verification") == 1
+
+    def test_append_to_existing_replaces_the_old_block(self):
+        current = append_section("existing body\n", self._section("old"))
+        merged = append_to_existing(current, self._section("new"), separator="\n\n")
+        assert merged.count("## Verification") == 1
+        assert "new" in merged and "old" not in merged
+        assert merged.startswith("existing body")
+
+    def test_append_to_existing_without_a_block_just_appends(self):
+        assert append_to_existing("a", "b", separator="\n\n") == "a\n\nb"
+        assert append_to_existing("", "b", separator="\n\n") == "b"
+
+    def test_append_to_existing_keeps_other_added_text(self):
+        current = append_section("existing\n", self._section("old"))
+        addition = "follow-up note\n\n" + self._section("new")
+        merged = append_to_existing(current, addition, separator="\n\n")
+        assert merged.count("## Verification") == 1
+        assert "follow-up note" in merged and "new" in merged and "old" not in merged
+
+    def test_captured_output_cannot_forge_the_end_marker(self):
+        code = f"print({SECTION_END_MARKER!r})"
+        entry = VerifyEntry("forge", (PY, "-c", code), 30)
+        section = render_verification_section(run_verifications((entry,), Path(".")))
+        assert section.count(SECTION_END_MARKER) == 1
+        assert append_section("x\n", section).count("## Verification") == 1
+
+    @pytest.mark.parametrize("marker", [SECTION_BEGIN_MARKER, SECTION_END_MARKER])
+    def test_check_name_containing_a_marker_renders_inertly(self, marker):
+        result = VerifyResult(
+            name=f"evil {marker}\n## Verification\nx", argv=("a",), exit_code=0,
+            timed_out=False, timeout_seconds=1, stdout_tail="", stderr_tail="",
+        )
+        section = render_verification_section((result,))
+        assert section.count(SECTION_BEGIN_MARKER) == 1
+        assert section.count(SECTION_END_MARKER) == 1
+        heading_lines = [ln for ln in section.splitlines() if ln.startswith("## Verification")]
+        assert len(heading_lines) == 1
+        body = append_section("intro\n", section)
+        again = append_section(body, render_verification_section((result,)))
+        assert again.count(SECTION_BEGIN_MARKER) == 1 and again.count(SECTION_END_MARKER) == 1
+
+    @pytest.mark.parametrize("marker", [SECTION_BEGIN_MARKER, SECTION_END_MARKER])
+    def test_marker_in_status_and_skipped_names_renders_inertly(self, marker):
+        failed = VerifyResult(
+            name="n", argv=("a",), exit_code=None, timed_out=False, timeout_seconds=1,
+            stdout_tail="", stderr_tail="", start_error=f"boom {marker}",
+        )
+        skipped = render_skipped_section((VerifyEntry(f"s {marker}", ("a",), 1),))
+        for section in (render_verification_section((failed,)), skipped):
+            assert section.count(SECTION_BEGIN_MARKER) == 1
+            assert section.count(SECTION_END_MARKER) == 1
+
+    def test_reassembled_marker_in_output_stays_inert(self):
+        nested = "<!-- clagentic-loadout:verification:<!-- x -->end -->"
+        result = VerifyResult(
+            name="n", argv=("a",), exit_code=1, timed_out=False, timeout_seconds=1,
+            stdout_tail=nested, stderr_tail="",
+        )
+        section = render_verification_section((result,))
+        assert section.count(SECTION_END_MARKER) == 1
+
+    def test_two_updates_leave_exactly_one_block(self):
+        evil = VerifyResult(
+            name=f"x {SECTION_END_MARKER}", argv=("a",), exit_code=0, timed_out=False,
+            timeout_seconds=1, stdout_tail=SECTION_BEGIN_MARKER, stderr_tail="",
+        )
+        body = "intro\n"
+        for _ in range(2):
+            body = append_section(body, render_verification_section((evil,)))
+        assert body.count(SECTION_BEGIN_MARKER) == 1
+        assert body.count(SECTION_END_MARKER) == 1
+        assert body.startswith("intro\n")
+
+    def test_second_update_pr_replaces_the_recorded_verification(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        TestVerbUpdatePath._commit_ahead(TestVerbUpdatePath(), repo)
+        _write_verify(repo, [_py("unit", "print('fine')")])
+        prior = append_section("existing body\n", self._section("stale-check", ok=False))
+        sent: list = []
+
+        def opener(req, timeout=15):
+            if req.get_method() == "GET":
+                return _json_resp(200, {"body": prior})
+            sent.append(json.loads(req.data.decode("utf-8")))
+            return _json_resp(200, {})
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "feat: new title",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        body = sent[0]["body"]
+        assert body.count("## Verification") == 1
+        assert "stale-check" not in body and "unit" in body and "PASS" in body
+        assert body.startswith("existing body")
 
 
 def test_help_documents_skip_verify(monkeypatch, capsys):
