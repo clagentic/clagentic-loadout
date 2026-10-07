@@ -1231,8 +1231,9 @@ pushed (after bot-identity re-authoring settles it), before any ref moves and be
 PR is created. Entries run in order and stop at the first failure. On `--update-pr` it
 runs whenever the update could carry new work: a body is being written, or the checkout
 has commits ahead of its upstream (or the upstream cannot be determined), in the
-checkout's current HEAD. With no body there is nowhere to record the outcome, so it is
-reported on stderr and a failure still refuses. Only a metadata-only update provably
+checkout's current HEAD. With no body supplied, the `## Verification` section (or the
+skip notice) is still written: it is appended to the PR's existing body, never replacing
+it, whatever body-mode flag was given. Only a metadata-only update provably
 without new commits skips, and it says so on stderr. `--dry-run` pushes nothing and does
 not run it.
 

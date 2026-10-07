@@ -307,6 +307,8 @@ class TestVerbCreatePath:
 class TestVerbUpdatePath:
     def _update_opener(self, captured: list):
         def opener(req, timeout=15):
+            if req.get_method() == "GET":
+                return _json_resp(200, {"body": "existing body"})
             if req.get_method() == "PATCH":
                 captured.append(json.loads(req.data.decode("utf-8")))
                 return _json_resp(200, {})
@@ -422,6 +424,61 @@ class TestVerbUpdatePath:
         assert code == verb.EXIT_VERIFY_FAILED
         assert sent == []
 
+    def _commit_ahead(self, repo) -> None:
+        self._track_upstream_at_head(repo)
+        (repo / "more.txt").write_text("more\n")
+        subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
+        )
+
+    def test_no_body_pass_appends_record_to_existing_body(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        self._commit_ahead(repo)
+        _write_verify(repo, [_py("unit", "print('fine')")])
+        sent: list = []
+        assert self._title_update(repo, monkeypatch, sent) == verb.EXIT_OK
+        body = sent[0]["body"]
+        assert body.startswith("existing body")
+        assert "## Verification" in body and "unit" in body and "PASS" in body
+
+    def test_no_body_fail_refuses_and_updates_nothing(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        self._commit_ahead(repo)
+        _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
+        sent: list = []
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "feat: new title",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            opener=self._update_opener(sent),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERIFY_FAILED
+        assert sent == []
+
+    def test_no_body_skip_verify_records_skip_in_body(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        self._commit_ahead(repo)
+        marker = repo.parent / "skip-marker"
+        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
+        sent: list = []
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "feat: new title", "--skip-verify",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=self._update_opener(sent),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert not marker.exists()
+        assert sent[0]["body"].startswith("existing body")
+        assert "SKIPPED" in sent[0]["body"] and "unit" in sent[0]["body"]
+
     def test_title_only_update_with_unknown_upstream_runs_verification(
         self, repo_with_remote, monkeypatch
     ):
@@ -430,6 +487,26 @@ class TestVerbUpdatePath:
         _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
         assert self._title_update(repo, monkeypatch) == verb.EXIT_OK
         assert marker.exists()
+
+
+class TestRunVerificationWithoutBody:
+    def test_pass_returns_section_alone(self, tmp_path):
+        _write_verify(tmp_path, [_py("unit", "print('ok')")])
+        out = verb._run_verification(tmp_path, body=None, skip=False)
+        assert out is not None and out.startswith("## Verification") and "PASS" in out
+
+    def test_skip_returns_skip_notice(self, tmp_path):
+        _write_verify(tmp_path, [_py("unit", "pass")])
+        out = verb._run_verification(tmp_path, body=None, skip=True)
+        assert out is not None and "SKIPPED" in out
+
+    def test_fail_raises(self, tmp_path):
+        _write_verify(tmp_path, [_py("unit", "raise SystemExit(1)")])
+        with pytest.raises(VerificationFailedError):
+            verb._run_verification(tmp_path, body=None, skip=False)
+
+    def test_absent_config_stays_none(self, tmp_path):
+        assert verb._run_verification(tmp_path, body=None, skip=False) is None
 
 
 def test_help_documents_skip_verify(monkeypatch, capsys):

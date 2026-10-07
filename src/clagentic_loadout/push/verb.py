@@ -1284,7 +1284,10 @@ def _run_verification(project_root: Path, *, body: str | None, skip: bool) -> st
     build without this feature, including when *skip* is set (there is
     nothing to skip, so nothing to record). With *skip*, no command runs; the
     bypass is logged to stderr and written into the returned body so a
-    reader of the PR can see it was not verified.
+    reader of the PR can see it was not verified. When *body* is None and
+    something ran or was skipped, the returned body is the section alone, so
+    the record is never lost; a caller that passed None must treat the result
+    as an addition to an existing body, not a replacement.
 
     Raises push.verify_config.InvalidVerifyConfigError for malformed config
     and push.verify_run.VerificationFailedError on the first failing check;
@@ -1300,13 +1303,19 @@ def _run_verification(project_root: Path, *, body: str | None, skip: bool) -> st
             f"(checks not run: {names})",
             file=sys.stderr,
         )
-        return None if body is None else append_section(body, render_skipped_section(entries))
+        return _with_section(body, render_skipped_section(entries))
     print(
         f"push: running {len(entries)} verification check(s) in {project_root}",
         file=sys.stderr,
     )
     results = run_verifications(entries, project_root)
-    return None if body is None else append_section(body, render_verification_section(results))
+    return _with_section(body, render_verification_section(results))
+
+
+def _with_section(body: str | None, section: str) -> str:
+    """*body* with *section* appended, or *section* alone when no body was
+    supplied -- a verification outcome is never dropped for want of a body."""
+    return section if body is None else append_section(body, section)
 
 
 def _resolve_repo_root(repo_path_override: str) -> Path:
@@ -2049,12 +2058,16 @@ def _run_update_pr(
     # body is being written, or the checkout holds commits (or an unknown
     # state) beyond its upstream. Only a metadata-only edit PROVABLY without
     # new commits skips, and says so. This path never pushes, so the
-    # checkout's HEAD is verified as-is; with no body there is nowhere to
-    # record the outcome, so it is reported on stderr and a failure refuses.
+    # checkout's HEAD is verified as-is. With no body supplied the record is
+    # still written: the section becomes the body and is APPENDED to the PR's
+    # existing one (never replacing it), whatever body-mode flag was given.
     ahead_state = _commits_ahead_of_upstream(project_root)
     has_new_commits = ahead_state is None or ahead_state[1] > 0
+    force_append = False
     if body is not None or has_new_commits:
+        body_supplied = body is not None
         body = _run_verification(project_root, body=body, skip=args.skip_verify)
+        force_append = body is not None and not body_supplied
     elif load_verify_entries(project_root):
         print(
             "push: push.verify checks SKIPPED -- metadata-only update with no "
@@ -2079,7 +2092,7 @@ def _run_update_pr(
     # is composed here, at the call site, not as a mode flag threaded into
     # either backend's update_pr().
     effective_body = body
-    if body is not None and args.append_body:
+    if body is not None and (args.append_body or force_append):
         try:
             if args.platform == PLATFORM_GITHUB:
                 current_body = github_backend.get_pr_body(owner, repo, args.pr_number, token=token, opener=opener)
