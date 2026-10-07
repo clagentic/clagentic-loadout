@@ -220,10 +220,10 @@ repo-local config home. A repo with no dispatcher re-deriving those flags
 from its own external config format LOST its merge gates the instant it
 switched to `.clagentic/loadout/config.yaml` alone.
 
-These sections close that gap — **schema and doctor validation only** (this
-task's scope); wiring `merge.verb`'s CLI to read these as its own flag
-DEFAULTS (so a bare `loadout-merge` invocation with no flags still enforces
-a repo's declared policy) is a named follow-up, not built into this slice.
+These sections close that gap. `loadout-merge` enforces
+`required_reviewer_roles` and `required_scanners` from this file at runtime;
+`merge_requirements` and `authorized_roles` are schema and doctor validation
+only, and wiring them as flag defaults is a named follow-up.
 
 **`required_reviewer_roles` absence is not symmetric with `authorized_roles`
 absence.** Once a repo's `merge:` section exists at all, omitting
@@ -333,8 +333,23 @@ comments never needs to declare it at all. See its own bullet below for the
   `--max-changed-files` supplies today). Each key is independent; a partial
   mapping keeps its own defaults for the keys it omits.
 - **`required_reviewer_roles`** — the release-gate reviewer-verdict
-  roster (role names, feeds `merge.verb`'s existing `--required-reviewer`
-  mechanism via `merge.reviewer_login.resolve_reviewer_login`).
+  roster (role names, resolved to logins via
+  `merge.reviewer_login.resolve_reviewer_login`). `loadout-merge` requires
+  these as a floor beneath `--required-reviewer`; see
+  [docs/merge-authority.md](merge-authority.md) for the unloadable-config
+  fallback and the `--ignore-repo-gate` escape hatch.
+- **`required_scanners`** — a mapping of reviewer role to scanner names. A
+  clean verdict from that role that reports one of them as `failed` in its
+  fence refuses the merge. `not_applicable` and `not_invoked` (with a reason)
+  are accepted. A clean verdict from a role that has an entry here, but that
+  records no outcome for one of the named scanners (no record at all, or a
+  partial record that omits one), refuses the merge naming the missing
+  record; for a role with no entry, no record only warns. `--ignore-repo-gate`
+  lifts this requirement along with the reviewer floor. Scanner names are
+  deployment vocabulary; none is built in. A malformed declaration drops the
+  whole repo gate config to flags-only with a warning (see
+  [docs/merge-authority.md](merge-authority.md)). Role and scanner names are
+  trimmed of surrounding whitespace on load.
 - **`authorized_roles`** — the merge-authority roster (role names, feeds
   `merge.authority.StaticRoleAuthorityProvider` exactly like the repeated
   `--authorized-role` flag does today). Absent means no role holds merge

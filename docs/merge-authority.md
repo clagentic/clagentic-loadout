@@ -163,14 +163,39 @@ merge:
   role-only — it never carries a login or account name, so this split does
   not create a second identity-bearing key inside the repo-tier section.
 
-As of this writing, reading `merge.authorized_roles` /
-`required_reviewer_roles` into `StaticRoleAuthorityProvider` / the
-reviewer-verdict gate as the CLI's own flag *defaults* is a named follow-up
-(see [docs/provisioning.md](provisioning.md#merge-gate-config-homes));
-today a caller (a dispatch/lead layer) reads the config and passes the
-resolved roles via `--authorized-role` / `--required-reviewer` explicitly.
-The schema and its `loadout-doctor` validation are landed; the CLI-wiring
-slice is not.
+`loadout-merge` enforces `merge.required_reviewer_roles` as a **floor**: the
+roles it requires are the union of that list (read through `--repo-path`) and
+any `--required-reviewer` flags. Declaring the key gates the merge. Two rules
+keep a broken config from blocking the merge that would fix it:
+
+- If **any** repo gate key (`required_reviewer_roles`, `required_scanners`)
+  cannot be loaded (unreadable, malformed, an explicit `null` for either key,
+  or a `merge:` section that omits `required_reviewer_roles`), the **whole** repo gate config falls back to
+  flags-only: no repo gate key is enforced, including one that was valid. A
+  stderr warning names the file and the error. The fallback is deliberate, so
+  the merge that lands the corrected config is never blocked by the broken one.
+- A config that loads but cannot be satisfied (a declared role with no
+  verdict, or no resolvable login; a clean verdict that records no scanner
+  outcomes, or reports a required scanner failed, for a role with
+  `required_scanners`) refuses the merge. `--ignore-repo-gate` is the
+  deliberate escape hatch for exactly two gates, `merge.required_reviewer_roles`
+  and `merge.required_scanners`: it is logged to stderr, printed in the merge
+  output, and recorded in the merge-completion attestation. It lifts nothing
+  else; model attestation and the single-fence requirement stay enforced.
+- A `required_scanners` entry for a role that is not a required reviewer (not in
+  `required_reviewer_roles` and not named by `--required-reviewer`) could never
+  gate anything, so it refuses the merge naming the role, with the same
+  `--ignore-repo-gate` escape hatch. An entry with an empty scanner list
+  declares nothing.
+- Role names and scanner names in these keys are trimmed of surrounding
+  whitespace when loaded; two `required_scanners` keys that collide after
+  trimming are a malformed config.
+
+**Upgrading.** This is a breaking change for a repo that declared
+`required_reviewer_roles` decoratively. Its merges now need those verdicts.
+Declare `required_reviewer_roles: []` for no reviewer gate. `merge.authorized_roles`
+and `merge.merge_requirements` are still read only by `loadout-doctor` and by a
+caller building its own invocation.
 
 ## 4. The built-in fallback: what it actually grants
 

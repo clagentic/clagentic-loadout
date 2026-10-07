@@ -160,6 +160,11 @@ import sys
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.merge.errors import VerdictMalformedError
+from clagentic_loadout.merge.fence_state import (
+    KEY_FENCE_SCHEMA_VERSION,
+    STATE_KEYS,
+    normalize_findings_state,
+)
 from clagentic_loadout.merge.verdict import (
     VERDICT_FENCE,
     assert_single_own_verdict_block,
@@ -615,7 +620,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "readback, the landed body is re-parsed field-for-field AND "
         "checked to carry exactly one fenced block tagged with this "
         "caller's own reviewer id (merge.verdict."
-        "assert_single_own_verdict_block) -- any mismatch fails closed.",
+        "assert_single_own_verdict_block) -- any mismatch fails closed. "
+        "On either verdict route, --body-stdin's JSON may also carry the "
+        "structured findings-state fields 'findings_open', 'supersedes', "
+        "'cleared_claims' and 'scanners_run'; they are validated and "
+        "rendered inside the tool-built fence (fence_schema_version 2), "
+        "never as body text, and a fence that lands without them fails "
+        "the readback.",
     )
     parser.add_argument(
         "--verdict-head-sha",
@@ -668,6 +679,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(comment delete is scoped by comment id, not PR).",
     )
     return parser
+
+
+def _staged_findings_state(raw_bytes: bytes) -> dict:
+    """The findings-state fields a staged body JSON carries, as raw input.
+
+    Structured JSON fields only; they are rendered into the tool-built fence
+    and never appear in body text. An unparseable body yields {} here because
+    the route-specific validation that follows reports that failure with its
+    own exit code.
+    """
+    try:
+        parsed = json.loads(raw_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {key: parsed[key] for key in STATE_KEYS if key in parsed}
 
 
 def _parse_owner_repo(owner_repo: str) -> tuple[str, str]:
@@ -1063,6 +1091,14 @@ def _run(
         raw_bytes = sys.stdin.buffer.read()
     verdict_review_status: str | None = None
     verdict_findings: list[dict] | None = None
+    findings_state = _staged_findings_state(raw_bytes)
+    if findings_state and args.verdict_review_status is None and not args.verdict_findings:
+        _fail(
+            f"the staged body carries findings state ({sorted(findings_state)}) but this "
+            f"invocation is not a verdict post. Those fields are rendered into the "
+            f"tool-built verdict fence; pass --verdict-findings or --verdict-review-status.",
+            code=EXIT_VERDICT_BLOCK_USAGE,
+        )
     if args.verdict_findings:
         # PRIMARY route (lr-c26110): stdin carries NO 'body'/prose field at
         # all -- only review_status + a structured findings list. There is
@@ -1106,6 +1142,17 @@ def _run(
     # prose is ever consulted; pr_number comes from this verb's own
     # positional argument, so the fenced pr_number can never disagree with
     # the PR actually posted to.
+    expected_state: dict = {}
+    if verdict_review_status is not None:
+        try:
+            expected_state = normalize_findings_state(
+                findings_state,
+                head_sha=args.verdict_head_sha,
+                review_status=verdict_review_status,
+            )
+        except ValueError as exc:
+            route = "--verdict-findings" if verdict_findings is not None else "--verdict-review-status"
+            _fail(f"{route}: {exc}", code=EXIT_VERDICT_BLOCK_USAGE)
     if verdict_findings is not None:
         try:
             body = build_findings_verdict_body(
@@ -1115,6 +1162,7 @@ def _run(
                 pr_number,
                 verdict_findings,
                 args.model_attested,
+                findings_state,
             )
         except ValueError as exc:
             _fail(f"--verdict-findings: {exc}", code=EXIT_VERDICT_BLOCK_USAGE)
@@ -1148,7 +1196,7 @@ def _run(
         try:
             fence = build_verdict_block(
                 caller, verdict_review_status, args.verdict_head_sha, pr_number,
-                args.model_attested,
+                args.model_attested, findings_state,
             )
         except ValueError as exc:
             _fail(f"--verdict-review-status: {exc}", code=EXIT_VERDICT_BLOCK_USAGE)
@@ -1239,6 +1287,13 @@ def _run(
                 f"model_attested: expected {args.model_attested!r}, got "
                 f"{parsed.get('model_attested')!r}"
             )
+        # Findings state must round-trip exactly, and a fence that landed with
+        # state nobody supplied is as wrong as one that lost it.
+        for key in (*STATE_KEYS, KEY_FENCE_SCHEMA_VERSION):
+            if parsed.get(key) != expected_state.get(key):
+                mismatches.append(
+                    f"{key}: expected {expected_state.get(key)!r}, got {parsed.get(key)!r}"
+                )
         if mismatches:
             _fail(
                 f"{route_label} MISMATCH -- the verified comment/review's "

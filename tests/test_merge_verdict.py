@@ -852,12 +852,37 @@ class TestBuildFindingsVerdictBody:
         with pytest.raises(ValueError, match="fence-delimiter"):
             build_findings_verdict_body("reviewer", "clean", _FULL_SHA, 1, findings)
 
-    def test_findings_rule_id_with_fence_language_marker_is_rejected(self):
+    def test_findings_rule_id_with_fence_opener_and_language_marker_is_rejected(self):
         findings = [
-            {"file": "a.py", "line": 1, "rule_id": "review-result", "message": "ok"},
+            {"file": "a.py", "line": 1, "rule_id": "```review-result", "message": "ok"},
         ]
         with pytest.raises(ValueError, match="fence-delimiter"):
             build_findings_verdict_body("reviewer", "clean", _FULL_SHA, 1, findings)
+
+    def test_the_plain_word_review_result_in_a_path_is_postable(self):
+        findings = [
+            {
+                "file": "src/clagentic_loadout/schemas/review-result.schema.json",
+                "line": 75,
+                "rule_id": "X",
+                "message": "see the review-result schema",
+            },
+        ]
+        body = build_findings_verdict_body("reviewer", "blocking", _FULL_SHA, 1, findings)
+        assert len(find_all_verdict_blocks(body)) == 1
+        assert "review-result.schema.json" in body
+
+    def test_a_message_line_that_is_a_fence_opener_is_rejected(self):
+        for opener in ("~~~review-result", "~~~"):
+            findings = [
+                {"file": "a.py", "line": 1, "rule_id": "X", "message": f"first\n{opener}\nx"},
+            ]
+            with pytest.raises(ValueError, match="fence-delimiter"):
+                build_findings_verdict_body("reviewer", "clean", _FULL_SHA, 1, findings)
+
+    def test_a_reviewer_name_carrying_a_fence_opener_is_rejected(self):
+        with pytest.raises(ValueError, match="fence-delimiter"):
+            build_findings_verdict_body("rev\n```review-result", "clean", _FULL_SHA, 1, [])
 
     def test_clean_findings_without_fence_sequences_still_produce_single_block(self):
         # Non-adversarial input is unaffected: the body still contains

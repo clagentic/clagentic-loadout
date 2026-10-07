@@ -77,6 +77,23 @@ Verdict enforcement (read_reviewer_verdict)
    exception) — never an implicit pass. Do not weaken this parse: a lenient
    parser that accepts a non-fenced, wrong-SHA, or mismatched-role verdict
    is a critical hole in the release gate.
+7. A fenced verdict at a stale head never authorizes a merge, whatever else
+   the reviewer has posted since. When later comments from the same login
+   carry no verdict the refusal is VerdictStaleAfterCommentsError (a
+   VerdictStaleError subclass, same exit family) so the operator sees that
+   the reviewer commented without re-verdicting. Selection walks newest
+   first, so a fresh fence is always chosen over an older stale one.
+8. Findings state (merge.fence_state): the reviewer's EARLIER fences are
+   walked in order, each classified by classify_earlier_fence; a finding one
+   of the valid ones held open that the selected fence neither clears at its
+   own head nor re-raises refuses via assert_prior_findings_resolved. An
+   earlier fence that is unreadable AND may carry findings state refuses
+   (VerdictMalformedError); one that is unreadable with no state, or is
+   another reviewer's or PR's, is ignored with a warning.
+   check_required_scanners refuses a clean verdict whose required scanner is
+   reported failed, or that records no scanner outcomes while scanners are
+   required. A fence with no state fields asserts nothing and is never an
+   error.
 """
 
 from __future__ import annotations
@@ -93,10 +110,27 @@ from clagentic_loadout.merge.errors import (
     VerdictBlockingError,
     VerdictMalformedError,
     VerdictMissingError,
+    VerdictPriorFindingsOpenError,
     VerdictRoleMismatchError,
+    VerdictScannerFailedError,
+    VerdictScannersMissingError,
+    VerdictStaleAfterCommentsError,
     VerdictStaleError,
 )
-from clagentic_loadout.sha import InvalidShaError, compare_sha_values, validate_sha
+from clagentic_loadout.merge.fence_state import (
+    KEY_CLEARED_CLAIMS,
+    KEY_FINDINGS_OPEN,
+    SCANNER_FAILED,
+    FindingsState,
+    has_findings_state,
+    index_scanners,
+    normalize_findings_state,
+    raw_mentions_findings_state,
+    state_from_fence,
+    unresolved_prior_findings,
+)
+from clagentic_loadout.merge.fence_syntax import find_fence_syntax
+from clagentic_loadout.sha import FULL_SHA_RE, InvalidShaError, compare_sha_values, validate_sha
 
 #: The fence language token that marks a machine-readable verdict block.
 #: Emitters write: ```review-result\n{...}\n```
@@ -119,24 +153,16 @@ _VALID_STATUSES = frozenset({"clean", "blocking"})
 #: correctly treated as "no block found," not silently accepted.
 _FENCE_RE = re.compile(r"```review-result\s*\n(.*?)\n```", re.DOTALL)
 
-#: Fence-delimiter sequences that MUST NOT appear in caller-supplied findings
-#: fields inserted into a build_findings_verdict_body prose/bullet line
-#: (security-audit finding, lr-c26110): a bare triple-backtick can open
-#: an unrelated fenced block, and the literal fence-language marker can
-#: masquerade as (or help forge) a second review-result block. Neither is
-#: gate-bypassable on its own — assert_single_own_verdict_block counts every
-#: fence and fails closed on more than one — but a tool-CONSTRUCTED body
-#: should never contain fence-shaped syntax it did not itself emit; letting
-#: caller data smuggle one in defeats the enforce-good-behavior intent this
-#: function exists for. REJECT (fail pre-post), not escape: matches this
-#: module's existing posture (missing-field validation above also raises
-#: before any body is built) rather than adding a second, silent transform
-#: a caller could get out of sync with the fence contract above.
-_FORBIDDEN_FENCE_SEQUENCES = ("```", VERDICT_FENCE)
-
 
 def _reject_fence_delimiters(value: str, finding_index: int, field_name: str) -> None:
     """Raise ValueError if *value* contains a fence-delimiter sequence.
+
+    Fence-shaped means what merge.fence_syntax.find_fence_syntax says, the one
+    definition shared with the findings-state validator; the plain word
+    review-result is not fence syntax. Caller data that could open or close a
+    block is rejected (fail pre-post), not escaped, because a tool-CONSTRUCTED
+    body must never contain fence syntax it did not itself emit (security-audit
+    finding, lr-c26110).
 
     Called on every findings[idx]['file'|'rule_id'|'message'] field before
     it is inserted into the body's prose/bullet lines — the only findings
@@ -145,15 +171,15 @@ def _reject_fence_delimiters(value: str, finding_index: int, field_name: str) ->
     caller-typed as an int per this function's documented contract, not a
     string a fence could hide inside).
     """
-    for sequence in _FORBIDDEN_FENCE_SEQUENCES:
-        if sequence in value:
-            raise ValueError(
-                f"findings[{finding_index}]['{field_name}'] contains the "
-                f"fence-delimiter sequence {sequence!r}: {value!r}. A "
-                f"tool-constructed verdict body must never contain "
-                f"fence-shaped syntax from caller-supplied data — this "
-                f"field is rejected rather than escaped."
-            )
+    offending = find_fence_syntax(value)
+    if offending is not None:
+        raise ValueError(
+            f"findings[{finding_index}]['{field_name}'] contains the "
+            f"fence-delimiter sequence {offending!r}: {value!r}. A "
+            f"tool-constructed verdict body must never contain "
+            f"fence-shaped syntax from caller-supplied data — this "
+            f"field is rejected rather than escaped."
+        )
 
 
 def build_verdict_block(
@@ -162,6 +188,7 @@ def build_verdict_block(
     head_sha: str,
     pr_number: int,
     model_attested: str | None = None,
+    findings_state: dict[str, Any] | None = None,
 ) -> str:
     """Build the fenced verdict block to append to a reviewer's PR comment.
 
@@ -179,11 +206,18 @@ def build_verdict_block(
     actually ran; see merge.model_attestation's module docstring for what
     downstream enforcement can and cannot prove about this value.
 
-    Raises ValueError if review_status is not 'clean' or 'blocking'.
+    *findings_state* (OPTIONAL): structured findings state (findings_open,
+    supersedes, cleared_claims, scanners_run; see merge.fence_state). It is
+    validated here and rendered INSIDE the fence with fence_schema_version 2;
+    None or empty leaves the fence exactly as before. Callers pass the raw
+    mapping, never a pre-rendered one.
+
+    Raises ValueError if review_status is not 'clean' or 'blocking', or if
+    *findings_state* is malformed or contradicts the status.
     """
     if review_status not in _VALID_STATUSES:
         raise ValueError(f"review_status must be 'clean' or 'blocking', got {review_status!r}")
-    payload_fields = {
+    payload_fields: dict[str, Any] = {
         "reviewer": reviewer,
         "review_status": review_status,
         "head_sha": head_sha,
@@ -191,6 +225,9 @@ def build_verdict_block(
     }
     if model_attested is not None:
         payload_fields["model_attested"] = model_attested
+    payload_fields.update(
+        normalize_findings_state(findings_state, head_sha=head_sha, review_status=review_status)
+    )
     payload = json.dumps(payload_fields, separators=(", ", ": "))
     return f"\n```{VERDICT_FENCE}\n{payload}\n```\n"
 
@@ -202,6 +239,7 @@ def build_findings_verdict_body(
     pr_number: int,
     findings: list[dict[str, Any]],
     model_attested: str | None = None,
+    findings_state: dict[str, Any] | None = None,
 ) -> str:
     """PRIMARY structured-body-construction mechanism (lr-c26110, operator
     reframe: 'enforce good behavior over blocking bad behavior'). Builds the
@@ -234,6 +272,8 @@ def build_findings_verdict_body(
                      a header-only body (plus the fence) with no bullets.
     model_attested: OPTIONAL — see build_verdict_block's own docstring for
                      the full contract; passed through unchanged.
+    findings_state: OPTIONAL — see build_verdict_block; passed through
+                     unchanged. Structured fields only, never prose.
 
     Returns the constructed body string: a header line, one bullet per
     finding (in the order given), then build_verdict_block's fence.
@@ -247,6 +287,15 @@ def build_findings_verdict_body(
     lr-c26110).
     """
     required_keys = ("file", "line", "rule_id", "message")
+    # The reviewer name is written raw into the header line, so it goes through
+    # the same predicate as the findings fields.
+    offending_reviewer = find_fence_syntax(reviewer)
+    if offending_reviewer is not None:
+        raise ValueError(
+            f"reviewer contains the fence-delimiter sequence {offending_reviewer!r}: "
+            f"{reviewer!r}. A tool-constructed verdict body must never contain "
+            f"fence-shaped syntax from caller-supplied data."
+        )
     for idx, finding in enumerate(findings):
         missing = [k for k in required_keys if k not in finding]
         if missing:
@@ -267,7 +316,9 @@ def build_findings_verdict_body(
             f"{finding['message']}"
         )
     prose = "\n".join(lines)
-    fence = build_verdict_block(reviewer, review_status, head_sha, pr_number, model_attested)
+    fence = build_verdict_block(
+        reviewer, review_status, head_sha, pr_number, model_attested, findings_state
+    )
     return f"{prose}\n{fence}"
 
 
@@ -460,6 +511,18 @@ class ReviewerVerdict:
     comment_id: int
     comment_author_login: str
     model_attested: str | None = None
+    state: FindingsState = FindingsState()
+    #: Findings an earlier fence held open that this verdict leaves
+    #: unaccounted for. Enforced by assert_prior_findings_resolved.
+    unresolved_prior_findings: tuple[dict[str, Any], ...] = ()
+    #: The comment id this fence says it replaces, when no earlier verdict
+    #: comment from the reviewer on the PR has that id. None when the fence
+    #: supersedes nothing or the id resolves.
+    unresolved_supersedes: int | None = None
+    #: (comment id, reason) for each earlier fence the gate read past because it
+    #: asserts nothing: unreadable with no findings state, or not this
+    #: reviewer's or this PR's. The verb prints one warning per entry.
+    ignored_earlier_fences: tuple[tuple[Any, str], ...] = ()
 
 
 def parse_verdict_block(comment_body: str) -> dict[str, Any] | None:
@@ -491,6 +554,10 @@ def parse_verdict_block(comment_body: str) -> dict[str, Any] | None:
         if missing:
             raise VerdictMalformedError(f"verdict block missing required fields: {missing}")
         raise VerdictMalformedError(f"verdict block failed schema validation: {'; '.join(errors)}")
+    try:
+        index_scanners(data.get("scanners_run") or ())
+    except ValueError as exc:
+        raise VerdictMalformedError(f"verdict block failed validation: {exc}") from exc
     return data
 
 
@@ -639,11 +706,13 @@ def read_reviewer_verdict(
     # (lr-5260f9) and parse exactly as before; that per-comment enforcement
     # is unchanged by this loop (see lr-cb8db9's double-fence handling).
     matching_comment: dict[str, Any] | None = None
-    for candidate in ordered_comments:
+    selected_index = 0
+    for position, candidate in enumerate(ordered_comments):
         candidate_body = candidate.get("body", "")
         if _FENCE_RE.search(candidate_body) is None:
             continue
         matching_comment = candidate
+        selected_index = position
         break
 
     if matching_comment is None:
@@ -696,6 +765,20 @@ def read_reviewer_verdict(
             f"re-run and post a valid 40-character hex SHA stamp."
         ) from exc
 
+    later_comments = ordered_comments[:selected_index]
+    if not compare_sha_values(verdict_sha, current_head_sha) and later_comments:
+        # Same refusal as a plain stale verdict, named precisely: the
+        # selected fence is the newest one, so every later comment from this
+        # login carries no verdict. Never relaxed: the older-head verdict
+        # still does not authorize this head.
+        raise VerdictStaleAfterCommentsError(
+            f"STALE GATE DATA — the last verdict from {expected_login!r} on PR "
+            f"#{pr_number} in {owner}/{repo} is at SHA {verdict_sha!r}, but "
+            f"current PR HEAD is {current_head_sha!r}, and that reviewer has "
+            f"posted {len(later_comments)} comment(s) since without a verdict "
+            f"block. Commenting is not re-verdicting. The reviewer must post "
+            f"a new verdict at the current HEAD, then retry the merge gate."
+        )
     if not compare_sha_values(verdict_sha, current_head_sha):
         raise VerdictStaleError(
             f"STALE GATE DATA — verdict from {expected_login!r} on PR "
@@ -734,6 +817,31 @@ def read_reviewer_verdict(
             f"lands under its own App, then retry the merge gate."
         )
 
+    current_state = state_from_fence(verdict_data)
+    valid_earlier, ignored_earlier = _earlier_fence_states(
+        ordered_comments[selected_index + 1 :][::-1],
+        pr_number=pr_number,
+        expected_reviewer_name=expected_reviewer_name or verdict_reviewer,
+    )
+    unresolved = unresolved_prior_findings(
+        [(fence.head, fence.state) for fence in valid_earlier],
+        current_state,
+        verdict_sha,
+    )
+
+    # Supersession is provenance, not resolution, but a claim to replace a
+    # comment this reviewer never posted a valid verdict in is worth
+    # surfacing: it means the history the fence describes is not the history
+    # on the PR. Only the VALID earlier fences are targets, the same list the
+    # findings carry-forward above reads, so the two can never disagree.
+    earlier_verdict_ids = {fence.comment_id for fence in valid_earlier}
+    unresolved_supersedes = (
+        current_state.supersedes
+        if current_state.supersedes is not None
+        and current_state.supersedes not in earlier_verdict_ids
+        else None
+    )
+
     return ReviewerVerdict(
         reviewer=verdict_reviewer,
         review_status=review_status,
@@ -742,7 +850,182 @@ def read_reviewer_verdict(
         comment_id=comment_id,
         comment_author_login=author_login,
         model_attested=verdict_data.get("model_attested"),
+        state=current_state,
+        unresolved_prior_findings=tuple(unresolved),
+        unresolved_supersedes=unresolved_supersedes,
+        ignored_earlier_fences=tuple(
+            (fence.comment_id, fence.reason) for fence in ignored_earlier
+        ),
     )
+
+
+#: classify_earlier_fence dispositions.
+EARLIER_FENCE_VALID = "valid"
+EARLIER_FENCE_IGNORED = "ignored"
+EARLIER_FENCE_UNREADABLE_STATEFUL = "unreadable_stateful"
+
+
+@dataclass(frozen=True)
+class EarlierFence:
+    """How the gate reads one earlier comment of the reviewer's that carries a
+    fence. *head* and *state* are set only for a VALID fence; *reason* says why
+    a fence was not VALID (empty for VALID)."""
+
+    comment_id: Any
+    kind: str
+    head: str = ""
+    state: FindingsState = FindingsState()
+    reason: str = ""
+
+
+def classify_earlier_fence(
+    comment: dict[str, Any], *, pr_number: int, reviewer_name: str
+) -> EarlierFence | None:
+    """Decide what one EARLIER comment of the reviewer's contributes to the gate.
+    The only place that does; _earlier_fence_states applies it to every earlier
+    comment and nothing else filters them, so findings carry-forward and
+    supersession targets cannot disagree about which fences are readable.
+
+    Two axes decide the disposition. Readable or not: the fence parses, passes
+    the schema, has no repeated scanner, is the only fence in its comment, has
+    well-formed heads. Stateful or not: it carries findings state (see
+    merge.fence_state.has_findings_state; for JSON that does not parse, a scan
+    of the raw text for the state key names, which fails closed). An unreadable
+    fence that may have held a finding open must refuse, because skipping it
+    would silently drop the finding. An unreadable fence with no state asserts
+    nothing and can clear nothing, so it is ignored with a warning rather than
+    wedging every later merge on the PR.
+
+    Checked in this order, first match wins:
+
+      no fenced block in the comment            -> None (not a verdict)
+      any fence's JSON does not parse into an
+        object                                  -> raw scan: UNREADABLE_STATEFUL
+                                                   if it names a state key,
+                                                   else IGNORED
+      every fence is another reviewer's or
+        another PR's                            -> IGNORED
+      more than one fence in the comment        -> UNREADABLE_STATEFUL if stateful,
+                                                   else IGNORED
+      schema error, repeated scanner, or a
+        malformed findings_open / cleared_claims
+        head                                    -> same split
+      malformed head_sha                        -> same split
+      otherwise                                 -> VALID
+
+    The newest fence, the one being judged, is not read through here: it stays
+    strict and any defect in it refuses.
+    """
+    comment_id = comment.get("id")
+    raws = [raw.strip() for raw in _FENCE_RE.findall(comment.get("body") or "")]
+    if not raws:
+        return None
+
+    parsed: list[dict[str, Any] | None] = []
+    for raw in raws:
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            data = None
+        parsed.append(data if isinstance(data, dict) else None)
+    stateful = any(
+        raw_mentions_findings_state(raw) if data is None else has_findings_state(data)
+        for raw, data in zip(raws, parsed)
+    )
+
+    def unreadable(reason: str) -> EarlierFence:
+        kind = EARLIER_FENCE_UNREADABLE_STATEFUL if stateful else EARLIER_FENCE_IGNORED
+        return EarlierFence(comment_id, kind, reason=reason)
+
+    if any(data is None for data in parsed):
+        return unreadable("its fence is not a parseable JSON object")
+
+    foreign_reasons = [
+        _foreign_reason(data, pr_number, reviewer_name) for data in parsed if data is not None
+    ]
+    if all(foreign_reasons):
+        return EarlierFence(comment_id, EARLIER_FENCE_IGNORED, reason=foreign_reasons[0])
+
+    if len(raws) > 1:
+        return unreadable(f"its comment carries {len(raws)} fences, expected one")
+    (data,) = [d for d in parsed if d is not None]
+
+    errors = validate_against_schema(data, _VERDICT_SCHEMA_PATH)
+    if errors:
+        return unreadable(f"its fence failed schema validation: {'; '.join(errors)}")
+    try:
+        index_scanners(data.get("scanners_run") or ())
+    except ValueError as exc:
+        return unreadable(f"its fence failed validation: {exc}")
+    fence_head = data["head_sha"]
+    try:
+        validate_sha(fence_head, allow_abbreviated=False)
+    except InvalidShaError as exc:
+        # Its claims are matched against its head, so an unreadable head could
+        # otherwise clear or supersede a finding by matching another malformed
+        # value.
+        return unreadable(f"it has a malformed head_sha stamp ({fence_head!r}): {exc}")
+    for key in (KEY_FINDINGS_OPEN, KEY_CLEARED_CLAIMS):
+        for entry in data.get(key) or ():
+            if not FULL_SHA_RE.match(entry["head"]):
+                return unreadable(
+                    f"its {key} entry {entry.get('id')!r} has a malformed head ({entry['head']!r})"
+                )
+    return EarlierFence(
+        comment_id, EARLIER_FENCE_VALID, head=fence_head, state=state_from_fence(data)
+    )
+
+
+def _foreign_reason(data: dict[str, Any], pr_number: int, reviewer_name: str) -> str:
+    """Why *data* is not this reviewer's fence for this PR, or "" when it may
+    be. A missing or mistyped reviewer / pr_number is a schema error, not a
+    foreign fence, so it returns "" and is judged by the schema check."""
+    reviewer = data.get("reviewer")
+    if isinstance(reviewer, str) and reviewer.casefold() != reviewer_name.casefold():
+        return f"its fence names another reviewer ({reviewer!r})"
+    fence_pr = data.get("pr_number")
+    if type(fence_pr) is int and fence_pr != pr_number:
+        return f"its fence is for another PR (#{fence_pr})"
+    return ""
+
+
+def _earlier_fence_states(
+    earlier_oldest_first: list[dict[str, Any]],
+    *,
+    pr_number: int,
+    expected_reviewer_name: str,
+) -> tuple[list[EarlierFence], list[EarlierFence]]:
+    """Classify the reviewer's EARLIER comments, oldest first, returning
+    (valid fences, ignored fences). The one filter over earlier comments; see
+    classify_earlier_fence for the disposition table.
+
+    Raises VerdictMalformedError naming every comment whose fence is
+    unreadable and may have held findings open. Ignored fences are returned so
+    the caller can surface each one; they are never dropped silently.
+    """
+    valid: list[EarlierFence] = []
+    ignored: list[EarlierFence] = []
+    unreadable: list[EarlierFence] = []
+    for comment in earlier_oldest_first:
+        fence = classify_earlier_fence(
+            comment, pr_number=pr_number, reviewer_name=expected_reviewer_name
+        )
+        if fence is None:
+            continue
+        {
+            EARLIER_FENCE_VALID: valid,
+            EARLIER_FENCE_IGNORED: ignored,
+            EARLIER_FENCE_UNREADABLE_STATEFUL: unreadable,
+        }[fence.kind].append(fence)
+    if unreadable:
+        listed = "; ".join(f"comment #{f.comment_id!r}: {f.reason}" for f in unreadable)
+        raise VerdictMalformedError(
+            f"{len(unreadable)} earlier verdict comment(s) from {expected_reviewer_name!r} on "
+            f"PR #{pr_number} cannot be read and may hold findings open ({listed}). An "
+            f"unreadable fence cannot clear or supersede any finding, and the findings history "
+            f"cannot be read past it; the reviewer must re-run and post a valid verdict."
+        )
+    return valid, ignored
 
 
 def assert_clean_verdict(verdict: ReviewerVerdict, reviewer_name: str) -> None:
@@ -766,14 +1049,117 @@ def assert_clean_verdict(verdict: ReviewerVerdict, reviewer_name: str) -> None:
         )
 
 
+def assert_prior_findings_resolved(verdict: ReviewerVerdict, reviewer_name: str) -> None:
+    """Refuse the merge when an earlier fence's open finding has no
+    resolution at this verdict's head, or when this clean verdict itself
+    still lists findings open.
+
+    A version 1 fence, or any history with no findings state, has nothing to
+    carry forward and passes.
+
+    Raises merge.errors.VerdictPriorFindingsOpenError naming each finding id.
+    """
+    if verdict.unresolved_prior_findings:
+        listed = ", ".join(
+            f"{f['id']} (rule {f['rule_id']}, raised at {f['head']})"
+            for f in verdict.unresolved_prior_findings
+        )
+        raise VerdictPriorFindingsOpenError(
+            f"{reviewer_name.upper()} left finding(s) open: {listed}. The verdict on PR "
+            f"#{verdict.pr_number} at {verdict.head_sha!r} (comment #{verdict.comment_id}) "
+            f"neither clears them with evidence at this head nor re-raises them. A "
+            f"clean verdict at a later head does not resolve an earlier blocker. "
+            f"Re-run {reviewer_name.upper()} so each is adjudicated, then retry the merge gate."
+        )
+    if verdict.review_status == "clean" and verdict.state.findings_open:
+        ids = ", ".join(f["id"] for f in verdict.state.findings_open)
+        raise VerdictPriorFindingsOpenError(
+            f"{reviewer_name.upper()} posted a clean verdict (comment #{verdict.comment_id}) "
+            f"that still lists open finding(s): {ids}. A verdict that holds findings "
+            f"open is blocking."
+        )
+
+
+def check_required_scanners(
+    verdict: ReviewerVerdict, reviewer_name: str, required_scanners: "tuple[str, ...]"
+) -> list[str]:
+    """Check a verdict's scanner outcomes against the scanners the
+    deployment requires for this reviewer, and return warnings to surface.
+
+    Refuses when the deployment declares required scanners and the verdict
+    records no scanner outcomes at all (VerdictScannersMissingError), or when
+    a required scanner is reported failed (VerdictScannerFailedError).
+    not_applicable and not_invoked, with their reason, are legitimate. With no
+    required scanners declared, absence only warns. A required scanner the
+    verdict does not record, even beside others it does record, also refuses
+    (VerdictScannersMissingError): a declared gate gates.
+    A repeated scanner name is malformed (VerdictMalformedError), never
+    last-write-wins.
+    """
+    try:
+        reported = index_scanners(verdict.state.scanners_run)
+    except ValueError as exc:
+        raise VerdictMalformedError(
+            f"{reviewer_name.upper()} verdict comment #{verdict.comment_id} is malformed: {exc}"
+        ) from exc
+    if required_scanners and not verdict.state.scanners_run:
+        raise VerdictScannersMissingError(
+            f"{reviewer_name.upper()} verdict (comment #{verdict.comment_id} on PR "
+            f"#{verdict.pr_number}) records no scanner outcomes, but this deployment requires "
+            f"scanner(s) {list(required_scanners)!r} for it. A clean verdict without a "
+            f"scanners_run record is not coverage. Have the reviewer re-post it with each "
+            f"scanner recorded (ran, or not_applicable/not_invoked with a reason), then retry "
+            f"the merge gate."
+        )
+    for scanner in required_scanners:
+        entry = reported.get(scanner)
+        if entry is not None and entry["status"] == SCANNER_FAILED:
+            raise VerdictScannerFailedError(
+                f"{reviewer_name.upper()} reports required scanner {scanner!r} as failed "
+                f"({entry.get('reason', 'no reason given')}) in verdict comment "
+                f"#{verdict.comment_id} on PR #{verdict.pr_number}. A failed scanner is not "
+                f"coverage. Re-run it, or have the reviewer record it as not_applicable or "
+                f"not_invoked with a reason, then retry the merge gate."
+            )
+    unrecorded = [scanner for scanner in required_scanners if scanner not in reported]
+    if unrecorded:
+        raise VerdictScannersMissingError(
+            f"{reviewer_name.upper()} verdict (comment #{verdict.comment_id} on PR "
+            f"#{verdict.pr_number}) records no outcome for required scanner(s) "
+            f"{unrecorded!r}. A declared scanner requirement is not met by a partial "
+            f"record. Have the reviewer re-post it with each required scanner recorded "
+            f"(ran, or not_applicable/not_invoked with a reason), then retry the merge gate."
+        )
+    warnings: list[str] = []
+    if verdict.unresolved_supersedes is not None:
+        warnings.append(
+            f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) says it supersedes "
+            f"comment #{verdict.unresolved_supersedes}, which is not an earlier verdict "
+            f"comment from that reviewer on this PR"
+        )
+    if not verdict.state.scanners_run:
+        warnings.append(
+            f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) is clean but "
+            f"records no scanner outcomes; it may rest on judgment alone"
+        )
+    return warnings
+
+
 __all__ = [
     "VERDICT_FENCE",
+    "assert_prior_findings_resolved",
+    "check_required_scanners",
+    "EARLIER_FENCE_IGNORED",
+    "EARLIER_FENCE_UNREADABLE_STATEFUL",
+    "EARLIER_FENCE_VALID",
+    "EarlierFence",
     "ReviewerVerdict",
     "assert_clean_verdict",
     "assert_single_own_verdict_block",
     "assert_verdict_block_count_at_most_one",
     "build_findings_verdict_body",
     "build_verdict_block",
+    "classify_earlier_fence",
     "find_all_verdict_blocks",
     "parse_verdict_block",
     "read_reviewer_verdict",
