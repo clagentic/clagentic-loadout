@@ -55,10 +55,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import yaml
-
-from clagentic_loadout.merge.post_merge import PostMergeConfigError, validate_post_merge_steps
-from clagentic_loadout.merge.post_merge_config import CONFIG_SECTION_MERGE
+from clagentic_loadout.merge.post_merge import validate_post_merge_steps
+from clagentic_loadout.merge.post_merge_config import CONFIG_SECTION_MERGE, read_repo_merge_section
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     resolve_repo_config_path,
@@ -68,22 +66,6 @@ from clagentic_loadout.repo_config import (
 #: Sibling of CONFIG_KEY_POST_MERGE_STEPS within the SAME `merge:` section —
 #: pre_checks run BEFORE the merge call, post_merge_steps run AFTER it.
 CONFIG_KEY_PRE_CHECKS = "pre_checks"
-
-
-def _read_yaml_mapping(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise PostMergeConfigError(f"{path}: could not be read as YAML: {exc}.") from exc
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise PostMergeConfigError(
-            f"{path}: top-level document must be a mapping, got {type(raw).__name__}."
-        )
-    return raw
 
 
 def load_pre_checks(
@@ -119,17 +101,19 @@ def load_pre_checks(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
+    return pre_checks_from_section(read_repo_merge_section(config_path))
 
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return []
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
 
+def pre_checks_from_section(merge_section: dict) -> list[dict]:
+    """Validate and return the `pre_checks` list of an already-parsed `merge:`
+    section (`[]` when the key is absent or null).
+
+    Shared by `load_pre_checks` and the merge gate's base-commit reader, so a
+    pre_check is validated by one rule wherever its text came from.
+
+    Raises:
+        PostMergeConfigError: `pre_checks` is not a list or a step is invalid.
+    """
     steps = merge_section.get(CONFIG_KEY_PRE_CHECKS)
     if steps is None:
         return []
@@ -143,4 +127,5 @@ __all__ = [
     "CONFIG_SECTION_MERGE",
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "load_pre_checks",
+    "pre_checks_from_section",
 ]

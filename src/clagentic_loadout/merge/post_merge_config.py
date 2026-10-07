@@ -392,20 +392,25 @@ _ENV_OVERRIDE_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 
-def _read_yaml_mapping(path: Path) -> dict:
-    if not path.exists():
-        return {}
+def read_repo_merge_section(config_path: str | Path) -> dict:
+    """The `merge:` section of the repo config file at *config_path* (`{}` when
+    the file or section is absent), through `gate_config.read_merge_section`,
+    the one YAML and section-shape reader, with its error re-raised as this
+    module's `PostMergeConfigError`.
+
+    The import is local because `gate_config` imports this module for
+    `CONFIG_SECTION_MERGE`.
+
+    Raises:
+        PostMergeConfigError: unreadable or non-UTF-8 file, invalid YAML, or a
+            non-mapping document or `merge:` section.
+    """
+    from clagentic_loadout.merge.gate_config import InvalidMergeGateConfigError, read_merge_section
+
     try:
-        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
-        raise PostMergeConfigError(f"{path}: could not be read as YAML: {exc}.") from exc
-    if raw is None:
-        return {}
-    if not isinstance(raw, dict):
-        raise PostMergeConfigError(
-            f"{path}: top-level document must be a mapping, got {type(raw).__name__}."
-        )
-    return raw
+        return read_merge_section(config_path)
+    except InvalidMergeGateConfigError as exc:
+        raise PostMergeConfigError(str(exc)) from exc
 
 
 def load_post_merge_steps(
@@ -440,16 +445,7 @@ def load_post_merge_steps(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return []
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     steps = merge_section.get(CONFIG_KEY_POST_MERGE_STEPS)
     if steps is None:
@@ -698,7 +694,6 @@ def load_post_merge_steps_from_git_sha(
         result = subprocess.run(
             ["git", "show", f"{merged_sha}:{relative_path}"],
             capture_output=True,
-            text=True,
             cwd=str(git_tree_path),
         )
         if result.returncode != 0:
@@ -710,9 +705,16 @@ def load_post_merge_steps_from_git_sha(
                 f"git show {merged_sha}:{relative_path} failed (exit "
                 f"{result.returncode}) in {git_tree_path} after "
                 f"cat-file -e confirmed the path present at that commit: "
-                f"{result.stderr.strip()[:400]}"
+                f"{result.stderr.decode('utf-8', 'replace').strip()[:400]}"
             )
-        return result.stdout
+        # Bytes, decoded strictly: a blob that is not text is the same loud
+        # config error as a malformed one, never an uncaught UnicodeDecodeError.
+        try:
+            return result.stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise PostMergeConfigError(
+                f"{merged_sha}:{relative_path} is not valid UTF-8 text in {git_tree_path}: {exc}"
+            ) from exc
 
     content: str | None = None
     source_label = f"{merged_sha}:{config_relative_path}"
@@ -887,16 +889,7 @@ def post_merge_steps_key_declared(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return False
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     return CONFIG_KEY_POST_MERGE_STEPS in merge_section
 
@@ -1022,16 +1015,7 @@ def resolve_git_working_tree(
         config_relative_path=config_relative_path,
         legacy_relative_path=legacy_relative_path,
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return None
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     working_tree = merge_section.get(CONFIG_KEY_GIT_WORKING_TREE)
     if working_tree is None:
@@ -1117,16 +1101,7 @@ def resolve_sync_tree_after_merge(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return DEFAULT_SYNC_TREE_AFTER_MERGE
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     value = merge_section.get(CONFIG_KEY_SYNC_TREE_AFTER_MERGE)
     if value is None:
@@ -1175,16 +1150,7 @@ def resolve_enforce_merge_shape(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return DEFAULT_ENFORCE_MERGE_SHAPE
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     value = merge_section.get(CONFIG_KEY_ENFORCE_MERGE_SHAPE)
     if value is None:
@@ -1240,16 +1206,7 @@ def resolve_enforce_single_verdict_fence(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return DEFAULT_ENFORCE_SINGLE_VERDICT_FENCE
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     value = merge_section.get(CONFIG_KEY_ENFORCE_SINGLE_VERDICT_FENCE)
     if value is None:
@@ -1299,16 +1256,7 @@ def resolve_require_model_attestation(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return DEFAULT_REQUIRE_MODEL_ATTESTATION
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     value = merge_section.get(CONFIG_KEY_REQUIRE_MODEL_ATTESTATION)
     if value is None:
@@ -1355,16 +1303,7 @@ def resolve_model_attestation_denylist(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return frozenset()
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     value = merge_section.get(CONFIG_KEY_MODEL_ATTESTATION_DENYLIST)
     if value is None:
@@ -1415,16 +1354,7 @@ def resolve_post_merge_step_timeout_seconds(
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
-    raw = _read_yaml_mapping(config_path)
-
-    merge_section = raw.get(CONFIG_SECTION_MERGE)
-    if merge_section is None:
-        return DEFAULT_POST_MERGE_STEP_TIMEOUT_SECONDS
-    if not isinstance(merge_section, dict):
-        raise PostMergeConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE!r} section must be a mapping, "
-            f"got {type(merge_section).__name__}."
-        )
+    merge_section = read_repo_merge_section(config_path)
 
     value = merge_section.get(CONFIG_KEY_POST_MERGE_STEP_TIMEOUT_SECONDS)
     if value is None:

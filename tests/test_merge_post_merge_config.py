@@ -909,6 +909,17 @@ class TestLoadPostMergeStepsFromGitSha:
         with pytest.raises(PostMergeConfigError):
             load_post_merge_steps_from_git_sha(tmp_path, sha)
 
+    def test_a_config_blob_that_is_not_utf8_raises_the_config_error(self, tmp_path):
+        _init_git_repo(tmp_path)
+        config_dir = tmp_path / ".clagentic" / "loadout"
+        config_dir.mkdir(parents=True)
+        (config_dir / "config.yaml").write_bytes(b"merge:\n  note: \xff\xfe\n")
+        _git(["add", "."], cwd=tmp_path)
+        _git(["commit", "-m", "binary config"], cwd=tmp_path)
+        sha = _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+        with pytest.raises(PostMergeConfigError, match="not valid UTF-8"):
+            load_post_merge_steps_from_git_sha(tmp_path, sha)
+
     def test_merge_section_not_a_mapping_raises(self, tmp_path):
         _init_git_repo(tmp_path)
         sha = _commit_config(tmp_path, {"merge": ["not", "a", "mapping"]})

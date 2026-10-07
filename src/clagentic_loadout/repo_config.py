@@ -79,6 +79,12 @@ from pathlib import Path
 #: directly) rather than re-declaring the literal.
 DEFAULT_CONFIG_RELATIVE_PATH = ".clagentic/loadout/config.yaml"
 
+#: Relative path (from a repo root) to the TRACKED, committed merge-gate
+#: declaration. Unlike `DEFAULT_CONFIG_RELATIVE_PATH` (a per-deployment file a
+#: repo may gitignore), this file is reviewed and landed through the PR flow,
+#: and `loadout-merge` reads it only as it exists at the PR's base commit.
+TRACKED_GATE_RELATIVE_PATH = ".clagentic/loadout/gate.yaml"
+
 #: The PRE-lr-446c35 relative path. Read only as a transitional fallback by
 #: `resolve_repo_config_path` when `DEFAULT_CONFIG_RELATIVE_PATH` is absent —
 #: never used as a first choice, never returned when both paths are absent.
@@ -345,6 +351,7 @@ __all__ = [
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "LEGACY_CONFIG_MARKER",
     "LEGACY_CONFIG_RELATIVE_PATH",
+    "TRACKED_GATE_RELATIVE_PATH",
     "find_git_top_level",
     "find_git_top_level_down_hop",
     "resolve_repo_config_path",

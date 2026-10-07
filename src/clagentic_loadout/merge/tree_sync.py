@@ -158,6 +158,17 @@ def resolve_base_branch(pr_info: dict) -> str:
     return base.get("ref", "") or ""
 
 
+def resolve_base_sha(pr_info: dict) -> str:
+    """Extract the PR's base commit SHA from a get_pr_info() response (the
+    `{"base": {"sha": ...}}` shape both backends share). Returns "" if absent;
+    the merge gate reports an unreadable base rather than guessing one."""
+    base = pr_info.get("base", {})
+    if not isinstance(base, dict):
+        return ""
+    sha = base.get("sha", "")
+    return sha if isinstance(sha, str) else ""
+
+
 def advance_repo_to_merged_sha(
     repo_path: str | Path,
     *,
@@ -458,4 +469,5 @@ __all__ = [
     "fetch_merged_sha_object",
     "land_on_base_branch",
     "resolve_base_branch",
+    "resolve_base_sha",
 ]

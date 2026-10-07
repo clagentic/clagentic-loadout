@@ -53,6 +53,8 @@ from clagentic_loadout.transport.provider_config import (
     USER_CONFIG_FILENAME as PROVIDER_CONFIG_FILENAME,
 )
 
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
+from tests._gate_repo import commit_files, git
 from tests._import_guard import ForbiddenImportFoundError, assert_module_never_imports
 
 _PY = sys.executable
@@ -84,6 +86,14 @@ def _write_loadout_config(repo_root, yaml_text: str) -> None:
     loadout_dir = repo_root / ".clagentic" / "loadout"
     loadout_dir.mkdir(parents=True, exist_ok=True)
     (loadout_dir / "config.yaml").write_text(yaml_text, encoding="utf-8")
+
+
+def _commit_tracked_gate(repo_root, yaml_text: str) -> None:
+    """Commit the repo's tracked gate file, where merge reads the gate keys from.
+    Doctor judges the gate at HEAD, so it must be a real commit."""
+    if not (repo_root / ".git").exists():
+        git(repo_root, "init", "-q", "-b", "main")
+    commit_files(repo_root, {TRACKED_GATE_RELATIVE_PATH: yaml_text}, "declare the gate")
 
 
 def _write_crew_config(repo_root, filename: str, yaml_text: str) -> None:
@@ -649,10 +659,17 @@ class TestCheckRepoLoadoutSchema:
         assert result.resolved["errors"] == []
 
     def test_malformed_pre_checks_fails(self, tmp_path):
-        _write_loadout_config(tmp_path, "merge:\n  pre_checks:\n    - {}\n")
+        _write_loadout_config(tmp_path, "merge:\n  sync_tree_after_merge: false\n")
+        _commit_tracked_gate(
+            tmp_path, "merge:\n  required_reviewer_roles: []\n  pre_checks:\n    - {}\n"
+        )
         result = check_repo_loadout_schema(tmp_path)
         assert result.ok is False
-        assert any("merge.pre_checks:" in err for err in result.resolved["errors"])
+        assert any(
+            err.startswith("merge (gate declaration): ")
+            and f"{TRACKED_GATE_RELATIVE_PATH}: pre_checks: " in err
+            for err in result.resolved["errors"]
+        )
 
     def test_malformed_merge_requirements_fails(self, tmp_path):
         _write_loadout_config(
@@ -663,9 +680,8 @@ class TestCheckRepoLoadoutSchema:
         assert any("merge (gate declaration):" in err for err in result.resolved["errors"])
 
     def test_malformed_required_reviewer_roles_fails(self, tmp_path):
-        _write_loadout_config(
-            tmp_path, "merge:\n  required_reviewer_roles: not-a-list\n"
-        )
+        _write_loadout_config(tmp_path, "merge:\n  sync_tree_after_merge: false\n")
+        _commit_tracked_gate(tmp_path, "merge:\n  required_reviewer_roles: not-a-list\n")
         result = check_repo_loadout_schema(tmp_path)
         assert result.ok is False
         assert any("merge (gate declaration):" in err for err in result.resolved["errors"])
@@ -684,6 +700,7 @@ class TestCheckRepoLoadoutSchema:
         _write_loadout_config(
             tmp_path, "merge:\n  post_merge_steps:\n    - cmd: scripts/install.sh\n"
         )
+        _commit_tracked_gate(tmp_path, "merge:\n  pre_checks: []\n")
         result = check_repo_loadout_schema(tmp_path)
         assert result.ok is False
         assert any(
@@ -723,11 +740,11 @@ class TestCheckRepoLoadoutSchema:
             "  lead:\n"
             "    - git-host-api\n"
             "merge:\n"
-            "  required_reviewer_roles:\n"
-            "    - reviewer\n"
-            "    - security\n"
             "  authorized_roles:\n"
             "    - merger\n",
+        )
+        _commit_tracked_gate(
+            tmp_path, "merge:\n  required_reviewer_roles:\n    - reviewer\n    - security\n"
         )
         result = check_repo_loadout_schema(tmp_path)
         assert result.ok is False
@@ -783,14 +800,9 @@ class TestCheckRepoLoadoutSchema:
         declaration. A gate role outside that reference set is not provably
         unsatisfiable (the deployment may resolve roles elsewhere), so this
         stays a WARN (ok remains True) rather than escalating to FAIL."""
-        _write_loadout_config(
-            tmp_path,
-            "merge:\n"
-            "  required_reviewer_roles:\n"
-            "    - reviewer\n"
-            "    - security\n"
-            "  authorized_roles:\n"
-            "    - merger\n",
+        _write_loadout_config(tmp_path, "merge:\n  authorized_roles:\n    - merger\n")
+        _commit_tracked_gate(
+            tmp_path, "merge:\n  required_reviewer_roles:\n    - reviewer\n    - security\n"
         )
         result = check_repo_loadout_schema(tmp_path)
         assert result.ok is True
@@ -1124,6 +1136,9 @@ class TestUnsatisfiableGateIsDiagnosticOnlyNotABootstrapTrap:
             "    - reviewer\n"
             "    - security\n",
         )
+        _commit_tracked_gate(
+            tmp_path, "merge:\n  required_reviewer_roles:\n    - reviewer\n    - security\n"
+        )
         doctor_result = check_repo_loadout_schema(tmp_path)
         assert doctor_result.ok is False
 
@@ -1286,11 +1301,9 @@ class TestUnsatisfiableGateIsDiagnosticOnlyNotABootstrapTrap:
             tmp_path,
             "roles:\n"
             "  builder:\n"
-            "    - push\n"
-            "merge:\n"
-            "  required_reviewer_roles:\n"
-            "    - security\n",
+            "    - push\n",
         )
+        _commit_tracked_gate(tmp_path, "merge:\n  required_reviewer_roles:\n    - security\n")
         result = check_repo_loadout_schema(tmp_path)
         assert result.ok is False
         (error_message,) = [

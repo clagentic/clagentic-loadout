@@ -137,8 +137,16 @@ from clagentic_loadout.merge.gate_config import (
     InvalidMergeGateConfigError,
     load_authorized_roles,
     load_merge_requirements,
-    load_required_reviewer_roles,
 )
+from clagentic_loadout.merge.commit_files import resolve_commit
+from clagentic_loadout.merge.repo_gate_runtime import (
+    ignored_deployment_gate_warnings,
+    load_repo_gate_at_base,
+    resolve_gate_git_tree,
+    with_resolvable_reviewer_roles,
+)
+from clagentic_loadout.platform_detect import detect_platform_from_url
+from clagentic_loadout.push.git_coords import read_remote_url_best_effort
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_POST_MERGE_STEPS,
@@ -148,7 +156,6 @@ from clagentic_loadout.merge.post_merge_config import (
     load_post_merge_steps,
     post_merge_steps_key_declared,
 )
-from clagentic_loadout.merge.pre_checks_config import load_pre_checks
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.provisioning.roles import (
     CONFIG_SECTION_ROLES,
@@ -819,6 +826,54 @@ def check_attestation_source_configured(
 KNOWN_CONFIG_SECTIONS: tuple[str, ...] = ("wait", "roles", "merge")
 
 
+@dataclass(frozen=True)
+class _GateFindings:
+    #: Roles the tracked gate declares, before any is dropped as unresolvable;
+    #: the roles-section satisfiability check judges what the repo asked for.
+    declared_roles: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
+    """What `loadout-merge` would make of this repo's tracked gate at HEAD.
+
+    Doctor does not re-derive merge's gate rules: it asks the merge runtime for
+    the gate (`load_repo_gate_at_base`, with HEAD standing in for the PR base
+    commit) and reports that result's own warnings and `pre_checks_error`
+    verbatim, so a change to what merge does cannot leave doctor describing the
+    old behaviour. Only severity is doctor's: the notice that a gate key sits in
+    the ignored deployment file is a warning; everything merge reports about a
+    gate it cannot enforce, or a role it drops, is an error here. A tree with no
+    readable HEAD commit has no tracked gate to judge, so nothing is reported.
+    """
+    head = "HEAD"
+    try:
+        resolved_head = resolve_commit(resolve_gate_git_tree(repo_root_path), "HEAD")
+    except PostMergeConfigError:
+        # A malformed git_working_tree: the runtime reports it itself, as a gate
+        # it cannot read, before it looks at the SHA.
+        pass
+    else:
+        if resolved_head is None:
+            return _GateFindings()
+        head = resolved_head
+
+    ignored = ignored_deployment_gate_warnings(repo_root_path)
+    gate = load_repo_gate_at_base(repo_root_path, base_sha=head)
+    declared_roles = gate.reviewer_roles
+    remote = read_remote_url_best_effort(repo_root_path)
+    if remote:
+        gate = with_resolvable_reviewer_roles(gate, detect_platform_from_url(remote))
+
+    errors = [f"merge (gate declaration): {warning}" for warning in gate.warnings if warning not in ignored]
+    if gate.pre_checks_error:
+        errors.append(f"merge (gate declaration): {gate.pre_checks_error}")
+    return _GateFindings(
+        declared_roles=declared_roles, errors=tuple(errors), warnings=tuple(w for w in gate.warnings if w in ignored)
+    )
+
+
 def check_repo_loadout_schema(
     repo_root: str | Path,
     *,
@@ -860,6 +915,9 @@ def check_repo_loadout_schema(
     config_path = resolve_repo_config_path(
         repo_root_path, config_relative_path=config_relative_path, warn=False
     )
+    # The gate lives in the tracked file at HEAD, not in config.yaml, so it is
+    # judged whether or not the deployment file exists.
+    gate_findings = _repo_gate_findings(repo_root_path)
     if not config_path.exists():
         summary = f"{config_path}: not present (every section falls back to its own default)"
         if legacy_dir_present:
@@ -867,14 +925,18 @@ def check_repo_loadout_schema(
                 f"; WARN: legacy {LEGACY_CONFIG_MARKER}/ dir present with no "
                 f"config.yaml inside it -- migrate to {config_relative_path}"
             )
+        if gate_findings.errors:
+            summary += f"; {len(gate_findings.errors)} gate error(s) -- " + "; ".join(gate_findings.errors)
         return CheckResult(
             name="repo_loadout_schema",
-            ok=True,
+            ok=not gate_findings.errors,
             summary=summary,
             resolved={
                 "config_path": str(config_path),
                 "exists": False,
                 "legacy_dir_present": legacy_dir_present,
+                "gate_warnings": [],
+                "errors": list(gate_findings.errors),
             },
         )
 
@@ -886,7 +948,7 @@ def check_repo_loadout_schema(
     # a bad repo config crash a health-check run).
     try:
         parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         return CheckResult(
             name="repo_loadout_schema",
             ok=False,
@@ -928,18 +990,13 @@ def check_repo_loadout_schema(
     except PostMergeConfigError as exc:
         errors.append(f"merge: {exc}")
 
-    try:
-        load_pre_checks(repo_root, config_relative_path=config_relative_path)
-    except PostMergeConfigError as exc:
-        errors.append(f"merge.pre_checks: {exc}")
+    errors.extend(gate_findings.errors)
+    required_reviewer_roles = gate_findings.declared_roles
 
     unknown_gate_roles: list[str] = []
     unsatisfiable_gate_roles: list[str] = []
     try:
         load_merge_requirements(repo_root, config_relative_path=config_relative_path)
-        required_reviewer_roles = load_required_reviewer_roles(
-            repo_root, config_relative_path=config_relative_path
-        )
         authorized_roles = load_authorized_roles(
             repo_root, config_relative_path=config_relative_path
         )
@@ -1028,6 +1085,8 @@ def check_repo_loadout_schema(
             f"; WARN: reading legacy {LEGACY_CONFIG_RELATIVE_PATH} -- migrate to "
             f"{config_relative_path}"
         )
+    for notice in gate_findings.warnings:
+        summary += f"; WARN: {notice}"
     if unknown_gate_roles:
         summary += (
             f"; WARN: gate role(s) {', '.join(unknown_gate_roles)} match no "
@@ -1050,6 +1109,7 @@ def check_repo_loadout_schema(
             "unknown_sections": unknown_sections,
             "unknown_gate_roles": unknown_gate_roles,
             "unsatisfiable_gate_roles": unsatisfiable_gate_roles,
+            "gate_warnings": list(gate_findings.warnings),
             "errors": errors,
         },
     )

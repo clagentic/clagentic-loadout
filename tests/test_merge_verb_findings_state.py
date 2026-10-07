@@ -7,6 +7,7 @@ touches a network or a real git tree."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 import yaml
@@ -14,9 +15,11 @@ import yaml
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.attestation import build_attestation_body
 from clagentic_loadout.merge.errors import VerdictStaleAfterCommentsError, VerdictStaleError
-from clagentic_loadout.merge.repo_gate_runtime import load_repo_gate
+from clagentic_loadout.merge.repo_gate_runtime import load_repo_gate_at_base
 from clagentic_loadout.merge.verdict import build_verdict_block, read_reviewer_verdict
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.transport import provider_config
+from tests._gate_repo import git, init_gate_repo, write_deployment_config
 from tests.test_merge_verb import (
     _AllowingAuthorityProvider,
     _RecordingTokenProvider,
@@ -52,20 +55,24 @@ def _merge(comments, *, head=HEAD_B, extra_args=None, repo_path=None, capsys=Non
         argv,
         token_provider=_RecordingTokenProvider(),
         authority_provider=_AllowingAuthorityProvider(),
-        opener=_make_opener(
-            pr_info={"head": {"sha": head}, "title": "feat: x"}, comments=comments
-        ),
+        opener=_make_opener(pr_info=_pr_info(head, repo_path), comments=comments),
     )
     return code, (capsys.readouterr().err if capsys else "")
 
 
 def _write_config(repo_path, merge_section):
-    config_dir = repo_path / ".clagentic" / "loadout"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    (config_dir / "config.yaml").write_text(
-        yaml.safe_dump({"merge": {"sync_tree_after_merge": False, **merge_section}}),
-        encoding="utf-8",
-    )
+    """Commit *merge_section* as the tracked gate at the base commit of a real
+    repo at *repo_path*; the gitignored deployment file carries only
+    machine-local keys."""
+    return init_gate_repo(repo_path, tracked_gate=merge_section)
+
+
+def _pr_info(head, repo_path=None):
+    """PR payload whose base commit is *repo_path*'s main, when it is a repo."""
+    info = {"head": {"sha": head}, "title": "feat: x"}
+    if repo_path is not None and (Path(repo_path) / ".git").exists():
+        info["base"] = {"ref": "main", "sha": git(Path(repo_path), "rev-parse", "main")}
+    return info
 
 
 F1_OPEN = {"findings_open": [{"id": "F1", "rule_id": "R1", "head": HEAD_A}]}
@@ -399,7 +406,7 @@ class TestRepoReviewerFloor:
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=_make_opener(pr_info={"head": {"sha": HEAD_B}, "title": "feat: x"}, comments=[]),
+            opener=_make_opener(pr_info=_pr_info(HEAD_B, tmp_path), comments=[]),
         )
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
         assert "required_reviewer_roles" in capsys.readouterr().err
@@ -411,7 +418,7 @@ class TestRepoReviewerFloor:
             _base_args(**{"--repo-path": str(tmp_path)}),
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=_make_opener(pr_info={"head": {"sha": HEAD_B}, "title": "feat: x"}, comments=comments),
+            opener=_make_opener(pr_info=_pr_info(HEAD_B, tmp_path), comments=comments),
         )
         assert code == verb.EXIT_OK
 
@@ -420,6 +427,100 @@ class TestRepoReviewerFloor:
         comments = [_comment(1, _fence("clean", HEAD_B))]
         code, _ = _merge(comments, repo_path=tmp_path)
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
+
+    @staticmethod
+    def _only_ghost_is_unresolvable(monkeypatch):
+        from clagentic_loadout.merge.reviewer_login import ReviewerLoginNotConfiguredError
+
+        def resolve(name, platform):
+            if name.startswith("ghost"):
+                raise ReviewerLoginNotConfiguredError(
+                    f"no GitHub App slug configured for reviewer {name!r}"
+                )
+            return name
+
+        monkeypatch.setattr("clagentic_loadout.merge.repo_gate_runtime.resolve_reviewer_login", resolve)
+        monkeypatch.setattr(verb, "resolve_reviewer_login", resolve)
+
+    def test_an_unresolvable_role_is_dropped_with_a_warning_and_the_rest_still_merges(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": ["ghost"]})
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "'ghost'" in err and "forgejo" in err and "no GitHub App slug configured" in err
+        assert "DROPPED" in err
+        assert "NOT ENFORCED" not in err
+
+    def test_a_failed_required_scanner_on_a_resolvable_role_still_refuses_beside_an_unresolvable_role(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(
+            tmp_path,
+            {
+                "required_reviewer_roles": ["ghost"],
+                "required_scanners": {NAME: ["alpha"], "ghost": ["beta"]},
+            },
+        )
+        failed = {"scanners_run": [{"scanner": "alpha", "status": "failed", "reason": "x"}]}
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B, failed))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "alpha" in err
+        assert "'ghost'" in err
+
+    def test_an_unresolvable_roles_own_scanners_are_skipped_not_unreachable(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(
+            tmp_path,
+            {"required_reviewer_roles": ["ghost"], "required_scanners": {"ghost": ["beta"]}},
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "required_scanners entry is skipped" in err
+
+    def test_a_resolvable_role_stays_enforced_beside_an_unresolvable_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": ["ghost", "never-posts"]})
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "'ghost'" in err
+
+    def test_a_resolvable_declared_role_is_still_enforced(self, tmp_path, monkeypatch, capsys):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": ["never-posts"]})
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "NOT ENFORCED" not in err
+
+    def test_a_declared_role_named_by_a_flag_keeps_the_flags_login(self, tmp_path, monkeypatch, capsys):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": ["ghost"]})
+        code, err = _merge(
+            [_comment(1, _fence("clean", HEAD_B))],
+            repo_path=tmp_path,
+            extra_args=["--required-reviewer", "ghost:ghost-login"],
+            capsys=capsys,
+        )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "NOT ENFORCED" not in err
+
+    def test_an_unresolvable_explicit_flag_role_still_errors(self, tmp_path, monkeypatch, capsys):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": []})
+        code, err = _merge(
+            [_comment(1, _fence("clean", HEAD_B))],
+            repo_path=tmp_path,
+            extra_args=["--required-reviewer", "ghost2"],
+            capsys=capsys,
+        )
+        assert code == verb.EXIT_USAGE
+        assert "'ghost2'" in err
 
     @pytest.mark.parametrize(
         "section",
@@ -434,6 +535,7 @@ class TestRepoReviewerFloor:
         assert code == verb.EXIT_OK
         assert "required_reviewer_roles NOT ENFORCED" in err
         assert str(tmp_path) in err
+        assert TRACKED_GATE_RELATIVE_PATH in err
 
     def test_a_malformed_reviewer_key_drops_the_whole_gate_even_beside_a_valid_scanners_key(
         self, tmp_path, capsys
@@ -469,17 +571,20 @@ class TestRepoReviewerFloor:
         assert "IGNORED via --ignore-repo-gate" in err
 
     def test_both_gate_keys_are_read_from_one_snapshot(self, tmp_path, monkeypatch):
-        _write_config(tmp_path, {"required_reviewer_roles": [NAME], "required_scanners": {NAME: ["a"]}})
+        repo = _write_config(tmp_path, {"required_reviewer_roles": [NAME], "required_scanners": {NAME: ["a"]}})
+        committed_gate_text = git(tmp_path, "show", f"{repo.base_sha}:{TRACKED_GATE_RELATIVE_PATH}")
         real = yaml.safe_load
-        reads = []
+        gate_parses = []
 
-        def counting(*args, **kwargs):
-            reads.append(args)
-            return real(*args, **kwargs)
+        def counting(stream, *args, **kwargs):
+            if str(stream).strip() == committed_gate_text.strip():
+                gate_parses.append(stream)
+            return real(stream, *args, **kwargs)
 
         monkeypatch.setattr(yaml, "safe_load", counting)
-        gate = load_repo_gate(tmp_path)
-        assert len(reads) == 1
+        gate = load_repo_gate_at_base(tmp_path, base_sha=repo.base_sha, base_branch="main")
+        assert len(gate_parses) == 1
+        assert gate.warnings == ()
         assert gate.reviewer_roles == (NAME,)
         assert gate.scanners_for(NAME) == ("a",)
 
@@ -505,7 +610,7 @@ class TestRepoReviewerFloor:
         _write_config(tmp_path, {"required_reviewer_roles": ["never-posts"]})
         posted: list[str] = []
         opener = _make_opener(
-            pr_info={"head": {"sha": HEAD_B}, "title": "feat: x"},
+            pr_info=_pr_info(HEAD_B, tmp_path),
             comments=[_comment(1, _fence("clean", HEAD_B))],
         )
 
@@ -525,21 +630,71 @@ class TestRepoReviewerFloor:
         assert any("Repo gate" in body and "ignored" in body for body in posted)
         assert '"repo_gate_ignored": ["never-posts"]' in capsys.readouterr().out
 
-    def test_a_role_with_no_resolvable_login_refuses_and_names_the_override(self, tmp_path, capsys):
-        _write_config(tmp_path, {"required_reviewer_roles": ["security"]})
-        argv = _base_args(**{"--platform": "github", "--repo-path": str(tmp_path)})
-        code = verb.main(
-            argv,
-            token_provider=_RecordingTokenProvider(),
-            authority_provider=_AllowingAuthorityProvider(),
-            opener=_make_opener(),
-        )
-        assert code == verb.EXIT_USAGE
-        assert "--ignore-repo-gate" in capsys.readouterr().err
-
     def test_no_repo_path_declares_nothing(self):
         code, _ = _merge([_comment(1, _fence("clean", HEAD_B))])
         assert code == verb.EXIT_OK
+
+
+class TestTheGateComesFromBaseNotTheWorkingTree:
+    """The PR under review must not be able to relax its own gate."""
+
+    def test_a_relaxed_working_tree_does_not_relax_a_strict_base(self, tmp_path, capsys):
+        _write_config(tmp_path, {"required_reviewer_roles": ["never-posts"]})
+        # The working tree (as if holding the PR head) declares no requirement.
+        (tmp_path / TRACKED_GATE_RELATIVE_PATH).write_text(
+            yaml.safe_dump({"merge": {"required_reviewer_roles": []}}), encoding="utf-8"
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "never-posts" in err
+
+    def test_a_corrupted_working_tree_does_not_force_the_fallback(self, tmp_path, capsys):
+        _write_config(tmp_path, {"required_reviewer_roles": ["never-posts"]})
+        (tmp_path / TRACKED_GATE_RELATIVE_PATH).write_text("merge: [unclosed", encoding="utf-8")
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "NOT ENFORCED" not in err
+
+    def test_a_strict_working_tree_is_not_enforced_when_base_declares_nothing(self, tmp_path, capsys):
+        init_gate_repo(tmp_path, tracked_gate=None)
+        gate_file = tmp_path / TRACKED_GATE_RELATIVE_PATH
+        gate_file.write_text(yaml.safe_dump({"merge": {"required_reviewer_roles": ["never-posts"]}}), encoding="utf-8")
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "NOT ENFORCED" not in err
+
+    def test_gate_keys_in_the_deployment_file_are_ignored_with_a_warning(self, tmp_path, capsys):
+        init_gate_repo(tmp_path, tracked_gate=None)
+        write_deployment_config(
+            tmp_path, {"sync_tree_after_merge": False, "required_reviewer_roles": ["never-posts"]}
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "merge.required_reviewer_roles in" in err
+        assert "IGNORED" in err
+        assert TRACKED_GATE_RELATIVE_PATH in err
+
+    def test_a_malformed_base_gate_falls_back_with_a_warning_even_if_the_working_tree_is_valid(
+        self, tmp_path, capsys
+    ):
+        _write_config(tmp_path, {"required_reviewer_roles": "reviewer"})
+        (tmp_path / TRACKED_GATE_RELATIVE_PATH).write_text(
+            yaml.safe_dump({"merge": {"required_reviewer_roles": ["never-posts"]}}), encoding="utf-8"
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "required_reviewer_roles NOT ENFORCED" in err
+
+    def test_the_introducing_pr_is_judged_by_a_base_with_no_gate(self, tmp_path, capsys):
+        repo = init_gate_repo(
+            tmp_path,
+            tracked_gate=None,
+            head_files={TRACKED_GATE_RELATIVE_PATH: yaml.safe_dump({"merge": {"required_reviewer_roles": ["never-posts"]}})},
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert repo.head_sha != repo.base_sha
+        assert code == verb.EXIT_OK
+        assert "NOT ENFORCED" not in err
 
 
 def _raw_fence(**fields):
