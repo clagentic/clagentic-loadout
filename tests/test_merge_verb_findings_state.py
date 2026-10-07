@@ -12,7 +12,9 @@ import pytest
 import yaml
 
 from clagentic_loadout.merge import verb
+from clagentic_loadout.merge.attestation import build_attestation_body
 from clagentic_loadout.merge.errors import VerdictStaleAfterCommentsError, VerdictStaleError
+from clagentic_loadout.merge.repo_gate_runtime import load_repo_gate
 from clagentic_loadout.merge.verdict import build_verdict_block, read_reviewer_verdict
 from clagentic_loadout.transport import provider_config
 from tests.test_merge_verb import (
@@ -318,6 +320,25 @@ class TestSupersedesResolution:
         assert code == verb.EXIT_OK
         assert "supersedes comment #99" in err
 
+    def test_a_supersedes_naming_another_reviewers_fence_is_surfaced(self, capsys):
+        comments = [
+            _comment(1, _fence("blocking", HEAD_A, name="someone-else")),
+            _comment(2, _fence("clean", HEAD_B, {"supersedes": 1})),
+        ]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "supersedes comment #1" in err
+
+    def test_a_supersedes_naming_a_malformed_fence_is_surfaced(self, capsys):
+        broken = _fence("blocking", HEAD_A).replace("{", "{,", 1)
+        comments = [
+            _comment(1, broken),
+            _comment(2, _fence("clean", HEAD_B, {"supersedes": 1})),
+        ]
+        code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "supersedes comment #1" in err
+
     def test_supersession_still_resolves_no_finding(self, capsys):
         comments = [
             _comment(1, _fence("blocking", HEAD_A, F1_OPEN)),
@@ -446,6 +467,39 @@ class TestRepoReviewerFloor:
         )
         assert code == verb.EXIT_OK
         assert "IGNORED via --ignore-repo-gate" in err
+
+    def test_both_gate_keys_are_read_from_one_snapshot(self, tmp_path, monkeypatch):
+        _write_config(tmp_path, {"required_reviewer_roles": [NAME], "required_scanners": {NAME: ["a"]}})
+        real = yaml.safe_load
+        reads = []
+
+        def counting(*args, **kwargs):
+            reads.append(args)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(yaml, "safe_load", counting)
+        gate = load_repo_gate(tmp_path)
+        assert len(reads) == 1
+        assert gate.reviewer_roles == (NAME,)
+        assert gate.scanners_for(NAME) == ("a",)
+
+    def test_the_ignore_flag_help_names_exactly_the_gates_it_lifts(self, capsys):
+        assert verb.main(["--help"]) == 0
+        flat = " ".join(capsys.readouterr().out.split())
+        assert "merge.required_reviewer_roles" in flat
+        assert "merge.required_scanners" in flat
+        assert "model attestation" in flat
+        assert "single-fence" in flat
+
+    def test_the_attestation_row_names_exactly_the_gates_it_lifts(self):
+        body = build_attestation_body(
+            gated_head_sha=HEAD_B,
+            merged_sha=HEAD_A,
+            required_reviewer_logins=[],
+            ci_disposition="ok",
+            repo_gate_ignored=True,
+        )
+        assert "merge.required_reviewer_roles and merge.required_scanners ignored" in body
 
     def test_the_override_appears_in_the_output_and_the_attestation(self, tmp_path, capsys):
         _write_config(tmp_path, {"required_reviewer_roles": ["never-posts"]})

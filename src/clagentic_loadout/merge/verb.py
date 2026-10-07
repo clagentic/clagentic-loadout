@@ -935,10 +935,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         dest="ignore_repo_gate",
-        help="Do not enforce any gate the repo declares in its merge config: "
-        "neither the reviewer roles in merge.required_reviewer_roles nor the "
-        "scanners in merge.required_scanners; only --required-reviewer "
-        "applies. For a repo whose declared gate cannot be satisfied (for "
+        help="Lift exactly two repo-declared gates: the reviewer roles in "
+        "merge.required_reviewer_roles and the scanners in "
+        "merge.required_scanners; only --required-reviewer applies. Every "
+        "other gate, including model attestation and the single-fence "
+        "requirement, stays enforced. For a repo whose declared gate cannot be satisfied (for "
         "example while landing the config that fixes it). Logged to stderr "
         "and recorded in the merge-completion attestation. A repo gate "
         "config that cannot be loaded at all already falls back to "
@@ -1290,7 +1291,8 @@ def _run(
     floor_only_reviewers: dict[str, str] = {}
     if args.ignore_repo_gate:
         print(
-            f"merge: repo gate IGNORED via --ignore-repo-gate (declared reviewer "
+            f"merge: merge.required_reviewer_roles and merge.required_scanners IGNORED "
+            f"via --ignore-repo-gate (declared reviewer "
             f"roles: {list(repo_gate.reviewer_roles)!r}, declared required scanners: "
             f"{ {r: list(s) for r, s in (repo_gate.required_scanners or {}).items()}!r}); "
             f"only --required-reviewer applies",

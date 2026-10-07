@@ -31,8 +31,7 @@ from typing import Iterable
 
 from clagentic_loadout.merge.gate_config import (
     InvalidMergeGateConfigError,
-    load_required_reviewer_roles,
-    load_required_scanners,
+    load_repo_gate_declarations,
 )
 
 
@@ -68,8 +67,7 @@ def load_repo_gate(repo_path: str | Path | None) -> RepoGate:
         return RepoGate()
 
     try:
-        roles = load_required_reviewer_roles(repo_path)
-        scanners = load_required_scanners(repo_path)
+        roles, scanners = load_repo_gate_declarations(repo_path)
     except InvalidMergeGateConfigError as exc:
         return RepoGate(
             warnings=(

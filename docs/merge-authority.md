@@ -178,9 +178,10 @@ keep a broken config from blocking the merge that would fix it:
   verdict, or no resolvable login; a clean verdict that records no scanner
   outcomes, or reports a required scanner failed, for a role with
   `required_scanners`) refuses the merge. `--ignore-repo-gate` is the
-  deliberate escape hatch for **all** repo gates, reviewer roles and required
-  scanners alike: it is logged to stderr, printed in the merge output, and
-  recorded in the merge-completion attestation.
+  deliberate escape hatch for exactly two gates, `merge.required_reviewer_roles`
+  and `merge.required_scanners`: it is logged to stderr, printed in the merge
+  output, and recorded in the merge-completion attestation. It lifts nothing
+  else; model attestation and the single-fence requirement stay enforced.
 - A `required_scanners` entry for a role that is not a required reviewer (not in
   `required_reviewer_roles` and not named by `--required-reviewer`) could never
   gate anything, so it refuses the merge naming the role, with the same

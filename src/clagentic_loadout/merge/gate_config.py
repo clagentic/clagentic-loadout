@@ -365,6 +365,12 @@ def load_required_reviewer_roles(
     config_path, merge_section, section_present = _read_merge_section_with_presence(
         repo_root, config_relative_path=config_relative_path
     )
+    return _reviewer_roles_from_section(config_path, merge_section, section_present)
+
+
+def _reviewer_roles_from_section(
+    config_path: Path, merge_section: dict, section_present: bool
+) -> tuple[str, ...]:
     if not section_present:
         return ()
     if CONFIG_KEY_REQUIRED_REVIEWER_ROLES not in merge_section:
@@ -443,6 +449,38 @@ def load_required_scanners(
     config_path, merge_section = _read_merge_section(
         repo_root, config_relative_path=config_relative_path
     )
+    return _required_scanners_from_section(config_path, merge_section)
+
+
+def load_repo_gate_declarations(
+    repo_root: str | Path | None,
+    *,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """Resolve `required_reviewer_roles` and `required_scanners` from ONE read
+    of the config file, so both keys describe the same snapshot.
+
+    Two separate reads could straddle a concurrent edit and pair a role list
+    from one version with a scanner map from another, which defeats the
+    whole-config fallback rule applied by the caller.
+
+    Raises:
+        InvalidMergeGateConfigError: any error either single-key loader raises.
+    """
+    if repo_root is None:
+        return (), {}
+    config_path, merge_section, section_present = _read_merge_section_with_presence(
+        repo_root, config_relative_path=config_relative_path
+    )
+    return (
+        _reviewer_roles_from_section(config_path, merge_section, section_present),
+        _required_scanners_from_section(config_path, merge_section),
+    )
+
+
+def _required_scanners_from_section(
+    config_path: Path, merge_section: dict
+) -> dict[str, tuple[str, ...]]:
     raw = merge_section.get(CONFIG_KEY_REQUIRED_SCANNERS)
     if raw is None:
         return {}
@@ -488,5 +526,6 @@ __all__ = [
     "load_authorized_roles",
     "load_merge_requirements",
     "load_required_reviewer_roles",
+    "load_repo_gate_declarations",
     "load_required_scanners",
 ]

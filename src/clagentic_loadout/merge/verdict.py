@@ -806,24 +806,23 @@ def read_reviewer_verdict(
         )
 
     current_state = state_from_fence(verdict_data)
+    earlier_fences = _earlier_fence_states(
+        ordered_comments[selected_index + 1 :][::-1],
+        pr_number=pr_number,
+        expected_reviewer_name=expected_reviewer_name or verdict_reviewer,
+    )
     unresolved = unresolved_prior_findings(
-        _earlier_fence_states(
-            ordered_comments[selected_index + 1 :][::-1],
-            pr_number=pr_number,
-            expected_reviewer_name=expected_reviewer_name or verdict_reviewer,
-        ),
+        [(head, state) for _comment_id, head, state in earlier_fences],
         current_state,
         verdict_sha,
     )
 
     # Supersession is provenance, not resolution, but a claim to replace a
-    # comment this reviewer never posted a verdict in is worth surfacing: it
-    # means the history the fence describes is not the history on the PR.
-    earlier_verdict_ids = {
-        candidate.get("id")
-        for candidate in ordered_comments[selected_index + 1 :]
-        if _FENCE_RE.search(candidate.get("body", "")) is not None
-    }
+    # comment this reviewer never posted a valid verdict in is worth
+    # surfacing: it means the history the fence describes is not the history
+    # on the PR. A malformed fence or another reviewer's fence is not a valid
+    # target, so only the fences accepted above count.
+    earlier_verdict_ids = {comment_id for comment_id, _head, _state in earlier_fences}
     unresolved_supersedes = (
         current_state.supersedes
         if current_state.supersedes is not None
@@ -850,8 +849,9 @@ def _earlier_fence_states(
     *,
     pr_number: int,
     expected_reviewer_name: str,
-) -> list[tuple[str, FindingsState]]:
-    """Parse the findings state out of a reviewer's EARLIER verdict comments.
+) -> list[tuple[Any, str, FindingsState]]:
+    """Parse the findings state out of a reviewer's EARLIER verdict comments,
+    as (comment id, fence head, state) triples.
 
     A fence that cannot be parsed, that names another reviewer, or that is for
     another PR is not this reviewer's verdict and is skipped: it was never a
@@ -861,7 +861,7 @@ def _earlier_fence_states(
     (VerdictMalformedError), since it cannot be trusted to clear or supersede
     anything yet may have held findings open.
     """
-    states: list[tuple[str, FindingsState]] = []
+    states: list[tuple[Any, str, FindingsState]] = []
     for comment in earlier_oldest_first:
         try:
             data = parse_verdict_block(comment.get("body", ""))
@@ -887,7 +887,7 @@ def _earlier_fence_states(
                 f"and the findings history cannot be read past it; the reviewer must "
                 f"re-run and post a valid verdict."
             ) from exc
-        states.append((fence_head, state_from_fence(data)))
+        states.append((comment.get("id"), fence_head, state_from_fence(data)))
     return states
 
 
