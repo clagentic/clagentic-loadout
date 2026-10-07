@@ -143,6 +143,8 @@ import sys
 import time
 from pathlib import Path
 
+from clagentic_loadout.numeric_validation import is_finite_positive_number
+
 #: Tokens that only mean something to a shell — never valid inside a plain
 #: argv, so their presence in a cmd STRING (not a list-form step) is refused
 #: outright rather than silently misparsed into a bogus argv (the bug this
@@ -335,9 +337,9 @@ def _validate_timeout_seconds(value, *, step_label: str) -> None:
             f"{step_label}: {STEP_KEY_TIMEOUT_SECONDS!r} must be an int or "
             f"float number of seconds, got {value!r}."
         )
-    if value <= 0:
+    if not is_finite_positive_number(value):
         raise PostMergeConfigError(
-            f"{step_label}: {STEP_KEY_TIMEOUT_SECONDS!r} must be > 0, got "
+            f"{step_label}: {STEP_KEY_TIMEOUT_SECONDS!r} must be a finite number > 0, got "
             f"{value!r}."
         )
 
@@ -369,10 +371,10 @@ def _validate_liveness_probe(value, *, step_label: str) -> None:
             f"{LIVENESS_PROBE_KEY_POLL_INTERVAL_SECONDS!r} must be an int or "
             f"float number of seconds, got {poll_interval!r}."
         )
-    if poll_interval <= 0:
+    if not is_finite_positive_number(poll_interval):
         raise PostMergeConfigError(
             f"{step_label}: {STEP_KEY_LIVENESS_PROBE!r}."
-            f"{LIVENESS_PROBE_KEY_POLL_INTERVAL_SECONDS!r} must be > 0, got "
+            f"{LIVENESS_PROBE_KEY_POLL_INTERVAL_SECONDS!r} must be a finite number > 0, got "
             f"{poll_interval!r}."
         )
     max_polls = value.get(LIVENESS_PROBE_KEY_MAX_POLLS, DEFAULT_LIVENESS_MAX_POLLS)

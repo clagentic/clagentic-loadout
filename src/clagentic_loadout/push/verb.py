@@ -300,6 +300,17 @@ from clagentic_loadout.push.remote_readback import (
     read_remote_head,
     verify_remote_authorship,
 )
+from clagentic_loadout.push.verify_config import (
+    InvalidVerifyConfigError,
+    load_verify_entries,
+)
+from clagentic_loadout.push.verify_run import (
+    VerificationFailedError,
+    append_section,
+    render_skipped_section,
+    render_verification_section,
+    run_verifications,
+)
 from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
@@ -445,6 +456,13 @@ EXIT_DIRTY_WORK_TREE = 36
 #: see push.host_guard.check_host_allowed's own docstring for the full
 #: config-ceiling rationale.
 EXIT_HOST_CONFIG_INVALID = 37
+#: A repo-declared verification command (`push.verify` in the repo config)
+#: exited non-zero, timed out, or could not start. Fires before any push or
+#: PR call on the path that ran it; --skip-verify is the explicit, recorded
+#: override. See docs/verbs.md's `loadout-push` section.
+EXIT_VERIFY_FAILED = 38
+#: `push.verify` is present in the repo config but malformed.
+EXIT_VERIFY_CONFIG_INVALID = 39
 
 
 class PushVerbError(Exception):
@@ -870,6 +888,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"({EXIT_STRAY_MERGE_COMMIT}=EXIT_STRAY_MERGE_COMMIT). Use of this "
         "flag is logged to stderr for audit.",
     )
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        default=False,
+        dest="skip_verify",
+        help="Do not run the repo's declared verification commands "
+        "(.clagentic/loadout/config.yaml push.verify). Default: they run in "
+        "the checkout at the head being pushed, before the PR is created "
+        "(or, on --update-pr, before a body edit), their results are "
+        "appended to the PR body, and a failing one refuses the push, exit "
+        f"{EXIT_VERIFY_FAILED} ({EXIT_VERIFY_FAILED}=EXIT_VERIFY_FAILED). "
+        "This flag is never silent: it is logged to stderr and recorded in "
+        "the PR body. A no-op when push.verify is not configured.",
+    )
     return parser
 
 
@@ -1241,6 +1273,49 @@ def _run_task_id_guard_commit_check(
         )
         if warning:
             print(f"push: WARNING -- {warning}", file=sys.stderr)
+
+
+def _run_verification(project_root: Path, *, body: str | None, skip: bool) -> str | None:
+    """Run the repo's declared `push.verify` commands (push.verify_run) in
+    *project_root* and return *body* with a `## Verification` section
+    appended recording the outcome.
+
+    With nothing configured, returns *body* unchanged -- byte-identical to a
+    build without this feature, including when *skip* is set (there is
+    nothing to skip, so nothing to record). With *skip*, no command runs; the
+    bypass is logged to stderr and written into the returned body so a
+    reader of the PR can see it was not verified. When *body* is None and
+    something ran or was skipped, the returned body is the section alone, so
+    the record is never lost; a caller that passed None must treat the result
+    as an addition to an existing body, not a replacement.
+
+    Raises push.verify_config.InvalidVerifyConfigError for malformed config
+    and push.verify_run.VerificationFailedError on the first failing check;
+    both are mapped to exit codes in main().
+    """
+    entries = load_verify_entries(project_root)
+    if not entries:
+        return body
+    if skip:
+        names = ", ".join(e.name for e in entries)
+        print(
+            f"push: verification BYPASSED via --skip-verify for {project_root} "
+            f"(checks not run: {names})",
+            file=sys.stderr,
+        )
+        return _with_section(body, render_skipped_section(entries))
+    print(
+        f"push: running {len(entries)} verification check(s) in {project_root}",
+        file=sys.stderr,
+    )
+    results = run_verifications(entries, project_root)
+    return _with_section(body, render_verification_section(results))
+
+
+def _with_section(body: str | None, section: str) -> str:
+    """*body* with *section* appended, or *section* alone when no body was
+    supplied -- a verification outcome is never dropped for want of a body."""
+    return section if body is None else append_section(body, section)
 
 
 def _resolve_repo_root(repo_path_override: str) -> Path:
@@ -1647,6 +1722,12 @@ def main(
     except InvalidPushHostConfigError as exc:
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_HOST_CONFIG_INVALID
+    except VerificationFailedError as exc:
+        print(f"push: {exc}", file=sys.stderr)
+        return EXIT_VERIFY_FAILED
+    except InvalidVerifyConfigError as exc:
+        print(f"push: {exc}", file=sys.stderr)
+        return EXIT_VERIFY_CONFIG_INVALID
 
 
 def _run(
@@ -1884,6 +1965,29 @@ def _resolve_owner_repo_for_update(args: argparse.Namespace, project_root: Path)
 _APPEND_BODY_SEPARATOR = "\n\n"
 
 
+def _commits_ahead_of_upstream(project_root: Path) -> tuple[str, int] | None:
+    """Return (upstream ref, number of local commits not on it), or None when
+    that cannot be determined (no upstream configured, git failure)."""
+    import subprocess
+
+    upstream = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        cwd=str(project_root), capture_output=True, text=True,
+    )
+    if upstream.returncode != 0 or not upstream.stdout.strip():
+        return None
+    counts = subprocess.run(
+        ["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"],
+        cwd=str(project_root), capture_output=True, text=True,
+    )
+    if counts.returncode != 0:
+        return None
+    parts = counts.stdout.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        return None
+    return upstream.stdout.strip(), int(parts[1])
+
+
 def _warn_if_ahead_of_remote_tracking(project_root: Path) -> None:
     """Warn on stderr when the current local branch is AHEAD of its own
     remote-tracking ref (lr-2500b7): the exact situation the originating
@@ -1896,28 +2000,14 @@ def _warn_if_ahead_of_remote_tracking(project_root: Path) -> None:
     upstream configured) is silently skipped -- this is a diagnostic nicety
     for the common case, not a new precondition on every --update-pr call.
     """
-    import subprocess
-
-    upstream = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        cwd=str(project_root), capture_output=True, text=True,
-    )
-    if upstream.returncode != 0 or not upstream.stdout.strip():
+    state = _commits_ahead_of_upstream(project_root)
+    if state is None:
         return
-    counts = subprocess.run(
-        ["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"],
-        cwd=str(project_root), capture_output=True, text=True,
-    )
-    if counts.returncode != 0:
-        return
-    parts = counts.stdout.split()
-    if len(parts) != 2:
-        return
-    _behind, ahead = parts
-    if ahead.isdigit() and int(ahead) > 0:
+    upstream_ref, ahead = state
+    if ahead > 0:
         print(
             f"push: WARNING -- the local branch is {ahead} commit(s) ahead of "
-            f"its remote-tracking ref {upstream.stdout.strip()!r}. --update-pr "
+            f"its remote-tracking ref {upstream_ref!r}. --update-pr "
             f"NEVER pushes (metadata-only: title/body PATCH) -- those local "
             f"commits are NOT on the remote after this call. Use the create "
             f"path (push without --update-pr) to push them.",
@@ -1964,6 +2054,27 @@ def _run_update_pr(
 
     _check_title_gate(args, owner, repo, project_root=project_root)
 
+    # Verification runs whenever the update could be carrying new work: a
+    # body is being written, or the checkout holds commits (or an unknown
+    # state) beyond its upstream. Only a metadata-only edit PROVABLY without
+    # new commits skips, and says so. This path never pushes, so the
+    # checkout's HEAD is verified as-is. With no body supplied the record is
+    # still written: the section becomes the body and is APPENDED to the PR's
+    # existing one (never replacing it), whatever body-mode flag was given.
+    ahead_state = _commits_ahead_of_upstream(project_root)
+    has_new_commits = ahead_state is None or ahead_state[1] > 0
+    force_append = False
+    if body is not None or has_new_commits:
+        body_supplied = body is not None
+        body = _run_verification(project_root, body=body, skip=args.skip_verify)
+        force_append = body is not None and not body_supplied
+    elif load_verify_entries(project_root):
+        print(
+            "push: push.verify checks SKIPPED -- metadata-only update with no "
+            "commits ahead of the upstream",
+            file=sys.stderr,
+        )
+
     print(f"push: resolving token for caller={caller!r} (PR update)", file=sys.stderr)
     active_provider = (
         token_provider
@@ -1981,7 +2092,7 @@ def _run_update_pr(
     # is composed here, at the call site, not as a mode flag threaded into
     # either backend's update_pr().
     effective_body = body
-    if body is not None and args.append_body:
+    if body is not None and (args.append_body or force_append):
         try:
             if args.platform == PLATFORM_GITHUB:
                 current_body = github_backend.get_pr_body(owner, repo, args.pr_number, token=token, opener=opener)
@@ -2218,6 +2329,13 @@ def _run_create_pr(
     _run_task_id_guard_commit_check(
         project_root, base_branch=args.base, remote=remote_name,
     )
+
+    # Repo-declared verification, at the head that is about to be pushed
+    # (bot-identity re-authoring above has already settled it), before any
+    # ref moves or PR exists. A dry run pushes nothing and opens no PR, so it
+    # does not spend a verification run.
+    if not args.dry_run:
+        body = _run_verification(project_root, body=body, skip=args.skip_verify)
 
     # LEASE CONTROL (lr-f57f13, D5 DECIDED): never derive force_with_lease
     # silently from history_rewritten alone -- resolve_lease applies the
