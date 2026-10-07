@@ -1296,7 +1296,7 @@ class TestContentionCheck:
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_OK
-        assert {"feature", "origin/feature"} <= set(seen["own_branches"])
+        assert set(seen["own_branches"]) == {"refs/heads/feature"}
 
     def test_enabled_non_matching_branch_proceeds(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote

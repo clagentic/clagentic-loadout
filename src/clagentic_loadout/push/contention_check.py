@@ -152,8 +152,14 @@ def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _current_branch(repo_root: Path) -> str:
-    result = _run_git(["symbolic-ref", "--short", "-q", "HEAD"], cwd=repo_root)
+_HEADS_PREFIX = "refs/heads/"
+
+
+def _current_ref(repo_root: Path) -> str:
+    """The FULL ref HEAD points at (`refs/heads/<name>`), never the short
+    name: a short name is ambiguous between a local branch literally named
+    `origin/foo` and the remote-tracking ref for `foo`."""
+    result = _run_git(["symbolic-ref", "-q", "HEAD"], cwd=repo_root)
     if result.returncode != 0:
         # Detached HEAD (or a check that cannot resolve a symbolic ref at
         # all) has no branch name to match against the in-flight pattern —
@@ -174,17 +180,16 @@ def _is_dirty(repo_root: Path) -> bool:
     return bool(result.stdout.strip())
 
 
-def own_branch_refs(branch: str, remote: str = "") -> frozenset[str]:
-    """Every spelling under which the branch a caller is about to push may
-    show up as the checked-out branch: the short name, its full ref, and (when
-    *remote* is known) its remote-tracking form. A checked-out branch in this
-    set is the caller's OWN work, not another unit's."""
+def own_branch_refs(branch: str) -> frozenset[str]:
+    """The full local ref of the branch a caller is about to push. Only the
+    local `refs/heads/<branch>` can ever be the checked-out HEAD, so the
+    remote-tracking ref (`refs/remotes/<remote>/<branch>`) is deliberately
+    absent: it is a remote ref, and matching it by short name would let a
+    local branch literally named `<remote>/<branch>` masquerade as the
+    caller's own work."""
     if not branch:
         return frozenset()
-    refs = {branch, f"refs/heads/{branch}"}
-    if remote:
-        refs.update({f"{remote}/{branch}", f"refs/remotes/{remote}/{branch}"})
-    return frozenset(refs)
+    return frozenset({f"{_HEADS_PREFIX}{branch}"})
 
 
 def check_working_tree_contention(
@@ -213,7 +218,7 @@ def check_working_tree_contention(
             proceeding with no record of the decision (see module docstring,
             defect (2): an override that cannot be seen to have fired is not
             meaningfully different from one that does not exist).
-        own_branches: ref spellings (see `own_branch_refs`) of the branch the
+        own_branches: full refs (see `own_branch_refs`) of the branch the
             caller is itself about to push. A push always operates on the
             checked-out branch, so without this exclusion the branch being
             pushed matched the in-flight pattern on every call and the check
@@ -239,9 +244,10 @@ def check_working_tree_contention(
         )
 
     repo_root = Path(repo_root)
-    branch = _current_branch(repo_root)
+    current_ref = _current_ref(repo_root)
+    branch = current_ref.removeprefix(_HEADS_PREFIX)
 
-    if branch and branch in frozenset(own_branches):
+    if current_ref and current_ref in frozenset(own_branches):
         return ContentionVerdict(
             in_flight=False, overridden=False, branch=branch, dirty=False,
             reason=(

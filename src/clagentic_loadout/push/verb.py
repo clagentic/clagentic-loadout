@@ -1089,7 +1089,7 @@ def _run_task_id_guard_title_check(args: argparse.Namespace, *, project_root: Pa
 
 
 def _run_contention_check(
-    project_root: Path, *, override: bool, branch: str, remote: str
+    project_root: Path, *, override: bool, branch: str
 ) -> None:
     """Optional, config-gated pre-flight working-tree contention check
     (lr-78a584, push.contention_check) -- refuses when another unit of work
@@ -1108,9 +1108,11 @@ def _run_contention_check(
     via new commit objects + `git update-ref`, lr-ac7bb0) -- a refusal here
     must never spend a token mint or touch history first.
 
-    *branch*/*remote* name the branch this invocation is itself pushing and
-    its remote; that branch is never counted as other work in flight (it is
-    always the checked-out branch, so counting it refused every push).
+    *branch* names the branch this invocation is itself pushing; that branch
+    is never counted as other work in flight (it is always the checked-out
+    branch, so counting it refused every push). It is matched by its full
+    `refs/heads/` ref, so a differently-named local branch such as
+    `origin/<branch>` is still other work.
 
     Raises push.contention_check.WorkingTreeContentionError when contention
     is found and *override* is False; caught at the CLI boundary in main()
@@ -1128,7 +1130,7 @@ def _run_contention_check(
             enabled=config.enabled,
             branch_pattern=config.branch_pattern,
             override=override,
-            own_branches=own_branch_refs(branch, remote),
+            own_branches=own_branch_refs(branch),
         )
     except WorkingTreeContentionError as exc:
         _fail(str(exc), code=EXIT_WORKING_TREE_CONTENTION)
@@ -2170,7 +2172,7 @@ def _run_create_pr(
 
     _run_contention_check(
         project_root, override=args.override_contention_check,
-        branch=branch, remote=git_coords.tracking_remote(branch, project_root),
+        branch=branch,
     )
 
     if args.platform == PLATFORM_GITHUB:

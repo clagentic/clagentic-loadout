@@ -155,7 +155,7 @@ class TestPushedBranchIsNeverOtherWork:
         _git(["checkout", "-b", "feat/lr-1-thing"], git_repo)
         verdict = check_working_tree_contention(
             git_repo, enabled=True, branch_pattern=_PATTERN, override=False,
-            own_branches=own_branch_refs("feat/lr-1-thing", "origin"),
+            own_branches=own_branch_refs("feat/lr-1-thing"),
         )
         assert verdict.in_flight is False
         assert verdict.overridden is False
@@ -175,7 +175,7 @@ class TestPushedBranchIsNeverOtherWork:
         with pytest.raises(WorkingTreeContentionError) as exc_info:
             check_working_tree_contention(
                 git_repo, enabled=True, branch_pattern=_PATTERN, override=False,
-                own_branches=own_branch_refs("feat/lr-1-thing", "origin"),
+                own_branches=own_branch_refs("feat/lr-1-thing"),
             )
         assert exc_info.value.branch == "feat/lr-2-other"
 
@@ -184,22 +184,41 @@ class TestPushedBranchIsNeverOtherWork:
         with pytest.raises(WorkingTreeContentionError):
             check_working_tree_contention(
                 git_repo, enabled=True, branch_pattern=_PATTERN, override=False,
-                own_branches=own_branch_refs("feat/lr-1-thing", "origin"),
+                own_branches=own_branch_refs("feat/lr-1-thing"),
             )
 
     def test_override_on_a_different_branch_is_still_reported(self, git_repo):
         _git(["checkout", "-b", "feat/lr-2-other"], git_repo)
         verdict = check_working_tree_contention(
             git_repo, enabled=True, branch_pattern=_PATTERN, override=True,
-            own_branches=own_branch_refs("feat/lr-1-thing", "origin"),
+            own_branches=own_branch_refs("feat/lr-1-thing"),
         )
         assert verdict.overridden is True
 
-    def test_own_branch_refs_covers_remote_tracking_spellings(self):
-        refs = own_branch_refs("feat/x", "origin")
-        assert {"feat/x", "refs/heads/feat/x", "origin/feat/x", "refs/remotes/origin/feat/x"} == refs
-        assert own_branch_refs("feat/x") == {"feat/x", "refs/heads/feat/x"}
+    def test_own_branch_refs_is_the_full_local_ref_only(self):
+        assert own_branch_refs("feat/x") == {"refs/heads/feat/x"}
         assert own_branch_refs("") == frozenset()
+
+    def test_local_branch_named_like_the_remote_tracking_ref_is_refused(self, git_repo):
+        # A local branch literally named 'origin/feat/lr-1-thing' is NOT the
+        # pushed 'feat/lr-1-thing' (whose remote-tracking ref has the same
+        # short spelling): full refs differ, so it is other work in flight.
+        _git(["checkout", "-b", "origin/feat/lr-1-thing"], git_repo)
+        pattern = r"feat/"
+        with pytest.raises(WorkingTreeContentionError) as exc_info:
+            check_working_tree_contention(
+                git_repo, enabled=True, branch_pattern=pattern, override=False,
+                own_branches=own_branch_refs("feat/lr-1-thing"),
+            )
+        assert exc_info.value.branch == "origin/feat/lr-1-thing"
+
+    def test_pushed_branch_itself_is_not_refused_by_the_same_pattern(self, git_repo):
+        _git(["checkout", "-b", "feat/lr-1-thing"], git_repo)
+        verdict = check_working_tree_contention(
+            git_repo, enabled=True, branch_pattern=r"feat/", override=False,
+            own_branches=own_branch_refs("feat/lr-1-thing"),
+        )
+        assert verdict.in_flight is False
 
 
 class TestOverrideFlagIsMandatoryAndAlwaysHonored:
@@ -250,7 +269,7 @@ class TestNoStateBetweenInvocations:
 
 class TestGitReadFailureIsASoftFail:
     def test_not_a_git_repo_never_refuses(self, tmp_path, monkeypatch):
-        # Not a git repo at all: _current_branch's `symbolic-ref` read fails,
+        # Not a git repo at all: _current_ref's `symbolic-ref` read fails,
         # which resolves to an empty branch name -- "does not match the
         # in-flight pattern" rather than an error. This check's own inability
         # to identify a repo must never refuse a write that would otherwise
