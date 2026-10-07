@@ -145,6 +145,11 @@ from clagentic_loadout.merge.repo_gate_runtime import (
     resolve_gate_git_tree,
     with_resolvable_reviewer_roles,
 )
+from clagentic_loadout.merge.reviewer_login import (
+    ReviewerLoginNotConfiguredError,
+    resolve_declared_role,
+    role_caller_mapping_key,
+)
 from clagentic_loadout.platform_detect import detect_platform_from_url
 from clagentic_loadout.push.git_coords import read_remote_url_best_effort
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
@@ -833,6 +838,57 @@ class _GateFindings:
     declared_roles: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: One entry per declared reviewer role, as merge would resolve it on this
+    #: repo's platform: the login and the source that supplied it, or why it
+    #: does not resolve and the config key that would resolve it.
+    role_resolution: tuple[dict, ...] = ()
+
+
+def _role_resolution_report(roles: tuple[str, ...], platform: str) -> tuple[dict, ...]:
+    """Resolve each declared role through the same path merge uses
+    (`resolve_declared_role`) and describe the outcome, never raising."""
+    report: list[dict] = []
+    for role in roles:
+        try:
+            resolution = resolve_declared_role(role, platform)
+        except ReviewerLoginNotConfiguredError as exc:
+            report.append(
+                {
+                    "role": role,
+                    "platform": platform,
+                    "resolved": False,
+                    "reason": str(exc),
+                    "mapping_key": role_caller_mapping_key(role),
+                }
+            )
+            continue
+        report.append(
+            {
+                "role": role,
+                "platform": platform,
+                "resolved": True,
+                "requirement": resolution.requirement,
+                "login": resolution.login,
+                "source": resolution.source,
+            }
+        )
+    return tuple(report)
+
+
+def _describe_role_resolution(report: tuple[dict, ...]) -> str:
+    parts = []
+    for entry in report:
+        if entry["resolved"]:
+            required_as = (
+                f"required as {entry['requirement']}, " if entry["requirement"] != entry["role"] else ""
+            )
+            parts.append(f"{entry['role']} -> {entry['login']} ({required_as}via {entry['source']})")
+        else:
+            parts.append(
+                f"{entry['role']} -> UNRESOLVED (dropped from the reviewer floor; "
+                f"set {entry['mapping_key']}: <caller> to resolve it)"
+            )
+    return "; ".join(parts)
 
 
 def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
@@ -865,8 +921,15 @@ def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
     gate = load_repo_gate_at_base(repo_root_path, base_sha=head)
     declared_roles = gate.reviewer_roles
     remote = read_remote_url_best_effort(repo_root_path)
+    role_resolution: tuple[dict, ...] = ()
+    # Notices describing a mapped role are reported through role_resolution,
+    # not as warnings: only the notices the loaded gate itself carries are
+    # findings.
+    notices = gate.notices
     if remote:
-        gate = with_resolvable_reviewer_roles(gate, detect_platform_from_url(remote))
+        platform = detect_platform_from_url(remote)
+        role_resolution = _role_resolution_report(declared_roles, platform)
+        gate = with_resolvable_reviewer_roles(gate, platform)
 
     errors = [f"merge (gate declaration): {warning}" for warning in gate.warnings if warning not in ignored]
     if gate.pre_checks_error:
@@ -874,7 +937,8 @@ def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
     return _GateFindings(
         declared_roles=declared_roles,
         errors=tuple(errors),
-        warnings=(*(w for w in gate.warnings if w in ignored), *gate.notices),
+        warnings=(*(w for w in gate.warnings if w in ignored), *notices),
+        role_resolution=role_resolution,
     )
 
 
@@ -931,6 +995,8 @@ def check_repo_loadout_schema(
             )
         if gate_findings.errors:
             summary += f"; {len(gate_findings.errors)} gate error(s) -- " + "; ".join(gate_findings.errors)
+        if gate_findings.role_resolution:
+            summary += f"; reviewer role resolution: {_describe_role_resolution(gate_findings.role_resolution)}"
         return CheckResult(
             name="repo_loadout_schema",
             ok=not gate_findings.errors,
@@ -940,6 +1006,7 @@ def check_repo_loadout_schema(
                 "exists": False,
                 "legacy_dir_present": legacy_dir_present,
                 "gate_warnings": [],
+                "reviewer_role_resolution": list(gate_findings.role_resolution),
                 "errors": list(gate_findings.errors),
             },
         )
@@ -1091,6 +1158,8 @@ def check_repo_loadout_schema(
         )
     for notice in gate_findings.warnings:
         summary += f"; WARN: {notice}"
+    if gate_findings.role_resolution:
+        summary += f"; reviewer role resolution: {_describe_role_resolution(gate_findings.role_resolution)}"
     if unknown_gate_roles:
         summary += (
             f"; WARN: gate role(s) {', '.join(unknown_gate_roles)} match no "
@@ -1114,6 +1183,7 @@ def check_repo_loadout_schema(
             "unknown_gate_roles": unknown_gate_roles,
             "unsatisfiable_gate_roles": unsatisfiable_gate_roles,
             "gate_warnings": list(gate_findings.warnings),
+            "reviewer_role_resolution": list(gate_findings.role_resolution),
             "errors": errors,
         },
     )

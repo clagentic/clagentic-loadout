@@ -135,7 +135,7 @@ from clagentic_loadout.merge import post_merge_verb as merge_post_merge_verb
 from clagentic_loadout.merge import verb as merge_verb
 from clagentic_loadout.push import verb as push_verb
 from clagentic_loadout.review import verb as review_verb
-from clagentic_loadout.transport import attestation, git_host_api
+from clagentic_loadout.transport import attestation, git_host_api, github_app_config
 
 #: Env vars a live crew/harness spawn environment may set that could steer
 #: the REAL `attestation.resolve_identity()` chain toward a session-specific
@@ -284,6 +284,19 @@ def _isolate_real_attestation_chain(monkeypatch, tmp_path):
     monkeypatch.setattr(attestation, "DEFAULT_USER_CONFIG_ROOT", isolated_config_root)
     for env_var in _ATTESTATION_ENV_VARS_TO_SCRUB:
         monkeypatch.delenv(env_var, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_github_app_config_root(monkeypatch, tmp_path):
+    """Autouse repo-wide: the GitHub App slug and role-mapping reads never see
+    the host's real user-level config.
+
+    `github_app_config` binds its own import-time copy of the default config
+    root, so patching `provider_config`'s copy does not reach it. Without this,
+    a host that maps a declared reviewer role to a caller would change what
+    every test that resolves a role observes."""
+    monkeypatch.setattr(github_app_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "no-github-app-config")
+    monkeypatch.delenv(github_app_config.GITHUB_APP_SLUG_ENV_VAR, raising=False)
 
 
 @pytest.fixture(autouse=True)

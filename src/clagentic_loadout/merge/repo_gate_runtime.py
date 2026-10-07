@@ -109,7 +109,11 @@ from clagentic_loadout.merge.gate_config import (
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import resolve_git_working_tree
 from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS, pre_checks_from_section
-from clagentic_loadout.merge.reviewer_login import ReviewerLoginNotConfiguredError, resolve_reviewer_login
+from clagentic_loadout.merge.reviewer_login import (
+    ReviewerLoginNotConfiguredError,
+    resolve_reviewer_login,
+    resolve_role_via_mapping,
+)
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, resolve_repo_config_path
 
 #: Keys that belong to the tracked gate file and are never honoured from the
@@ -373,8 +377,14 @@ def with_resolvable_reviewer_roles(
 
     A declared role is resolved through `merge.reviewer_login.resolve_reviewer_login`,
     the single role -> login path (the bare role on Forgejo; the role's entry
-    under `github_app.slugs` plus the bot suffix on GitHub). A role that does
-    not resolve can never be checked, so ONLY that role is dropped from the
+    under `github_app.slugs` plus the bot suffix on GitHub). A role that
+    resolves that way is untouched. A role that does not may still resolve
+    through the deployment's OPTIONAL `github_app.role_callers.<role>` mapping:
+    it is then required under the mapped caller's name (the name the caller's
+    verdict fence carries), so the same caller named by `--required-reviewer`
+    or by another declared role is one requirement, and the role's
+    `required_scanners` entry moves with it. A role that resolves neither way
+    can never be checked, so ONLY that role is dropped from the
     reviewer floor and its own `required_scanners` entry is skipped, each with a
     warning naming the role, the platform and the missing mapping. Every other
     resolvable role, and its scanner requirements, stays enforced. This is not
@@ -393,29 +403,54 @@ def with_resolvable_reviewer_roles(
     flagged = set(flagged_roles)
     kept: list[str] = []
     dropped: list[str] = []
+    renamed: dict[str, str] = {}
     warnings = list(gate.warnings)
+    notices = list(gate.notices)
     for role in gate.reviewer_roles:
         if role in flagged:
             kept.append(role)
             continue
         try:
             resolve_reviewer_login(role, platform)
-        except ReviewerLoginNotConfiguredError as exc:
-            dropped.append(role)
-            warnings.append(
-                f"declared reviewer role {role!r} cannot be resolved to a {platform} login "
-                f"({exc}); it is DROPPED from the reviewer floor and its required_scanners "
-                f"entry is skipped, every other declared role and scanner stays enforced"
+        except ReviewerLoginNotConfiguredError as unresolved:
+            try:
+                mapped = resolve_role_via_mapping(role, unresolved)
+            except ReviewerLoginNotConfiguredError as exc:
+                dropped.append(role)
+                warnings.append(
+                    f"declared reviewer role {role!r} cannot be resolved to a {platform} login "
+                    f"({exc}); it is DROPPED from the reviewer floor and its required_scanners "
+                    f"entry is skipped, every other declared role and scanner stays enforced"
+                )
+                continue
+            renamed[role] = mapped.requirement
+            notices.append(
+                f"declared reviewer role {role!r} resolved through {mapped.source} to "
+                f"{mapped.requirement!r} ({mapped.login}); it is required under that name"
             )
+            kept.append(mapped.requirement)
         else:
             kept.append(role)
-    if not dropped:
+    if not dropped and not renamed:
         return gate
+    # Two roles can map to one caller, and a mapped caller can also be named
+    # directly: one requirement each, in declaration order.
+    kept = list(dict.fromkeys(kept))
     scanners = gate.required_scanners
     if scanners is not None:
-        scanners = {role: names for role, names in scanners.items() if role not in dropped}
+        merged: dict[str, tuple[str, ...]] = {}
+        for role, names in scanners.items():
+            if role in dropped:
+                continue
+            target = renamed.get(role, role)
+            merged[target] = tuple(dict.fromkeys((*merged.get(target, ()), *names)))
+        scanners = merged
     return replace(
-        gate, reviewer_roles=tuple(kept), required_scanners=scanners, warnings=tuple(warnings)
+        gate,
+        reviewer_roles=tuple(kept),
+        required_scanners=scanners,
+        warnings=tuple(warnings),
+        notices=tuple(notices),
     )
 
 
