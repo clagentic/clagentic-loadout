@@ -31,12 +31,15 @@ _DEV_NULL = "/dev/null"
 
 @dataclass(frozen=True)
 class HunkSpan:
-    """The head-side (new numbering) lines one hunk covers in one file, as an
-    inclusive range."""
+    """The lines one hunk covers in one file, as inclusive ranges on both sides
+    of the diff: ``first``/``last`` in the new numbering, ``old_first``/
+    ``old_last`` in the old numbering."""
 
     file: str
     first: int
     last: int
+    old_first: int
+    old_last: int
 
 
 @dataclass(frozen=True)
@@ -51,9 +54,13 @@ class Chunk:
     lines: int
     hunks: tuple[HunkSpan, ...] = ()
 
-    def covers(self, file: str, line: int) -> bool:
-        """True when *line* of *file* lies inside one of this chunk's hunks."""
-        return any(s.file == file and s.first <= line <= s.last for s in self.hunks)
+    def covers_prior_line(self, file: str, line: int) -> bool:
+        """True when *line* of *file*, numbered as in the diff's OLD side, lies
+        inside one of this chunk's hunks. A finding from an earlier review
+        carries the numbering of the head that review saw, which is the old
+        side of a since..head delta diff; matching it against new-side lines
+        would miss it whenever earlier insertions shifted the file."""
+        return any(s.file == file and s.old_first <= line <= s.old_last for s in self.hunks)
 
 
 @dataclass(frozen=True)
@@ -329,10 +336,10 @@ def _split_oversized_file(name: str, lines: list[str], max_lines: int) -> list[_
 
 
 def _hunk_spans(lines: tuple[str, ...], default_file: str) -> tuple[HunkSpan, ...]:
-    """The hunks in a chunk's lines, each with the file it belongs to. Findings
-    cite head (new-side) line numbers, so a span is the hunk's new-side range
-    only; an old/new union would claim unchanged head lines between the two
-    starts. A hunk whose header does not parse has no span."""
+    """The hunks in a chunk's lines, each with the file it belongs to. A span
+    keeps the two sides as separate ranges; a union would claim unchanged
+    lines between the two starts. A hunk whose header does not parse has no
+    span."""
     spans: list[HunkSpan] = []
     name = default_file
     for position, line in enumerate(lines):
@@ -350,17 +357,22 @@ def _hunk_spans(lines: tuple[str, ...], default_file: str) -> tuple[HunkSpan, ..
         match = _HUNK_HEADER_RE.match(line)
         if match is None:
             continue
-        _, _, new_start, new_count, _ = match.groups()
-        first = int(new_start)
-        count = int(new_count) if new_count is not None else 1
-        if count > 0:
-            spans.append(HunkSpan(name, first, first + count - 1))
-        else:
-            # A pure deletion has no head lines; its anchor is the line the
-            # deletion sits next to.
-            anchor = max(first, 1)
-            spans.append(HunkSpan(name, anchor, anchor))
+        old_start, old_count, new_start, new_count, _ = match.groups()
+        first, last = _side_range(int(new_start), new_count)
+        old_first, old_last = _side_range(int(old_start), old_count)
+        spans.append(HunkSpan(name, first, last, old_first, old_last))
     return tuple(spans)
+
+
+def _side_range(start: int, count_text: str | None) -> tuple[int, int]:
+    """Inclusive line range one side of a hunk header covers. A zero-count side
+    (a pure deletion on the new side, a pure addition on the old side) has no
+    lines of its own; it is anchored at the line it sits next to."""
+    count = int(count_text) if count_text is not None else 1
+    if count > 0:
+        return start, start + count - 1
+    anchor = max(start, 1)
+    return anchor, anchor
 
 
 def _merge_tiny(pieces: list[_Piece], max_lines: int, min_lines: int) -> list[_Piece]:

@@ -8,7 +8,7 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
 from tests._support.fakes import (
@@ -35,6 +35,7 @@ __all__ = [
 FULL_SHA = "a" * 40
 OTHER_FULL_SHA = "b" * 40
 MERGED_COMMIT_SHA = "e" * 40
+_EPOCH = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
 
 class MissingCredsTokenProvider:
@@ -95,7 +96,12 @@ def make_opener(
     # needs out-of-order timestamps supplies its own, which is never
     # overwritten.
     comments = [
-        c if "created_at" in c else {**c, "created_at": f"2026-01-01T00:00:{c.get('id', 0):02d}Z"}
+        c
+        if "created_at" in c
+        else {
+            **c,
+            "created_at": (_EPOCH + timedelta(seconds=c.get("id", 0))).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
         for c in comments
     ]
     ci_statuses = ci_statuses if ci_statuses is not None else []

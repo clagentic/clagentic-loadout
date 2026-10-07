@@ -55,8 +55,9 @@ def test_a_chunk_knows_the_hunks_it_holds():
         [("big.py", 50, 51)],
         [("big.py", 100, 101)],
     ]
-    assert chunks[1].covers("big.py", 51) and not chunks[1].covers("big.py", 52)
-    assert not chunks[1].covers("other.py", 51)
+    assert chunks[1].covers_prior_line("big.py", 51)
+    assert not chunks[1].covers_prior_line("big.py", 52)
+    assert not chunks[1].covers_prior_line("other.py", 51)
 
 
 def test_a_chunk_holding_several_files_attributes_each_hunk_to_its_own_file():
@@ -75,10 +76,13 @@ def test_a_split_hunk_gets_a_span_per_piece():
 
     assert len(chunks) > 1
     assert all(chunk.hunks for chunk in chunks)
-    covered = {line for line in range(1, 21) if any(c.covers("x.py", line) for c in chunks)}
+    spans = [s for chunk in chunks for s in chunk.hunks]
+    covered = {line for s in spans for line in range(s.first, s.last + 1)}
     assert covered == set(range(1, 21))
-    # Each added line is covered by the chunk that actually holds it.
-    assert chunks[0].covers("x.py", 1) and not chunks[-1].covers("x.py", 1)
+    # Each added line is held by exactly the chunk that carries it.
+    assert chunks[0].hunks[0].first == 1 and chunks[-1].hunks[0].first > 1
+    # A pure addition has no old lines; every piece anchors at the old line it follows.
+    assert {(s.old_first, s.old_last) for s in spans} == {(1, 1)}
 
 
 def test_a_finding_on_a_split_file_is_listed_only_in_the_chunk_whose_hunks_cover_it():
@@ -113,7 +117,7 @@ def test_a_finding_on_a_file_no_chunk_holds_is_carried_even_when_reported_touche
     assert [f["file"] for f in carried_findings(context, {"ghost.py"}, chunks)] == ["ghost.py"]
 
 
-def test_a_span_is_the_new_side_of_its_hunk_never_an_old_new_union():
+def test_a_span_keeps_each_side_of_its_hunk_apart_never_an_old_new_union():
     diff = "\n".join(
         [
             "diff --git a/m.py b/m.py", "index 1..2 100644", "--- a/m.py", "+++ b/m.py",
@@ -124,9 +128,10 @@ def test_a_span_is_the_new_side_of_its_hunk_never_an_old_new_union():
     chunk = plan_chunks(diff, 600)[0]
 
     assert [(s.first, s.last) for s in chunk.hunks] == [(420, 428)]
-    assert not chunk.covers("m.py", 300) and not chunk.covers("m.py", 419)
-    assert chunk.covers("m.py", 420) and chunk.covers("m.py", 428)
-    assert not chunk.covers("m.py", 429)
+    assert [(s.old_first, s.old_last) for s in chunk.hunks] == [(300, 306)]
+    assert chunk.covers_prior_line("m.py", 300) and chunk.covers_prior_line("m.py", 306)
+    assert not chunk.covers_prior_line("m.py", 299) and not chunk.covers_prior_line("m.py", 307)
+    assert not chunk.covers_prior_line("m.py", 420)
 
 
 def test_a_pure_deletion_is_anchored_at_the_line_it_sits_next_to():
@@ -139,6 +144,41 @@ def test_a_pure_deletion_is_anchored_at_the_line_it_sits_next_to():
     chunk = plan_chunks(diff, 600)[0]
 
     assert [(s.first, s.last) for s in chunk.hunks] == [(9, 9)]
+
+
+def test_an_insertion_above_a_finding_shifts_head_numbering_but_the_finding_is_still_listed():
+    # 5 lines were inserted above the prior-reviewed code: old lines 10-11 are
+    # now head lines 15-16. The finding keeps the prior head's numbering (10).
+    diff = _diff_with_hunks("s.py", ["@@ -10,2 +15,2 @@", " context", "-old line", "+new line"])
+    chunk = plan_chunks(diff, 600)[0]
+    finding = _finding("s.py", 10)
+    context = _context(finding)
+
+    assert findings_for_chunk(context, chunk) == (finding,)
+    assert carried_findings(context, {"s.py"}, [chunk]) == []
+
+
+def test_a_finding_the_old_side_does_not_cover_is_carried_even_if_its_number_is_a_new_side_line():
+    diff = _diff_with_hunks("s.py", ["@@ -10,2 +15,2 @@", " context", "-old line", "+new line"])
+    chunk = plan_chunks(diff, 600)[0]
+    shifted_number = _finding("s.py", 15)
+    context = _context(shifted_number)
+
+    assert findings_for_chunk(context, chunk) == ()
+    assert carried_findings(context, {"s.py"}, [chunk]) == [shifted_number]
+
+
+def test_a_pure_addition_is_anchored_at_the_old_line_it_follows():
+    diff = _diff_with_hunks("s.py", ["@@ -20,0 +21,2 @@", "+added one", "+added two"])
+    chunk = plan_chunks(diff, 600)[0]
+
+    assert [(s.old_first, s.old_last) for s in chunk.hunks] == [(20, 20)]
+    assert chunk.covers_prior_line("s.py", 20) and not chunk.covers_prior_line("s.py", 21)
+
+
+def _diff_with_hunks(name: str, hunk_lines: list[str]) -> str:
+    header = [f"diff --git a/{name} b/{name}", "index 111..222 100644", f"--- a/{name}", f"+++ b/{name}"]
+    return "\n".join(header + hunk_lines) + "\n"
 
 
 def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_carried():

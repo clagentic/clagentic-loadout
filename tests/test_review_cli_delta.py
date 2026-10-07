@@ -103,7 +103,16 @@ def test_a_finding_on_a_file_the_delta_touches_is_left_to_the_reviewer_not_carri
 ):
     env.configure(carrier_mode="empty")
     prior = _prior(tmp_path / "prior.json", [{**_BLOCKING, "line": 2}])
-    compare = _ahead(make_diff({"a.py": 2}))
+    # The finding's line 2 is an existing line of the prior head, so the hunk
+    # must hold it on the OLD side: a pure addition to an empty file has none.
+    edit = "\n".join(
+        [
+            "diff --git a/a.py b/a.py", "index 1111111..2222222 100644",
+            "--- a/a.py", "+++ b/a.py",
+            "@@ -1,3 +1,3 @@", " line 1", "-line 2", "+line 2 edited", " line 3",
+        ]
+    ) + "\n"
+    compare = _ahead(edit)
 
     _, payload = env.run("--prior-findings", prior, capsys=capsys, compare=compare)
 

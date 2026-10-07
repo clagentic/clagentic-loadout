@@ -131,13 +131,15 @@ def resolve_delta(
 def findings_for_chunk(context: DeltaContext, chunk: Chunk) -> tuple[dict[str, Any], ...]:
     """The open findings this chunk's prompt lists for judgment.
 
-    A finding is listed only in a chunk whose own hunks cover its line: a chunk
+    A finding carries its line in the numbering of the head it was reported
+    against, which is the old side of the delta diff, so it is matched there.
+    It is listed only in a chunk whose own hunks cover its line: a chunk
     without the file cannot see the code, and a chunk holding the file but not
     that part of it cannot either, so neither can resolve it. This holds for an
     unsplit file as much as a split one. The listing cap still applies, by
     position in the whole list."""
     return tuple(
-        finding for finding in _listed(context) if chunk.covers(finding["file"], finding["line"])
+        finding for finding in _listed(context) if chunk.covers_prior_line(finding["file"], finding["line"])
     )
 
 
@@ -201,5 +203,8 @@ def carried_findings(
         for position, f in enumerate(context.open_findings)
         if position >= MAX_LISTED_FINDINGS
         or f["file"] not in touched_files
-        or (bool(chunks) and not any(chunk.covers(f["file"], f["line"]) for chunk in chunks))
+        or (
+            bool(chunks)
+            and not any(chunk.covers_prior_line(f["file"], f["line"]) for chunk in chunks)
+        )
     ]
