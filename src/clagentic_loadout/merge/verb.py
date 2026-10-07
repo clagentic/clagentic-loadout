@@ -1039,7 +1039,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "the repo's merge gate (merge.required_reviewer_roles, "
         "merge.required_scanners, merge.pre_checks) is read from "
         f"{TRACKED_GATE_RELATIVE_PATH} as it exists at the PR's BASE commit, "
-        "never from the working tree. pre_checks "
+        "never from the working tree. When the base commit has no such file, the "
+        "gate keys are read from the deployment config file instead. pre_checks "
         "(declared at base) run in this directory BEFORE the merge is authorized -- "
         "an on_failure: fail pre_check refuses the merge (see "
         "--skip-pre-checks). post_merge_steps are read from "
@@ -1359,6 +1360,8 @@ def _run(
     )
     for warning in repo_gate.warnings:
         print(f"merge: WARNING -- {warning}", file=sys.stderr)
+    for notice in repo_gate.notices:
+        print(f"merge: NOTICE -- {notice}", file=sys.stderr)
     floor_only_reviewers: dict[str, str] = {}
     if args.ignore_repo_gate:
         print(

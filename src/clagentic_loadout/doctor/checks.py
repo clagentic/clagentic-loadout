@@ -843,7 +843,9 @@ def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
     commit) and reports that result's own warnings and `pre_checks_error`
     verbatim, so a change to what merge does cannot leave doctor describing the
     old behaviour. Only severity is doctor's: the notice that a gate key sits in
-    the ignored deployment file is a warning; everything merge reports about a
+    the ignored deployment file, and the notice that the gate is being read from
+    the deployment file because base has no tracked gate, are warnings;
+    everything merge reports about a
     gate it cannot enforce, or a role it drops, is an error here. A tree with no
     readable HEAD commit has no tracked gate to judge, so nothing is reported.
     """
@@ -870,7 +872,9 @@ def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
     if gate.pre_checks_error:
         errors.append(f"merge (gate declaration): {gate.pre_checks_error}")
     return _GateFindings(
-        declared_roles=declared_roles, errors=tuple(errors), warnings=tuple(w for w in gate.warnings if w in ignored)
+        declared_roles=declared_roles,
+        errors=tuple(errors),
+        warnings=(*(w for w in gate.warnings if w in ignored), *gate.notices),
     )
 
 
