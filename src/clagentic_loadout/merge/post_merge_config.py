@@ -698,7 +698,6 @@ def load_post_merge_steps_from_git_sha(
         result = subprocess.run(
             ["git", "show", f"{merged_sha}:{relative_path}"],
             capture_output=True,
-            text=True,
             cwd=str(git_tree_path),
         )
         if result.returncode != 0:
@@ -710,9 +709,16 @@ def load_post_merge_steps_from_git_sha(
                 f"git show {merged_sha}:{relative_path} failed (exit "
                 f"{result.returncode}) in {git_tree_path} after "
                 f"cat-file -e confirmed the path present at that commit: "
-                f"{result.stderr.strip()[:400]}"
+                f"{result.stderr.decode('utf-8', 'replace').strip()[:400]}"
             )
-        return result.stdout
+        # Bytes, decoded strictly: a blob that is not text is the same loud
+        # config error as a malformed one, never an uncaught UnicodeDecodeError.
+        try:
+            return result.stdout.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise PostMergeConfigError(
+                f"{merged_sha}:{relative_path} is not valid UTF-8 text in {git_tree_path}: {exc}"
+            ) from exc
 
     content: str | None = None
     source_label = f"{merged_sha}:{config_relative_path}"
