@@ -83,6 +83,64 @@
           "reason": {"type": "string", "minLength": 1, "description": "Why the scanner did not run or failed. Required for every status but ran."}
         }
       }
+    },
+    "failure_sequences": {
+      "type": "array",
+      "description": "OPTIONAL evidence. For each blocking finding that stated one, the concrete steps that trigger the defect and the damage that results. Informational: it holds no finding open and clears none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "rule_id", "failure_sequence"],
+        "properties": {
+          "file": {"type": "string", "minLength": 1, "description": "Path of the finding the sequence belongs to."},
+          "line": {"type": "integer", "minimum": 1, "description": "Line of that finding."},
+          "rule_id": {"type": "string", "minLength": 1, "description": "Rule the finding was raised under."},
+          "failure_sequence": {"type": "string", "minLength": 1, "description": "The trigger steps and the resulting damage."}
+        }
+      }
+    },
+    "dropped": {
+      "type": "array",
+      "description": "OPTIONAL evidence. Candidate findings the reviewer examined and dropped, each with the reason. Informational: a dropped candidate is not a finding.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "rule_id", "message", "reason"],
+        "properties": {
+          "file": {"type": "string", "minLength": 1, "description": "Path the candidate was raised on."},
+          "line": {"type": "integer", "minimum": 1, "description": "Line the candidate was raised on."},
+          "rule_id": {"type": "string", "minLength": 1, "description": "Rule the candidate was raised under."},
+          "message": {"type": "string", "minLength": 1, "description": "What the candidate claimed."},
+          "reason": {"type": "string", "minLength": 1, "description": "Why it was dropped."}
+        }
+      }
+    },
+    "range": {
+      "type": "object",
+      "description": "OPTIONAL evidence. The commit range the review covered: base..head for a full review, or since a previously reviewed head for a delta review.",
+      "required": ["basis", "head"],
+      "properties": {
+        "basis": {"type": "string", "enum": ["base..head", "since"], "description": "Which kind of range this is."},
+        "base": {"type": "string", "minLength": 1, "description": "Base SHA, for basis base..head."},
+        "since": {"type": "string", "minLength": 1, "description": "Previously reviewed head SHA, for basis since."},
+        "head": {"type": "string", "minLength": 1, "description": "Head SHA the range ends at."}
+      },
+      "additionalProperties": false
+    },
+    "engines": {
+      "type": "array",
+      "description": "OPTIONAL evidence. Which engine answered the run's chunks: the configured carrier, or the fallback that took over, with the model it ran as and why the carrier was not used.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["engine"],
+        "properties": {
+          "engine": {"type": "string", "enum": ["carrier", "fallback"], "description": "Engine that answered."},
+          "model": {"type": "string", "minLength": 1, "description": "Model label the profile declares for that engine."},
+          "reason": {"type": "string", "minLength": 1, "description": "Why the carrier was not used, for a fallback."},
+          "chunks": {"type": "integer", "minimum": 1, "description": "How many chunks this engine answered."}
+        }
+      }
     }
   }
 }

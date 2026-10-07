@@ -748,6 +748,8 @@ review:
     reviewer:
       carrier: ["my-review-cli", "--read-only"]   # argv list; prompt on stdin
       fallback: ["my-other-cli", "--no-tools"]    # optional
+      carrier_model: some-model                   # optional display label
+      fallback_model: other-model                 # optional display label
       rulebook: /etc/loadout/rulebook.md          # optional
       chunk_lines: 600
       timeout_seconds: 480
@@ -765,7 +767,9 @@ a user-level rulebook may be an arbitrary host path, and a repo-level
 `rulebook: null` is ignored with a warning rather than dropping the user-level
 one). A repo-level `carrier` or
 `fallback` is ignored with a warning: those keys name a command this process
-executes, and a cloned repository must not choose it. Repo-level numbers are
+executes, and a cloned repository must not choose it (the same goes for the
+`carrier_model` and `fallback_model` labels, which are never passed to the
+command: they only let a posted verdict name the model that answered). Repo-level numbers are
 clamped with a warning: `parallel` at most 16, `max_attempts` at most 10,
 `timeout_seconds` and `fallback_timeout_seconds` at most 3600, `chunk_lines` at
 least 50. Values in the user-level config are not clamped. A repo-level config
@@ -796,6 +800,31 @@ than `posted`; the comment stays, and the review must be run again. A failed
 closing read leaves `posted` with `head_recheck` `unavailable`; otherwise
 `head_recheck` is `current`. With a findings file written by `run`, a `--head-sha` that differs from
 the file's recorded head is refused (exit **32**).
+
+**Reviewer evidence in the posted comment.** A finding may carry an optional
+`failure_sequence` string: the concrete steps that trigger the defect and the
+damage that results. The chunk prompt asks for it on blocking findings, `run` keeps it
+when it is a non-empty string (cut to 600 characters), and `post` renders it under
+the finding's bullet and copies it into the fence as `failure_sequences`. A finding
+without it posts exactly as before. `post --dropped <file>` takes the candidates the
+reviewer examined and dropped (an array, or an object with a `dropped` array, of
+`file`, `line`, `rule_id`, `message`, `reason`) and renders a `Dropped candidates`
+section, counted in the header (`clean (0 finding(s), 2 dropped)`) and copied into
+the fence as `dropped`; a dropped candidate is never a finding and never changes the
+verdict. When `--findings` is a `run` output, `post` also states, from the run's own
+record, the range (`range: <base>..<head>`, or `range: since <sha>` for a delta
+review) and the engine that answered (`engine: carrier`, or
+`engine: fallback: <model>, reason usage_limit`, the model coming from the profile's
+`fallback_model` label), with machine-readable `range` and `engines` in the fence.
+These evidence fields never raise the fence schema version, and the merge gate does
+not read them. They are derived, so `--state-file` may not carry them.
+
+**Failure diagnostics.** When no engine can answer a chunk, the blocked result carries
+each engine's saved stderr path (`carrier_stderr_file`, `fallback_stderr_file`;
+`stderr_file` is the engine tried last), and a fallback that itself fails reports its
+own error with the carrier's failure as context. Saved stderr lives in the run
+directory's `carrier-logs/`, created at mode 0700 with files at 0600, and an engine's
+output is read through a bounded tail, so memory stays flat however much it writes.
 
 ### `loadout-push` — bot-attributed commit push + PR open/update
 

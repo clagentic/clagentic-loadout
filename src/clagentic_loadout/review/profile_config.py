@@ -10,6 +10,8 @@ which is normally the reviewer role):
         reviewer:
           carrier: ["my-review-cli", "--read-only"]   # argv list; prompt on stdin
           fallback: ["my-other-cli", "-p"]            # optional; same contract
+          carrier_model: some-model                   # optional label, shown in the verdict
+          fallback_model: other-model                 # optional label, shown in the verdict
           rulebook: /etc/loadout/rulebook.md          # optional
           chunk_lines: 600
           timeout_seconds: 480
@@ -30,7 +32,10 @@ same direction the credential-provider config takes).
 The carrier contract: the argv is executed directly (no shell), the chunk
 prompt is written to its stdin, and the reply is read from its stdout. Exit
 127 (or a missing executable) means the engine is absent. Loadout never names
-or selects a model; that is entirely the configured argv's business.
+or selects a model; that is entirely the configured argv's business. The
+optional ``carrier_model`` and ``fallback_model`` are display labels only: they
+are never passed to the command, and exist so a posted verdict can say which
+model answered when a fallback took over.
 """
 
 from __future__ import annotations
@@ -68,7 +73,8 @@ _REPO_OVERRIDABLE_KEYS = (
     "parallel",
     "rulebook",
 )
-_REPO_REFUSED_KEYS = ("carrier", "fallback")
+_REPO_REFUSED_KEYS = ("carrier", "fallback", "carrier_model", "fallback_model")
+_MAX_LABEL_CHARS = 100
 
 
 #: A cloned repository must not be able to make this process spawn an
@@ -119,6 +125,26 @@ class ReviewProfile:
     fallback_timeout_seconds: float
     max_attempts: int
     parallel: int
+    carrier_model: str | None = None
+    fallback_model: str | None = None
+
+
+def _label(value: object, key: str, profile: str) -> str | None:
+    """An optional one-line display label, or None when the key is unset."""
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > _MAX_LABEL_CHARS
+        or "\n" in value
+        or "\r" in value
+    ):
+        raise ReviewProfileError(
+            f"review profile {profile!r}: {key!r} must be a one-line string of at most "
+            f"{_MAX_LABEL_CHARS} characters, got {value!r}"
+        )
+    return value.strip()
 
 
 def _argv(value: object, key: str, profile: str) -> tuple[str, ...]:
@@ -305,4 +331,6 @@ def load_review_profile(
         parallel=int(
             _positive_number(merged.get("parallel", DEFAULT_PARALLEL), "parallel", name, integer=True)
         ),
+        carrier_model=_label(merged.get("carrier_model"), "carrier_model", name),
+        fallback_model=_label(merged.get("fallback_model"), "fallback_model", name),
     )

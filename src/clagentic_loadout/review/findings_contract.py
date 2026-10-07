@@ -19,6 +19,12 @@ SEVERITIES = ("blocking", "nit", "praise")
 #: Mirrors the "at most 200 characters" line in OUTPUT_CONTRACT.
 MAX_MESSAGE_CHARS = 200
 
+#: Mirrors the "at most 600 characters" line in OUTPUT_CONTRACT.
+MAX_FAILURE_SEQUENCE_CHARS = 600
+
+#: Optional finding key carrying a blocking finding's trigger steps and damage.
+KEY_FAILURE_SEQUENCE = "failure_sequence"
+
 # Higher is more severe; used only to pick which duplicate survives a merge.
 _SEVERITY_RANK = {"praise": 0, "nit": 1, "blocking": 2}
 
@@ -32,6 +38,10 @@ no Markdown. Each element is an object with these keys:
   "rule_id": a rule id from the rulebook above (string)
   "severity": "blocking", "nit", or "praise"
   "message": what is wrong and why, at most 200 characters (string)
+  "failure_sequence": OPTIONAL, for severity "blocking" only: the concrete
+    steps that trigger the defect and the damage that results, at most 600
+    characters (string). A blocking finding that cannot state a concrete
+    failure sequence should be reported as "nit" instead.
 Reply [] when the chunk has no findings.
 """
 
@@ -64,7 +74,12 @@ def validate_finding(
     edited: the severity may be absent (returned as None), and a present one
     is matched ignoring case and surrounding whitespace, then returned
     normalized, so "Blocking" can never slip past a clean-vs-blocking check.
-    ``truncate_message`` keeps an edited message whole.
+    ``truncate_message`` keeps an edited message whole (and an edited
+    failure_sequence).
+
+    ``failure_sequence`` is optional: it is carried through when it is a
+    non-empty string and silently left out otherwise, so a finding without it
+    is exactly as valid as before.
     """
     if not isinstance(item, dict):
         raise InvalidReplyError(f"finding {position} is not an object")
@@ -94,13 +109,20 @@ def validate_finding(
         # A good finding with a long message is kept, not discarded; the
         # contract's bound is enforced by truncation.
         message = message[: MAX_MESSAGE_CHARS - 3] + "..."
-    return {
+    validated: dict[str, Any] = {
         "file": file_value,
         "line": line,
         "rule_id": rule_id,
         "severity": severity,
         "message": message,
     }
+    sequence = item.get(KEY_FAILURE_SEQUENCE)
+    if isinstance(sequence, str) and sequence.strip():
+        sequence = sequence.strip()
+        if truncate_message and len(sequence) > MAX_FAILURE_SEQUENCE_CHARS:
+            sequence = sequence[: MAX_FAILURE_SEQUENCE_CHARS - 3] + "..."
+        validated[KEY_FAILURE_SEQUENCE] = sequence
+    return validated
 
 
 def parse_chunk_reply(text: str) -> list[dict[str, Any]]:

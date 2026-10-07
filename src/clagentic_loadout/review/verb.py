@@ -161,8 +161,11 @@ import sys
 from clagentic_loadout._version import get_version
 from clagentic_loadout.merge.errors import VerdictMalformedError
 from clagentic_loadout.merge.fence_state import (
+    EVIDENCE_KEYS,
+    KEY_FAILURE_SEQUENCES,
     KEY_FENCE_SCHEMA_VERSION,
     STATE_KEYS,
+    failure_sequences_of,
     normalize_findings_state,
 )
 from clagentic_loadout.merge.verdict import (
@@ -626,7 +629,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "'cleared_claims' and 'scanners_run'; they are validated and "
         "rendered inside the tool-built fence (fence_schema_version 2), "
         "never as body text, and a fence that lands without them fails "
-        "the readback.",
+        "the readback. The evidence fields 'failure_sequences', 'dropped', "
+        "'range' and 'engines' are accepted the same way; they are shown in "
+        "the body (a finding's own optional 'failure_sequence' under its "
+        "bullet, a 'Dropped candidates' section, 'range:' and 'engine:' "
+        "lines) and copied into the fence without raising its version.",
     )
     parser.add_argument(
         "--verdict-head-sha",
@@ -695,7 +702,7 @@ def _staged_findings_state(raw_bytes: bytes) -> dict:
         return {}
     if not isinstance(parsed, dict):
         return {}
-    return {key: parsed[key] for key in STATE_KEYS if key in parsed}
+    return {key: parsed[key] for key in (*STATE_KEYS, *EVIDENCE_KEYS) if key in parsed}
 
 
 def _parse_owner_repo(owner_repo: str) -> tuple[str, str]:
@@ -1109,6 +1116,12 @@ def _run(
             )
         except ReviewBodyStdinEmptyError as exc:
             _fail(_maybe_augment(str(exc), args), code=EXIT_VERDICT_BLOCK_USAGE)
+        # A finding's failure_sequence reaches the fence as well as the body;
+        # derived here so the readback below expects exactly what the body
+        # builder renders.
+        sequences = failure_sequences_of(verdict_findings)
+        if sequences:
+            findings_state = {KEY_FAILURE_SEQUENCES: sequences, **findings_state}
         body = None  # constructed below, entirely from structured fields
     elif args.verdict_review_status is not None:
         try:
@@ -1289,7 +1302,7 @@ def _run(
             )
         # Findings state must round-trip exactly, and a fence that landed with
         # state nobody supplied is as wrong as one that lost it.
-        for key in (*STATE_KEYS, KEY_FENCE_SCHEMA_VERSION):
+        for key in (*STATE_KEYS, *EVIDENCE_KEYS, KEY_FENCE_SCHEMA_VERSION):
             if parsed.get(key) != expected_state.get(key):
                 mismatches.append(
                     f"{key}: expected {expected_state.get(key)!r}, got {parsed.get(key)!r}"
