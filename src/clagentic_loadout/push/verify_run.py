@@ -212,19 +212,31 @@ def _fence_for(text: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+def _inert(text: str, *, single_line: bool = False) -> str:
+    """*text* made safe to render inside the marked block.
+
+    Every field written into the block goes through here, so none of them can
+    forge or close it. Breaking the HTML-comment opener (rather than removing
+    the two known markers) leaves no input that can re-assemble a marker after
+    a single pass. *single_line* also flattens line breaks so a one-line field
+    cannot start a heading or a list item of its own.
+    """
+    if single_line:
+        text = " ".join(text.split())
+    return text.replace("<!--", "<! --")
+
+
 def render_verification_section(results: tuple[VerifyResult, ...]) -> str:
     """Markdown `## Verification` section: one entry per check with its name,
     exit status, and bounded output tails."""
     lines = []
     for result in results:
         mark = "PASS" if result.passed else "FAIL"
-        lines.append(f"- **{result.name}**: {mark} ({result.status_label})")
-        tails = format_output_tails(result)
+        name = _inert(result.name, single_line=True)
+        status = _inert(result.status_label, single_line=True)
+        lines.append(f"- **{name}**: {mark} ({status})")
+        tails = _inert(format_output_tails(result))
         if tails:
-            # Captured output must not be able to forge or close the block.
-            tails = tails.replace(SECTION_BEGIN_MARKER, "[marker removed]").replace(
-                SECTION_END_MARKER, "[marker removed]"
-            )
             fence = _fence_for(tails)
             lines.extend(["", f"{fence}text", tails, fence, ""])
     return _wrap_section("\n".join(lines).rstrip())
@@ -233,7 +245,7 @@ def render_verification_section(results: tuple[VerifyResult, ...]) -> str:
 def render_skipped_section(entries: tuple[VerifyEntry, ...]) -> str:
     """Section recording an explicit --skip-verify, so a skipped
     verification is visible to every reader of the PR, never silent."""
-    names = ", ".join(e.name for e in entries)
+    names = ", ".join(_inert(e.name, single_line=True) for e in entries)
     return _wrap_section(f"- **SKIPPED** via --skip-verify; declared checks NOT run: {names}")
 
 

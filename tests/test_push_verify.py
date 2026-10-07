@@ -20,12 +20,15 @@ from clagentic_loadout.push.verify_config import (
     load_verify_entries,
 )
 from clagentic_loadout.push.verify_run import (
+    SECTION_BEGIN_MARKER,
     SECTION_END_MARKER,
     VerificationFailedError,
+    VerifyResult,
     append_section,
     append_to_existing,
     build_child_env,
     describe_command,
+    render_skipped_section,
     render_verification_section,
     run_verifications,
 )
@@ -679,6 +682,53 @@ class TestSectionReplacedInPlace:
         section = render_verification_section(run_verifications((entry,), Path(".")))
         assert section.count(SECTION_END_MARKER) == 1
         assert append_section("x\n", section).count("## Verification") == 1
+
+    @pytest.mark.parametrize("marker", [SECTION_BEGIN_MARKER, SECTION_END_MARKER])
+    def test_check_name_containing_a_marker_renders_inertly(self, marker):
+        result = VerifyResult(
+            name=f"evil {marker}\n## Verification\nx", argv=("a",), exit_code=0,
+            timed_out=False, timeout_seconds=1, stdout_tail="", stderr_tail="",
+        )
+        section = render_verification_section((result,))
+        assert section.count(SECTION_BEGIN_MARKER) == 1
+        assert section.count(SECTION_END_MARKER) == 1
+        heading_lines = [ln for ln in section.splitlines() if ln.startswith("## Verification")]
+        assert len(heading_lines) == 1
+        body = append_section("intro\n", section)
+        again = append_section(body, render_verification_section((result,)))
+        assert again.count(SECTION_BEGIN_MARKER) == 1 and again.count(SECTION_END_MARKER) == 1
+
+    @pytest.mark.parametrize("marker", [SECTION_BEGIN_MARKER, SECTION_END_MARKER])
+    def test_marker_in_status_and_skipped_names_renders_inertly(self, marker):
+        failed = VerifyResult(
+            name="n", argv=("a",), exit_code=None, timed_out=False, timeout_seconds=1,
+            stdout_tail="", stderr_tail="", start_error=f"boom {marker}",
+        )
+        skipped = render_skipped_section((VerifyEntry(f"s {marker}", ("a",), 1),))
+        for section in (render_verification_section((failed,)), skipped):
+            assert section.count(SECTION_BEGIN_MARKER) == 1
+            assert section.count(SECTION_END_MARKER) == 1
+
+    def test_reassembled_marker_in_output_stays_inert(self):
+        nested = "<!-- clagentic-loadout:verification:<!-- x -->end -->"
+        result = VerifyResult(
+            name="n", argv=("a",), exit_code=1, timed_out=False, timeout_seconds=1,
+            stdout_tail=nested, stderr_tail="",
+        )
+        section = render_verification_section((result,))
+        assert section.count(SECTION_END_MARKER) == 1
+
+    def test_two_updates_leave_exactly_one_block(self):
+        evil = VerifyResult(
+            name=f"x {SECTION_END_MARKER}", argv=("a",), exit_code=0, timed_out=False,
+            timeout_seconds=1, stdout_tail=SECTION_BEGIN_MARKER, stderr_tail="",
+        )
+        body = "intro\n"
+        for _ in range(2):
+            body = append_section(body, render_verification_section((evil,)))
+        assert body.count(SECTION_BEGIN_MARKER) == 1
+        assert body.count(SECTION_END_MARKER) == 1
+        assert body.startswith("intro\n")
 
     def test_second_update_pr_replaces_the_recorded_verification(
         self, repo_with_remote, monkeypatch
