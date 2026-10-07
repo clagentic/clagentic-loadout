@@ -1021,6 +1021,23 @@ class TestGitWorkingTreeConfigRootSplit:
         )
         assert code == verb.EXIT_POST_MERGE_FAILED
 
+    def test_knob_present_but_target_not_a_git_tree_refuses_pre_checks(self, tmp_path):
+        # The same misconfiguration without the bypass: the tree cannot supply
+        # a gate declaration, so pre_checks refuse before anything merges.
+        (tmp_path / "not-a-repo").mkdir()
+        _write_merge_config(
+            tmp_path,
+            [{"cmd": [_PY, "-c", "pass"]}],
+            git_working_tree="not-a-repo",
+        )
+        code = verb.main(
+            _base_args(**{"--repo-path": str(tmp_path)}),
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_PRE_CHECKS_FAILED
+
     def test_drift_check_never_false_positives_in_wrapper_layout(self, tmp_path):
         """BOBBIE finding, lr-cd3644 fold-in #3: the config root (the
         wrapper) and the git tree (its `repo` subdirectory) are DIFFERENT

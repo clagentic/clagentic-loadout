@@ -49,12 +49,19 @@ changes where the text comes from.
     unloadable key: it degrades per role (`with_resolvable_reviewer_roles`).
     That role drops from the reviewer floor and its own `required_scanners`
     entry is skipped, each with a warning naming it; every other resolvable
-    role and scanner requirement stays enforced.
+    role and scanner requirement stays enforced. THIS IS DELIBERATE, not a
+    gate relaxation: an unresolvable deployment mapping must never block
+    merges, so a repo's declaration cannot demand deployment config it was
+    never given. The role is skipped with a loud warning; resolvable roles
+    and explicit `--required-reviewer` flags stay enforced (an unresolvable
+    flag role is still a usage error). Locked by
+    `TestRepoReviewerFloor.test_an_unresolvable_role_is_dropped_with_a_warning_and_the_rest_still_merges`
+    in tests/test_merge_verb_findings_state.py.
   - `pre_checks` NEVER falls back. A `pre_checks` declaration that cannot be
     read or validated at base (including a file that is not valid UTF-8, or a
     whole-file parse failure, or a base commit that cannot be fetched or shown,
-    or a PR payload that carries no base commit SHA, or a repo path that is not
-    a git tree) is reported in `RepoGate.pre_checks_error`, and the merge verb REFUSES the merge, as it
+    or a PR payload that carries no base commit SHA (alone or beside a malformed
+    `merge.git_working_tree`), or a repo path that is not a git tree) is reported in `RepoGate.pre_checks_error`, and the merge verb REFUSES the merge, as it
     did before the gate moved to base. No local tree at all (`repo_path` None)
     declares nothing. `--skip-pre-checks` is its bypass; `--ignore-repo-gate`
     does not lift it.
@@ -243,7 +250,8 @@ def load_repo_gate_at_base(
     the gate be skipped. The reviewer pair falls back with a warning, and with
     a base commit known pre_checks are read from *repo_path* itself instead: a
     declared check still runs, and a *repo_path* that is not a git tree refuses
-    before anything merges. A tracked file absent at base declares nothing. The
+    before anything merges. With no base commit either, pre_checks refuse as
+    well, never skipped. A tracked file absent at base declares nothing. The
     per-key failure rules are in the module docstring.
     """
     if repo_path is None:
@@ -255,7 +263,14 @@ def load_repo_gate_at_base(
     except PostMergeConfigError as exc:
         pair_warnings = _reviewer_pair_warnings(ignored, str(exc))
         if not base_sha:
-            return RepoGate(warnings=pair_warnings)
+            # No tree to name and no base commit to read from: nothing can
+            # supply pre_checks, so they refuse rather than being skipped.
+            return RepoGate(
+                warnings=pair_warnings,
+                pre_checks_error=(
+                    f"{exc}; and the PR payload carried no base commit SHA to read the gate at"
+                ),
+            )
         # The key names no tree, so the reviewer pair falls back like any gate
         # that cannot be loaded. pre_checks must not be skipped with it: they
         # are read from *repo_path*'s own tree at the base commit, so declared
@@ -288,6 +303,13 @@ def with_resolvable_reviewer_roles(
     parsed at all. Never a refusal: a repo's declaration must not demand
     deployment config it was never told about. A role already named by a
     `--required-reviewer` flag keeps the flag's login and is not resolved here.
+
+    DELIBERATE POLICY, do not "fix" it into a refusal: an unresolvable
+    deployment mapping must never block merges (no project may need new manual
+    config just to keep merging). The role is skipped with a loud warning;
+    resolvable roles and explicit `--required-reviewer` flags stay enforced.
+    Locked by `TestRepoReviewerFloor.test_an_unresolvable_role_is_dropped_with_a_warning_and_the_rest_still_merges`
+    in tests/test_merge_verb_findings_state.py.
     """
     flagged = set(flagged_roles)
     kept: list[str] = []

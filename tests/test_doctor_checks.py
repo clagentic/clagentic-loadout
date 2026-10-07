@@ -665,7 +665,11 @@ class TestCheckRepoLoadoutSchema:
         )
         result = check_repo_loadout_schema(tmp_path)
         assert result.ok is False
-        assert any("pre_checks:" in err for err in result.resolved["errors"])
+        assert any(
+            err.startswith("merge (gate declaration): ")
+            and f"{TRACKED_GATE_RELATIVE_PATH}: pre_checks: " in err
+            for err in result.resolved["errors"]
+        )
 
     def test_malformed_merge_requirements_fails(self, tmp_path):
         _write_loadout_config(

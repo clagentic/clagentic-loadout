@@ -428,6 +428,16 @@ class TestNoGitTreeToReadTheGateFrom:
         assert merge_calls == []
         assert "git_working_tree" in capsys.readouterr().err
 
+    def test_a_malformed_git_working_tree_and_no_base_sha_refuses_pre_checks(self, tmp_path, capsys):
+        repo = _repo_with(tmp_path, [_FAIL_CHECK])
+        write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "git_working_tree": 42})
+        pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
+        merge_calls: list[str] = []
+        assert _merge(repo, pr_info=pr_info, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+        err = capsys.readouterr().err
+        assert "git_working_tree" in err and "no base commit SHA" in err
+
     def test_skip_pre_checks_is_the_bypass_for_a_malformed_git_working_tree(self, tmp_path):
         repo = _repo_with(tmp_path, [_FAIL_CHECK])
         write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "git_working_tree": 42})
