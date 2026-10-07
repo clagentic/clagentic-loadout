@@ -98,22 +98,85 @@ def test_a_finding_on_a_split_file_is_listed_only_in_the_chunk_whose_hunks_cover
     assert listed == [[1], [50], [101]]
 
 
-def test_a_finding_on_a_file_held_whole_is_listed_in_every_chunk_as_before():
+def test_a_finding_on_a_file_held_whole_is_listed_only_in_the_chunk_holding_it():
     chunks = plan_chunks(_diff("big.py", [1, 50, 100]) + _diff("small.py", [1]), 8)
     context = _context(_finding("small.py", 99), _finding("untouched.py", 3))
     split = split_files(chunks)
 
-    for chunk in chunks:
-        assert len(findings_for_chunk(context, chunk, split)) == 2
+    listed = [[f["file"] for f in findings_for_chunk(context, c, split)] for c in chunks]
+
+    holders = [i for i, c in enumerate(chunks) if "small.py" in c.files]
+    assert len(holders) == 1
+    for index, files in enumerate(listed):
+        assert files == (["small.py"] if index in holders else [])
+    # The finding on a file the diff does not hold is carried, never dropped.
+    assert [f["file"] for f in carried_findings(context, {"big.py", "small.py"}, chunks)] == [
+        "untouched.py"
+    ]
+
+
+def test_a_finding_on_a_file_no_chunk_holds_is_carried_even_when_reported_touched():
+    chunks = plan_chunks(_diff("a.py", [1]), 600)
+    context = _context(_finding("ghost.py", 4))
+
+    assert [f["file"] for f in carried_findings(context, {"ghost.py"}, chunks)] == ["ghost.py"]
+
+
+def test_a_span_is_the_new_side_of_its_hunk_never_an_old_new_union():
+    diff = "\n".join(
+        [
+            "diff --git a/m.py b/m.py", "index 1..2 100644", "--- a/m.py", "+++ b/m.py",
+            "@@ -300,7 +420,9 @@",
+            *[" ctx"] * 7, "+add one", "+add two",
+        ]
+    ) + "\n"
+    chunk = plan_chunks(diff, 600)[0]
+
+    assert [(s.first, s.last) for s in chunk.hunks] == [(420, 428)]
+    assert not chunk.covers("m.py", 300) and not chunk.covers("m.py", 419)
+    assert chunk.covers("m.py", 420) and chunk.covers("m.py", 428)
+    assert not chunk.covers("m.py", 429)
+
+
+def test_a_pure_deletion_is_anchored_at_the_line_it_sits_next_to():
+    diff = "\n".join(
+        [
+            "diff --git a/d.py b/d.py", "index 1..2 100644", "--- a/d.py", "+++ b/d.py",
+            "@@ -10,2 +9,0 @@", "-gone", "-gone too",
+        ]
+    ) + "\n"
+    chunk = plan_chunks(diff, 600)[0]
+
+    assert [(s.first, s.last) for s in chunk.hunks] == [(9, 9)]
+
+
+def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_carried():
+    def hunk(old: int, new: int) -> list[str]:
+        return [f"@@ -{old},2 +{new},2 @@", " context", "-old line", "+new line"]
+
+    diff = "\n".join(
+        [
+            "diff --git a/s.py b/s.py", "index 1..2 100644", "--- a/s.py", "+++ b/s.py",
+            *hunk(300, 420), *hunk(500, 620),
+        ]
+    ) + "\n"
+    chunks = plan_chunks(diff, 8)
+    assert [c.files for c in chunks] == [("s.py",)] * 2
+    gap = _finding("s.py", 350)
+    context = _context(gap)
+
+    assert [findings_for_chunk(context, c, split_files(chunks)) for c in chunks] == [(), ()]
+    assert carried_findings(context, {"s.py"}, chunks) == [gap]
 
 
 def test_the_listing_cap_still_counts_by_position_in_the_whole_list():
-    chunks = _split_chunks()
+    chunks = plan_chunks(_diff("other.py", [1]) + _diff("big.py", [1, 50, 100]), 8)
     many = [_finding("other.py", i) for i in range(1, 60)]
     context = _context(*many, _finding("big.py", 1))
     split = split_files(chunks)
+    first = next(c for c in chunks if "other.py" in c.files)
 
-    listed = findings_for_chunk(context, chunks[0], split)
+    listed = findings_for_chunk(context, first, split)
 
     # big.py:1 sits at position 59, past the cap of 50: never shown, so carried.
     assert all(f["file"] == "other.py" for f in listed) and len(listed) == 50

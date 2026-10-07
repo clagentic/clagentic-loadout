@@ -31,8 +31,8 @@ _DEV_NULL = "/dev/null"
 
 @dataclass(frozen=True)
 class HunkSpan:
-    """The lines one hunk covers in one file, as an inclusive range over both
-    the old and the new side of the hunk."""
+    """The head-side (new numbering) lines one hunk covers in one file, as an
+    inclusive range."""
 
     file: str
     first: int
@@ -329,10 +329,10 @@ def _split_oversized_file(name: str, lines: list[str], max_lines: int) -> list[_
 
 
 def _hunk_spans(lines: tuple[str, ...], default_file: str) -> tuple[HunkSpan, ...]:
-    """The hunks in a chunk's lines, each with the file it belongs to. A hunk
-    header gives the old and new start and count; the span runs from the
-    smaller start to the larger end so a finding on either side of the edit
-    falls inside it. A hunk whose header does not parse has no span."""
+    """The hunks in a chunk's lines, each with the file it belongs to. Findings
+    cite head (new-side) line numbers, so a span is the hunk's new-side range
+    only; an old/new union would claim unchanged head lines between the two
+    starts. A hunk whose header does not parse has no span."""
     spans: list[HunkSpan] = []
     name = default_file
     for position, line in enumerate(lines):
@@ -350,17 +350,16 @@ def _hunk_spans(lines: tuple[str, ...], default_file: str) -> tuple[HunkSpan, ..
         match = _HUNK_HEADER_RE.match(line)
         if match is None:
             continue
-        old_start, old_count, new_start, new_count, _ = match.groups()
-        # A side with no lines (a pure addition's old side) names the line
-        # BEFORE the edit and spans nothing, so it must not widen the range.
-        sides = [
-            (int(start), int(start) + int(count if count is not None else 1) - 1)
-            for start, count in ((old_start, old_count), (new_start, new_count))
-            if int(count if count is not None else 1) > 0
-        ] or [(max(int(new_start), 1), max(int(new_start), 1))]
-        spans.append(
-            HunkSpan(name, min(first for first, _ in sides), max(last for _, last in sides))
-        )
+        _, _, new_start, new_count, _ = match.groups()
+        first = int(new_start)
+        count = int(new_count) if new_count is not None else 1
+        if count > 0:
+            spans.append(HunkSpan(name, first, first + count - 1))
+        else:
+            # A pure deletion has no head lines; its anchor is the line the
+            # deletion sits next to.
+            anchor = max(first, 1)
+            spans.append(HunkSpan(name, anchor, anchor))
     return tuple(spans)
 
 

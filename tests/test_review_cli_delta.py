@@ -67,7 +67,10 @@ def test_a_fast_forward_reviews_only_the_delta_and_frames_the_open_findings(env,
     assert "+line 1 of a.py" not in sent[0]
     assert "## Incremental review" in sent[0]
     assert SINCE_SHA[:12] in sent[0]
-    assert "- a.py:3 [R1] (blocking) bad" in sent[0]
+    # a.py is not in the delta, so the chunk cannot judge its finding: it is
+    # carried forward instead of listed.
+    assert "- a.py:3 [R1] (blocking) bad" not in sent[0]
+    assert "- none" in sent[0]
     assert "nice" not in sent[0]
     assert sent[0].rstrip().endswith("Reply [] when the chunk has no findings.")
     assert _stage(payload, "delta") == {
