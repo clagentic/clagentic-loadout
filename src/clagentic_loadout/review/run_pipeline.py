@@ -45,7 +45,6 @@ from clagentic_loadout.review.delta import (
     carried_findings,
     findings_for_chunk,
     render_delta_note,
-    split_files,
 )
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
 from clagentic_loadout.review.findings_contract import merge_findings
@@ -315,9 +314,8 @@ def run_review(
     # all of them are part of the resume key.
     delta_notes: dict[int, str] = {}
     if delta is not None:
-        split = split_files(chunks)
         delta_notes = {
-            chunk.index: render_delta_note(delta, findings_for_chunk(delta, chunk, split))
+            chunk.index: render_delta_note(delta, findings_for_chunk(delta, chunk))
             for chunk in chunks
         }
     resume_note = "\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else ""

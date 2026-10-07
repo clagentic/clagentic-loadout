@@ -479,7 +479,21 @@ def failure_sequences_of(findings: Iterable[Mapping[str, Any]]) -> list[dict[str
     ]
 
 
+def with_derived_failure_sequences(
+    state: Mapping[str, Any] | None, findings: Iterable[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """*state* as a new dict whose failure_sequences are those derived from
+    *findings*. A caller-staged copy is replaced (or removed when no finding
+    states a sequence), so the fence can never contradict the bullets."""
+    merged = {k: v for k, v in (state or {}).items() if k != KEY_FAILURE_SEQUENCES}
+    sequences = failure_sequences_of(findings)
+    if sequences:
+        merged[KEY_FAILURE_SEQUENCES] = sequences
+    return merged
+
+
 __all__ = [
+    "with_derived_failure_sequences",
     "ENGINE_CARRIER",
     "ENGINE_FALLBACK",
     "EVIDENCE_KEYS",

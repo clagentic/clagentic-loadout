@@ -47,10 +47,18 @@ def test_a_document_without_a_readable_range_yields_none(document):
     assert range_of(document) is None
 
 
-def test_a_delta_without_a_readable_since_head_falls_back_to_base_to_head():
-    document = _document(mode="delta", since_head="nope")
+@pytest.mark.parametrize("since_head", ["nope", None, ""])
+def test_a_delta_without_a_readable_since_head_yields_no_range(since_head):
+    document = _document(mode="delta", since_head=since_head)
 
-    assert range_of(document)["basis"] == "base..head"
+    assert range_of(document) is None
+
+
+def test_a_delta_without_a_since_head_key_yields_no_range():
+    document = _document(mode="delta")
+    del document["since_head"]
+
+    assert range_of(document) is None
 
 
 def test_engines_are_counted_per_distinct_engine_model_and_reason():

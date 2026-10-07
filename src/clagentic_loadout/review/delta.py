@@ -128,32 +128,16 @@ def resolve_delta(
     )
 
 
-def split_files(chunks: Sequence[Chunk]) -> frozenset[str]:
-    """Files whose diff is spread over more than one chunk."""
-    seen: set[str] = set()
-    split: set[str] = set()
-    for chunk in chunks:
-        for name in chunk.files:
-            (split if name in seen else seen).add(name)
-    return frozenset(split)
-
-
-def findings_for_chunk(
-    context: DeltaContext, chunk: Chunk, split: frozenset[str]
-) -> tuple[dict[str, Any], ...]:
+def findings_for_chunk(context: DeltaContext, chunk: Chunk) -> tuple[dict[str, Any], ...]:
     """The open findings this chunk's prompt lists for judgment.
 
-    A finding is listed only in a chunk that holds its file; a chunk without
-    the file cannot see the code and would otherwise answer for it. A finding
-    on a file split across chunks is further limited to the chunk whose own
-    hunks cover its line (re-reporting a finding a sibling chunk resolved, or
-    dropping one it never saw, is the failure this prevents). The listing cap
-    still applies, by position in the whole list."""
+    A finding is listed only in a chunk whose own hunks cover its line: a chunk
+    without the file cannot see the code, and a chunk holding the file but not
+    that part of it cannot either, so neither can resolve it. This holds for an
+    unsplit file as much as a split one. The listing cap still applies, by
+    position in the whole list."""
     return tuple(
-        finding
-        for finding in _listed(context)
-        if finding["file"] in chunk.files
-        and (finding["file"] not in split or chunk.covers(finding["file"], finding["line"]))
+        finding for finding in _listed(context) if chunk.covers(finding["file"], finding["line"])
     )
 
 
@@ -209,18 +193,13 @@ def carried_findings(
     open: those on files the delta did not touch (it cannot have resolved what
     it never changed), and every finding past the listing cap regardless of
     file (the reviewer never saw it, so it cannot have resolved it). With
-    *chunks*, also a finding on a file no chunk holds, and one on a split file
-    that no chunk's hunks cover: no chunk was asked about it, so none can have
-    resolved it. An open finding is never dropped."""
-    split = split_files(chunks)
+    *chunks*, also every finding that no chunk's hunks cover, on any file: no
+    chunk was asked about it, so none can have resolved it. An open finding is
+    never dropped."""
     return [
         dict(f)
         for position, f in enumerate(context.open_findings)
         if position >= MAX_LISTED_FINDINGS
         or f["file"] not in touched_files
-        or (bool(chunks) and not any(f["file"] in chunk.files for chunk in chunks))
-        or (
-            f["file"] in split
-            and not any(chunk.covers(f["file"], f["line"]) for chunk in chunks)
-        )
+        or (bool(chunks) and not any(chunk.covers(f["file"], f["line"]) for chunk in chunks))
     ]

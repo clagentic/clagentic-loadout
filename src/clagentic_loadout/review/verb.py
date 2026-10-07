@@ -162,11 +162,10 @@ from clagentic_loadout._version import get_version
 from clagentic_loadout.merge.errors import VerdictMalformedError
 from clagentic_loadout.merge.fence_state import (
     EVIDENCE_KEYS,
-    KEY_FAILURE_SEQUENCES,
     KEY_FENCE_SCHEMA_VERSION,
     STATE_KEYS,
-    failure_sequences_of,
     normalize_findings_state,
+    with_derived_failure_sequences,
 )
 from clagentic_loadout.merge.verdict import (
     VERDICT_FENCE,
@@ -1119,9 +1118,7 @@ def _run(
         # A finding's failure_sequence reaches the fence as well as the body;
         # derived here so the readback below expects exactly what the body
         # builder renders.
-        sequences = failure_sequences_of(verdict_findings)
-        if sequences:
-            findings_state = {KEY_FAILURE_SEQUENCES: sequences, **findings_state}
+        findings_state = with_derived_failure_sequences(findings_state, verdict_findings)
         body = None  # constructed below, entirely from structured fields
     elif args.verdict_review_status is not None:
         try:

@@ -14,7 +14,6 @@ from clagentic_loadout.review.delta import (
     carried_findings,
     findings_for_chunk,
     render_delta_note,
-    split_files,
 )
 from clagentic_loadout.review.run_pipeline import RESULT_COMPLETE, run_review
 from tests._support.review_chunk import profile
@@ -82,28 +81,20 @@ def test_a_split_hunk_gets_a_span_per_piece():
     assert chunks[0].covers("x.py", 1) and not chunks[-1].covers("x.py", 1)
 
 
-def test_only_files_spread_over_several_chunks_are_split_files():
-    chunks = plan_chunks(_diff("big.py", [1, 50, 100]) + _diff("small.py", [1]), 8)
-
-    assert split_files(chunks) == frozenset({"big.py"})
-
-
 def test_a_finding_on_a_split_file_is_listed_only_in_the_chunk_whose_hunks_cover_it():
     chunks = _split_chunks()
     context = _context(_finding("big.py", 1), _finding("big.py", 50), _finding("big.py", 101))
-    split = split_files(chunks)
 
-    listed = [[f["line"] for f in findings_for_chunk(context, c, split)] for c in chunks]
+    listed = [[f["line"] for f in findings_for_chunk(context, c)] for c in chunks]
 
     assert listed == [[1], [50], [101]]
 
 
 def test_a_finding_on_a_file_held_whole_is_listed_only_in_the_chunk_holding_it():
     chunks = plan_chunks(_diff("big.py", [1, 50, 100]) + _diff("small.py", [1]), 8)
-    context = _context(_finding("small.py", 99), _finding("untouched.py", 3))
-    split = split_files(chunks)
+    context = _context(_finding("small.py", 1), _finding("untouched.py", 3))
 
-    listed = [[f["file"] for f in findings_for_chunk(context, c, split)] for c in chunks]
+    listed = [[f["file"] for f in findings_for_chunk(context, c)] for c in chunks]
 
     holders = [i for i, c in enumerate(chunks) if "small.py" in c.files]
     assert len(holders) == 1
@@ -165,18 +156,28 @@ def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_carried()
     gap = _finding("s.py", 350)
     context = _context(gap)
 
-    assert [findings_for_chunk(context, c, split_files(chunks)) for c in chunks] == [(), ()]
+    assert [findings_for_chunk(context, c) for c in chunks] == [(), ()]
     assert carried_findings(context, {"s.py"}, chunks) == [gap]
+
+
+def test_a_finding_outside_the_hunks_of_an_unsplit_touched_file_is_not_listed_and_is_carried():
+    chunks = plan_chunks(_diff("small.py", [1]), 600)
+    assert len(chunks) == 1
+    outside = _finding("small.py", 99)
+    inside = _finding("small.py", 1, rule="R2")
+    context = _context(outside, inside)
+
+    assert findings_for_chunk(context, chunks[0]) == (inside,)
+    assert carried_findings(context, {"small.py"}, chunks) == [outside]
 
 
 def test_the_listing_cap_still_counts_by_position_in_the_whole_list():
     chunks = plan_chunks(_diff("other.py", [1]) + _diff("big.py", [1, 50, 100]), 8)
-    many = [_finding("other.py", i) for i in range(1, 60)]
+    many = [_finding("other.py", 1, rule=f"R{i}") for i in range(1, 60)]
     context = _context(*many, _finding("big.py", 1))
-    split = split_files(chunks)
     first = next(c for c in chunks if "other.py" in c.files)
 
-    listed = findings_for_chunk(context, first, split)
+    listed = findings_for_chunk(context, first)
 
     # big.py:1 sits at position 59, past the cap of 50: never shown, so carried.
     assert all(f["file"] == "other.py" for f in listed) and len(listed) == 50

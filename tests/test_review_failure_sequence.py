@@ -13,6 +13,7 @@ from clagentic_loadout.merge.fence_state import (
     KEY_FAILURE_SEQUENCES,
     failure_sequences_of,
     normalize_findings_state,
+    with_derived_failure_sequences,
 )
 from clagentic_loadout.merge.verdict import build_findings_verdict_body, parse_verdict_block
 from clagentic_loadout.review.findings_contract import (
@@ -129,6 +130,40 @@ def test_a_non_dict_mapping_state_still_gets_the_sequence_in_the_fence():
         {"file": "a.py", "line": 3, "rule_id": "R1", "failure_sequence": "a\nb"}
     ]
     assert dict(state) == {}
+
+
+def test_a_staged_stale_sequence_copy_never_overrides_the_findings():
+    stale = [{"file": "z.py", "line": 9, "rule_id": "R9", "failure_sequence": "stale"}]
+
+    body = build_findings_verdict_body(
+        "reviewer", "blocking", HEAD, 7, [_finding(failure_sequence="fresh")],
+        findings_state={KEY_FAILURE_SEQUENCES: stale},
+    )
+
+    assert parse_verdict_block(body)[KEY_FAILURE_SEQUENCES] == [
+        {"file": "a.py", "line": 3, "rule_id": "R1", "failure_sequence": "fresh"}
+    ]
+
+
+def test_a_staged_sequence_copy_is_removed_when_no_finding_states_one():
+    stale = [{"file": "z.py", "line": 9, "rule_id": "R9", "failure_sequence": "stale"}]
+
+    body = build_findings_verdict_body(
+        "reviewer", "blocking", HEAD, 7, [_finding()], findings_state={KEY_FAILURE_SEQUENCES: stale}
+    )
+
+    assert KEY_FAILURE_SEQUENCES not in parse_verdict_block(body)
+    assert "stale" not in body
+
+
+def test_the_derivation_helper_replaces_a_staged_copy_without_mutating_it():
+    staged = {KEY_FAILURE_SEQUENCES: [{"x": 1}], "other": 1}
+
+    derived = with_derived_failure_sequences(staged, [_finding(failure_sequence="s")])
+
+    assert derived["other"] == 1
+    assert derived[KEY_FAILURE_SEQUENCES][0]["failure_sequence"] == "s"
+    assert staged[KEY_FAILURE_SEQUENCES] == [{"x": 1}]
 
 
 def test_a_finding_without_one_builds_the_body_it_always_did():

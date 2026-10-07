@@ -122,7 +122,6 @@ from clagentic_loadout.merge.fence_state import (
     KEY_CLEARED_CLAIMS,
     KEY_DROPPED,
     KEY_ENGINES,
-    KEY_FAILURE_SEQUENCES,
     KEY_FINDINGS_OPEN,
     KEY_RANGE,
     SCANNER_FAILED,
@@ -136,6 +135,7 @@ from clagentic_loadout.merge.fence_state import (
     render_range,
     state_from_fence,
     unresolved_prior_findings,
+    with_derived_failure_sequences,
 )
 from clagentic_loadout.merge.fence_syntax import find_fence_syntax
 from clagentic_loadout.sha import FULL_SHA_RE, InvalidShaError, compare_sha_values, validate_sha
@@ -333,12 +333,11 @@ def build_findings_verdict_body(
             )
         _reject_fence_delimiters(sequence, idx, "failure_sequence")
 
-    # The fence's copy of each failure sequence is derived from the findings
-    # themselves unless the caller already supplied it, so a finding that
-    # states one can never reach the body without also reaching the fence.
-    sequences = failure_sequences_of(findings)
-    if sequences and (findings_state is None or isinstance(findings_state, Mapping)):
-        findings_state = {KEY_FAILURE_SEQUENCES: sequences, **(findings_state or {})}
+    # The fence's copy of each failure sequence is always derived from the
+    # findings, replacing any staged copy, so the fence cannot contradict the
+    # bullets it sits under.
+    if findings_state is None or isinstance(findings_state, Mapping):
+        findings_state = with_derived_failure_sequences(findings_state, findings)
     # Evidence is rendered from the same normalized fields the fence carries,
     # so the prose and the machine-readable copy are one source.
     evidence = normalize_findings_state(

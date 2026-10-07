@@ -49,8 +49,12 @@ def range_of(document: Mapping[str, Any]) -> dict[str, str] | None:
     head = _sha(document.get("head_sha"))
     if head is None:
         return None
-    since = _sha(document.get("since_head"))
-    if document.get("mode") == MODE_DELTA and since is not None:
+    if document.get("mode") == MODE_DELTA:
+        # A delta run's base is the prior head; without a readable since_head the
+        # range is unknown, and base..head would state a wider range than was read.
+        since = _sha(document.get("since_head"))
+        if since is None:
+            return None
         return {"basis": RANGE_BASIS_SINCE, "since": since, "head": head}
     base = _sha(document.get("base_sha"))
     if base is None:
