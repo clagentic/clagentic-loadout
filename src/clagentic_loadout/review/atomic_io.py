@@ -43,12 +43,18 @@ def write_json_atomic(path: Path, data: Any) -> None:
 def ensure_private_dir(path: Path) -> None:
     """Create *path* (and any missing parents) so that *path* itself is owner
     only, created at that mode. A directory that already exists wider, from an
-    earlier version, is narrowed too. Raises OSError on failure."""
+    earlier version, is narrowed too. A symlink at *path* is refused rather
+    than followed, since narrowing would then change its target, not a private
+    directory at *path*. Raises OSError on failure."""
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         path.mkdir(mode=PRIVATE_DIR_MODE)
     except FileExistsError:
-        if not path.is_dir():
-            raise
-        if path.stat().st_mode & 0o077:
-            os.chmod(path, PRIVATE_DIR_MODE)
+        # O_NOFOLLOW makes the open itself fail on a symlink (ELOOP), and
+        # fchmod acts on the descriptor, so there is no check-then-chmod gap.
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if os.fstat(fd).st_mode & 0o077:
+                os.fchmod(fd, PRIVATE_DIR_MODE)
+        finally:
+            os.close(fd)

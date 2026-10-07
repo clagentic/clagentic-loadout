@@ -5,6 +5,7 @@ body builder, and copied into the fence."""
 from __future__ import annotations
 
 import json
+from types import MappingProxyType
 
 import pytest
 
@@ -99,6 +100,20 @@ def test_the_body_renders_the_sequence_under_its_bullet_and_the_fence_carries_a_
     assert fence[KEY_FAILURE_SEQUENCES] == [
         {"file": "a.py", "line": 3, "rule_id": "R1", "failure_sequence": "a\nb"}
     ]
+
+
+def test_a_non_dict_mapping_state_still_gets_the_sequence_in_the_fence():
+    state = MappingProxyType({})
+
+    body = build_findings_verdict_body(
+        "reviewer", "blocking", HEAD, 7, [_finding(failure_sequence="a\nb")], findings_state=state
+    )
+
+    assert "failure sequence: a" in body
+    assert parse_verdict_block(body)[KEY_FAILURE_SEQUENCES] == [
+        {"file": "a.py", "line": 3, "rule_id": "R1", "failure_sequence": "a\nb"}
+    ]
+    assert dict(state) == {}
 
 
 def test_a_finding_without_one_builds_the_body_it_always_did():

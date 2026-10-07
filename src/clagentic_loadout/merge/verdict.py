@@ -100,6 +100,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -336,7 +337,7 @@ def build_findings_verdict_body(
     # themselves unless the caller already supplied it, so a finding that
     # states one can never reach the body without also reaching the fence.
     sequences = failure_sequences_of(findings)
-    if sequences and (findings_state is None or isinstance(findings_state, dict)):
+    if sequences and (findings_state is None or isinstance(findings_state, Mapping)):
         findings_state = {KEY_FAILURE_SEQUENCES: sequences, **(findings_state or {})}
     # Evidence is rendered from the same normalized fields the fence carries,
     # so the prose and the machine-readable copy are one source.

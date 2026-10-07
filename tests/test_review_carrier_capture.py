@@ -8,6 +8,7 @@ import os
 import stat
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
@@ -135,6 +136,35 @@ def test_a_log_directory_left_wide_by_an_older_run_is_narrowed(tmp_path, open_um
     assert _mode(log_dir) == 0o700
 
 
+def test_a_symlink_at_the_private_dir_path_is_refused_and_its_target_left_alone(tmp_path, open_umask):
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o755)
+    link = tmp_path / "carrier-logs"
+    link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        ensure_private_dir(link)
+
+    assert _mode(target) == 0o755
+
+
+def test_saved_stderr_is_not_written_through_a_symlinked_log_dir(tmp_path, open_umask):
+    target = tmp_path / "elsewhere"
+    target.mkdir(mode=0o755)
+    link = tmp_path / "carrier-logs"
+    link.symlink_to(target, target_is_directory=True)
+
+    result = run_engine(
+        [sys.executable, "-c", "import sys; sys.stderr.write('echoed prompt'); sys.exit(2)"],
+        "p", 10, cwd=tmp_path, log_dir=link,
+    )
+
+    assert result.kind == KIND_FAILED
+    assert result.stderr_file == ""
+    assert list(target.iterdir()) == []
+    assert _mode(target) == 0o755
+
+
 def test_ensure_private_dir_creates_missing_parents(tmp_path, open_umask):
     ensure_private_dir(tmp_path / "a" / "b" / "carrier-logs")
 
@@ -147,7 +177,11 @@ def test_the_default_write_mode_is_unchanged(tmp_path, open_umask):
     assert _mode(tmp_path / "f") == 0o666
 
 
-def test_stdin_feed_tolerates_a_child_that_closed_its_stdin(tmp_path):
+def test_stdin_feed_tolerates_a_child_that_closed_its_stdin(tmp_path, monkeypatch):
+    # threading swallows an exception raised in a thread, so a BrokenPipeError
+    # in the feeder would leave is_alive() False either way; record it instead.
+    thread_errors: list[threading.ExceptHookArgs] = []
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
     proc = subprocess.Popen(
         [sys.executable, "-c", "import os; os.close(0); import time; time.sleep(0.2)"],
         stdin=subprocess.PIPE,
@@ -158,3 +192,4 @@ def test_stdin_feed_tolerates_a_child_that_closed_its_stdin(tmp_path):
     proc.wait(10)
 
     assert not feeder.is_alive()
+    assert thread_errors == []
