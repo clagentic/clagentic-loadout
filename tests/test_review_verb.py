@@ -32,6 +32,13 @@ import pytest
 from clagentic_loadout.review import verb
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
+from tests._support.review_verb import (
+    RecordingTokenProvider as _RecordingTokenProvider,
+    RefusingTokenProvider as _RefusingTokenProvider,
+    github_verdict_opener as _github_verdict_opener,
+    json_resp as _json_resp,
+    run_main as _run_main,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -51,31 +58,6 @@ def _isolate_user_config_root(tmp_path, monkeypatch):
     exercises the config tier explicitly writes into this isolated root."""
     isolated_root = tmp_path / "isolated-user-config-root"
     monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
-
-
-class _RecordingTokenProvider:
-    """Records every role it was asked to resolve a token for -- proves
-    role-parameterization end to end (no hardcoded caller name anywhere in
-    the dispatch path)."""
-
-    def __init__(self, token: str = "tok-123") -> None:
-        self.resolved_for: list[str] = []
-        self._token = token
-
-    def resolve_token(self, role: str) -> str:
-        self.resolved_for.append(role)
-        return self._token
-
-
-class _RefusingTokenProvider:
-    """Raises if ever called -- used to prove the platform guard fires
-    BEFORE any credential mint."""
-
-    def resolve_token(self, role: str) -> str:
-        raise AssertionError(
-            f"token provider must not be called when the platform guard "
-            f"should have refused first (role={role!r})"
-        )
 
 
 def _github_success_opener(*, pr_number=42, posted_id=5):
@@ -109,29 +91,6 @@ def _github_success_opener(*, pr_number=42, posted_id=5):
     return opener
 
 
-class _FakeResponse:
-    def __init__(self, status: int, body: bytes):
-        self.status = status
-        self._body = body
-        self.headers = {"Content-Type": "application/json"}
-
-    def read(self):
-        return self._body
-
-    def getcode(self):
-        return self.status
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _json_resp(status: int, payload) -> _FakeResponse:
-    return _FakeResponse(status, json.dumps(payload).encode("utf-8"))
-
-
 def _forgejo_success_opener(*, pr_number=42, comment_id=9):
     def opener(req, timeout=15):
         url = req.full_url
@@ -156,21 +115,6 @@ def _forgejo_success_opener(*, pr_number=42, comment_id=9):
         raise AssertionError(f"unexpected: {method} {url}")
 
     return opener
-
-
-def _run_main(argv, *, stdin_bytes, token_provider, opener, monkeypatch):
-    """Drive verb.main() with *stdin_bytes* on the (monkeypatched) stdin
-    buffer. --body-env is now the DEFAULT body-ingestion route (lr-9ca25a)
-    when neither --body-env nor --body-stdin is passed -- every existing
-    caller of this helper was written against the PRIOR bare-stdin default,
-    so --body-stdin is injected automatically here unless *argv* already
-    names a body-ingestion flag, preserving each test's original intent
-    (drive stdin content through this invocation) without a mass per-test
-    edit."""
-    monkeypatch.setattr("sys.stdin", type("_S", (), {"buffer": io.BytesIO(stdin_bytes)})())
-    if "--body-stdin" not in argv and "--body-env" not in argv:
-        argv = [*argv, "--body-stdin"]
-    return verb.main(argv, token_provider=token_provider, opener=opener)
 
 
 class TestRoleParameterization:
@@ -473,59 +417,6 @@ class TestRepoContextReachesProvider:
 # ---------------------------------------------------------------------------
 
 _HEAD_SHA = "a" * 40
-
-
-def _github_verdict_opener(*, pr_number=42, posted_id=5, landed_body=None, capture_into=None):
-    """Echoes back whatever body was actually posted -- the readback must
-    reflect the REAL posted body (including the tool-constructed fence), not
-    a hand-crafted fixture string, so the mismatch-detection tests can
-    override `landed_body` to simulate a mangled-in-transit fence.
-    `landed_body`, when given a callable, is invoked with the real posted
-    body and must return the (possibly mangled) body verify_comment_on_pr's
-    ordinary substring-match readback will see -- letting a mismatch test
-    still pass the ordinary post_and_verify substring check while corrupting
-    only the fence, isolating the --verdict-review-status re-parse failure
-    from an ordinary verify-phase failure. `capture_into`, when given a dict,
-    is populated with {"posted_body": ...} for a caller that wants to
-    inspect exactly what this verb constructed and posted."""
-    state: dict = capture_into if capture_into is not None else {}
-    state.setdefault("posted_body", None)
-
-    def opener(req, timeout=15):
-        url = req.full_url
-        method = req.get_method()
-        if method == "GET" and url.endswith(f"/issues/{pr_number}/comments") and state["posted_body"] is None:
-            # Pre-POST dedupe readback (review.github_backend's lr-39f8
-            # idempotency check) -- nothing has been posted yet, so no
-            # existing-own-comment match is possible.
-            return _json_resp(200, [])
-        if method == "POST" and url.endswith(f"/issues/{pr_number}/comments"):
-            import json as _json
-
-            state["posted_body"] = _json.loads(req.data.decode("utf-8"))["body"]
-            return _json_resp(200, {"id": posted_id, "html_url": "http://post"})
-        if url.endswith("/user"):
-            return _json_resp(200, {"login": "reviewer"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
-            if callable(landed_body):
-                body = landed_body(state["posted_body"])
-            else:
-                body = landed_body if landed_body is not None else state["posted_body"]
-            return _json_resp(
-                200,
-                [
-                    {
-                        "id": posted_id,
-                        "user": {"login": "reviewer"},
-                        "body": body,
-                        "created_at": "2099-01-01T00:00:10Z",
-                        "html_url": "http://readback",
-                    }
-                ],
-            )
-        raise AssertionError(f"unexpected: {method} {url}")
-
-    return opener
 
 
 def _forgejo_verdict_opener(*, pr_number=42, comment_id=9, landed_body=None, capture_into=None):

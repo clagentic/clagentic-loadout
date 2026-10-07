@@ -19,7 +19,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from clagentic_loadout.review.atomic_io import write_bytes_atomic
+from clagentic_loadout.bounded_capture import join_capture, start_stdin_feed, start_tail_capture
+from clagentic_loadout.review.atomic_io import (
+    PRIVATE_FILE_MODE,
+    ensure_private_dir,
+    write_bytes_atomic,
+)
 
 EXIT_COMMAND_NOT_FOUND = 127
 EXCERPT_LIMIT = 2000
@@ -28,6 +33,9 @@ HEAD_PREFIX = 300
 LAST_LINE_LIMIT = 300
 #: Upper bound on the full-stderr file kept per failed call.
 STDERR_FILE_LIMIT = 256 * 1024
+#: Bytes of an engine's stdout kept. The reply is a findings array of a few KB;
+#: a reply past this bound has lost its opening and is read as an invalid one.
+STDOUT_CAPTURE_LIMIT = 8 * 1024 * 1024
 _CLASSIFY_WINDOW = 4096
 #: How many trailing non-empty stderr lines are searched for an engine error.
 _CLASSIFY_LINES = 3
@@ -129,8 +137,10 @@ def _save_stderr(stderr: bytes | str | None, log_dir: Path | None, label: str) -
         return ""
     path = log_dir / f"{label}-{uuid.uuid4().hex[:12]}.stderr"
     try:
-        log_dir.mkdir(parents=True, exist_ok=True)
-        write_bytes_atomic(path, data[-STDERR_FILE_LIMIT:])
+        # An engine's stderr echoes the prompt, so it holds the reviewed diff:
+        # owner-only from the moment it exists, directory and file both.
+        ensure_private_dir(log_dir)
+        write_bytes_atomic(path, data[-STDERR_FILE_LIMIT:], mode=PRIVATE_FILE_MODE)
     except OSError:
         return ""
     return str(path)
@@ -157,7 +167,9 @@ def run_in_process_group(
     """subprocess.run semantics, except the child leads its own process group
     and a timeout kills the whole group. subprocess.run kills only the direct
     child and then waits for pipe EOF, so a carrier whose grandchildren inherit
-    stdout would hang past the timeout."""
+    stdout would hang past the timeout. Output is captured through
+    bounded_capture, so memory stays flat: only the last STDOUT_CAPTURE_LIMIT
+    bytes of stdout and STDERR_FILE_LIMIT bytes of stderr are returned."""
     if not capture_output:
         raise ValueError("run_in_process_group always captures output")
     proc = subprocess.Popen(
@@ -168,28 +180,36 @@ def run_in_process_group(
         cwd=cwd,
         start_new_session=True,
     )
+    # communicate() would hold each stream whole; an engine that echoes the
+    # whole prompt to stderr makes that tens of KB per chunk, times the run's
+    # parallelism, and unbounded for a pathological engine. The tails below
+    # are all the classification and the saved stderr file ever use.
+    start_stdin_feed(proc, input)
+    out_buf, err_buf, readers = start_tail_capture(
+        proc, STDOUT_CAPTURE_LIMIT, stderr_limit=STDERR_FILE_LIMIT
+    )
     try:
-        stdout, stderr = proc.communicate(input=input, timeout=timeout)
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         _kill_group(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=_DRAIN_SECONDS)
-        except subprocess.TimeoutExpired as drain:
-            # A descendant that left the group can still hold a pipe open;
-            # report what was captured rather than waiting on it.
-            stdout, stderr = drain.stdout, drain.stderr
-            # communicate() gave up before reaping the direct child; without
-            # a wait it would stay a zombie for the life of this process.
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=_DRAIN_SECONDS)
+        # A descendant that left the group can still hold a pipe open; report
+        # what was captured rather than waiting on it. The wait also reaps the
+        # direct child, which would otherwise stay a zombie for the life of
+        # this process.
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=_DRAIN_SECONDS)
+        join_capture(readers, _DRAIN_SECONDS)
         raise subprocess.TimeoutExpired(
-            list(argv), timeout, output=stdout, stderr=stderr
+            list(argv), timeout, output=out_buf.value(), stderr=err_buf.value()
         ) from None
     except BaseException:
         _kill_group(proc)
         proc.wait()
         raise
-    return subprocess.CompletedProcess(list(argv), proc.returncode, stdout, stderr)
+    join_capture(readers, _DRAIN_SECONDS)
+    return subprocess.CompletedProcess(
+        list(argv), proc.returncode, out_buf.value(), err_buf.value()
+    )
 
 
 def run_engine(

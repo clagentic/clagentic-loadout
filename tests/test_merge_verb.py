@@ -18,208 +18,25 @@ from __future__ import annotations
 import io
 import json
 import urllib.error
-from datetime import datetime, timezone
 
 import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.verdict import build_verdict_block
-from clagentic_loadout.transport.credential_provider import CredentialProviderError
 from tests._gate_repo import seed_base_commit
-
-_FULL_SHA = "a" * 40
-_OTHER_FULL_SHA = "b" * 40
-
-
-class _RecordingTokenProvider:
-    def __init__(self, token: str = "tok-123"):
-        self.resolved_for: list[str] = []
-        self._token = token
-
-    def resolve_token(self, role: str) -> str:
-        self.resolved_for.append(role)
-        return self._token
-
-
-class _RefusingTokenProvider:
-    def resolve_token(self, role: str) -> str:
-        raise AssertionError(f"token provider must not be called (role={role!r})")
-
-
-class _MissingCredsTokenProvider:
-    def resolve_token(self, role: str) -> str:
-        raise CredentialProviderError("no credentials configured for this role")
-
-
-class _AllowingAuthorityProvider:
-    def authority_allows(self, role, owner, repo, pr_number) -> bool:
-        return True
-
-
-class _DenyingAuthorityProvider:
-    def authority_allows(self, role, owner, repo, pr_number) -> bool:
-        return False
-
-
-class _RefusingAuthorityProvider:
-    def authority_allows(self, role, owner, repo, pr_number) -> bool:
-        raise AssertionError("authority provider must not be called")
-
-
-class _FakeResponse:
-    def __init__(self, status: int, body: bytes):
-        self.status = status
-        self._body = body
-
-    def read(self):
-        return self._body
-
-    def getcode(self):
-        return self.status
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _json_resp(status: int, payload) -> _FakeResponse:
-    return _FakeResponse(status, json.dumps(payload).encode("utf-8"))
-
-
-_MERGED_COMMIT_SHA = "e" * 40
-
-
-def _make_opener(
-    *,
-    pr_info=None,
-    files=None,
-    comments=None,
-    merge_status=200,
-    ci_state="",
-    ci_statuses=None,
-    ci_run_total_count=0,
-    branch_commits=None,
-    post_merge_readback_confirms=True,
-):
-    """Route GET/POST calls to canned responses keyed by URL shape. No real
-    network call is ever made -- every test in this file supplies its own
-    opener via this factory.
-
-    CI-status defaults to the no-runner-by-design empty shape (empty
-    combined state, zero statuses, zero actions/tasks total_count) -- see
-    merge.ci_status's module docstring -- so every PRE-EXISTING test in this
-    file (none of which reasons about CI at all) keeps reaching the exact
-    gate outcome it asserted before the CI-status gate (lr-afba) existed.
-    Tests that DO want to exercise the CI-status gate pass ci_state /
-    ci_statuses / ci_run_total_count explicitly (see TestCiStatusGate).
-
-    branch_commits (lr-835c57) defaults to an EMPTY commit list -- the
-    branch commit-subject gate is a no-op over an empty list regardless of
-    subject content, so every PRE-EXISTING test in this file (none of which
-    reasons about branch commit subjects) keeps reaching the exact gate
-    outcome it asserted before that gate existed. Tests that DO want to
-    exercise it (see TestBranchCommitSubjectGate) pass a list of
-    {"sha": ..., "commit": {"message": ...}} dicts explicitly -- the same
-    shape the real compare API's 'commits' field carries.
-
-    post_merge_readback_confirms (lr-361de3, default True): merge.verb now
-    performs a FRESH post-merge GET .../pulls/{n} (merge.merge_readback.
-    verify_merge_landed) to confirm merged==true with a non-empty
-    merge_commit_sha, AFTER the merge_status POST above has already
-    succeeded. This fixture tracks whether the merge POST has fired yet
-    (`_merge_landed`, a mutable single-element list so the nested `opener`
-    closure can flip it) and, once it has, overlays `merged`/
-    `merge_commit_sha` onto every subsequent `pr_info` GET response -- the
-    SAME pr_info dict a PRE-merge gate read saw stays unmerged-shaped (no
-    gate in this file's existing coverage reasons about `merged`/
-    `merge_commit_sha` at all, so this is additive, not a behavior change
-    for any pre-existing gate assertion). Set False to exercise the
-    readback-failure path (TestPostMergeReadback below) without touching
-    every other test in this file's own `pr_info` fixture.
-    """
-    pr_info = pr_info if pr_info is not None else {"head": {"sha": _FULL_SHA}, "title": "feat: a change"}
-    files = files if files is not None else ["a.py"]
-    comments = comments if comments is not None else []
-    branch_commits = branch_commits if branch_commits is not None else []
-    # lr-c14a2d: read_reviewer_verdict now requires a valid created_at on
-    # every candidate comment for its deterministic latest-verdict
-    # selection. Test fixtures across this file predate that requirement
-    # and construct comment dicts by id alone (id order == intended
-    # chronological order in every existing fixture) -- backfill a
-    # monotonic-with-id created_at here rather than touching every call
-    # site, so pre-existing fixtures keep exercising the SAME gate outcome
-    # they asserted before. A fixture that explicitly needs to test
-    # out-of-order created_at vs. id supplies its own 'created_at' key,
-    # which this backfill never overwrites.
-    comments = [
-        c if "created_at" in c else {**c, "created_at": f"2026-01-01T00:00:{c.get('id', 0):02d}Z"}
-        for c in comments
-    ]
-    ci_statuses = ci_statuses if ci_statuses is not None else []
-
-    # Merge-completion attestation (lr-20e866): posted via review.
-    # forgejo_backend.post_and_verify_comment AFTER a successful merge --
-    # POST issues/<pr>/comments, then GET /api/v1/user (bot-login
-    # resolution), then GET issues/<pr>/comments again (readback). Recorded
-    # separately from `comments` (the reviewer-verdict fixture list) so a
-    # POST here never contaminates the verdict-fence gate's own comment
-    # list, and the readback sees exactly the posted attestation body.
-    posted_comments: list[dict] = []
-    _merge_landed = [False]
-
-    def opener(req, timeout=15):
-        url = req.full_url
-        method = req.get_method()
-        if method == "POST" and url.endswith("/merge"):
-            if merge_status in (200, 204):
-                _merge_landed[0] = True
-                return _FakeResponse(merge_status, b"{}")
-            import io
-            import urllib.error
-
-            raise urllib.error.HTTPError(url, merge_status, "err", {}, io.BytesIO(b"{}"))
-        if method == "POST" and "/comments" in url:
-            # created_at is captured AT POST TIME (not a fixed literal) so
-            # this always clears post_and_verify_comment's freshness anchor
-            # (not_before, captured immediately before the POST) regardless
-            # of when the test suite itself runs -- this is a same-instant
-            # readback fixture, not an assumption about any real calendar
-            # date.
-            posted_body = json.loads(req.data.decode("utf-8"))["body"]
-            posted_comments.append(
-                {
-                    "id": 9001 + len(posted_comments),
-                    "user": {"login": "loadout-merger"},
-                    "body": posted_body,
-                    "html_url": "https://forgejo.example/comment/9001",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            return _json_resp(201, posted_comments[-1])
-        if method == "GET" and url.endswith("/user"):
-            return _json_resp(200, {"login": "loadout-merger"})
-        if method == "GET" and url.endswith("/files"):
-            return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and url.endswith("/comments"):
-            return _json_resp(200, comments + posted_comments)
-        if method == "GET" and url.endswith("/status"):
-            return _json_resp(200, {"state": ci_state, "statuses": ci_statuses})
-        if method == "GET" and url.endswith("/actions/tasks"):
-            return _json_resp(200, {"total_count": ci_run_total_count})
-        if method == "GET" and "/compare/" in url:
-            return _json_resp(200, {"commits": branch_commits, "ahead_by": len(branch_commits)})
-        if method == "GET" and "/pulls/" in url:
-            if _merge_landed[0] and post_merge_readback_confirms:
-                return _json_resp(
-                    200,
-                    {**pr_info, "merged": True, "merge_commit_sha": _MERGED_COMMIT_SHA},
-                )
-            return _json_resp(200, pr_info)
-        raise AssertionError(f"unexpected call: {method} {url}")
-
-    return opener
+from tests._support.merge_verb import (
+    FULL_SHA as _FULL_SHA,
+    MERGED_COMMIT_SHA as _MERGED_COMMIT_SHA,
+    OTHER_FULL_SHA as _OTHER_FULL_SHA,
+    AllowingAuthorityProvider as _AllowingAuthorityProvider,
+    DenyingAuthorityProvider as _DenyingAuthorityProvider,
+    MissingCredsTokenProvider as _MissingCredsTokenProvider,
+    RecordingTokenProvider as _RecordingTokenProvider,
+    RefusingAuthorityProvider as _RefusingAuthorityProvider,
+    RefusingTokenProvider as _RefusingTokenProvider,
+    base_args as _base_args,
+    make_opener as _make_opener,
+)
 
 
 def _pr_info_with_base(repo_path, *, title: str = "feat: a change") -> dict:
@@ -230,31 +47,6 @@ def _pr_info_with_base(repo_path, *, title: str = "feat: a change") -> dict:
         "title": title,
         "base": {"ref": "main", "sha": seed_base_commit(repo_path)},
     }
-
-
-def _base_args(**overrides) -> list[str]:
-    args = {
-        "--platform": "forgejo",
-        "--role": "merger",
-        "--authorized-role": "merger",
-        "--repo": "some-owner/some-repo",
-        "--pr": "1",
-    }
-    args.update(overrides)
-    argv: list[str] = []
-    for key, value in args.items():
-        if value is None:
-            continue
-        argv.extend([key, str(value)])
-    # lr-ac5c8a: this file exercises the gate chain, never post_merge_steps
-    # (see test_merge_verb_post_merge.py for that), and none of its fixtures
-    # carry a local working tree -- --no-post-merge-tree explicitly
-    # acknowledges that, satisfying the now-mandatory --repo-path/
-    # --no-post-merge-tree/--skip-post-merge requirement (checked before any
-    # credential mint) without changing any gate outcome this file asserts.
-    if "--repo-path" not in argv and "--skip-post-merge" not in argv:
-        argv.append("--no-post-merge-tree")
-    return argv
 
 
 class TestNamespaceGuard:

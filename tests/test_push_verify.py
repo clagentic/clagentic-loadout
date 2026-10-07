@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from clagentic_loadout.push import verb
-from clagentic_loadout.push.bounded_capture import TailBuffer
+from clagentic_loadout.bounded_capture import TailBuffer
 from clagentic_loadout.push.verify_config import (
     InvalidVerifyConfigError,
     VerifyEntry,
@@ -32,14 +32,14 @@ from clagentic_loadout.push.verify_run import (
     render_verification_section,
     run_verifications,
 )
-from tests.test_push_verb import (  # noqa: F401  (fixtures reused, not redefined)
-    _RecordingTokenProvider,
-    _RefusingTokenProvider,
-    _forgejo_create_opener,
-    _isolate_user_config_root,
-    _json_resp,
-    _run_main,
+from tests._support.push_verb import (  # noqa: F401  (fixtures reused, not redefined)
+    RecordingTokenProvider as _RecordingTokenProvider,
+    RefusingTokenProvider as _RefusingTokenProvider,
+    forgejo_create_opener as _forgejo_create_opener,
+    isolate_user_config_root,
+    json_resp as _json_resp,
     repo_with_remote,
+    run_main as _run_main,
 )
 
 PY = sys.executable

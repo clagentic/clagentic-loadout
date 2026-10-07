@@ -20,11 +20,11 @@ from clagentic_loadout.merge.verdict import build_verdict_block, read_reviewer_v
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.transport import provider_config
 from tests._gate_repo import git, init_gate_repo, write_deployment_config
-from tests.test_merge_verb import (
-    _AllowingAuthorityProvider,
-    _RecordingTokenProvider,
-    _base_args,
-    _make_opener,
+from tests._support.merge_verb import (
+    AllowingAuthorityProvider as _AllowingAuthorityProvider,
+    RecordingTokenProvider as _RecordingTokenProvider,
+    base_args as _base_args,
+    make_opener as _make_opener,
 )
 
 HEAD_A = "a" * 40

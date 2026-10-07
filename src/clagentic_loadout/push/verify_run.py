@@ -23,7 +23,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from clagentic_loadout.push.bounded_capture import (
+from clagentic_loadout.bounded_capture import (
     TailBuffer,
     join_capture,
     start_tail_capture,
