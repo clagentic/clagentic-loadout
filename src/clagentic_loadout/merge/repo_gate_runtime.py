@@ -38,6 +38,8 @@ changes where the text comes from.
     warning naming the commit, the file and the error, so the merge that lands
     the corrected config is always possible. A pair that is half-trusted is
     harder to reason about than one that is either enforced or visibly not.
+    A declared role the deployment cannot resolve to a platform login counts as
+    the same kind of unloadable key (`with_resolvable_reviewer_roles`).
   - `pre_checks` NEVER falls back. A `pre_checks` declaration that cannot be
     read or validated at base (including a file that is not valid UTF-8, or a
     whole-file parse failure, or a base commit that cannot be fetched or shown)
@@ -60,7 +62,7 @@ refuse.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
@@ -78,6 +80,7 @@ from clagentic_loadout.merge.gate_config import (
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import resolve_git_working_tree
 from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS, pre_checks_from_section
+from clagentic_loadout.merge.reviewer_login import ReviewerLoginNotConfiguredError, resolve_reviewer_login
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, resolve_repo_config_path
 
 #: Keys that belong to the tracked gate file and are never honoured from the
@@ -218,4 +221,38 @@ def load_repo_gate_at_base(
     )
 
 
-__all__ = ["GATE_KEYS", "RepoGate", "load_repo_gate_at_base"]
+def with_resolvable_reviewer_roles(
+    gate: RepoGate, platform: str, *, flagged_roles: Iterable[str] = ()
+) -> RepoGate:
+    """Apply the reviewer-pair fallback to a gate naming a role the deployment
+    cannot resolve to a *platform* login.
+
+    A declared role is resolved through `merge.reviewer_login.resolve_reviewer_login`,
+    the single role -> login path (the bare role on Forgejo; the role's entry
+    under `github_app.slugs` plus the bot suffix on GitHub). A role that does
+    not resolve makes `required_reviewer_roles` unloadable for this deployment,
+    so, like any unloadable pair key, neither it nor `required_scanners` is
+    enforced and the merge runs on `--required-reviewer` alone, with a warning
+    naming the role, the platform and the missing mapping. Never a refusal: a
+    repo's declaration must not demand deployment config it was never told
+    about. A role already named by a `--required-reviewer` flag keeps the
+    flag's login and is not resolved here.
+    """
+    flagged = set(flagged_roles)
+    for role in gate.reviewer_roles:
+        if role in flagged:
+            continue
+        try:
+            resolve_reviewer_login(role, platform)
+        except ReviewerLoginNotConfiguredError as exc:
+            reason = f"declared reviewer role {role!r} cannot be resolved to a {platform} login: {exc}"
+            return replace(
+                gate,
+                reviewer_roles=(),
+                required_scanners=None,
+                warnings=_reviewer_pair_warnings(gate.warnings, reason),
+            )
+    return gate
+
+
+__all__ = ["GATE_KEYS", "RepoGate", "load_repo_gate_at_base", "with_resolvable_reviewer_roles"]

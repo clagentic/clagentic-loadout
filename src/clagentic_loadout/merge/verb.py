@@ -521,7 +521,10 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_require_model_attestation,
     resolve_sync_tree_after_merge,
 )
-from clagentic_loadout.merge.repo_gate_runtime import load_repo_gate_at_base
+from clagentic_loadout.merge.repo_gate_runtime import (
+    load_repo_gate_at_base,
+    with_resolvable_reviewer_roles,
+)
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
@@ -1351,6 +1354,9 @@ def _run(
         base_sha=resolve_base_sha(pr_info),
         base_branch=resolve_base_branch(pr_info),
     )
+    repo_gate = with_resolvable_reviewer_roles(
+        repo_gate, args.platform, flagged_roles=required_reviewers
+    )
     for warning in repo_gate.warnings:
         print(f"merge: WARNING -- {warning}", file=sys.stderr)
     floor_only_reviewers: dict[str, str] = {}
@@ -1365,13 +1371,9 @@ def _run(
         )
     else:
         undeclared = [r for r in repo_gate.reviewer_roles if r not in required_reviewers]
-        try:
-            floor_only_reviewers = _parse_required_reviewers(undeclared, args.platform)
-        except MergeUsageError as exc:
-            raise MergeUsageError(
-                f"{exc} This role is required by the repo's merge.required_reviewer_roles; "
-                f"pass --ignore-repo-gate to override it (logged and attested)."
-            ) from exc
+        # Every declared role resolves here: an unresolvable one already took
+        # the pair fallback in with_resolvable_reviewer_roles.
+        floor_only_reviewers = _parse_required_reviewers(undeclared, args.platform)
         required_reviewers = {**required_reviewers, **floor_only_reviewers}
         unreachable = repo_gate.unreachable_scanner_roles(required_reviewers)
         if unreachable:

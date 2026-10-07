@@ -428,6 +428,66 @@ class TestRepoReviewerFloor:
         code, _ = _merge(comments, repo_path=tmp_path)
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
 
+    @staticmethod
+    def _only_ghost_is_unresolvable(monkeypatch):
+        from clagentic_loadout.merge.reviewer_login import ReviewerLoginNotConfiguredError
+
+        def resolve(name, platform):
+            if name.startswith("ghost"):
+                raise ReviewerLoginNotConfiguredError(
+                    f"no GitHub App slug configured for reviewer {name!r}"
+                )
+            return name
+
+        monkeypatch.setattr("clagentic_loadout.merge.repo_gate_runtime.resolve_reviewer_login", resolve)
+        monkeypatch.setattr(verb, "resolve_reviewer_login", resolve)
+
+    def test_an_unresolvable_declared_role_falls_back_to_flags_with_a_warning_and_merges(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(
+            tmp_path,
+            {"required_reviewer_roles": ["ghost", "never-posts"], "required_scanners": {NAME: ["alpha"]}},
+        )
+        failed = {"scanners_run": [{"scanner": "alpha", "status": "failed", "reason": "x"}]}
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B, failed))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "required_reviewer_roles NOT ENFORCED" in err
+        assert "required_scanners NOT ENFORCED" in err
+        assert "'ghost'" in err and "forgejo" in err and "no GitHub App slug configured" in err
+
+    def test_a_resolvable_declared_role_is_still_enforced(self, tmp_path, monkeypatch, capsys):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": ["never-posts"]})
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "NOT ENFORCED" not in err
+
+    def test_a_declared_role_named_by_a_flag_keeps_the_flags_login(self, tmp_path, monkeypatch, capsys):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": ["ghost"]})
+        code, err = _merge(
+            [_comment(1, _fence("clean", HEAD_B))],
+            repo_path=tmp_path,
+            extra_args=["--required-reviewer", "ghost:ghost-login"],
+            capsys=capsys,
+        )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "NOT ENFORCED" not in err
+
+    def test_an_unresolvable_explicit_flag_role_still_errors(self, tmp_path, monkeypatch, capsys):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": []})
+        code, err = _merge(
+            [_comment(1, _fence("clean", HEAD_B))],
+            repo_path=tmp_path,
+            extra_args=["--required-reviewer", "ghost2"],
+            capsys=capsys,
+        )
+        assert code == verb.EXIT_USAGE
+        assert "'ghost2'" in err
+
     @pytest.mark.parametrize(
         "section",
         [{"required_reviewer_roles": "reviewer"}, {"authorized_roles": ["merger"]}],
@@ -533,18 +593,6 @@ class TestRepoReviewerFloor:
         assert code == verb.EXIT_OK
         assert any("Repo gate" in body and "ignored" in body for body in posted)
         assert '"repo_gate_ignored": ["never-posts"]' in capsys.readouterr().out
-
-    def test_a_role_with_no_resolvable_login_refuses_and_names_the_override(self, tmp_path, capsys):
-        _write_config(tmp_path, {"required_reviewer_roles": ["security"]})
-        argv = _base_args(**{"--platform": "github", "--repo-path": str(tmp_path)})
-        code = verb.main(
-            argv,
-            token_provider=_RecordingTokenProvider(),
-            authority_provider=_AllowingAuthorityProvider(),
-            opener=_make_opener(pr_info=_pr_info(HEAD_B, tmp_path)),
-        )
-        assert code == verb.EXIT_USAGE
-        assert "--ignore-repo-gate" in capsys.readouterr().err
 
     def test_no_repo_path_declares_nothing(self):
         code, _ = _merge([_comment(1, _fence("clean", HEAD_B))])

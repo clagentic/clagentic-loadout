@@ -212,8 +212,16 @@ keep a broken config from blocking the merge that would fix it:
   the gate moved to base. `--skip-pre-checks` bypasses it; `--ignore-repo-gate`
   does not. A PR payload that carries no base SHA gives nothing to read: the
   reviewer pair falls back with a warning and no `pre_checks` are declared.
+- A declared reviewer role the deployment cannot resolve to a platform login
+  is treated as an unloadable key: `required_reviewer_roles` and
+  `required_scanners` fall back together to flags-only, with a warning naming
+  the role, the platform and the missing mapping. It is never a refusal, so a
+  repo's declaration cannot demand deployment config the deployment was not
+  told about. `loadout-doctor` reports such a role as a failure. A role named
+  by `--required-reviewer` is the caller's assertion and still errors as
+  before when it cannot resolve.
 - A config that loads but cannot be satisfied (a declared role with no
-  verdict, or no resolvable login; a clean verdict that records no scanner
+  verdict; a clean verdict that records no scanner
   outcomes, or reports a required scanner failed, for a role with
   `required_scanners`) refuses the merge. `--ignore-repo-gate` is the
   deliberate escape hatch for exactly two gates, `merge.required_reviewer_roles`
@@ -228,6 +236,23 @@ keep a broken config from blocking the merge that would fix it:
 - Role names and scanner names in these keys are trimmed of surrounding
   whitespace when loaded; two `required_scanners` keys that collide after
   trimming are a malformed config.
+
+**Role to login: the single resolution path.** Every role name, whether it
+comes from `--required-reviewer` or `merge.required_reviewer_roles`, resolves
+through `merge.reviewer_login.resolve_reviewer_login`: on Forgejo the bare role
+is the login; on GitHub it is the `github_app.slugs.<role>` entry (or the
+single `github_app.slug`) plus `[bot]`. That map is keyed by the same names a
+deployment uses for its callers, so a deployment whose slugs are keyed by
+caller names has no entry for a role token. For a declared role that is now a
+warning and a flags-only fallback; add the `github_app.slugs.<role>` entry (or
+pass `--required-reviewer <role>:<login>`) to enforce it.
+
+**Migration (since the repo reviewer floor landed).** A deployment needs no new
+configuration to keep merging: a declared role that cannot resolve falls back
+with a warning, a malformed reviewer/scanner declaration falls back with a
+warning, and `pre_checks` keep refusing when malformed. Gate keys must now live
+in the tracked gate file; the same keys in the deployment file are ignored
+with a warning.
 
 **Upgrading.** This is a breaking change for a repo that declared
 `required_reviewer_roles` decoratively. Its merges now need those verdicts.

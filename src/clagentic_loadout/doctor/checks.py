@@ -138,7 +138,14 @@ from clagentic_loadout.merge.gate_config import (
     load_authorized_roles,
     load_merge_requirements,
     load_required_reviewer_roles,
+    parse_tracked_gate_text,
 )
+from clagentic_loadout.merge.reviewer_login import (
+    ReviewerLoginNotConfiguredError,
+    resolve_reviewer_login,
+)
+from clagentic_loadout.platform_detect import detect_platform_from_url
+from clagentic_loadout.push.git_coords import read_remote_url_best_effort
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_POST_MERGE_STEPS,
@@ -164,6 +171,7 @@ from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     LEGACY_CONFIG_MARKER,
     LEGACY_CONFIG_RELATIVE_PATH,
+    TRACKED_GATE_RELATIVE_PATH,
     resolve_repo_config_path,
 )
 from clagentic_loadout.review.login_config import (
@@ -819,6 +827,47 @@ def check_attestation_source_configured(
 KNOWN_CONFIG_SECTIONS: tuple[str, ...] = ("wait", "roles", "merge")
 
 
+def _unresolvable_reviewer_role_errors(
+    repo_root_path: Path, config_roles: tuple[str, ...]
+) -> list[str]:
+    """One error per declared reviewer role the deployment cannot resolve to a
+    login on the platform this repo's remote points at.
+
+    Roles come from the config file already loaded plus the tracked gate file
+    (`repo_config.TRACKED_GATE_RELATIVE_PATH`) when the working tree has one.
+    Resolution uses `merge.reviewer_login.resolve_reviewer_login`, the same
+    path `loadout-merge` takes. At merge time such a role is only a warning
+    (the reviewer pair falls back to flags); doctor reports it as a failure so
+    the gap is visible. No detectable remote means no platform to resolve on,
+    so nothing is reported.
+    """
+    roles = list(config_roles)
+    gate_file = repo_root_path / TRACKED_GATE_RELATIVE_PATH
+    if gate_file.is_file():
+        try:
+            tracked_roles, _, _ = parse_tracked_gate_text(
+                gate_file.read_text(encoding="utf-8"), source=str(gate_file)
+            )
+        except (OSError, InvalidMergeGateConfigError):
+            tracked_roles = ()
+        roles.extend(tracked_roles)
+    remote = read_remote_url_best_effort(repo_root_path)
+    if not remote:
+        return []
+    platform = detect_platform_from_url(remote)
+    errors: list[str] = []
+    for role in dict.fromkeys(roles):
+        try:
+            resolve_reviewer_login(role, platform)
+        except ReviewerLoginNotConfiguredError as exc:
+            errors.append(
+                f"merge (gate declaration): required reviewer role {role!r} cannot be "
+                f"resolved to a {platform} login ({exc}); loadout-merge will not enforce "
+                f"the declared reviewer roles or required scanners until it can"
+            )
+    return errors
+
+
 def check_repo_loadout_schema(
     repo_root: str | Path,
     *,
@@ -968,6 +1017,7 @@ def check_repo_loadout_schema(
         #     cannot see (e.g. an external harness/allowlist that never
         #     touched this repo's `roles:` section at all). WARN
         #     (`ok` stays True) is the correct severity for this shape only.
+        errors.extend(_unresolvable_reviewer_role_errors(repo_root_path, required_reviewer_roles))
         roles_section_present = CONFIG_SECTION_ROLES in raw
         known_roles = set(
             declared_role_verbs if declared_role_verbs is not None else DEFAULT_ROLE_VERBS

@@ -124,8 +124,12 @@ obeys two rules:
     raises is therefore caught there, never propagated out of `loadout-merge`
     or `loadout-push`. `pre_checks` is NOT part of this fallback: it keeps its
     own rule (a malformed or unreadable declaration refuses the merge).
+  - A declared role the deployment cannot resolve to a platform login takes the
+    same fallback as an unloadable key (merge.repo_gate_runtime.
+    with_resolvable_reviewer_roles), with a warning naming the role, platform
+    and missing mapping.
   - A config that loads cleanly but cannot be satisfied (a declared role with
-    no resolvable login, or no verdict from it) refuses the merge, with
+    no verdict from it) refuses the merge, with
     `--ignore-repo-gate` as the deliberate, logged escape hatch.
 
 `push.verb` must still never import this module: pushing a corrected config
