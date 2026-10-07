@@ -196,10 +196,11 @@ class TestVerbCreatePath:
     def test_failure_refuses_before_push_and_pr(self, repo_with_remote, monkeypatch, capsys):
         repo, remote = repo_with_remote
         _write_verify(repo, [_py("unit", "import sys; print('red'); sys.exit(2)")])
+        sent: list = []
         code = _run_main(
             _create_argv(repo),
             token_provider=_RecordingTokenProvider(),
-            opener=_capturing_create_opener([]),  # a PR POST would append; none expected
+            opener=_capturing_create_opener(sent),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
         )
@@ -207,19 +208,22 @@ class TestVerbCreatePath:
         err = capsys.readouterr().err
         assert "unit" in err and "red" in err
         assert not _remote_has_branch(remote)
+        assert sent == []
 
     def test_timeout_refuses(self, repo_with_remote, monkeypatch):
         repo, remote = repo_with_remote
         _write_verify(repo, [_py("slow", "import time; time.sleep(30)", timeout=0.5)])
+        sent: list = []
         code = _run_main(
             _create_argv(repo),
             token_provider=_RecordingTokenProvider(),
-            opener=_capturing_create_opener([]),
+            opener=_capturing_create_opener(sent),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_FAILED
         assert not _remote_has_branch(remote)
+        assert sent == []
 
     def test_skip_verify_is_logged_and_recorded_in_body(
         self, repo_with_remote, monkeypatch, capsys
@@ -258,29 +262,33 @@ class TestVerbCreatePath:
     def test_malformed_config_exits_config_invalid(self, repo_with_remote, monkeypatch):
         repo, remote = repo_with_remote
         _write_verify(repo, "not-a-list")
+        sent: list = []
         code = _run_main(
             _create_argv(repo),
             token_provider=_RecordingTokenProvider(),
-            opener=_capturing_create_opener([]),
+            opener=_capturing_create_opener(sent),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_CONFIG_INVALID
         assert not _remote_has_branch(remote)
+        assert sent == []
 
     @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
     def test_non_finite_timeout_exits_config_invalid(self, repo_with_remote, monkeypatch, bad):
         repo, remote = repo_with_remote
         _write_verify(repo, [_py("unit", "pass", timeout=bad)])
+        sent: list = []
         code = _run_main(
             _create_argv(repo),
             token_provider=_RecordingTokenProvider(),
-            opener=_capturing_create_opener([]),
+            opener=_capturing_create_opener(sent),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_CONFIG_INVALID
         assert not _remote_has_branch(remote)
+        assert sent == []
 
     def test_dry_run_does_not_run_verification(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
@@ -326,16 +334,19 @@ class TestVerbUpdatePath:
     def test_body_update_failure_refuses_before_token(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
+        sent: list = []
         code = _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--body-stdin", "--replace-body",
             ],
             token_provider=_RefusingTokenProvider(),
+            opener=self._update_opener(sent),
             stdin_text=json.dumps({"body": "new body"}),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_FAILED
+        assert sent == []
 
     @staticmethod
     def _track_upstream_at_head(repo) -> None:
@@ -347,14 +358,14 @@ class TestVerbUpdatePath:
             cwd=repo, check=True, capture_output=True,
         )
 
-    def _title_update(self, repo, monkeypatch, capsys=None):
+    def _title_update(self, repo, monkeypatch, sent=None):
         return _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--title", "feat: new title",
             ],
             token_provider=_RecordingTokenProvider(),
-            opener=self._update_opener([]),
+            opener=self._update_opener([] if sent is None else sent),
             monkeypatch=monkeypatch,
         )
 
@@ -365,10 +376,12 @@ class TestVerbUpdatePath:
         self._track_upstream_at_head(repo)
         marker = repo.parent / "update-marker"
         _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
-        code = self._title_update(repo, monkeypatch)
+        sent: list = []
+        code = self._title_update(repo, monkeypatch, sent)
         assert code == verb.EXIT_OK
         assert not marker.exists()
         assert "SKIPPED" in capsys.readouterr().err
+        assert len(sent) == 1 and sent[0]["title"] == "feat: new title"
 
     def test_title_only_update_with_new_commits_runs_verification(
         self, repo_with_remote, monkeypatch
@@ -396,15 +409,18 @@ class TestVerbUpdatePath:
             ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
         )
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
+        sent: list = []
         code = _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--title", "feat: new title",
             ],
             token_provider=_RefusingTokenProvider(),
+            opener=self._update_opener(sent),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_FAILED
+        assert sent == []
 
     def test_title_only_update_with_unknown_upstream_runs_verification(
         self, repo_with_remote, monkeypatch
