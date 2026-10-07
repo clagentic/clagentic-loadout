@@ -138,6 +138,29 @@ def _record_unavailable(
             )
 
 
+_UNAVAILABLE_FIELDS = (
+    "detail", "stderr_excerpt", "stderr_last_line", "stderr_file", "exit_code",
+)
+
+
+def _carry_unavailable(into: dict[str, Any], source: dict[str, Any], engine: str) -> None:
+    """Copy *engine*'s recorded unavailability diagnostics from *source* onto
+    *into*, keeping the per-engine key names."""
+    for field in _UNAVAILABLE_FIELDS:
+        key = f"{engine}_unavailable_{field}"
+        if key in source:
+            into[key] = source[key]
+
+
+def _first_present(record: dict[str, Any], field: str, *engines: str) -> Any:
+    """The first non-empty `<engine>_unavailable_<field>` among *engines*."""
+    for engine in engines:
+        value = record.get(f"{engine}_unavailable_{field}")
+        if value not in (None, ""):
+            return value
+    return None
+
+
 def _run_one_engine(
     engine: str,
     argv: tuple[str, ...],
@@ -264,8 +287,9 @@ def _fallback_after_carrier_failure(
     )
     if finished is None:
         # The fallback is absent too: report the carrier's own failure, which
-        # is the more useful diagnosis, with the fallback's absence beside it.
-        failed["fallback_unavailable_detail"] = record.get(f"{ENGINE_FALLBACK}_unavailable_detail", "")
+        # is the more useful diagnosis, with the fallback's absence beside it
+        # and its saved stderr path, so neither engine's evidence is lost.
+        _carry_unavailable(failed, record, ENGINE_FALLBACK)
         return failed
     finished["carrier_failure"] = carrier_failure
     return finished
@@ -284,7 +308,30 @@ def review_chunk(
 ) -> dict[str, Any]:
     """Review *chunk*; returns its persistable record. Never raises for an
     engine problem: every outcome is a record with a status. *breaker* is the
-    run-wide record of engines known to be out of service."""
+    run-wide record of engines known to be out of service. A record carries
+    the profile's display label for the engine that answered, when it has one,
+    so a posted verdict can name the model."""
+    record = _review_chunk(
+        chunk, total, profile, attempts_before=attempts_before, cwd=cwd, runner=runner,
+        delta_note=delta_note, breaker=breaker,
+    )
+    label = profile.fallback_model if record.get("engine") == ENGINE_FALLBACK else profile.carrier_model
+    if label:
+        record["engine_label"] = label
+    return record
+
+
+def _review_chunk(
+    chunk: Chunk,
+    total: int,
+    profile: ReviewProfile,
+    *,
+    attempts_before: int,
+    cwd: Path,
+    runner: Runner,
+    delta_note: str,
+    breaker: EngineBreaker | None,
+) -> dict[str, Any]:
     prompt = build_prompt(chunk, total, profile.rulebook_text, delta_note)
     record = _new_record(chunk, attempts_before + 1)
 
@@ -319,8 +366,10 @@ def review_chunk(
                 kind=KIND_UNAVAILABLE,
                 detail=record.get(f"{ENGINE_CARRIER}_unavailable_detail", "carrier unavailable")
                 + "; no fallback is configured for this profile",
+                exit_code=record.get(f"{ENGINE_CARRIER}_unavailable_exit_code"),
                 stderr_excerpt=record.get(f"{ENGINE_CARRIER}_unavailable_stderr_excerpt", ""),
                 stderr_last_line=record.get(f"{ENGINE_CARRIER}_unavailable_stderr_last_line", ""),
+                stderr_file=record.get(f"{ENGINE_CARRIER}_unavailable_stderr_file", ""),
             ),
             retriable=False,
         )
@@ -335,7 +384,11 @@ def review_chunk(
         if reason:
             finished["carrier_unavailable_reason"] = reason
         return finished
-    return _failure(
+    # Neither engine could answer. The failure leads with the fallback's own
+    # diagnostics (the last engine tried) and keeps the carrier's beside them,
+    # so both saved stderr paths survive on the record.
+    both = (ENGINE_FALLBACK, ENGINE_CARRIER)
+    failure = _failure(
         record,
         ENGINE_FALLBACK,
         REASON_MODEL_UNAVAILABLE,
@@ -346,14 +399,13 @@ def review_chunk(
                 f"{record.get(f'{ENGINE_CARRIER}_unavailable_detail', '')}; fallback: "
                 f"{record.get(f'{ENGINE_FALLBACK}_unavailable_detail', '')}"
             ),
-            stderr_excerpt=(
-                record.get(f"{ENGINE_FALLBACK}_unavailable_stderr_excerpt", "")
-                or record.get(f"{ENGINE_CARRIER}_unavailable_stderr_excerpt", "")
-            ),
-            stderr_last_line=(
-                record.get(f"{ENGINE_FALLBACK}_unavailable_stderr_last_line", "")
-                or record.get(f"{ENGINE_CARRIER}_unavailable_stderr_last_line", "")
-            ),
+            exit_code=_first_present(record, "exit_code", *both),
+            stderr_excerpt=_first_present(record, "stderr_excerpt", *both) or "",
+            stderr_last_line=_first_present(record, "stderr_last_line", *both) or "",
+            stderr_file=_first_present(record, "stderr_file", *both) or "",
         ),
         retriable=False,
     )
+    for engine in both:
+        failure[f"{engine}_stderr_file"] = record.get(f"{engine}_unavailable_stderr_file", "")
+    return failure

@@ -29,11 +29,13 @@ PR, and a delta review can never turn "clean" by simply not looking.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.acquire.contract import AcquiredPr, RangeDiffBackend
 from clagentic_loadout.acquire.errors import AcquireFetchError
+from clagentic_loadout.review.chunking import Chunk
 
 STATUS_DELTA = "ok"
 STATUS_FALLBACK = "fallback"
@@ -126,8 +128,41 @@ def resolve_delta(
     )
 
 
-def render_delta_note(context: DeltaContext) -> str:
-    """Prompt text framing each chunk as part of an incremental review."""
+def split_files(chunks: Sequence[Chunk]) -> frozenset[str]:
+    """Files whose diff is spread over more than one chunk."""
+    seen: set[str] = set()
+    split: set[str] = set()
+    for chunk in chunks:
+        for name in chunk.files:
+            (split if name in seen else seen).add(name)
+    return frozenset(split)
+
+
+def findings_for_chunk(
+    context: DeltaContext, chunk: Chunk, split: frozenset[str]
+) -> tuple[dict[str, Any], ...]:
+    """The open findings this chunk's prompt lists for judgment.
+
+    A finding on a file that sits whole in one chunk is listed as before. A
+    finding on a file split across chunks is listed only in the chunk whose
+    own hunks cover its line: the other chunks hold a different part of that
+    file, cannot see the code the finding is about, and would otherwise
+    answer for it (re-reporting a finding a sibling chunk resolved, or
+    dropping one it never saw). The listing cap still applies, by position in
+    the whole list."""
+    return tuple(
+        finding
+        for finding in _listed(context)
+        if finding["file"] not in split or chunk.covers(finding["file"], finding["line"])
+    )
+
+
+def render_delta_note(
+    context: DeltaContext, listed: Sequence[dict[str, Any]] | None = None
+) -> str:
+    """Prompt text framing each chunk as part of an incremental review.
+    *listed* is the findings to list (default: every listable open finding,
+    see findings_for_chunk for the per-chunk subset)."""
     lines = [
         "## Incremental review",
         "",
@@ -144,15 +179,15 @@ def render_delta_note(context: DeltaContext) -> str:
         "",
         "Open findings from the last review:",
     ]
-    listed = _listed(context)
-    if not listed:
+    shown = _listed(context) if listed is None else listed
+    if not shown:
         lines.append("- none")
-    for finding in listed:
+    for finding in shown:
         lines.append(
             f"- {finding['file']}:{finding['line']} [{finding['rule_id']}] "
             f"({finding['severity']}) {finding['message']}"
         )
-    omitted = len(context.open_findings) - len(listed)
+    omitted = len(context.open_findings) - len(_listed(context))
     if omitted > 0:
         lines.append(
             f"- ... and {omitted} more not listed; they are carried forward "
@@ -166,15 +201,25 @@ def _listed(context: DeltaContext) -> tuple[dict[str, Any], ...]:
 
 
 def carried_findings(
-    context: DeltaContext, touched_files: set[str]
+    context: DeltaContext,
+    touched_files: set[str],
+    chunks: Sequence[Chunk] = (),
 ) -> list[dict[str, Any]]:
     """Open findings the delta review is not asked to re-judge, so they stay
     open: those on files the delta did not touch (it cannot have resolved what
     it never changed), and every finding past the listing cap regardless of
-    file (the reviewer never saw it, so it cannot have resolved it). An open
-    finding is never dropped."""
+    file (the reviewer never saw it, so it cannot have resolved it). With
+    *chunks*, also a finding on a split file that no chunk's hunks cover: no
+    chunk was asked about it, so none can have resolved it. An open finding is
+    never dropped."""
+    split = split_files(chunks)
     return [
         dict(f)
         for position, f in enumerate(context.open_findings)
-        if position >= MAX_LISTED_FINDINGS or f["file"] not in touched_files
+        if position >= MAX_LISTED_FINDINGS
+        or f["file"] not in touched_files
+        or (
+            f["file"] in split
+            and not any(chunk.covers(f["file"], f["line"]) for chunk in chunks)
+        )
     ]
