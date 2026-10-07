@@ -124,10 +124,11 @@ obeys two rules:
     raises is therefore caught there, never propagated out of `loadout-merge`
     or `loadout-push`. `pre_checks` is NOT part of this fallback: it keeps its
     own rule (a malformed or unreadable declaration refuses the merge).
-  - A declared role the deployment cannot resolve to a platform login takes the
-    same fallback as an unloadable key (merge.repo_gate_runtime.
-    with_resolvable_reviewer_roles), with a warning naming the role, platform
-    and missing mapping.
+  - A declared role the deployment cannot resolve to a platform login degrades
+    PER ROLE, not as a pair (merge.repo_gate_runtime.
+    with_resolvable_reviewer_roles): that role drops from the floor and its own
+    required_scanners entry is skipped, with a warning naming the role,
+    platform and missing mapping; every other role and scanner stays enforced.
   - A config that loads cleanly but cannot be satisfied (a declared role with
     no verdict from it) refuses the merge, with
     `--ignore-repo-gate` as the deliberate, logged escape hatch.
@@ -225,7 +226,7 @@ def _read_yaml_mapping(path: Path) -> dict:
         return {}
     try:
         text = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise InvalidMergeGateConfigError(
             f"{path}: could not be read as YAML: {exc}."
         ) from exc

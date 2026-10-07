@@ -65,6 +65,29 @@ def test_a_role_declared_only_in_the_tracked_gate_file_is_checked_too(tmp_path, 
     assert "'reviewer'" in result.summary
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [b"merge:\n  required_reviewer_roles: [\xff\xfe]\n", b"merge: [unclosed", b"- just\n- a list\n"],
+    ids=["not-utf8", "not-yaml", "not-a-mapping"],
+)
+@pytest.mark.parametrize("remote", [_GITHUB_REMOTE, None], ids=["with-remote", "no-remote"])
+def test_an_unreadable_tracked_gate_is_a_fail_never_a_crash(tmp_path, monkeypatch, raw, remote):
+    _slugs(monkeypatch, {"reviewer"})
+    repo = _repo(tmp_path, remote=remote, roles_yaml="[reviewer]")
+    (repo / TRACKED_GATE_RELATIVE_PATH).write_bytes(raw)
+    result = check_repo_loadout_schema(repo)
+    assert result.ok is False
+    assert TRACKED_GATE_RELATIVE_PATH in result.summary
+    assert "cannot be read as a gate declaration" in result.summary
+
+
+def test_a_non_utf8_repo_config_is_a_fail_never_a_crash(tmp_path):
+    repo = _repo(tmp_path, remote=None, roles_yaml="[]")
+    (repo / ".clagentic" / "loadout" / "config.yaml").write_bytes(b"merge: \xff\xfe\n")
+    result = check_repo_loadout_schema(repo)
+    assert result.ok is False
+
+
 def test_resolvable_roles_pass(tmp_path, monkeypatch):
     _slugs(monkeypatch, {"reviewer"})
     repo = _repo(tmp_path, remote=_GITHUB_REMOTE, roles_yaml="[reviewer]")

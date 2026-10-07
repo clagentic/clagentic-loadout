@@ -837,33 +837,40 @@ def _unresolvable_reviewer_role_errors(
     (`repo_config.TRACKED_GATE_RELATIVE_PATH`) when the working tree has one.
     Resolution uses `merge.reviewer_login.resolve_reviewer_login`, the same
     path `loadout-merge` takes. At merge time such a role is only a warning
-    (the reviewer pair falls back to flags); doctor reports it as a failure so
+    (that role is dropped from the floor); doctor reports it as a failure so
     the gap is visible. No detectable remote means no platform to resolve on,
     so nothing is reported.
     """
     roles = list(config_roles)
+    errors: list[str] = []
     gate_file = repo_root_path / TRACKED_GATE_RELATIVE_PATH
     if gate_file.is_file():
         try:
             tracked_roles, _, _ = parse_tracked_gate_text(
                 gate_file.read_text(encoding="utf-8"), source=str(gate_file)
             )
-        except (OSError, InvalidMergeGateConfigError):
+        except (OSError, UnicodeDecodeError, InvalidMergeGateConfigError) as exc:
+            # A gate file that cannot be decoded or parsed is a finding, never a
+            # crash: at merge time it makes the reviewer pair fall back to flags.
+            errors.append(
+                f"merge (gate declaration): {gate_file} cannot be read as a gate "
+                f"declaration ({exc}); loadout-merge will not enforce the declared "
+                f"reviewer roles or required scanners until it can"
+            )
             tracked_roles = ()
         roles.extend(tracked_roles)
     remote = read_remote_url_best_effort(repo_root_path)
     if not remote:
-        return []
+        return errors
     platform = detect_platform_from_url(remote)
-    errors: list[str] = []
     for role in dict.fromkeys(roles):
         try:
             resolve_reviewer_login(role, platform)
         except ReviewerLoginNotConfiguredError as exc:
             errors.append(
                 f"merge (gate declaration): required reviewer role {role!r} cannot be "
-                f"resolved to a {platform} login ({exc}); loadout-merge will not enforce "
-                f"the declared reviewer roles or required scanners until it can"
+                f"resolved to a {platform} login ({exc}); loadout-merge drops that role "
+                f"from the reviewer floor and skips its required_scanners entry until it can"
             )
     return errors
 
@@ -935,7 +942,7 @@ def check_repo_loadout_schema(
     # a bad repo config crash a health-check run).
     try:
         parsed = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         return CheckResult(
             name="repo_loadout_schema",
             ok=False,

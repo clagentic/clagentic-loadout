@@ -45,6 +45,7 @@ import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.transport import provider_config
+from tests._gate_repo import seed_base_commit
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
@@ -115,7 +116,29 @@ def _init_repo_with_origin(tmp_path):
     rev_parse = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
     )
-    return rev_parse.stdout.strip()
+    return _record_base_sha(rev_parse.stdout.strip())
+
+
+#: The seed commit of the repo the current test built. The merge gate reads its
+#: declaration at the PR's base commit and fails closed without one, so the
+#: default PR payloads below carry this as `base.sha` whenever a repo was built.
+_SEEDED_BASE: dict[str, str] = {"sha": ""}
+
+
+def _record_base_sha(sha: str) -> str:
+    _SEEDED_BASE["sha"] = sha
+    return sha
+
+
+def _default_base() -> dict:
+    return {"ref": _BASE_BRANCH, **({"sha": _SEEDED_BASE["sha"]} if _SEEDED_BASE["sha"] else {})}
+
+
+@pytest.fixture(autouse=True)
+def _reset_seeded_base():
+    _SEEDED_BASE["sha"] = ""
+    yield
+    _SEEDED_BASE["sha"] = ""
 
 
 @pytest.fixture(autouse=True)
@@ -184,7 +207,7 @@ def _make_opener(*, pr_info=None, files=None, comments=None, merge_status=200):
     pr_info = pr_info if pr_info is not None else {
         "head": {"sha": _FULL_SHA},
         "title": "feat: a change",
-        "base": {"ref": _BASE_BRANCH},
+        "base": _default_base(),
     }
     files = files if files is not None else ["a.py"]
     comments = comments if comments is not None else []
@@ -256,7 +279,7 @@ def _make_github_opener(*, pr_info=None, files=None, comments=None, merged_sha=N
     pr_info = pr_info if pr_info is not None else {
         "head": {"sha": _FULL_SHA},
         "title": "feat: a change",
-        "base": {"ref": _BASE_BRANCH},
+        "base": _default_base(),
     }
     files = files if files is not None else ["a.py"]
     comments = comments if comments is not None else []
@@ -457,6 +480,7 @@ class TestPostMergeRunsOnlyAfterSuccess:
             tmp_path,
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
         )
+        _record_base_sha(seed_base_commit(tmp_path))
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
@@ -543,6 +567,7 @@ class TestSkipPostMerge:
             yaml.safe_dump({"merge": {"sync_tree_after_merge": False}}),
             encoding="utf-8",
         )
+        _record_base_sha(seed_base_commit(tmp_path))
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
@@ -767,7 +792,9 @@ class TestSyncTreeAfterMergeDefaultOn:
         # No origin remote at all (bare tmp_path, no post_merge_steps
         # configured) -- fetch_merged_sha_object must still fail loud with
         # EXIT_POST_MERGE_FAILED, never a silent partial sync, even on the
-        # fetch-only (no-checkout) path this shape now takes (lr-173768).
+        # fetch-only (no-checkout) path this shape now takes (lr-173768). The
+        # tree is a git repo with a base commit but no remote to fetch from.
+        _record_base_sha(seed_base_commit(tmp_path))
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
@@ -982,7 +1009,10 @@ class TestGitWorkingTreeConfigRootSplit:
             [{"cmd": [_PY, "-c", "pass"]}],
             git_working_tree="not-a-repo",
         )
-        argv = _base_args(**{"--repo-path": str(wrapper_dir)})
+        # The misconfigured tree cannot supply a gate declaration either, which
+        # refuses pre_checks first; skipping them reaches the tree-sync failure
+        # this test is about.
+        argv = _base_args(**{"--repo-path": str(wrapper_dir)}) + ["--skip-pre-checks"]
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
@@ -1362,7 +1392,7 @@ def _init_repo_with_origin_and_tracked_config(tmp_path, steps: list[dict]) -> st
     rev_parse = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
     )
-    return rev_parse.stdout.strip()
+    return _record_base_sha(rev_parse.stdout.strip())
 
 
 def _push_tracked_config_commit_to_origin(

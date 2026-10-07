@@ -25,6 +25,7 @@ import yaml
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.verdict import build_verdict_block
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
+from tests._gate_repo import seed_base_commit
 
 _FULL_SHA = "a" * 40
 _OTHER_FULL_SHA = "b" * 40
@@ -221,6 +222,16 @@ def _make_opener(
     return opener
 
 
+def _pr_info_with_base(repo_path, *, title: str = "feat: a change") -> dict:
+    """PR payload carrying the real base commit of *repo_path*: the merge gate
+    reads its declaration from that commit and fails closed without one."""
+    return {
+        "head": {"sha": _FULL_SHA},
+        "title": title,
+        "base": {"ref": "main", "sha": seed_base_commit(repo_path)},
+    }
+
+
 def _base_args(**overrides) -> list[str]:
     args = {
         "--platform": "forgejo",
@@ -332,9 +343,13 @@ class TestStaleSha:
 
 
 class TestReviewerVerdicts:
-    def _opener_with_comment(self, body: str):
+    def _opener_with_comment(self, body: str, repo_path=None):
         return _make_opener(
-            pr_info={"head": {"sha": _FULL_SHA}, "title": "feat: x"},
+            pr_info=(
+                _pr_info_with_base(repo_path, title="feat: x")
+                if repo_path is not None
+                else {"head": {"sha": _FULL_SHA}, "title": "feat: x"}
+            ),
             comments=[{"id": 1, "user": {"login": "reviewer-login"}, "body": body}],
         )
 
@@ -429,9 +444,13 @@ class TestModelAttestation:
     file.
     """
 
-    def _opener_with_comment(self, body: str):
+    def _opener_with_comment(self, body: str, repo_path=None):
         return _make_opener(
-            pr_info={"head": {"sha": _FULL_SHA}, "title": "feat: x"},
+            pr_info=(
+                _pr_info_with_base(repo_path, title="feat: x")
+                if repo_path is not None
+                else {"head": {"sha": _FULL_SHA}, "title": "feat: x"}
+            ),
             comments=[{"id": 1, "user": {"login": "reviewer-login"}, "body": body}],
         )
 
@@ -454,7 +473,7 @@ class TestModelAttestation:
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=self._opener_with_comment(block),
+            opener=self._opener_with_comment(block, tmp_path),
         )
         assert code == verb.EXIT_OK
 
@@ -511,7 +530,7 @@ class TestModelAttestation:
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=self._opener_with_comment(block),
+            opener=self._opener_with_comment(block, tmp_path),
         )
         assert code == verb.EXIT_OK
 
@@ -1128,6 +1147,7 @@ class TestTaskIdGuardCommitSubjectGate:
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path),
                 branch_commits=[
                     {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
                 ],
@@ -1161,6 +1181,7 @@ class TestTaskIdGuardCommitSubjectGate:
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path),
                 branch_commits=[
                     {"sha": "c" * 40, "commit": {"message": "feat(auth): add the gate"}},
                 ],
@@ -1180,6 +1201,7 @@ class TestTaskIdGuardCommitSubjectGate:
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path),
                 branch_commits=[
                     {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
                 ],
@@ -1197,6 +1219,7 @@ class TestTaskIdGuardCommitSubjectGate:
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path),
                 branch_commits=[
                     {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
                 ],
@@ -1213,6 +1236,7 @@ class TestTaskIdGuardCommitSubjectGate:
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path),
                 branch_commits=[
                     {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
                 ],
@@ -1320,7 +1344,9 @@ class TestPostMergeReadback:
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=_make_opener(post_merge_readback_confirms=False),
+            opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path), post_merge_readback_confirms=False
+            ),
         )
         assert code == verb.EXIT_MERGE_READBACK_FAILED
 

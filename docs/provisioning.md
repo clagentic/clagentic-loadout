@@ -352,7 +352,8 @@ comments never needs to declare it at all. See its own bullet below for the
   lifts this requirement along with the reviewer floor. Scanner names are
   deployment vocabulary; none is built in. A malformed declaration drops
   `required_reviewer_roles` and `required_scanners` together to flags-only with
-  a warning (`pre_checks` is not part of that fallback; see
+  a warning, whereas a role the deployment cannot resolve to a login drops out
+  alone with its own scanner entry (`pre_checks` is not part of that fallback; see
   [docs/merge-authority.md](merge-authority.md)). Role and scanner names are
   trimmed of surrounding whitespace on load.
 - **`authorized_roles`** — the merge-authority roster (role names, feeds

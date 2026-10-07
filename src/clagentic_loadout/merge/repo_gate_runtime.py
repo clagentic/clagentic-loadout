@@ -38,16 +38,19 @@ changes where the text comes from.
     warning naming the commit, the file and the error, so the merge that lands
     the corrected config is always possible. A pair that is half-trusted is
     harder to reason about than one that is either enforced or visibly not.
-    A declared role the deployment cannot resolve to a platform login counts as
-    the same kind of unloadable key (`with_resolvable_reviewer_roles`).
+    A declared role the deployment cannot resolve to a platform login is NOT an
+    unloadable key: it degrades per role (`with_resolvable_reviewer_roles`).
+    That role drops from the reviewer floor and its own `required_scanners`
+    entry is skipped, each with a warning naming it; every other resolvable
+    role and scanner requirement stays enforced.
   - `pre_checks` NEVER falls back. A `pre_checks` declaration that cannot be
     read or validated at base (including a file that is not valid UTF-8, or a
-    whole-file parse failure, or a base commit that cannot be fetched or shown)
-    is reported in `RepoGate.pre_checks_error`, and the merge verb REFUSES the
-    merge, as it did before the gate moved to base. Having no base commit to
-    read at all (no SHA in the PR payload) is not an unreadable declaration:
-    no pre_checks are declared, matching a repo with no local tree.
-    `--skip-pre-checks` is its bypass; `--ignore-repo-gate` does not lift it.
+    whole-file parse failure, or a base commit that cannot be fetched or shown,
+    or a PR payload that carries no base commit SHA) is reported in
+    `RepoGate.pre_checks_error`, and the merge verb REFUSES the merge, as it
+    did before the gate moved to base. No local tree at all (`repo_path` None)
+    declares nothing. `--skip-pre-checks` is its bypass; `--ignore-repo-gate`
+    does not lift it.
 
 A tracked file that is simply absent at base declares nothing and is neither a
 warning nor an error.
@@ -124,7 +127,7 @@ def _ignored_deployment_gate_warnings(repo_path: str | Path) -> tuple[str, ...]:
     config_path = resolve_repo_config_path(repo_path, warn=False)
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) if config_path.is_file() else None
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return ()
     merge_section = raw.get(CONFIG_SECTION_MERGE) if isinstance(raw, dict) else None
     if not isinstance(merge_section, dict):
@@ -146,18 +149,11 @@ def _reviewer_pair_warnings(warnings: tuple[str, ...], reason: str) -> tuple[str
     )
 
 
-def _base_unlocatable(warnings: tuple[str, ...], reason: str) -> RepoGate:
-    """There is no base commit to read (the host payload named none, or the
-    local tree cannot be resolved). That is the absence of a declaration source,
-    not an unreadable declaration, so the reviewer pair falls back with a
-    warning and no pre_checks are declared, as for a repo with no local tree."""
-    return RepoGate(warnings=_reviewer_pair_warnings(warnings, reason))
-
-
 def _nothing_readable(warnings: tuple[str, ...], reason: str) -> RepoGate:
-    """The tracked file at a located base commit could not be read or parsed:
-    the reviewer pair falls back, and pre_checks cannot be determined, which
-    refuses."""
+    """No gate declaration could be obtained (no base commit SHA, or a tracked
+    file at the base commit that cannot be read or parsed): the reviewer pair
+    falls back, and pre_checks cannot be determined, which refuses. A missing
+    trusted base is never read as "nothing declared"."""
     return RepoGate(warnings=_reviewer_pair_warnings(warnings, reason), pre_checks_error=reason)
 
 
@@ -168,10 +164,12 @@ def load_repo_gate_at_base(
 
     *repo_path* None (no local tree) declares nothing, matching every other
     repo-tier key in the merge verb. An empty *base_sha* (a PR payload that did
-    not carry one) or an unresolvable tree has no base to read: the reviewer
-    pair falls back with a warning and no pre_checks are declared. A tracked
-    file absent at base declares nothing. The per-key failure rules are in the
-    module docstring.
+    not carry one) has no trusted base to read: the reviewer pair falls back
+    with a warning and pre_checks refuse (fail closed). A malformed
+    `merge.git_working_tree` falls the pair back with a warning and leaves the
+    error to the post-merge tree sync that owns that key.
+    A tracked file absent at base declares nothing. The per-key failure rules
+    are in the module docstring.
     """
     if repo_path is None:
         return RepoGate()
@@ -180,11 +178,13 @@ def load_repo_gate_at_base(
     try:
         declared_tree = resolve_git_working_tree(repo_path)
     except PostMergeConfigError as exc:
-        return _base_unlocatable(ignored, str(exc))
+        # A malformed `merge.git_working_tree` is the post-merge tree sync's own
+        # config error and is reported there; it is not a gate declaration.
+        return RepoGate(warnings=_reviewer_pair_warnings(ignored, str(exc)))
     git_tree = declared_tree if declared_tree is not None else Path(repo_path)
 
     if not base_sha:
-        return _base_unlocatable(ignored, "the PR payload carried no base commit SHA to read it at")
+        return _nothing_readable(ignored, "the PR payload carried no base commit SHA to read it at")
     source = f"{base_sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"
     try:
         text = read_file_at_commit(git_tree, base_sha, TRACKED_GATE_RELATIVE_PATH, base_branch=base_branch)
@@ -224,35 +224,48 @@ def load_repo_gate_at_base(
 def with_resolvable_reviewer_roles(
     gate: RepoGate, platform: str, *, flagged_roles: Iterable[str] = ()
 ) -> RepoGate:
-    """Apply the reviewer-pair fallback to a gate naming a role the deployment
-    cannot resolve to a *platform* login.
+    """Degrade, per role, a gate naming roles the deployment cannot resolve to a
+    *platform* login.
 
     A declared role is resolved through `merge.reviewer_login.resolve_reviewer_login`,
     the single role -> login path (the bare role on Forgejo; the role's entry
     under `github_app.slugs` plus the bot suffix on GitHub). A role that does
-    not resolve makes `required_reviewer_roles` unloadable for this deployment,
-    so, like any unloadable pair key, neither it nor `required_scanners` is
-    enforced and the merge runs on `--required-reviewer` alone, with a warning
-    naming the role, the platform and the missing mapping. Never a refusal: a
-    repo's declaration must not demand deployment config it was never told
-    about. A role already named by a `--required-reviewer` flag keeps the
-    flag's login and is not resolved here.
+    not resolve can never be checked, so ONLY that role is dropped from the
+    reviewer floor and its own `required_scanners` entry is skipped, each with a
+    warning naming the role, the platform and the missing mapping. Every other
+    resolvable role, and its scanner requirements, stays enforced. This is not
+    the whole-pair fallback, which is reserved for a gate file that cannot be
+    parsed at all. Never a refusal: a repo's declaration must not demand
+    deployment config it was never told about. A role already named by a
+    `--required-reviewer` flag keeps the flag's login and is not resolved here.
     """
     flagged = set(flagged_roles)
+    kept: list[str] = []
+    dropped: list[str] = []
+    warnings = list(gate.warnings)
     for role in gate.reviewer_roles:
         if role in flagged:
+            kept.append(role)
             continue
         try:
             resolve_reviewer_login(role, platform)
         except ReviewerLoginNotConfiguredError as exc:
-            reason = f"declared reviewer role {role!r} cannot be resolved to a {platform} login: {exc}"
-            return replace(
-                gate,
-                reviewer_roles=(),
-                required_scanners=None,
-                warnings=_reviewer_pair_warnings(gate.warnings, reason),
+            dropped.append(role)
+            warnings.append(
+                f"declared reviewer role {role!r} cannot be resolved to a {platform} login "
+                f"({exc}); it is DROPPED from the reviewer floor and its required_scanners "
+                f"entry is skipped, every other declared role and scanner stays enforced"
             )
-    return gate
+        else:
+            kept.append(role)
+    if not dropped:
+        return gate
+    scanners = gate.required_scanners
+    if scanners is not None:
+        scanners = {role: names for role, names in scanners.items() if role not in dropped}
+    return replace(
+        gate, reviewer_roles=tuple(kept), required_scanners=scanners, warnings=tuple(warnings)
+    )
 
 
 __all__ = ["GATE_KEYS", "RepoGate", "load_repo_gate_at_base", "with_resolvable_reviewer_roles"]

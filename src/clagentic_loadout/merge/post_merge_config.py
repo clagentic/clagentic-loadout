@@ -397,7 +397,7 @@ def _read_yaml_mapping(path: Path) -> dict:
         return {}
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise PostMergeConfigError(f"{path}: could not be read as YAML: {exc}.") from exc
     if raw is None:
         return {}

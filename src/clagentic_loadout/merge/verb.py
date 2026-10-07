@@ -1371,8 +1371,8 @@ def _run(
         )
     else:
         undeclared = [r for r in repo_gate.reviewer_roles if r not in required_reviewers]
-        # Every declared role resolves here: an unresolvable one already took
-        # the pair fallback in with_resolvable_reviewer_roles.
+        # Every declared role resolves here: an unresolvable one was already
+        # dropped, with its scanners, in with_resolvable_reviewer_roles.
         floor_only_reviewers = _parse_required_reviewers(undeclared, args.platform)
         required_reviewers = {**required_reviewers, **floor_only_reviewers}
         unreachable = repo_gate.unreachable_scanner_roles(required_reviewers)

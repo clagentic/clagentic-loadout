@@ -391,13 +391,27 @@ class TestMalformedGateAtBase:
 
 
 class TestNoBaseShaInThePayload:
-    def test_there_is_nothing_to_read_so_the_pair_falls_back_and_no_pre_checks_are_declared(
+    def test_a_missing_base_sha_fails_closed_so_pre_checks_refuse_and_the_pair_falls_back(
         self, tmp_path, capsys
     ):
         repo = _repo_with(tmp_path, [_FAIL_CHECK])
         pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
-        assert _merge(repo, pr_info=pr_info) == verb.EXIT_OK
-        assert "no base commit SHA" in capsys.readouterr().err
+        merge_calls: list[str] = []
+        assert _merge(repo, pr_info=pr_info, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+        err = capsys.readouterr().err
+        assert "no base commit SHA" in err
+        assert "required_reviewer_roles NOT ENFORCED" in err
+
+    def test_a_missing_base_sha_refuses_even_when_no_check_is_declared_there(self, tmp_path):
+        repo = _repo_with(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
+        pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
+        assert _merge(repo, pr_info=pr_info) == verb.EXIT_PRE_CHECKS_FAILED
+
+    def test_skip_pre_checks_is_the_bypass_for_a_missing_base_sha(self, tmp_path):
+        repo = _repo_with(tmp_path, [_FAIL_CHECK])
+        pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
+        assert _merge(repo, pr_info=pr_info, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
 
 
 class TestInvalidUtf8GateAtBase:

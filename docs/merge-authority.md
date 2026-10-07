@@ -204,22 +204,28 @@ keep a broken config from blocking the merge that would fix it:
   two keys together** fall back to flags-only: neither is enforced, including
   one that was valid. A stderr warning names the commit, the file and the
   error. The fallback is deliberate, so the merge that lands the corrected
-  config is never blocked by the broken one.
+  config is never blocked by the broken one. This whole-pair fallback is for a
+  gate file that cannot be read or parsed, and for nothing else.
 - `merge.pre_checks` is **not** part of that fallback. A `pre_checks`
   declaration at base that is malformed, or that cannot be read at all (a base
   commit that cannot be fetched or shown, invalid UTF-8, a file that does not
   parse), **refuses** the merge (`EXIT_PRE_CHECKS_FAILED`), as it did before
   the gate moved to base. `--skip-pre-checks` bypasses it; `--ignore-repo-gate`
-  does not. A PR payload that carries no base SHA gives nothing to read: the
-  reviewer pair falls back with a warning and no `pre_checks` are declared.
+  does not. A PR payload that carries no base SHA gives nothing trusted to
+  read, so it fails closed: `pre_checks` **refuse** (the base SHA is the only
+  source of the declaration, and an unverifiable declaration is never read as
+  "no checks"), and the reviewer pair falls back with a warning.
 - A declared reviewer role the deployment cannot resolve to a platform login
-  is treated as an unloadable key: `required_reviewer_roles` and
-  `required_scanners` fall back together to flags-only, with a warning naming
-  the role, the platform and the missing mapping. It is never a refusal, so a
-  repo's declaration cannot demand deployment config the deployment was not
-  told about. `loadout-doctor` reports such a role as a failure. A role named
-  by `--required-reviewer` is the caller's assertion and still errors as
-  before when it cannot resolve.
+  degrades **per role**, not as a pair: that role is dropped from the reviewer
+  floor and its own `required_scanners` entry is skipped (it can never be
+  checked), each with a warning naming the role, the platform and the missing
+  mapping. Every other resolvable role, and every scanner requirement on a
+  resolvable role, stays enforced. It is never a refusal, so a repo's
+  declaration cannot demand deployment config the deployment was not told
+  about. `loadout-doctor` reports such a role as a failure, and reports a
+  tracked gate file it cannot decode or parse as a failure too, never a crash.
+  A role named by `--required-reviewer` is the caller's assertion and still
+  errors as before when it cannot resolve.
 - A config that loads but cannot be satisfied (a declared role with no
   verdict; a clean verdict that records no scanner
   outcomes, or reports a required scanner failed, for a role with
@@ -244,13 +250,18 @@ is the login; on GitHub it is the `github_app.slugs.<role>` entry (or the
 single `github_app.slug`) plus `[bot]`. That map is keyed by the same names a
 deployment uses for its callers, so a deployment whose slugs are keyed by
 caller names has no entry for a role token. For a declared role that is now a
-warning and a flags-only fallback; add the `github_app.slugs.<role>` entry (or
-pass `--required-reviewer <role>:<login>`) to enforce it.
+warning and that role being dropped from the floor; add the
+`github_app.slugs.<role>` entry (or pass `--required-reviewer <role>:<login>`)
+to enforce it.
 
 **Migration (since the repo reviewer floor landed).** A deployment needs no new
-configuration to keep merging: a declared role that cannot resolve falls back
-with a warning, a malformed reviewer/scanner declaration falls back with a
-warning, and `pre_checks` keep refusing when malformed. Gate keys must now live
+configuration to keep merging: a declared role that cannot resolve is dropped
+(with its scanners) with a warning while every other role stays enforced, a
+malformed reviewer/scanner declaration falls back with a warning, and
+`pre_checks` keep refusing when malformed. One behaviour does tighten: a PR
+payload with no base SHA now refuses `pre_checks` (previously it declared none);
+integrations that build their own PR payloads must carry `base.sha`, or pass
+`--skip-pre-checks`. Gate keys must now live
 in the tracked gate file; the same keys in the deployment file are ignored
 with a warning.
 

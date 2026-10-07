@@ -442,20 +442,54 @@ class TestRepoReviewerFloor:
         monkeypatch.setattr("clagentic_loadout.merge.repo_gate_runtime.resolve_reviewer_login", resolve)
         monkeypatch.setattr(verb, "resolve_reviewer_login", resolve)
 
-    def test_an_unresolvable_declared_role_falls_back_to_flags_with_a_warning_and_merges(
+    def test_an_unresolvable_role_is_dropped_with_a_warning_and_the_rest_still_merges(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": ["ghost"]})
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "'ghost'" in err and "forgejo" in err and "no GitHub App slug configured" in err
+        assert "DROPPED" in err
+        assert "NOT ENFORCED" not in err
+
+    def test_a_failed_required_scanner_on_a_resolvable_role_still_refuses_beside_an_unresolvable_role(
         self, tmp_path, monkeypatch, capsys
     ):
         self._only_ghost_is_unresolvable(monkeypatch)
         _write_config(
             tmp_path,
-            {"required_reviewer_roles": ["ghost", "never-posts"], "required_scanners": {NAME: ["alpha"]}},
+            {
+                "required_reviewer_roles": ["ghost"],
+                "required_scanners": {NAME: ["alpha"], "ghost": ["beta"]},
+            },
         )
         failed = {"scanners_run": [{"scanner": "alpha", "status": "failed", "reason": "x"}]}
         code, err = _merge([_comment(1, _fence("clean", HEAD_B, failed))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "alpha" in err
+        assert "'ghost'" in err
+
+    def test_an_unresolvable_roles_own_scanners_are_skipped_not_unreachable(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(
+            tmp_path,
+            {"required_reviewer_roles": ["ghost"], "required_scanners": {"ghost": ["beta"]}},
+        )
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
         assert code == verb.EXIT_OK
-        assert "required_reviewer_roles NOT ENFORCED" in err
-        assert "required_scanners NOT ENFORCED" in err
-        assert "'ghost'" in err and "forgejo" in err and "no GitHub App slug configured" in err
+        assert "required_scanners entry is skipped" in err
+
+    def test_a_resolvable_role_stays_enforced_beside_an_unresolvable_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._only_ghost_is_unresolvable(monkeypatch)
+        _write_config(tmp_path, {"required_reviewer_roles": ["ghost", "never-posts"]})
+        code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "'ghost'" in err
 
     def test_a_resolvable_declared_role_is_still_enforced(self, tmp_path, monkeypatch, capsys):
         self._only_ghost_is_unresolvable(monkeypatch)

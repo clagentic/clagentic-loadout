@@ -46,6 +46,17 @@ def commit_raw_gate_to_base(repo: "GateRepo", data: bytes) -> None:
     repo.base_sha = git(repo.path, "rev-parse", "HEAD")
 
 
+def seed_base_commit(path: Path) -> str:
+    """Make *path* a git repo with one commit on `main` (when it is not one
+    already) and return the commit SHA, for tests whose PR payload must carry a
+    real `base.sha` but that exercise nothing in the tree itself."""
+    path.mkdir(parents=True, exist_ok=True)
+    if not (path / ".git").exists():
+        git(path, "init", "-q", "-b", "main")
+        git(path, "commit", "-q", "--allow-empty", "-m", "base")
+    return git(path, "rev-parse", "HEAD")
+
+
 def write_deployment_config(repo: Path, merge_section: dict) -> None:
     path = repo / DEFAULT_CONFIG_RELATIVE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
