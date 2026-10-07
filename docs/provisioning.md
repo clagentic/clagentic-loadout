@@ -293,6 +293,29 @@ gate is not actually an enforceable one.
    `review.reviewer_logins.<role>` (deployment-tier, see below) exists **only**
    for the residual case: a Forgejo bot account whose actual login differs
    from its role name.
+5. **Mapping a declared role to a caller (GitHub, optional).** `github_app.slugs`
+   is keyed by CALLER, while a repo's gate names ROLES. A deployment whose
+   callers are not named after the roles its repos declare adds a user-level
+   `github_app.role_callers` map (`<role>: <caller>`):
+
+   ```yaml
+   github_app:
+     slugs:
+       some-caller: some-app-slug
+     role_callers:
+       some-role: some-caller
+   ```
+
+   A declared role is resolved as `--required-reviewer` resolves a name; a role
+   that resolves that way is never remapped. Only a role that does **not**
+   resolve consults `role_callers`, and is then required under the mapped
+   caller's name (the name that caller's verdict fence carries) with the login
+   `slugs.<caller>` + `[bot]`. The same caller named by `--required-reviewer`
+   or by another declared role is one requirement, and the role's
+   `required_scanners` entry moves with it. With no mapping the role degrades
+   per role with a warning, as before; Forgejo is unaffected. `loadout-doctor`
+   reports each declared role's resolution and names the
+   `github_app.role_callers.<role>` key that would resolve an unresolved one.
 
 ### `merge:` section — repo-tier (`.clagentic/loadout/config.yaml`)
 

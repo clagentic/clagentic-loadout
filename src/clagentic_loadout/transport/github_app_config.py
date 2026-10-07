@@ -110,6 +110,14 @@ CONFIG_KEY_SLUGS = "slugs"
 #: REFERENCE default, not a claim that role names and caller strings are
 #: the same key-space for every deployment.
 CONFIG_KEY_CALLERS = "callers"
+#: Key within CONFIG_SECTION_GITHUB_APP holding the OPTIONAL role -> caller
+#: map. A repo's merge gate names reviewer ROLES, while `slugs` above is keyed
+#: by CALLER. A deployment whose callers are not named after the roles a repo
+#: declares maps each declared role to the caller whose bot posts that role's
+#: verdict (`{<role>: <caller>}`); the caller's own `slugs` entry then supplies
+#: the login. User-level config only, for the same reason `slugs` is: the map
+#: decides which account a verdict is trusted from.
+CONFIG_KEY_ROLE_CALLERS = "role_callers"
 
 
 class GithubAppSlugNotConfiguredError(ValueError):
@@ -186,6 +194,21 @@ def read_configured_slugs(config_root: str | Path | None = None) -> dict[str, st
         caller: slug
         for caller, slug in slugs.items()
         if isinstance(caller, str) and isinstance(slug, str) and slug.strip()
+    }
+
+
+def read_configured_role_callers(config_root: str | Path | None = None) -> dict[str, str]:
+    """Return the `github_app.role_callers` mapping (role -> caller), or `{}`
+    when it is absent or malformed. Entries that are not non-blank string
+    pairs are dropped, the same degrade-to-"not configured" posture as
+    `read_configured_slugs`."""
+    role_callers = _read_github_app_section(config_root).get(CONFIG_KEY_ROLE_CALLERS)
+    if not isinstance(role_callers, dict):
+        return {}
+    return {
+        role: caller.strip()
+        for role, caller in role_callers.items()
+        if isinstance(role, str) and isinstance(caller, str) and caller.strip()
     }
 
 
@@ -280,6 +303,7 @@ def resolve_github_app_slug(
 
 __all__ = [
     "CONFIG_KEY_CALLERS",
+    "CONFIG_KEY_ROLE_CALLERS",
     "CONFIG_KEY_SLUG",
     "CONFIG_KEY_SLUGS",
     "CONFIG_SECTION_GITHUB_APP",
@@ -287,6 +311,7 @@ __all__ = [
     "USER_CONFIG_FILENAME",
     "GithubAppSlugNotConfiguredError",
     "read_configured_callers",
+    "read_configured_role_callers",
     "read_configured_slugs",
     "resolve_github_app_slug",
 ]

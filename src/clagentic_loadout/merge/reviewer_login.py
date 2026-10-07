@@ -40,9 +40,14 @@ literal login.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.transport.github_app_config import (
+    CONFIG_KEY_ROLE_CALLERS,
+    CONFIG_SECTION_GITHUB_APP,
     GithubAppSlugNotConfiguredError,
+    read_configured_role_callers,
     resolve_github_app_slug,
 )
 
@@ -100,7 +105,97 @@ def resolve_reviewer_login(reviewer_name: str, platform: str) -> str:
     )
 
 
+#: Resolution sources reported by resolve_declared_role.
+SOURCE_BARE_NAME = "bare name"
+SOURCE_SLUGS = "github_app.slugs"
+SOURCE_ROLE_CALLERS = f"{CONFIG_SECTION_GITHUB_APP}.{CONFIG_KEY_ROLE_CALLERS}"
+
+
+@dataclass(frozen=True)
+class DeclaredRoleResolution:
+    """How a repo-declared reviewer role resolves on a platform.
+
+    *requirement* is the name the role's verdict is required under: the
+    fenced verdict block's own `reviewer` field must equal it, and a
+    `--required-reviewer` flag naming the same reviewer is the same
+    requirement. It is the role itself unless the deployment maps the role to
+    a caller, in which case it is that caller's name.
+    """
+
+    role: str
+    requirement: str
+    login: str
+    source: str
+
+
+def role_caller_mapping_key(role: str) -> str:
+    """The config key that maps *role* to a caller (for messages)."""
+    return f"{CONFIG_SECTION_GITHUB_APP}.{CONFIG_KEY_ROLE_CALLERS}.{role}"
+
+
+def resolve_role_via_mapping(
+    role: str, unresolved: ReviewerLoginNotConfiguredError
+) -> DeclaredRoleResolution:
+    """Resolve a declared *role* that `resolve_reviewer_login` could not
+    (*unresolved* is its error) through the OPTIONAL
+    `github_app.role_callers.<role>` mapping: the mapped caller's
+    `github_app.slugs` entry supplies the login, and the verdict is required
+    under the caller's name.
+
+    Raises ReviewerLoginNotConfiguredError, naming the mapping key that would
+    resolve the role, when no usable mapping exists.
+    """
+    mapping_key = role_caller_mapping_key(role)
+    caller = read_configured_role_callers().get(role)
+    if caller is None:
+        raise ReviewerLoginNotConfiguredError(
+            f"{unresolved} To resolve a declared role whose name is not a caller, map it "
+            f"to the caller that posts it with {mapping_key}: <caller>"
+        ) from unresolved
+    try:
+        slug = resolve_github_app_slug(caller=caller)
+    except GithubAppSlugNotConfiguredError as slug_exc:
+        raise ReviewerLoginNotConfiguredError(
+            f"{mapping_key} maps role {role!r} to caller {caller!r}, but no GitHub App "
+            f"slug is configured for that caller -- add it under "
+            f"{CONFIG_SECTION_GITHUB_APP}.slugs.{caller}"
+        ) from slug_exc
+    return DeclaredRoleResolution(
+        role=role,
+        requirement=caller,
+        login=f"{slug}{_GITHUB_BOT_SUFFIX}",
+        source=SOURCE_ROLE_CALLERS,
+    )
+
+
+def resolve_declared_role(role: str, platform: str) -> DeclaredRoleResolution:
+    """Resolve a repo-DECLARED reviewer role to the login that posts it.
+
+    The role is first resolved exactly as `resolve_reviewer_login` resolves a
+    `--required-reviewer` name, and any role that resolves that way is returned
+    unchanged. Only when that fails (github, no slug for the role) is the
+    OPTIONAL role mapping consulted (`resolve_role_via_mapping`). A deployment
+    with no mapping therefore behaves exactly as it did before the mapping
+    existed.
+
+    Raises ReviewerLoginNotConfiguredError when the role resolves neither way.
+    """
+    try:
+        login = resolve_reviewer_login(role, platform)
+    except ReviewerLoginNotConfiguredError as exc:
+        return resolve_role_via_mapping(role, exc)
+    source = SOURCE_BARE_NAME if platform == PLATFORM_FORGEJO else SOURCE_SLUGS
+    return DeclaredRoleResolution(role=role, requirement=role, login=login, source=source)
+
+
 __all__ = [
+    "SOURCE_BARE_NAME",
+    "SOURCE_ROLE_CALLERS",
+    "SOURCE_SLUGS",
+    "DeclaredRoleResolution",
     "ReviewerLoginNotConfiguredError",
+    "resolve_declared_role",
+    "resolve_role_via_mapping",
     "resolve_reviewer_login",
+    "role_caller_mapping_key",
 ]
