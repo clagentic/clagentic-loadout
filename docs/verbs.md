@@ -1800,6 +1800,21 @@ question a liveness probe exists to answer for a fire-and-forget step.
 Absent `liveness_probe` on a `detaches: true` step (the default): no
 verification at all, byte-identical to before this feature.
 
+**`verify` — confirmed outcome for awaited steps:** every awaited step logs
+`PASS (exit=0, cwd=..., host=..., outcome=...)` or `FAIL (exit=N, cwd=...,
+host=...)`. `host` is the machine the verb ran on, as the platform reports it:
+a step acts on whichever machine runs `loadout-merge`, and the log says which.
+`outcome=unverified` means only that the process exited 0. An optional
+`verify` key (an argv, same rules as `cmd`) runs after a step exits 0; its own
+exit 0 logs `outcome=confirmed` with the command's first stdout line as
+evidence. A failing `verify` is terminal whatever the step's `on_failure`
+(`outcome=verification-failed`), because the step reported success and the
+declared check says its effect is absent. `verify` is a state predicate, not
+a `liveness_probe`: that one asserts a value advances between two samples,
+which is the wrong question for an effect that settles once (an installed
+file's hash never advances). It is rejected on a `detaches: true` step. Absent
+`verify` (the default): no change beyond the added `host=`/`outcome=` fields.
+
 **Environment inheritance:** a step with no leading `VAR=VALUE`
 prefix runs with `env=None`, which means `subprocess.run` inherits the
 CURRENT process's environment (`os.environ`) unchanged — including `HOME`.

@@ -542,6 +542,7 @@ from clagentic_loadout.merge.tree_sync import (
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.task_id_guard import (
+    InvalidTaskIdGuardConfigError,
     TaskIdGuardViolation,
     load_task_id_guard_config,
 )
@@ -1572,7 +1573,13 @@ def _run(
     # SAME config root every other repo-tier gate key here resolves
     # through; None when absent (--no-post-merge-tree/--skip-post-merge
     # paths), which resolves to the disabled default (no file lookup).
-    task_id_guard_config = load_task_id_guard_config(args.repo_path)
+    try:
+        task_id_guard_config = load_task_id_guard_config(args.repo_path)
+    except InvalidTaskIdGuardConfigError as exc:
+        _fail(
+            f"post-merge config FAILED to load -- {exc}",
+            code=EXIT_POST_MERGE_FAILED,
+        )
     try:
         guard_warnings = commit_subjects.check_branch_commit_subjects(
             branch_commit_subjects, args.pr_number, owner, repo,

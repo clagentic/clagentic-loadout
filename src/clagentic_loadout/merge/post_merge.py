@@ -136,6 +136,7 @@ unchanged `poll_interval`/`max_polls` budget.
 from __future__ import annotations
 
 import os
+import platform
 import re
 import shlex
 import subprocess
@@ -182,6 +183,24 @@ STEP_KEY_TIMEOUT_SECONDS = "timeout_seconds"
 #: already tells the caller whether it succeeded; a liveness probe answers a
 #: question only a fire-and-forget step's caller cannot otherwise answer.
 STEP_KEY_LIVENESS_PROBE = "liveness_probe"
+
+#: Key declaring an OPTIONAL outcome check for an ORDINARY (awaited) step: an
+#: argv run after the step exits 0, whose own exit 0 means the step's effect
+#: is confirmed (e.g. the installed artifact matches, the unit is active). It
+#: is a state predicate, deliberately not `liveness_probe`: that one asserts a
+#: sampled value ADVANCES between two polls, which is the wrong question for
+#: an effect that settles once and then stays put (an installed file's hash
+#: never "advances"), so widening it to awaited steps would force callers to
+#: fabricate a changing value. Absent (the default): the step is logged as
+#: exit-code-only, outcome=unverified, and behaves exactly as before.
+STEP_KEY_VERIFY = "verify"
+
+#: Values of the `outcome=` field in a step's PASS/FAIL line. "unverified"
+#: means only that the process exited; "confirmed" means the step's `verify`
+#: command also passed.
+OUTCOME_UNVERIFIED = "unverified"
+OUTCOME_CONFIRMED = "confirmed"
+OUTCOME_VERIFICATION_FAILED = "verification-failed"
 
 #: Sub-keys within a `liveness_probe` mapping.
 LIVENESS_PROBE_KEY_CMD = "cmd"
@@ -458,6 +477,52 @@ def validate_post_merge_steps(steps: list) -> None:
                 )
             _validate_liveness_probe(step[STEP_KEY_LIVENESS_PROBE], step_label=label)
 
+        if STEP_KEY_VERIFY in step:
+            if detaches:
+                raise PostMergeConfigError(
+                    f"{label}: {STEP_KEY_VERIFY!r} is incompatible with "
+                    f"{STEP_KEY_DETACHES!r}: true -- a detached step has no "
+                    f"completion to verify against; use "
+                    f"{STEP_KEY_LIVENESS_PROBE!r} instead."
+                )
+            _resolve_argv(step[STEP_KEY_VERIFY], step_label=f"{label}.{STEP_KEY_VERIFY}")
+
+
+def _execution_host() -> str:
+    """The machine this process runs on, as the platform reports it. A step
+    deploys to whichever machine the merge verb runs on, so a log line that
+    names only cwd cannot say where its effect landed."""
+    return platform.node() or "unknown-host"
+
+
+def _run_verify(
+    verify_cmd, *, cwd: str, env: dict[str, str] | None, timeout: int | float | None, label: str
+) -> tuple[bool, str]:
+    """Run a step's `verify` argv. Returns (confirmed, evidence): evidence is
+    the first stdout line on success, or the reason on failure. A timeout or a
+    launch failure is a failed verification, never an uncaught exception."""
+    argv, assignments = _resolve_argv(verify_cmd, step_label=f"{label}.{STEP_KEY_VERIFY}")
+    run_env = {**(env if env is not None else os.environ), **assignments}
+    try:
+        result = subprocess.run(
+            argv,
+            shell=False,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            timeout=timeout,
+            env=run_env,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"verify timed out after {timeout}s"
+    except OSError as exc:
+        return False, f"verify failed to launch ({exc})"
+    if result.returncode != 0:
+        detail = (result.stderr.strip() or result.stdout.strip()).splitlines()
+        return False, f"verify exited {result.returncode}" + (f": {detail[0]}" if detail else "")
+    first_line = result.stdout.strip().splitlines()
+    return True, first_line[0] if first_line else ""
+
 
 def _run_liveness_probe_once(argv: list[str], *, cwd: str) -> str:
     """Run a liveness-probe argv once, returning its stripped stdout (empty
@@ -694,6 +759,7 @@ def run_post_merge_steps(
     """
     validate_post_merge_steps(steps)
     root = str(project_root)
+    host = _execution_host()
     active_deployment_overrides = deployment_env_overrides or {}
 
     for i, step in enumerate(steps):
@@ -813,7 +879,7 @@ def run_post_merge_steps(
             msg = f"post-merge {label} failed (exit {result.returncode}): {cmd!r}"
             print(
                 f"merge: post-merge {label}: FAIL (exit={result.returncode}, "
-                f"cwd={root!r}): {cmd!r}",
+                f"cwd={root!r}, host={host!r}): {cmd!r}",
                 file=sys.stderr,
             )
             if on_failure == ON_FAILURE_FAIL:
@@ -824,8 +890,37 @@ def run_post_merge_steps(
                 file=sys.stderr,
             )
         else:
+            outcome = OUTCOME_UNVERIFIED
+            evidence = ""
+            verify_cmd = step.get(STEP_KEY_VERIFY)
+            if verify_cmd is not None:
+                confirmed, evidence = _run_verify(
+                    verify_cmd,
+                    cwd=root,
+                    env=step_env,
+                    timeout=resolved_timeout,
+                    label=label,
+                )
+                if not confirmed:
+                    print(
+                        f"merge: post-merge {label}: FAIL (exit=0, cwd={root!r}, "
+                        f"host={host!r}, outcome={OUTCOME_VERIFICATION_FAILED}): "
+                        f"{cmd!r}: {evidence}",
+                        file=sys.stderr,
+                    )
+                    # Terminal regardless of on_failure: the step reported
+                    # success and the declared check says its effect is
+                    # absent, which is the false-PASS this key exists to catch.
+                    raise PostMergeStepFailedError(
+                        f"post-merge {label} exited 0 on host {host!r} but its "
+                        f"{STEP_KEY_VERIFY!r} check did not confirm the outcome "
+                        f"({evidence}): {cmd!r}"
+                    )
+                outcome = OUTCOME_CONFIRMED
+            suffix = f" [{evidence}]" if evidence else ""
             print(
-                f"merge: post-merge {label}: PASS (exit=0, cwd={root!r}): {cmd!r}",
+                f"merge: post-merge {label}: PASS (exit=0, cwd={root!r}, "
+                f"host={host!r}, outcome={outcome}): {cmd!r}{suffix}",
                 file=sys.stderr,
             )
 
@@ -842,6 +937,10 @@ __all__ = [
     "STEP_KEY_DETACHES",
     "STEP_KEY_LIVENESS_PROBE",
     "STEP_KEY_TIMEOUT_SECONDS",
+    "STEP_KEY_VERIFY",
+    "OUTCOME_CONFIRMED",
+    "OUTCOME_UNVERIFIED",
+    "OUTCOME_VERIFICATION_FAILED",
     "PostMergeConfigError",
     "PostMergeLivenessError",
     "PostMergeStepFailedError",
