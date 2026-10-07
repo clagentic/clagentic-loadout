@@ -58,9 +58,9 @@ documented step ordering):
      --required-reviewer and the repo's declared
      `merge: required_reviewer_roles` (a floor; merge.repo_gate_runtime),
      read from the tracked gate file at the PR's BASE commit, never the
-     working tree, so the PR under review cannot relax its own gate. A repo
-     gate config that cannot be loaded falls back to flags-only with a
-     stderr warning; a loadable but unsatisfiable floor refuses, overridable
+     working tree, so the PR under review cannot relax its own gate. If
+     required_reviewer_roles or required_scanners cannot be loaded, that
+     pair (only) falls back to flags-only with a stderr warning; a loadable but unsatisfiable floor refuses, overridable
      only by --ignore-repo-gate (logged, attested). Findings state: a
      finding an earlier fence held open that the current verdict neither
      clears at this head nor re-raises refuses (merge.verdict.
@@ -197,10 +197,10 @@ REAL gate step, executed via the SAME merge.post_merge.run_post_merge_steps
 executor post_merge_steps already uses (same cmd shape, same shell-operator-
 token rejection, same on_failure semantics) — a repo's `on_failure: fail`
 pre_check that exits non-zero now REFUSES the merge (EXIT_PRE_CHECKS_FAILED)
-BEFORE step 9's merge_pr call is ever reached. A tracked gate file at
-base that is malformed or unreadable falls back, as a whole, to flags-only
-with a warning (merge.repo_gate_runtime) so the PR that repairs it can land;
-it is then enforced again from the next merge. `--skip-pre-checks` is the explicit, logged bypass (mirroring
+BEFORE step 9's merge_pr call is ever reached. A pre_checks declaration at
+base that is malformed or unreadable REFUSES the merge the same way (no
+fallback; only the reviewer-roles/scanners pair falls back, see
+merge.repo_gate_runtime). `--skip-pre-checks` is the explicit, logged bypass (mirroring
 --skip-post-merge exactly); the gate is enforced by default. Every step,
 success or failure, now emits an explicit PASS/FAIL line carrying the raw
 exit code and the RESOLVED cwd it executed in (see merge.post_merge.
@@ -945,9 +945,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "other gate, including model attestation and the single-fence "
         "requirement, stays enforced. For a repo whose declared gate cannot be satisfied (for "
         "example while landing the config that fixes it). Logged to stderr "
-        "and recorded in the merge-completion attestation. A repo gate "
-        "config that cannot be loaded at all already falls back to "
-        "flags-only with a warning and does not need this flag.",
+        "and recorded in the merge-completion attestation. Reviewer roles "
+        "and scanners that cannot be loaded at all already fall back to "
+        "flags-only with a warning and do not need this flag. It does not "
+        "lift merge.pre_checks (use --skip-pre-checks).",
     )
     parser.add_argument(
         "--max-changed-files",
@@ -1623,6 +1624,13 @@ def _run(
             f"merge: pre_checks gate BYPASSED via --skip-pre-checks for "
             f"PR #{args.pr_number} in {owner}/{repo}",
             file=sys.stderr,
+        )
+    elif repo_gate.pre_checks_error:
+        # Never a fallback: a declaration the verb cannot be shown to have read
+        # is not treated as "no checks". --ignore-repo-gate does not lift this.
+        _fail(
+            f"pre_checks config FAILED to load -- {repo_gate.pre_checks_error}",
+            code=EXIT_PRE_CHECKS_FAILED,
         )
     elif repo_gate.pre_checks:
         pre_checks = list(repo_gate.pre_checks)

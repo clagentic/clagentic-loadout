@@ -188,23 +188,30 @@ file that is absent at base declares nothing (no warning).
 **Bootstrap.** The PR that introduces the tracked file is judged by its base,
 which has none, so it runs flags-only; the declaration is enforced from the
 next merge on. A PR that fixes a broken gate file is judged by base's broken
-file (which falls back, below); its corrected file takes effect from the next
-merge.
+file, by each key's rule below (reviewer roles and scanners fall back;
+`pre_checks` refuses, and `--skip-pre-checks` lets the fix land); its corrected
+file takes effect from the next merge.
 
 `loadout-merge` enforces `merge.required_reviewer_roles` as a **floor**: the
 roles it requires are the union of that list and
 any `--required-reviewer` flags. Declaring the key gates the merge. Two rules
 keep a broken config from blocking the merge that would fix it:
 
-- If the tracked file at base cannot be read, or **any** repo gate key
-  (`required_reviewer_roles`, `required_scanners`, `pre_checks`) cannot be
-  loaded (unreadable, malformed, an explicit `null` for either of the first
-  two keys, or a `merge:` section that omits `required_reviewer_roles`), or the
-  PR payload carries no base SHA, the **whole** repo gate config falls back to
-  flags-only: no repo gate key is enforced, including one that was valid. A
-  stderr warning names the commit, the file and the error. The fallback is
-  deliberate, so the merge that lands the corrected config is never blocked by
-  the broken one.
+- If the tracked file at base cannot be read (including invalid UTF-8), or
+  `required_reviewer_roles` or `required_scanners` cannot be loaded
+  (malformed, an explicit `null` for either, or a `merge:` section that omits
+  `required_reviewer_roles`), or the PR payload carries no base SHA, **those
+  two keys together** fall back to flags-only: neither is enforced, including
+  one that was valid. A stderr warning names the commit, the file and the
+  error. The fallback is deliberate, so the merge that lands the corrected
+  config is never blocked by the broken one.
+- `merge.pre_checks` is **not** part of that fallback. A `pre_checks`
+  declaration at base that is malformed, or that cannot be read at all (a base
+  commit that cannot be fetched or shown, invalid UTF-8, a file that does not
+  parse), **refuses** the merge (`EXIT_PRE_CHECKS_FAILED`), as it did before
+  the gate moved to base. `--skip-pre-checks` bypasses it; `--ignore-repo-gate`
+  does not. A PR payload that carries no base SHA gives nothing to read: the
+  reviewer pair falls back with a warning and no `pre_checks` are declared.
 - A config that loads but cannot be satisfied (a declared role with no
   verdict, or no resolvable login; a clean verdict that records no scanner
   outcomes, or reports a required scanner failed, for a role with

@@ -10,7 +10,8 @@ commit; they execute in --repo-path as they always have:
   - pre_checks run BEFORE step 9 (the merge call) -- never after
   - `--skip-pre-checks` is an explicit, logged bypass
   - a working tree holding a relaxed gate cannot relax what base declares
-  - a malformed gate at base falls back to flags-only with a warning
+  - a malformed or unreadable pre_checks declaration at base REFUSES the
+    merge; only reviewer roles and scanners fall back, with a warning
   - absent --repo-path (--no-post-merge-tree) declares nothing
 
 No real network call: the opener is a canned-response double.
@@ -26,7 +27,7 @@ import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
-from tests._gate_repo import git, init_gate_repo, write_deployment_config
+from tests._gate_repo import commit_raw_gate_to_base, git, init_gate_repo, write_deployment_config
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
@@ -290,29 +291,75 @@ class TestTheGateIsReadFromBaseNotTheWorkingTree:
 
 
 class TestMalformedGateAtBase:
-    def test_pre_checks_not_a_list_falls_back_to_flags_only_with_a_warning(self, tmp_path, capsys):
+    """pre_checks keep their pre-existing failure rule: a declaration that
+    cannot be read or validated REFUSES the merge. Only the reviewer-roles and
+    scanners pair falls back."""
+
+    def test_pre_checks_not_a_list_refuses_before_merge_pr_called(self, tmp_path):
         repo = init_gate_repo(
             tmp_path, tracked_gate={"required_reviewer_roles": [], "pre_checks": "not-a-list"}
+        )
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+
+    def test_invalid_step_shape_refuses_at_load_time(self, tmp_path):
+        repo = init_gate_repo(
+            tmp_path,
+            tracked_gate={"required_reviewer_roles": [], "pre_checks": [{"description": "no cmd key"}]},
+        )
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+
+    def test_the_refusal_names_the_commit_and_file(self, tmp_path, capsys):
+        repo = init_gate_repo(
+            tmp_path, tracked_gate={"required_reviewer_roles": [], "pre_checks": "not-a-list"}
+        )
+        _merge(repo)
+        err = capsys.readouterr().err
+        assert "pre_checks config FAILED to load" in err
+        assert TRACKED_GATE_RELATIVE_PATH in err
+
+    def test_ignore_repo_gate_does_not_lift_a_pre_checks_refusal(self, tmp_path):
+        repo = init_gate_repo(
+            tmp_path, tracked_gate={"required_reviewer_roles": [], "pre_checks": "not-a-list"}
+        )
+        assert _merge(repo, extra_args=["--ignore-repo-gate"]) == verb.EXIT_PRE_CHECKS_FAILED
+
+    def test_skip_pre_checks_lets_the_fix_for_a_broken_pre_checks_land(self, tmp_path):
+        repo = init_gate_repo(
+            tmp_path, tracked_gate={"required_reviewer_roles": [], "pre_checks": "not-a-list"}
+        )
+        assert _merge(repo, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
+
+    def test_malformed_reviewer_roles_fall_back_with_a_warning_naming_only_that_pair(
+        self, tmp_path, capsys
+    ):
+        repo = init_gate_repo(
+            tmp_path, tracked_gate={"required_reviewer_roles": "reviewer", "pre_checks": []}
         )
         merge_calls: list[str] = []
         assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_OK
         assert len(merge_calls) == 1
         err = capsys.readouterr().err
-        assert "merge.pre_checks NOT ENFORCED" in err
+        assert "merge.required_reviewer_roles NOT ENFORCED" in err
+        assert "merge.required_scanners NOT ENFORCED" in err
+        assert "merge.pre_checks NOT ENFORCED" not in err
         assert TRACKED_GATE_RELATIVE_PATH in err
 
-    def test_invalid_step_shape_falls_back_with_a_warning(self, tmp_path, capsys):
+    def test_malformed_reviewer_roles_do_not_disable_valid_pre_checks(self, tmp_path):
         repo = init_gate_repo(
-            tmp_path,
-            tracked_gate={"required_reviewer_roles": [], "pre_checks": [{"description": "no cmd key"}]},
+            tmp_path, tracked_gate={"required_reviewer_roles": "reviewer", "pre_checks": [_FAIL_CHECK]}
         )
-        assert _merge(repo) == verb.EXIT_OK
-        assert "merge.pre_checks NOT ENFORCED" in capsys.readouterr().err
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
 
-    def test_a_pr_that_fixes_the_gate_is_judged_by_the_broken_base(self, tmp_path, capsys):
+    def test_a_pr_that_fixes_the_reviewer_roles_is_judged_by_the_broken_base(self, tmp_path, capsys):
         repo = init_gate_repo(
             tmp_path,
-            tracked_gate={"required_reviewer_roles": [], "pre_checks": "broken"},
+            tracked_gate={"required_reviewer_roles": "broken"},
             head_files={
                 TRACKED_GATE_RELATIVE_PATH: yaml.safe_dump(
                     {"merge": {"required_reviewer_roles": [], "pre_checks": [_FAIL_CHECK]}}
@@ -322,13 +369,52 @@ class TestMalformedGateAtBase:
         # Judged by base (broken -> fallback), so the PR's own strict gate is
         # not applied to it; it takes effect from the next merge.
         assert _merge(repo) == verb.EXIT_OK
-        assert "NOT ENFORCED" in capsys.readouterr().err
+        assert "required_reviewer_roles NOT ENFORCED" in capsys.readouterr().err
 
-    def test_a_base_sha_that_cannot_be_read_falls_back_with_a_warning(self, tmp_path, capsys):
+    def test_a_whole_file_that_does_not_parse_refuses_pre_checks_and_warns_for_the_pair(
+        self, tmp_path, capsys
+    ):
+        repo = init_gate_repo(tmp_path, tracked_gate=None)
+        commit_raw_gate_to_base(repo, b"merge: [unclosed")
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+        assert "required_reviewer_roles NOT ENFORCED" in capsys.readouterr().err
+
+    def test_a_base_sha_that_cannot_be_read_refuses_pre_checks(self, tmp_path, capsys):
         repo = _repo_with(tmp_path, [_FAIL_CHECK])
         pr_info = {**repo.pr_info(), "base": {"ref": "main", "sha": "f" * 40}}
+        merge_calls: list[str] = []
+        assert _merge(repo, pr_info=pr_info, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+        assert "required_reviewer_roles NOT ENFORCED" in capsys.readouterr().err
+
+
+class TestNoBaseShaInThePayload:
+    def test_there_is_nothing_to_read_so_the_pair_falls_back_and_no_pre_checks_are_declared(
+        self, tmp_path, capsys
+    ):
+        repo = _repo_with(tmp_path, [_FAIL_CHECK])
+        pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
         assert _merge(repo, pr_info=pr_info) == verb.EXIT_OK
-        assert "NOT ENFORCED" in capsys.readouterr().err
+        assert "no base commit SHA" in capsys.readouterr().err
+
+
+class TestInvalidUtf8GateAtBase:
+    def test_follows_each_keys_rule_the_pair_falls_back_and_pre_checks_refuse(self, tmp_path, capsys):
+        repo = init_gate_repo(tmp_path, tracked_gate=None)
+        commit_raw_gate_to_base(repo, b"merge:\n  required_reviewer_roles: []\n  note: \xff\xfe\n")
+        merge_calls: list[str] = []
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == []
+        err = capsys.readouterr().err
+        assert "not valid UTF-8" in err
+        assert "required_reviewer_roles NOT ENFORCED" in err
+
+    def test_with_pre_checks_skipped_the_merge_does_not_crash(self, tmp_path):
+        repo = init_gate_repo(tmp_path, tracked_gate=None)
+        commit_raw_gate_to_base(repo, b"\xff\xfe\x00 not text")
+        assert _merge(repo, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
 
 
 class TestAbsentRepoPathIsALegitimateNoOp:

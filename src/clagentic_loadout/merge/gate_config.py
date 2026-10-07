@@ -114,15 +114,16 @@ floor. That makes a broken gate config capable of blocking the very merge that
 would fix it, so the wiring lives in ONE place, `merge.repo_gate_runtime`, and
 obeys two rules:
 
-  - A config in which ANY gate key (`required_reviewer_roles`,
-    `required_scanners`) cannot be loaded (unreadable YAML, a `merge:` section
-    that is not a mapping, a malformed role list or scanner mapping, an
-    explicit null for either key, or a `merge:` section that omits
-    `required_reviewer_roles`) falls back as a
-    WHOLE to flags-only, with a loud stderr warning naming the file and the
-    error: neither key is enforced, not even the one that loaded. One rule,
-    no partial enforcement. The fix-the-config merge always lands. Every error this module raises is therefore caught there, never
-    propagated out of `loadout-merge` or `loadout-push`.
+  - A config in which `required_reviewer_roles` or `required_scanners` cannot
+    be loaded (unreadable YAML, a `merge:` section that is not a mapping, a
+    malformed role list or scanner mapping, an explicit null for either key,
+    or a `merge:` section that omits `required_reviewer_roles`) falls back as
+    a WHOLE PAIR to flags-only, with a loud stderr warning naming the file and
+    the error: neither of those two keys is enforced, not even the one that
+    loaded. The fix-the-config merge always lands. Every error this module
+    raises is therefore caught there, never propagated out of `loadout-merge`
+    or `loadout-push`. `pre_checks` is NOT part of this fallback: it keeps its
+    own rule (a malformed or unreadable declaration refuses the merge).
   - A config that loads cleanly but cannot be satisfied (a declared role with
     no resolvable login, or no verdict from it) refuses the merge, with
     `--ignore-repo-gate` as the deliberate, logged escape hatch.
@@ -276,13 +277,37 @@ def parse_tracked_gate_text(
     Raises:
         InvalidMergeGateConfigError: any error the single-key loaders raise.
     """
-    raw = _parse_yaml_mapping(text, source)
-    merge_section, section_present = _merge_section_from_mapping(raw, source)
+    merge_section, section_present = parse_tracked_merge_section(text, source=source)
+    roles, scanners = reviewer_gate_from_section(source, merge_section, section_present)
+    return roles, scanners, merge_section
+
+
+def parse_tracked_merge_section(text: str, *, source: str) -> tuple[dict, bool]:
+    """Parse the tracked gate file's text into its `merge:` section and whether
+    that section was present. The step every gate key shares: a failure here
+    means no key in the file can be read.
+
+    Raises:
+        InvalidMergeGateConfigError: unreadable YAML or a non-mapping document
+            or `merge:` section.
+    """
+    return _merge_section_from_mapping(_parse_yaml_mapping(text, source), source)
+
+
+def reviewer_gate_from_section(
+    source: str, merge_section: dict, section_present: bool
+) -> tuple[tuple[str, ...], dict[str, tuple[str, ...]]]:
+    """Validate `required_reviewer_roles` and `required_scanners` of an already
+    parsed `merge:` section. `pre_checks` is validated separately, so a fault in
+    one family never decides the other's failure rule.
+
+    Raises:
+        InvalidMergeGateConfigError: any error the single-key loaders raise.
+    """
     config_path = Path(source)
     return (
         _reviewer_roles_from_section(config_path, merge_section, section_present),
         _required_scanners_from_section(config_path, merge_section),
-        merge_section,
     )
 
 
@@ -584,4 +609,6 @@ __all__ = [
     "load_repo_gate_declarations",
     "load_required_scanners",
     "parse_tracked_gate_text",
+    "parse_tracked_merge_section",
+    "reviewer_gate_from_section",
 ]

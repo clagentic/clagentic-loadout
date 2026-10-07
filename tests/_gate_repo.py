@@ -35,6 +35,17 @@ def commit_files(repo: Path, files: dict[str, str], message: str = "change") -> 
     return git(repo, "rev-parse", "HEAD")
 
 
+def commit_raw_gate_to_base(repo: "GateRepo", data: bytes) -> None:
+    """Replace the base commit's tracked gate file with raw *data* (for content
+    that is not valid text) and point `repo.base_sha` at the new commit."""
+    target = repo.path / TRACKED_GATE_RELATIVE_PATH
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+    git(repo.path, "add", "--", TRACKED_GATE_RELATIVE_PATH)
+    git(repo.path, "commit", "-m", "raw gate")
+    repo.base_sha = git(repo.path, "rev-parse", "HEAD")
+
+
 def write_deployment_config(repo: Path, merge_section: dict) -> None:
     path = repo / DEFAULT_CONFIG_RELATIVE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)

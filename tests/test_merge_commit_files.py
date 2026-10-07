@@ -55,6 +55,15 @@ class TestReadFileAtCommit:
         with pytest.raises(CommitFileReadError):
             read_file_at_commit(plain, "a" * 40, "a.txt")
 
+    def test_invalid_utf8_content_raises_the_read_error_not_a_decode_error(self, tmp_path):
+        repo = _repo(tmp_path / "r")
+        (repo / "bad.txt").write_bytes(b"\xff\xfe broken")
+        git(repo, "add", "--", "bad.txt")
+        git(repo, "commit", "-m", "bad")
+        sha = git(repo, "rev-parse", "HEAD")
+        with pytest.raises(CommitFileReadError, match="not valid UTF-8"):
+            read_file_at_commit(repo, sha, "bad.txt")
+
     def test_an_option_shaped_sha_is_refused(self, tmp_path):
         repo = _repo(tmp_path / "r")
         commit_files(repo, {"a.txt": "a\n"})

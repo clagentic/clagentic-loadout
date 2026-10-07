@@ -26,8 +26,19 @@ class CommitFileReadError(Exception):
 
 
 def _git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+    # errors="replace": git's own diagnostics must never raise while being read.
+    # File content is fetched as bytes (`_git_bytes`) and decoded strictly.
     try:
-        return subprocess.run(["git", *args], capture_output=True, text=True, cwd=str(cwd))
+        return subprocess.run(
+            ["git", *args], capture_output=True, text=True, errors="replace", cwd=str(cwd)
+        )
+    except OSError as exc:
+        raise CommitFileReadError(f"git {args[0]} could not run in {cwd}: {exc}") from exc
+
+
+def _git_bytes(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(["git", *args], capture_output=True, cwd=str(cwd))
     except OSError as exc:
         raise CommitFileReadError(f"git {args[0]} could not run in {cwd}: {exc}") from exc
 
@@ -71,7 +82,7 @@ def read_file_at_commit(
 
     Raises:
         CommitFileReadError: see `ensure_commit_present`; or git could not list
-            or show the path.
+            or show the path; or the content is not valid UTF-8.
     """
     git_tree = Path(git_tree)
     ensure_commit_present(git_tree, sha, base_branch=base_branch)
@@ -83,13 +94,18 @@ def read_file_at_commit(
         )
     if not listed.stdout.strip():
         return None
-    shown = _git(["show", f"{sha}:{relative_path}"], cwd=git_tree)
+    shown = _git_bytes(["show", f"{sha}:{relative_path}"], cwd=git_tree)
     if shown.returncode != 0:
         raise CommitFileReadError(
             f"git show {sha}:{relative_path} failed (exit {shown.returncode}) in "
-            f"{git_tree}: {shown.stderr.strip()[:400]}"
+            f"{git_tree}: {shown.stderr.decode('utf-8', 'replace').strip()[:400]}"
         )
-    return shown.stdout
+    try:
+        return shown.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CommitFileReadError(
+            f"{sha}:{relative_path} is not valid UTF-8 text in {git_tree}: {exc}"
+        ) from exc
 
 
 __all__ = ["CommitFileReadError", "ensure_commit_present", "read_file_at_commit"]

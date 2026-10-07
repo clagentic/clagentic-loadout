@@ -1551,8 +1551,11 @@ indistinguishable from a gate that says nothing because it never ran.
 `--repo-path` omitted (`--no-post-merge-tree`/`--skip-post-merge`)
 resolves `pre_checks` to `[]` — there is no local tree to read the gate from,
 the same pre-existing boundary every other repo-tier `merge:` key in this
-chain already has. A tracked gate file that cannot be loaded at base falls
-back, with a warning, to flags-only (see
+chain already has. A `pre_checks` declaration at base that is malformed or
+unreadable (including a gate file that is not valid UTF-8) refuses the merge
+(`EXIT_PRE_CHECKS_FAILED`); only `required_reviewer_roles` and
+`required_scanners` fall back to flags-only on a load failure, with a warning,
+and `--ignore-repo-gate` does not lift `pre_checks` (see
 [docs/merge-authority.md](merge-authority.md#where-the-gate-is-read-from)).
 
 **Merge-completion attestation (`merge.attestation`):**

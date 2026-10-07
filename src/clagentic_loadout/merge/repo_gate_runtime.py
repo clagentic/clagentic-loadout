@@ -29,13 +29,26 @@ none, so it runs flags-only; the file is enforced from the next merge on. A
 fix-the-config PR is likewise judged by base's (broken) file, which falls back,
 and its corrected file takes effect from the next merge.
 
-FALLBACK GRANULARITY IS THE WHOLE CONFIG. If the tracked file at base cannot be
-read or any gate key in it cannot be loaded, none of the repo's gate keys is
-enforced: the merge degrades to the flags-only behaviour with a warning naming
-the commit, the file and the error, so the merge that lands the corrected
-config is always possible. A config that is half-trusted is harder to reason
-about than one that is either enforced or visibly not. A tracked file that is
-simply absent at base declares nothing and is not a warning.
+FAILURE RULES DIFFER BY KEY, and this module changes none of them: it only
+changes where the text comes from.
+
+  - `required_reviewer_roles` and `required_scanners` fall back AS A PAIR. If
+    the tracked file at base cannot be read, or either key cannot be loaded,
+    neither is enforced: the merge degrades to the flags-only behaviour with a
+    warning naming the commit, the file and the error, so the merge that lands
+    the corrected config is always possible. A pair that is half-trusted is
+    harder to reason about than one that is either enforced or visibly not.
+  - `pre_checks` NEVER falls back. A `pre_checks` declaration that cannot be
+    read or validated at base (including a file that is not valid UTF-8, or a
+    whole-file parse failure, or a base commit that cannot be fetched or shown)
+    is reported in `RepoGate.pre_checks_error`, and the merge verb REFUSES the
+    merge, as it did before the gate moved to base. Having no base commit to
+    read at all (no SHA in the PR payload) is not an unreadable declaration:
+    no pre_checks are declared, matching a repo with no local tree.
+    `--skip-pre-checks` is its bypass; `--ignore-repo-gate` does not lift it.
+
+A tracked file that is simply absent at base declares nothing and is neither a
+warning nor an error.
 
 A config that loads cleanly but cannot be satisfied is NOT handled here: that
 is a real refusal, overridable only by the verb's explicit, logged
@@ -59,7 +72,8 @@ from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_REQUIRED_SCANNERS,
     CONFIG_SECTION_MERGE,
     InvalidMergeGateConfigError,
-    parse_tracked_gate_text,
+    parse_tracked_merge_section,
+    reviewer_gate_from_section,
 )
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import resolve_git_working_tree
@@ -79,6 +93,10 @@ class RepoGate:
     required_scanners: dict[str, tuple[str, ...]] | None = None
     pre_checks: tuple[dict, ...] = ()
     warnings: tuple[str, ...] = ()
+    #: Why `pre_checks` could not be determined. Non-empty means the merge must
+    #: be refused (unless pre_checks are explicitly skipped); it never means
+    #: "no checks".
+    pre_checks_error: str = ""
 
     def scanners_for(self, reviewer_name: str) -> tuple[str, ...]:
         return (self.required_scanners or {}).get(reviewer_name, ())
@@ -116,15 +134,28 @@ def _ignored_deployment_gate_warnings(repo_path: str | Path) -> tuple[str, ...]:
     )
 
 
-def _unloadable(warnings: tuple[str, ...], reason: str) -> RepoGate:
-    return RepoGate(
-        warnings=(
-            *warnings,
-            f"merge.required_reviewer_roles NOT ENFORCED, merge.required_scanners NOT "
-            f"ENFORCED and merge.pre_checks NOT ENFORCED -- the repo gate config could "
-            f"not be loaded, so only --required-reviewer applies: {reason}",
-        )
+def _reviewer_pair_warnings(warnings: tuple[str, ...], reason: str) -> tuple[str, ...]:
+    return (
+        *warnings,
+        f"merge.required_reviewer_roles NOT ENFORCED and merge.required_scanners NOT "
+        f"ENFORCED -- the repo gate config could not be loaded, so only "
+        f"--required-reviewer applies: {reason}",
     )
+
+
+def _base_unlocatable(warnings: tuple[str, ...], reason: str) -> RepoGate:
+    """There is no base commit to read (the host payload named none, or the
+    local tree cannot be resolved). That is the absence of a declaration source,
+    not an unreadable declaration, so the reviewer pair falls back with a
+    warning and no pre_checks are declared, as for a repo with no local tree."""
+    return RepoGate(warnings=_reviewer_pair_warnings(warnings, reason))
+
+
+def _nothing_readable(warnings: tuple[str, ...], reason: str) -> RepoGate:
+    """The tracked file at a located base commit could not be read or parsed:
+    the reviewer pair falls back, and pre_checks cannot be determined, which
+    refuses."""
+    return RepoGate(warnings=_reviewer_pair_warnings(warnings, reason), pre_checks_error=reason)
 
 
 def load_repo_gate_at_base(
@@ -134,8 +165,10 @@ def load_repo_gate_at_base(
 
     *repo_path* None (no local tree) declares nothing, matching every other
     repo-tier key in the merge verb. An empty *base_sha* (a PR payload that did
-    not carry one) cannot be read and falls back like any unloadable config. A
-    tracked file absent at base declares nothing.
+    not carry one) or an unresolvable tree has no base to read: the reviewer
+    pair falls back with a warning and no pre_checks are declared. A tracked
+    file absent at base declares nothing. The per-key failure rules are in the
+    module docstring.
     """
     if repo_path is None:
         return RepoGate()
@@ -144,31 +177,44 @@ def load_repo_gate_at_base(
     try:
         declared_tree = resolve_git_working_tree(repo_path)
     except PostMergeConfigError as exc:
-        return _unloadable(ignored, str(exc))
+        return _base_unlocatable(ignored, str(exc))
     git_tree = declared_tree if declared_tree is not None else Path(repo_path)
 
     if not base_sha:
-        return _unloadable(ignored, "the PR payload carried no base commit SHA to read it at")
+        return _base_unlocatable(ignored, "the PR payload carried no base commit SHA to read it at")
     source = f"{base_sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"
     try:
         text = read_file_at_commit(git_tree, base_sha, TRACKED_GATE_RELATIVE_PATH, base_branch=base_branch)
     except CommitFileReadError as exc:
-        return _unloadable(ignored, f"{source}: {exc}")
+        return _nothing_readable(ignored, f"{source}: {exc}")
     if text is None:
         return RepoGate(warnings=ignored)
 
     try:
-        roles, scanners, merge_section = parse_tracked_gate_text(text, source=source)
-        pre_checks = pre_checks_from_section(merge_section)
+        merge_section, section_present = parse_tracked_merge_section(text, source=source)
     except InvalidMergeGateConfigError as exc:
-        return _unloadable(ignored, str(exc))
+        return _nothing_readable(ignored, str(exc))
+
+    warnings = ignored
+    roles: tuple[str, ...] = ()
+    scanners: dict[str, tuple[str, ...]] | None = None
+    try:
+        roles, scanners = reviewer_gate_from_section(source, merge_section, section_present)
+    except InvalidMergeGateConfigError as exc:
+        warnings = _reviewer_pair_warnings(ignored, str(exc))
+
+    pre_checks: tuple[dict, ...] = ()
+    pre_checks_error = ""
+    try:
+        pre_checks = tuple(pre_checks_from_section(merge_section))
     except PostMergeConfigError as exc:
-        return _unloadable(ignored, f"{source}: pre_checks: {exc}")
+        pre_checks_error = f"{source}: pre_checks: {exc}"
     return RepoGate(
         reviewer_roles=roles,
         required_scanners=scanners,
-        pre_checks=tuple(pre_checks),
-        warnings=ignored,
+        pre_checks=pre_checks,
+        warnings=warnings,
+        pre_checks_error=pre_checks_error,
     )
 
 
