@@ -24,6 +24,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.numeric_validation import is_finite_positive_number
+
 DEFAULT_MIN_LINES = 1
 DEFAULT_TIMEOUT = 120.0
 DEFAULT_INTERVAL = 2.0
@@ -99,10 +101,10 @@ def poll_wait(
     """
     if min_lines < 0:
         raise ValueError("min_lines must be >= 0.")
-    if timeout <= 0:
-        raise ValueError("timeout must be > 0.")
-    if interval <= 0:
-        raise ValueError("interval must be > 0.")
+    if not is_finite_positive_number(timeout):
+        raise ValueError("timeout must be a finite number > 0.")
+    if not is_finite_positive_number(interval):
+        raise ValueError("interval must be a finite number > 0.")
     if grep_pattern is not None:
         try:
             re.compile(grep_pattern)

@@ -92,6 +92,9 @@ class TestConfig:
             [{"name": "", "argv": ["a"]}],
             [{"name": "x", "argv": ["a"], "timeout_seconds": 0}],
             [{"name": "x", "argv": ["a"], "timeout_seconds": True}],
+            [{"name": "x", "argv": ["a"], "timeout_seconds": float("nan")}],
+            [{"name": "x", "argv": ["a"], "timeout_seconds": float("inf")}],
+            [{"name": "x", "argv": ["a"], "timeout_seconds": float("-inf")}],
             [{"name": "x", "argv": ["a"]}, {"name": "x", "argv": ["b"]}],
             ["bare-string"],
         ],
@@ -265,6 +268,20 @@ class TestVerbCreatePath:
         assert code == verb.EXIT_VERIFY_CONFIG_INVALID
         assert not _remote_has_branch(remote)
 
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_non_finite_timeout_exits_config_invalid(self, repo_with_remote, monkeypatch, bad):
+        repo, remote = repo_with_remote
+        _write_verify(repo, [_py("unit", "pass", timeout=bad)])
+        code = _run_main(
+            _create_argv(repo),
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_create_opener([]),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERIFY_CONFIG_INVALID
+        assert not _remote_has_branch(remote)
+
     def test_dry_run_does_not_run_verification(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
         marker = repo.parent / "dry-run-marker"
@@ -320,11 +337,18 @@ class TestVerbUpdatePath:
         )
         assert code == verb.EXIT_VERIFY_FAILED
 
-    def test_title_only_update_does_not_run_verification(self, repo_with_remote, monkeypatch):
-        repo, _remote = repo_with_remote
-        marker = repo.parent / "update-marker"
-        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
-        code = _run_main(
+    @staticmethod
+    def _track_upstream_at_head(repo) -> None:
+        subprocess.run(
+            ["git", "update-ref", "refs/remotes/origin/feature", "HEAD"], cwd=repo, check=True
+        )
+        subprocess.run(
+            ["git", "branch", "--set-upstream-to=origin/feature"],
+            cwd=repo, check=True, capture_output=True,
+        )
+
+    def _title_update(self, repo, monkeypatch, capsys=None):
+        return _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--title", "feat: new title",
@@ -333,8 +357,63 @@ class TestVerbUpdatePath:
             opener=self._update_opener([]),
             monkeypatch=monkeypatch,
         )
+
+    def test_metadata_only_update_without_new_commits_skips_and_says_so(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        self._track_upstream_at_head(repo)
+        marker = repo.parent / "update-marker"
+        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
+        code = self._title_update(repo, monkeypatch)
         assert code == verb.EXIT_OK
         assert not marker.exists()
+        assert "SKIPPED" in capsys.readouterr().err
+
+    def test_title_only_update_with_new_commits_runs_verification(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        self._track_upstream_at_head(repo)
+        (repo / "more.txt").write_text("more\n")
+        subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
+        )
+        marker = repo.parent / "update-marker"
+        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
+        assert self._title_update(repo, monkeypatch) == verb.EXIT_OK
+        assert marker.exists()
+
+    def test_title_only_update_with_new_commits_and_failing_check_refuses(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        self._track_upstream_at_head(repo)
+        (repo / "more.txt").write_text("more\n")
+        subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
+        )
+        _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--title", "feat: new title",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERIFY_FAILED
+
+    def test_title_only_update_with_unknown_upstream_runs_verification(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        marker = repo.parent / "update-marker"
+        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
+        assert self._title_update(repo, monkeypatch) == verb.EXIT_OK
+        assert marker.exists()
 
 
 def test_help_documents_skip_verify(monkeypatch, capsys):

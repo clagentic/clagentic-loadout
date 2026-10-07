@@ -29,6 +29,7 @@ from pathlib import Path
 
 import yaml
 
+from clagentic_loadout.numeric_validation import is_finite_positive_number
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     resolve_repo_config_path,
@@ -78,7 +79,7 @@ def _parse_entry(raw: object, index: int, config_path: Path) -> VerifyEntry:
         )
 
     timeout = raw.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+    if not is_finite_positive_number(timeout):
         raise InvalidVerifyConfigError(
             f"{where}.timeout_seconds must be a positive number, got {timeout!r}."
         )

@@ -222,6 +222,7 @@ from pathlib import Path
 import yaml
 
 from clagentic_loadout.merge.post_merge import PostMergeConfigError, validate_post_merge_steps
+from clagentic_loadout.numeric_validation import is_finite_positive_number
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     LEGACY_CONFIG_RELATIVE_PATH,
@@ -1434,10 +1435,10 @@ def resolve_post_merge_step_timeout_seconds(
             f"must be an int or float number of seconds, got "
             f"{type(value).__name__}."
         )
-    if value <= 0:
+    if not is_finite_positive_number(value):
         raise PostMergeConfigError(
             f"{config_path}: {CONFIG_KEY_POST_MERGE_STEP_TIMEOUT_SECONDS!r} "
-            f"must be > 0, got {value!r}."
+            f"must be a finite number > 0, got {value!r}."
         )
     return value
 

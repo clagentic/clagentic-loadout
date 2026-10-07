@@ -1275,7 +1275,7 @@ def _run_task_id_guard_commit_check(
             print(f"push: WARNING -- {warning}", file=sys.stderr)
 
 
-def _run_verification(project_root: Path, *, body: str, skip: bool) -> str:
+def _run_verification(project_root: Path, *, body: str | None, skip: bool) -> str | None:
     """Run the repo's declared `push.verify` commands (push.verify_run) in
     *project_root* and return *body* with a `## Verification` section
     appended recording the outcome.
@@ -1300,13 +1300,13 @@ def _run_verification(project_root: Path, *, body: str, skip: bool) -> str:
             f"(checks not run: {names})",
             file=sys.stderr,
         )
-        return append_section(body, render_skipped_section(entries))
+        return None if body is None else append_section(body, render_skipped_section(entries))
     print(
         f"push: running {len(entries)} verification check(s) in {project_root}",
         file=sys.stderr,
     )
     results = run_verifications(entries, project_root)
-    return append_section(body, render_verification_section(results))
+    return None if body is None else append_section(body, render_verification_section(results))
 
 
 def _resolve_repo_root(repo_path_override: str) -> Path:
@@ -1956,6 +1956,29 @@ def _resolve_owner_repo_for_update(args: argparse.Namespace, project_root: Path)
 _APPEND_BODY_SEPARATOR = "\n\n"
 
 
+def _commits_ahead_of_upstream(project_root: Path) -> tuple[str, int] | None:
+    """Return (upstream ref, number of local commits not on it), or None when
+    that cannot be determined (no upstream configured, git failure)."""
+    import subprocess
+
+    upstream = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        cwd=str(project_root), capture_output=True, text=True,
+    )
+    if upstream.returncode != 0 or not upstream.stdout.strip():
+        return None
+    counts = subprocess.run(
+        ["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"],
+        cwd=str(project_root), capture_output=True, text=True,
+    )
+    if counts.returncode != 0:
+        return None
+    parts = counts.stdout.split()
+    if len(parts) != 2 or not parts[1].isdigit():
+        return None
+    return upstream.stdout.strip(), int(parts[1])
+
+
 def _warn_if_ahead_of_remote_tracking(project_root: Path) -> None:
     """Warn on stderr when the current local branch is AHEAD of its own
     remote-tracking ref (lr-2500b7): the exact situation the originating
@@ -1968,28 +1991,14 @@ def _warn_if_ahead_of_remote_tracking(project_root: Path) -> None:
     upstream configured) is silently skipped -- this is a diagnostic nicety
     for the common case, not a new precondition on every --update-pr call.
     """
-    import subprocess
-
-    upstream = subprocess.run(
-        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
-        cwd=str(project_root), capture_output=True, text=True,
-    )
-    if upstream.returncode != 0 or not upstream.stdout.strip():
+    state = _commits_ahead_of_upstream(project_root)
+    if state is None:
         return
-    counts = subprocess.run(
-        ["git", "rev-list", "--left-right", "--count", "@{u}...HEAD"],
-        cwd=str(project_root), capture_output=True, text=True,
-    )
-    if counts.returncode != 0:
-        return
-    parts = counts.stdout.split()
-    if len(parts) != 2:
-        return
-    _behind, ahead = parts
-    if ahead.isdigit() and int(ahead) > 0:
+    upstream_ref, ahead = state
+    if ahead > 0:
         print(
             f"push: WARNING -- the local branch is {ahead} commit(s) ahead of "
-            f"its remote-tracking ref {upstream.stdout.strip()!r}. --update-pr "
+            f"its remote-tracking ref {upstream_ref!r}. --update-pr "
             f"NEVER pushes (metadata-only: title/body PATCH) -- those local "
             f"commits are NOT on the remote after this call. Use the create "
             f"path (push without --update-pr) to push them.",
@@ -2036,12 +2045,22 @@ def _run_update_pr(
 
     _check_title_gate(args, owner, repo, project_root=project_root)
 
-    # Verification gates only a body edit: the body is where its outcome is
-    # recorded, and a title-only update should not trigger a possibly
-    # expensive run. This path never pushes, so the checkout's HEAD is
-    # verified as-is.
-    if body is not None:
+    # Verification runs whenever the update could be carrying new work: a
+    # body is being written, or the checkout holds commits (or an unknown
+    # state) beyond its upstream. Only a metadata-only edit PROVABLY without
+    # new commits skips, and says so. This path never pushes, so the
+    # checkout's HEAD is verified as-is; with no body there is nowhere to
+    # record the outcome, so it is reported on stderr and a failure refuses.
+    ahead_state = _commits_ahead_of_upstream(project_root)
+    has_new_commits = ahead_state is None or ahead_state[1] > 0
+    if body is not None or has_new_commits:
         body = _run_verification(project_root, body=body, skip=args.skip_verify)
+    elif load_verify_entries(project_root):
+        print(
+            "push: push.verify checks SKIPPED -- metadata-only update with no "
+            "commits ahead of the upstream",
+            file=sys.stderr,
+        )
 
     print(f"push: resolving token for caller={caller!r} (PR update)", file=sys.stderr)
     active_provider = (

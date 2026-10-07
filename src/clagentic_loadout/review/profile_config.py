@@ -43,6 +43,7 @@ from pathlib import Path
 
 import yaml
 
+from clagentic_loadout.numeric_validation import is_finite_positive_number, is_number
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     LEGACY_CONFIG_RELATIVE_PATH,
@@ -90,7 +91,7 @@ class ReviewProfileError(ValueError):
 def _bound_repo_value(key: str, value: object, profile: str) -> object:
     """Clamp a numeric repo-level override into its bound, saying so on
     stderr. Non-numeric values pass through to the normal validation."""
-    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+    if not is_number(value) or not math.isfinite(value):
         return value
     upper = _REPO_MAX.get(key)
     lower = _REPO_MIN.get(key)
@@ -143,10 +144,8 @@ def _argv(value: object, key: str, profile: str) -> tuple[str, ...]:
 
 
 def _positive_number(value: object, key: str, profile: str, *, integer: bool) -> float:
-    ok = isinstance(value, (int, float)) and not isinstance(value, bool)
-    # YAML can produce .inf/.nan; int(inf) raises OverflowError, so finiteness
-    # is checked before any conversion.
-    ok = ok and math.isfinite(value) and value > 0
+    # Finiteness is checked before any conversion: int(inf) raises OverflowError.
+    ok = is_finite_positive_number(value)
     if integer:
         ok = ok and float(value) == int(value)
     if not ok:

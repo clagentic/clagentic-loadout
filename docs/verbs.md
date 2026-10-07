@@ -1223,15 +1223,18 @@ push:
 - `argv` (non-empty list of strings) — an argument list, executed with **no shell**: no
   expansion, pipes, or redirection. Wrap a shell pipeline in an explicit
   `["sh", "-c", "..."]` entry if you need one.
-- `timeout_seconds` (positive number, optional) — on expiry the command's whole process
+- `timeout_seconds` (finite positive number, optional; `.nan` and `.inf` are rejected) — on expiry the command's whole process
   group is killed and the check fails as a timeout.
 
 **When it runs.** On the create-PR path, in the pushing checkout at the head being
 pushed (after bot-identity re-authoring settles it), before any ref moves and before the
 PR is created. Entries run in order and stop at the first failure. On `--update-pr` it
-runs only when a body is being written (the body is where the outcome is recorded), in
-the checkout's current HEAD; a title-only update does not run it. `--dry-run` pushes
-nothing and does not run it.
+runs whenever the update could carry new work: a body is being written, or the checkout
+has commits ahead of its upstream (or the upstream cannot be determined), in the
+checkout's current HEAD. With no body there is nowhere to record the outcome, so it is
+reported on stderr and a failure still refuses. Only a metadata-only update provably
+without new commits skips, and it says so on stderr. `--dry-run` pushes nothing and does
+not run it.
 
 **What it records.** On success a `## Verification` section is appended to the PR body:
 each check's name, exit status, and the bounded tail (last 2000 characters) of its stdout
