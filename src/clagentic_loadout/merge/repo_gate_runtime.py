@@ -30,7 +30,9 @@ are read from the deployment file exactly as they were before the gate moved
 always did. Refusing or ignoring would turn a repo that declared a gate into
 one that silently gates nothing. The deployment file is gitignored operator
 config, not PR content, so the PR under review still cannot relax its own gate.
-The result carries one notice naming the source; it is never a refusal. Once a
+The result carries one notice naming the source; a readable file is never a
+refusal, but a deployment file that exists and cannot be read or parsed is (its
+gate cannot be known, see `gate_from_deployment_config`). Once a
 tracked file exists at base it is authoritative and the deployment gate keys
 fall back to IGNORED.
 
@@ -241,20 +243,26 @@ def gate_from_deployment_config(repo_path: str | Path) -> RepoGate:
     to a tracked file. The file is gitignored operator config, never PR
     content, so the PR under review cannot reach its own gate through it.
 
-    A file that is absent or unreadable, or a `merge:` section with no gate key
-    in it, declares nothing: this loader never refuses on its own account (the
-    loaders that own that file report its failures themselves). When gate keys
-    are read, the result carries a notice naming the source.
+    A file that is absent, or a `merge:` section with no gate key in it,
+    declares nothing. A file that exists but cannot be read or parsed (not
+    UTF-8, not YAML, a `merge:` section that is not a mapping) does NOT declare
+    nothing: the gate it was meant to carry cannot be known, so the result
+    carries `pre_checks_error` and the merge is refused. Returning an empty gate
+    there would let a merge land ungated and fail only afterwards, when the
+    post-merge loaders reread the same file. When gate keys are read, the result
+    carries a notice naming the source.
     """
     config_path = resolve_repo_config_path(repo_path, warn=False)
     try:
         text = config_path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+    except FileNotFoundError:
         return RepoGate()
+    except (OSError, UnicodeDecodeError) as exc:
+        return _nothing_readable((), f"{config_path}: could not be read: {exc}")
     try:
         merge_section, _present = parse_tracked_merge_section(text, source=str(config_path))
-    except InvalidMergeGateConfigError:
-        return RepoGate()
+    except InvalidMergeGateConfigError as exc:
+        return _nothing_readable((), str(exc))
     declared = [key for key in GATE_KEYS if key in merge_section]
     if not declared:
         return RepoGate()
