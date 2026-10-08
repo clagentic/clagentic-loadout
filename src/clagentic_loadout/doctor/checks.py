@@ -849,6 +849,7 @@ def _role_resolution_report(roles: tuple[str, ...], platform: str) -> tuple[dict
     """Resolve each declared role through the same path merge uses
     (`resolve_declared_role`) and describe the outcome, never raising."""
     report: list[dict] = []
+    known_callers = read_configured_callers()
     for role in roles:
         try:
             resolution = resolve_declared_role(role, platform)
@@ -872,10 +873,12 @@ def _role_resolution_report(roles: tuple[str, ...], platform: str) -> tuple[dict
             "source": resolution.source,
         }
         if platform == PLATFORM_FORGEJO and resolution.source == SOURCE_BARE_NAME:
-            # Still required (fail closed), but only an account literally named
-            # for the role can satisfy it; say which key would map it instead.
-            entry["unresolved_on_forgejo"] = True
-            entry["mapping_key"] = role_caller_mapping_key(role)
+            # The callers list never changes what merge enforces; it only lets
+            # doctor word the advisory. A bare name that is a known caller is
+            # taken as a real account; anything else cannot be confirmed here.
+            if resolution.login not in (known_callers or ()):
+                entry["unverified_on_forgejo"] = True
+                entry["mapping_key"] = role_caller_mapping_key(role)
         report.append(entry)
     return tuple(report)
 
@@ -883,10 +886,11 @@ def _role_resolution_report(roles: tuple[str, ...], platform: str) -> tuple[dict
 def _describe_role_resolution(report: tuple[dict, ...]) -> str:
     parts = []
     for entry in report:
-        if entry.get("unresolved_on_forgejo"):
+        if entry.get("unverified_on_forgejo"):
             parts.append(
-                f"{entry['role']} -> UNRESOLVED-ON-FORGEJO (still required from an account named "
-                f"{entry['login']!r}; set {entry['mapping_key']}: <caller> to map it)"
+                f"{entry['role']} -> UNVERIFIED-ON-FORGEJO (still required from an account named "
+                f"{entry['login']!r}, which cannot be confirmed; set {entry['mapping_key']}: <caller> "
+                f"to map it)"
             )
         elif entry["resolved"]:
             required_as = (

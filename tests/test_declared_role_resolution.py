@@ -369,16 +369,29 @@ class TestDoctorReportsResolutionPerRole:
         assert by_role["reviewer"]["mapping_key"] == "github_app.role_callers.reviewer"
         assert "set github_app.role_callers.reviewer: <caller>" in result.summary
 
-    def test_an_unmapped_forgejo_role_is_flagged_and_names_the_mapping_key(self, tmp_path, user_config):
-        user_config(callers=["peaches"])
+    @pytest.mark.parametrize("callers", [["peaches"], None])
+    def test_an_unlisted_forgejo_role_is_unverified_and_names_the_mapping_key(
+        self, tmp_path, user_config, callers
+    ):
+        user_config(callers=callers)
         repo = self._repo(tmp_path, ["reviewer"], remote="http://git-host.example.com:3000/o/r.git")
         result = check_repo_loadout_schema(repo)
         (entry,) = result.resolved["reviewer_role_resolution"]
         assert entry["login"] == "reviewer" and entry["source"] == SOURCE_BARE_NAME
-        assert entry["unresolved_on_forgejo"] is True
+        assert entry["unverified_on_forgejo"] is True
         assert entry["mapping_key"] == "github_app.role_callers.reviewer"
-        assert "UNRESOLVED-ON-FORGEJO" in result.summary
+        assert "UNVERIFIED-ON-FORGEJO" in result.summary
         assert "set github_app.role_callers.reviewer: <caller>" in result.summary
+
+    def test_a_listed_caller_bare_forgejo_role_is_resolved_with_no_hint(self, tmp_path, user_config):
+        user_config(callers=["reviewer"])
+        repo = self._repo(tmp_path, ["reviewer"], remote="http://git-host.example.com:3000/o/r.git")
+        result = check_repo_loadout_schema(repo)
+        (entry,) = result.resolved["reviewer_role_resolution"]
+        assert entry["resolved"] is True and entry["requirement"] == "reviewer"
+        assert "unverified_on_forgejo" not in entry and "mapping_key" not in entry
+        assert "UNVERIFIED" not in result.summary
+        assert "set github_app.role_callers" not in result.summary
 
     def test_a_mapped_forgejo_role_is_reported_resolved_to_the_caller(self, tmp_path, user_config):
         user_config(role_callers={"reviewer": "peaches"})
@@ -390,4 +403,4 @@ class TestDoctorReportsResolutionPerRole:
             "peaches",
             SOURCE_ROLE_CALLERS,
         )
-        assert "unresolved_on_forgejo" not in entry
+        assert "unverified_on_forgejo" not in entry

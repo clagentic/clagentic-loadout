@@ -324,8 +324,11 @@ gate is not actually an enforceable one.
    name); otherwise it stays required under its bare name, exactly as before,
    whether or not `github_app.callers` is declared (`callers` is the caller-ID
    space, not role vocabulary, so it never removes a requirement). An unmapped
-   role whose bare name is not a real account keeps refusing the merge;
-   `loadout-doctor` reports it as `UNRESOLVED-ON-FORGEJO` and names the
+   role whose bare name is not a real account keeps refusing the merge. The
+   callers list only words the `loadout-doctor` advisory: a bare role that is
+   listed in `github_app.callers` is reported as resolved; one that is not
+   listed, or any bare role when no list is declared, is reported as
+   `UNVERIFIED-ON-FORGEJO` (the account cannot be confirmed) with the
    `github_app.role_callers.<role>` key that would map it.
 
 ### `merge:` section — repo-tier (`.clagentic/loadout/config.yaml`)
