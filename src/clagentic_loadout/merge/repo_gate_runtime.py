@@ -110,10 +110,13 @@ from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import resolve_git_working_tree
 from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS, pre_checks_from_section
 from clagentic_loadout.merge.reviewer_login import (
+    DeclaredRoleResolution,
     ReviewerLoginNotConfiguredError,
+    resolve_forgejo_declared_role,
     resolve_reviewer_login,
     resolve_role_via_mapping,
 )
+from clagentic_loadout.platform_detect import PLATFORM_FORGEJO
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, resolve_repo_config_path
 
 #: Keys that belong to the tracked gate file and are never honoured from the
@@ -369,6 +372,20 @@ def load_repo_gate_at_base(
     )
 
 
+def _resolve_declared_role(role: str, platform: str) -> DeclaredRoleResolution | None:
+    """The renaming resolution for *role*, or None when it stays required under
+    its own name. Raises ReviewerLoginNotConfiguredError when it resolves to no
+    login."""
+    try:
+        resolve_reviewer_login(role, platform)
+    except ReviewerLoginNotConfiguredError as unresolved:
+        return resolve_role_via_mapping(role, unresolved)
+    if platform != PLATFORM_FORGEJO:
+        return None
+    resolution = resolve_forgejo_declared_role(role)
+    return None if resolution.requirement == role else resolution
+
+
 def with_resolvable_reviewer_roles(
     gate: RepoGate, platform: str, *, flagged_roles: Iterable[str] = ()
 ) -> RepoGate:
@@ -383,7 +400,9 @@ def with_resolvable_reviewer_roles(
     it is then required under the mapped caller's name (the name the caller's
     verdict fence carries), so the same caller named by `--required-reviewer`
     or by another declared role is one requirement, and the role's
-    `required_scanners` entry moves with it. A role that resolves neither way
+    `required_scanners` entry moves with it. On Forgejo the mapping is consulted
+    first and an unmapped role stays required under its bare name (see
+    `resolve_forgejo_declared_role`). A role that resolves neither way
     can never be checked, so ONLY that role is dropped from the
     reviewer floor and its own `required_scanners` entry is skipped, each with a
     warning naming the role, the platform and the missing mapping. Every other
@@ -411,26 +430,24 @@ def with_resolvable_reviewer_roles(
             kept.append(role)
             continue
         try:
-            resolve_reviewer_login(role, platform)
-        except ReviewerLoginNotConfiguredError as unresolved:
-            try:
-                mapped = resolve_role_via_mapping(role, unresolved)
-            except ReviewerLoginNotConfiguredError as exc:
-                dropped.append(role)
-                warnings.append(
-                    f"declared reviewer role {role!r} cannot be resolved to a {platform} login "
-                    f"({exc}); it is DROPPED from the reviewer floor and its required_scanners "
-                    f"entry is skipped, every other declared role and scanner stays enforced"
-                )
-                continue
-            renamed[role] = mapped.requirement
-            notices.append(
-                f"declared reviewer role {role!r} resolved through {mapped.source} to "
-                f"{mapped.requirement!r} ({mapped.login}); it is required under that name"
+            mapped = _resolve_declared_role(role, platform)
+        except ReviewerLoginNotConfiguredError as exc:
+            dropped.append(role)
+            warnings.append(
+                f"declared reviewer role {role!r} cannot be resolved to a {platform} login "
+                f"({exc}); it is DROPPED from the reviewer floor and its required_scanners "
+                f"entry is skipped, every other declared role and scanner stays enforced"
             )
-            kept.append(mapped.requirement)
-        else:
+            continue
+        if mapped is None:
             kept.append(role)
+            continue
+        renamed[role] = mapped.requirement
+        notices.append(
+            f"declared reviewer role {role!r} resolved through {mapped.source} to "
+            f"{mapped.requirement!r} ({mapped.login}); it is required under that name"
+        )
+        kept.append(mapped.requirement)
     if not dropped and not renamed:
         return gate
     # Two roles can map to one caller, and a mapped caller can also be named

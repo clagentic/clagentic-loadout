@@ -48,10 +48,15 @@ def user_config(tmp_path, monkeypatch):
     """Write the user-level `github_app:` section the resolvers read."""
     root = tmp_path / "user-config"
 
-    def write(*, slugs=None, role_callers=None, slug=None):
+    def write(*, slugs=None, role_callers=None, slug=None, callers=None):
         section = {
             key: value
-            for key, value in (("slugs", slugs), ("role_callers", role_callers), ("slug", slug))
+            for key, value in (
+                ("slugs", slugs),
+                ("role_callers", role_callers),
+                ("slug", slug),
+                ("callers", callers),
+            )
             if value is not None
         }
         root.mkdir(parents=True, exist_ok=True)
@@ -99,8 +104,22 @@ class TestResolveDeclaredRole:
         with pytest.raises(ReviewerLoginNotConfiguredError):
             resolve_reviewer_login("reviewer", PLATFORM_GITHUB)
 
-    def test_forgejo_resolves_the_bare_role_and_ignores_the_mapping(self, user_config):
+    def test_forgejo_resolves_a_mapped_role_to_the_callers_account(self, user_config):
         user_config(slugs={"peaches": "app-p"}, role_callers={"reviewer": "peaches"})
+        resolution = resolve_declared_role("reviewer", PLATFORM_FORGEJO)
+        assert (resolution.requirement, resolution.login, resolution.source) == (
+            "peaches",
+            "peaches",
+            SOURCE_ROLE_CALLERS,
+        )
+
+    def test_forgejo_mapping_wins_over_the_role_being_a_listed_caller(self, user_config):
+        user_config(role_callers={"reviewer": "peaches"}, callers=["reviewer", "peaches"])
+        assert resolve_declared_role("reviewer", PLATFORM_FORGEJO).login == "peaches"
+
+    @pytest.mark.parametrize("callers", [None, ["reviewer"], ["peaches", "bobbie"]])
+    def test_forgejo_an_unmapped_role_stays_required_under_its_bare_name(self, user_config, callers):
+        user_config(slugs={"peaches": "app-p"}, callers=callers)
         resolution = resolve_declared_role("reviewer", PLATFORM_FORGEJO)
         assert (resolution.requirement, resolution.login, resolution.source) == (
             "reviewer",
@@ -147,9 +166,19 @@ class TestGateRolesFollowTheMapping:
         gate = self._gate(["reviewer"])
         assert with_resolvable_reviewer_roles(gate, PLATFORM_GITHUB) is gate
 
-    def test_forgejo_is_returned_unchanged_whatever_is_mapped(self, user_config):
+    def test_forgejo_a_mapped_role_is_required_under_the_callers_account(self, user_config):
         user_config(role_callers={"reviewer": "peaches"})
-        gate = self._gate(["reviewer"])
+        gate = with_resolvable_reviewer_roles(
+            self._gate(["reviewer"], {"reviewer": ("a",)}), PLATFORM_FORGEJO
+        )
+        assert gate.reviewer_roles == ("peaches",)
+        assert gate.warnings == ()
+        assert gate.scanners_for("peaches") == ("a",)
+
+    @pytest.mark.parametrize("callers", [None, ["reviewer"], ["peaches"]])
+    def test_forgejo_an_unmapped_role_is_never_dropped(self, user_config, callers):
+        user_config(callers=callers)
+        gate = self._gate(["reviewer", "peaches"])
         assert with_resolvable_reviewer_roles(gate, PLATFORM_FORGEJO) is gate
 
 
@@ -256,6 +285,51 @@ class TestMergeEnforcesAMappedRole:
         assert "alpha" in err
 
 
+class TestForgejoMergeEnforcement:
+    """The verb's default platform is Forgejo, and nothing is stubbed: the role
+    resolves through a real config file."""
+
+    def _merge(self, tmp_path, comments, capsys):
+        init_gate_repo(tmp_path, tracked_gate={"required_reviewer_roles": ["reviewer"]})
+        code = verb.main(
+            base_args(**{"--repo-path": str(tmp_path)}),
+            token_provider=RecordingTokenProvider(),
+            authority_provider=AllowingAuthorityProvider(),
+            opener=make_opener(pr_info=_pr_info(tmp_path), comments=comments),
+        )
+        return code, capsys.readouterr().err
+
+    @staticmethod
+    def _verdict(name, status="clean"):
+        return {
+            "id": 1,
+            "user": {"login": name},
+            "body": build_verdict_block(name, status, HEAD, 1),
+        }
+
+    def test_a_mapped_role_merges_on_the_callers_clean_verdict(self, tmp_path, user_config, capsys):
+        user_config(role_callers={"reviewer": "peaches"}, callers=["peaches"])
+        code, err = self._merge(tmp_path, [self._verdict("peaches")], capsys)
+        assert code == verb.EXIT_OK
+        assert "'peaches' verdict PASSED" in err
+
+    def test_a_mapped_role_refuses_without_the_callers_verdict(self, tmp_path, user_config, capsys):
+        user_config(role_callers={"reviewer": "peaches"})
+        code, err = self._merge(tmp_path, [], capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "peaches" in err
+
+    @pytest.mark.parametrize("callers", [None, ["reviewer"], ["peaches"]])
+    def test_an_unmapped_role_is_still_required_under_its_bare_name(
+        self, tmp_path, user_config, capsys, callers
+    ):
+        user_config(callers=callers)
+        code, err = self._merge(tmp_path, [self._verdict("peaches")], capsys)
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "reviewer" in err
+        assert "DROPPED" not in err
+
+
 class TestDoctorReportsResolutionPerRole:
     def _repo(self, tmp_path, roles, remote=GITHUB_REMOTE):
         repo = tmp_path / "repo"
@@ -295,10 +369,38 @@ class TestDoctorReportsResolutionPerRole:
         assert by_role["reviewer"]["mapping_key"] == "github_app.role_callers.reviewer"
         assert "set github_app.role_callers.reviewer: <caller>" in result.summary
 
-    def test_a_forgejo_remote_reports_the_bare_role(self, tmp_path, user_config):
-        user_config()
+    @pytest.mark.parametrize("callers", [["peaches"], None])
+    def test_an_unlisted_forgejo_role_is_unverified_and_names_the_mapping_key(
+        self, tmp_path, user_config, callers
+    ):
+        user_config(callers=callers)
         repo = self._repo(tmp_path, ["reviewer"], remote="http://git-host.example.com:3000/o/r.git")
         result = check_repo_loadout_schema(repo)
-        assert result.ok is True
         (entry,) = result.resolved["reviewer_role_resolution"]
         assert entry["login"] == "reviewer" and entry["source"] == SOURCE_BARE_NAME
+        assert entry["unverified_on_forgejo"] is True
+        assert entry["mapping_key"] == "github_app.role_callers.reviewer"
+        assert "UNVERIFIED-ON-FORGEJO" in result.summary
+        assert "set github_app.role_callers.reviewer: <caller>" in result.summary
+
+    def test_a_listed_caller_bare_forgejo_role_is_resolved_with_no_hint(self, tmp_path, user_config):
+        user_config(callers=["reviewer"])
+        repo = self._repo(tmp_path, ["reviewer"], remote="http://git-host.example.com:3000/o/r.git")
+        result = check_repo_loadout_schema(repo)
+        (entry,) = result.resolved["reviewer_role_resolution"]
+        assert entry["resolved"] is True and entry["requirement"] == "reviewer"
+        assert "unverified_on_forgejo" not in entry and "mapping_key" not in entry
+        assert "UNVERIFIED" not in result.summary
+        assert "set github_app.role_callers" not in result.summary
+
+    def test_a_mapped_forgejo_role_is_reported_resolved_to_the_caller(self, tmp_path, user_config):
+        user_config(role_callers={"reviewer": "peaches"})
+        repo = self._repo(tmp_path, ["reviewer"], remote="http://git-host.example.com:3000/o/r.git")
+        result = check_repo_loadout_schema(repo)
+        (entry,) = result.resolved["reviewer_role_resolution"]
+        assert (entry["login"], entry["requirement"], entry["source"]) == (
+            "peaches",
+            "peaches",
+            SOURCE_ROLE_CALLERS,
+        )
+        assert "unverified_on_forgejo" not in entry

@@ -146,6 +146,7 @@ from clagentic_loadout.merge.repo_gate_runtime import (
     with_resolvable_reviewer_roles,
 )
 from clagentic_loadout.merge.reviewer_login import (
+    SOURCE_BARE_NAME,
     ReviewerLoginNotConfiguredError,
     resolve_declared_role,
     role_caller_mapping_key,
@@ -848,6 +849,7 @@ def _role_resolution_report(roles: tuple[str, ...], platform: str) -> tuple[dict
     """Resolve each declared role through the same path merge uses
     (`resolve_declared_role`) and describe the outcome, never raising."""
     report: list[dict] = []
+    known_callers = read_configured_callers()
     for role in roles:
         try:
             resolution = resolve_declared_role(role, platform)
@@ -862,23 +864,35 @@ def _role_resolution_report(roles: tuple[str, ...], platform: str) -> tuple[dict
                 }
             )
             continue
-        report.append(
-            {
-                "role": role,
-                "platform": platform,
-                "resolved": True,
-                "requirement": resolution.requirement,
-                "login": resolution.login,
-                "source": resolution.source,
-            }
-        )
+        entry = {
+            "role": role,
+            "platform": platform,
+            "resolved": True,
+            "requirement": resolution.requirement,
+            "login": resolution.login,
+            "source": resolution.source,
+        }
+        if platform == PLATFORM_FORGEJO and resolution.source == SOURCE_BARE_NAME:
+            # The callers list never changes what merge enforces; it only lets
+            # doctor word the advisory. A bare name that is a known caller is
+            # taken as a real account; anything else cannot be confirmed here.
+            if resolution.login not in (known_callers or ()):
+                entry["unverified_on_forgejo"] = True
+                entry["mapping_key"] = role_caller_mapping_key(role)
+        report.append(entry)
     return tuple(report)
 
 
 def _describe_role_resolution(report: tuple[dict, ...]) -> str:
     parts = []
     for entry in report:
-        if entry["resolved"]:
+        if entry.get("unverified_on_forgejo"):
+            parts.append(
+                f"{entry['role']} -> UNVERIFIED-ON-FORGEJO (still required from an account named "
+                f"{entry['login']!r}, which cannot be confirmed; set {entry['mapping_key']}: <caller> "
+                f"to map it)"
+            )
+        elif entry["resolved"]:
             required_as = (
                 f"required as {entry['requirement']}, " if entry["requirement"] != entry["role"] else ""
             )

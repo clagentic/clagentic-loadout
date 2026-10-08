@@ -169,24 +169,46 @@ def resolve_role_via_mapping(
     )
 
 
+def resolve_forgejo_declared_role(role: str) -> DeclaredRoleResolution:
+    """Resolve a repo-DECLARED reviewer role on Forgejo. Never drops a role.
+
+    A Forgejo login is the caller's account name, so a declared role resolves:
+
+      1. Through the deployment's `role_callers` mapping when it maps the role:
+         the mapped caller's name is both the login and the name the role is
+         required under.
+      2. Otherwise as the bare role, exactly as it was required before the
+         mapping existed. `callers` is the harness caller-ID space, not role
+         vocabulary, so a role absent from it is NOT evidence that no such
+         account exists; dropping it would silently lose a requirement.
+    """
+    caller = read_configured_role_callers().get(role)
+    if caller is not None:
+        return DeclaredRoleResolution(
+            role=role, requirement=caller, login=caller, source=SOURCE_ROLE_CALLERS
+        )
+    return DeclaredRoleResolution(role=role, requirement=role, login=role, source=SOURCE_BARE_NAME)
+
+
 def resolve_declared_role(role: str, platform: str) -> DeclaredRoleResolution:
     """Resolve a repo-DECLARED reviewer role to the login that posts it.
 
-    The role is first resolved exactly as `resolve_reviewer_login` resolves a
-    `--required-reviewer` name, and any role that resolves that way is returned
-    unchanged. Only when that fails (github, no slug for the role) is the
+    On GitHub the role is first resolved exactly as `resolve_reviewer_login`
+    resolves a `--required-reviewer` name, and any role that resolves that way
+    is returned unchanged. Only when that fails (no slug for the role) is the
     OPTIONAL role mapping consulted (`resolve_role_via_mapping`). A deployment
     with no mapping therefore behaves exactly as it did before the mapping
-    existed.
+    existed. Forgejo follows `resolve_forgejo_declared_role`.
 
     Raises ReviewerLoginNotConfiguredError when the role resolves neither way.
     """
+    if platform == PLATFORM_FORGEJO:
+        return resolve_forgejo_declared_role(role)
     try:
         login = resolve_reviewer_login(role, platform)
     except ReviewerLoginNotConfiguredError as exc:
         return resolve_role_via_mapping(role, exc)
-    source = SOURCE_BARE_NAME if platform == PLATFORM_FORGEJO else SOURCE_SLUGS
-    return DeclaredRoleResolution(role=role, requirement=role, login=login, source=source)
+    return DeclaredRoleResolution(role=role, requirement=role, login=login, source=SOURCE_SLUGS)
 
 
 __all__ = [
@@ -196,6 +218,7 @@ __all__ = [
     "DeclaredRoleResolution",
     "ReviewerLoginNotConfiguredError",
     "resolve_declared_role",
+    "resolve_forgejo_declared_role",
     "resolve_role_via_mapping",
     "resolve_reviewer_login",
     "role_caller_mapping_key",

@@ -263,6 +263,12 @@ warning and that role being dropped from the floor; add the
 `github_app.slugs.<role>` entry (or pass `--required-reviewer <role>:<login>`)
 to enforce it.
 
+On Forgejo a declared role is first looked up in the deployment's `role_callers`
+map (the mapped caller is the account and the name the role is required under);
+an unmapped role stays required under its bare name, as before the mapping
+existed, whether or not a `callers` list is declared. No Forgejo role is ever
+dropped. See `docs/provisioning.md`.
+
 **Migration (since the repo reviewer floor landed).** A deployment needs no new
 configuration to keep merging: a declared role that cannot resolve is dropped
 (with its scanners) with a warning while every other role stays enforced, a
