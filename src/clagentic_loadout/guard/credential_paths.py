@@ -68,7 +68,7 @@ DEFAULT_BASH_CREDENTIAL_PATTERNS: tuple[re.Pattern, ...] = (
 #: only, no path separators or `.` — rejects directory-as-prefix
 #: (`...bak-evil/anything`) and traversal (`...bak-../../etc/shadow`)
 #: attacks (lr-9c39).
-_BAK_SUFFIX_RE: re.Pattern = re.compile(r"^[A-Za-z0-9-]+\Z")
+_BAK_SUFFIX_RE: re.Pattern = re.compile(r"^[A-Za-z0-9-]+$")
 
 
 def is_valid_bak_path(path_str: str, base_path: str) -> bool:

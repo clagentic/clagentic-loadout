@@ -64,7 +64,7 @@ class VerifyEntry:
     env_passthrough: tuple[str, ...] = ()
 
 
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def _parse_entry(raw: object, index: int, config_path: Path) -> VerifyEntry:
