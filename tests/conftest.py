@@ -127,6 +127,8 @@ own module namespace, never `provider_config`'s.
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from clagentic_loadout.acquire import verb as acquire_verb
@@ -314,6 +316,66 @@ def _confine_git_discovery_to_tmp(monkeypatch, tmp_path):
     depend on the host's filesystem. A test that needs a different ceiling
     sets its own, which wins."""
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.resolve().parent))
+
+
+@pytest.fixture(scope="session")
+def _empty_git_template_dir(tmp_path_factory):
+    """One template directory shared by the whole session, holding only the
+    empty `hooks` and `info` directories. Tests install hook scripts straight
+    into `.git/hooks` and expect that directory to exist, so it must still be
+    created, just without the sample files. Reflogs are switched off in the
+    template's config too: a reflog is one more file per ref per repo, and no
+    test reads one."""
+    template = tmp_path_factory.mktemp("empty-git-template")
+    (template / "hooks").mkdir()
+    (template / "info").mkdir()
+    (template / "config").write_text("[core]\n\tlogAllRefUpdates = false\n", encoding="utf-8")
+    return template
+
+
+@pytest.fixture(autouse=True)
+def _init_git_repos_from_empty_template(monkeypatch, _empty_git_template_dir):
+    """Autouse repo-wide: `git init` copies no template into new repos.
+
+    The stock template adds about 15 sample hooks, an info/exclude and a
+    description to every repo, and the suite creates thousands of throwaway
+    repos, so a full run wrote hundreds of thousands of files into the pytest
+    base temp. None of those files affects what a test observes: sample hooks
+    are inert and nothing here reads info/exclude or description. Git reads
+    the template location from the environment, so every `git init` a test or
+    a verb under test spawns inherits it. A test that sets its own
+    GIT_TEMPLATE_DIR wins."""
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(_empty_git_template_dir))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Expose each phase's report on the item so fixtures can tell, in their
+    teardown, whether the test body passed."""
+    outcome = yield
+    setattr(item, f"rep_{call.when}", outcome.get_result())
+
+
+@pytest.fixture(autouse=True)
+def _remove_tmp_path_siblings_after_pass(request, tmp_path):
+    """Autouse repo-wide: a passing test's `<tmp_path name>-*` siblings go
+    away together with tmp_path itself.
+
+    With `tmp_path_retention_policy = "failed"` pytest deletes a passing
+    test's tmp_path, which frees its number for reuse by the next test whose
+    truncated directory name matches. Some tests build a sibling directory
+    next to tmp_path (a bare `-origin.git` remote, marker files); left
+    behind, they would be found already present by the test that reuses the
+    name. Failed tests
+    keep their siblings for diagnosis, like tmp_path."""
+    yield
+    report = getattr(request.node, "rep_call", None)
+    if report is not None and report.passed:
+        for sibling in tmp_path.parent.glob(f"{tmp_path.name}-*"):
+            if sibling.is_dir() and not sibling.is_symlink():
+                shutil.rmtree(sibling)
+            else:
+                sibling.unlink()
 
 
 def pytest_configure(config: "pytest.Config") -> None:
