@@ -246,7 +246,7 @@ def _make_opener(*, pr_info=None, files=None, comments=None, merge_status=200):
             return _json_resp(200, {"login": "loadout-merger"})
         if method == "GET" and url.endswith("/files"):
             return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and url.endswith("/comments"):
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
             return _json_resp(200, comments + posted_comments)
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": "", "statuses": []})
@@ -311,7 +311,7 @@ def _make_github_opener(*, pr_info=None, files=None, comments=None, merged_sha=N
             return _json_resp(200, posted_reviews[-1])
         if method == "GET" and url.endswith("/files"):
             return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and "/issues/" in url and url.endswith("/comments"):
+        if method == "GET" and "/issues/" in url and url.split("?")[0].endswith("/comments"):
             return _json_resp(200, comments)
         if method == "GET" and "/reviews" in url:
             return _json_resp(200, posted_reviews)

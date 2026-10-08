@@ -274,7 +274,7 @@ def github_opener(
             return _json({"id": 5, "html_url": "http://post"})
         if method == "GET" and url.endswith("/user"):
             return _json({"login": login})
-        if method == "GET" and url.endswith(f"/issues/{pr_number}/comments"):
+        if method == "GET" and url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             if recorded["posted_body"] is None:
                 return _json([])
             return _json(

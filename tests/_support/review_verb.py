@@ -42,7 +42,7 @@ def github_verdict_opener(*, pr_number=42, posted_id=5, landed_body=None, captur
     def opener(req, timeout=15):
         url = req.full_url
         method = req.get_method()
-        if method == "GET" and url.endswith(f"/issues/{pr_number}/comments") and state["posted_body"] is None:
+        if method == "GET" and url.split("?")[0].endswith(f"/issues/{pr_number}/comments") and state["posted_body"] is None:
             # Pre-POST dedupe readback (the GitHub backend's idempotency
             # check): nothing has been posted yet, so no existing-own-comment
             # match is possible.
@@ -52,7 +52,7 @@ def github_verdict_opener(*, pr_number=42, posted_id=5, landed_body=None, captur
             return json_resp(200, {"id": posted_id, "html_url": "http://post"})
         if url.endswith("/user"):
             return json_resp(200, {"login": "reviewer"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             if callable(landed_body):
                 body = landed_body(state["posted_body"])
             else:

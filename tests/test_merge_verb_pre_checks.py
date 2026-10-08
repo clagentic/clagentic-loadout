@@ -114,7 +114,7 @@ def _make_opener(*, pr_info=None, merge_calls=None):
             return _json_resp(200, {"login": "loadout-merger"})
         if method == "GET" and url.endswith("/files"):
             return _json_resp(200, [{"filename": "a.py"}])
-        if method == "GET" and url.endswith("/comments"):
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
             return _json_resp(200, posted_comments)
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": "", "statuses": []})

@@ -63,7 +63,7 @@ from clagentic_loadout.merge.errors import (
 )
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.sha import InvalidShaError, validate_sha
-from clagentic_loadout.transport import git_host_api
+from clagentic_loadout.transport import comment_paging, git_host_api
 
 
 def assert_platform_is_forgejo(owner: str, repo: str, *, explicit_platform: str) -> None:
@@ -198,30 +198,26 @@ def fetch_comments(
     enforce a reviewer's verdict it cannot read.
     """
     try:
-        status, raw = git_host_api.request(
-            api_base,
-            "GET",
-            f"/api/v1/repos/{owner}/{repo}/issues/{pr_number}/comments",
-            token,
-            opener=opener,
+        return comment_paging.list_forgejo_issue_comments(
+            git_host_api.request, api_base, owner, repo, pr_number, token, opener=opener
         )
     except git_host_api.GitHostApiError as exc:
         raise GateFactUnavailableError(
             f"cannot read comments for PR #{pr_number} in {owner}/{repo}: {exc}"
         ) from exc
-    if status != 200:
+    except comment_paging.CommentPageStatusError as exc:
         raise GateFactUnavailableError(
-            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: HTTP {status}"
-        )
-    if not raw:
-        return []
-    parsed = json.loads(raw.decode("utf-8"))
-    if not isinstance(parsed, list):
+            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: HTTP {exc.status}"
+        ) from exc
+    except comment_paging.CommentPageShapeError as exc:
         raise GateFactUnavailableError(
             f"comments endpoint returned a non-list body for PR #{pr_number} "
             f"in {owner}/{repo}"
-        )
-    return parsed
+        ) from exc
+    except comment_paging.CommentPageCapError as exc:
+        raise GateFactUnavailableError(
+            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
 
 
 def fetch_ci_status(

@@ -339,7 +339,7 @@ def _make_success_opener(*, own_login="reviewer-bot[bot]", posted_id=99, pr_numb
         url = req.full_url
         if url.endswith("/user"):
             raise _http_error(url, 403, {})
-        if req.get_method() == "GET" and url.endswith(f"/issues/{pr_number}/comments"):
+        if req.get_method() == "GET" and url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             comments_get_calls["count"] += 1
             if comments_get_calls["count"] == 1:
                 # Dedupe pre-check: no existing own comment yet.
@@ -414,7 +414,7 @@ class _FakeReviewsServer:
         url = req.full_url
         if url.endswith("/user"):
             raise _http_error(url, 403, {})
-        if req.get_method() == "GET" and url.endswith(f"/issues/{self.pr_number}/comments"):
+        if req.get_method() == "GET" and url.split("?")[0].endswith(f"/issues/{self.pr_number}/comments"):
             return _json_response(200, list(self.reviews))
         if req.get_method() == "POST" and url.endswith(f"/issues/{self.pr_number}/comments"):
             self.post_count += 1
@@ -623,7 +623,7 @@ class TestPostAndVerifyReviewPostFailures:
         def opener(req, timeout=15):
             if req.full_url.endswith("/user"):
                 return _json_response(200, {"login": "me"})
-            if req.get_method() == "GET" and req.full_url.endswith("/comments"):
+            if req.get_method() == "GET" and req.full_url.split("?")[0].endswith("/comments"):
                 return _json_response(200, [])  # dedupe pre-check: no match
             raise _http_error(req.full_url, 422, {"message": "Unprocessable"})
 
@@ -640,7 +640,7 @@ class TestPostAndVerifyReviewVerifyFailures:
         def opener(req, timeout=15):
             if req.full_url.endswith("/user"):
                 return _json_response(200, {"login": "me"})
-            if req.get_method() == "GET" and req.full_url.endswith("/comments"):
+            if req.get_method() == "GET" and req.full_url.split("?")[0].endswith("/comments"):
                 comments_get_calls["count"] += 1
                 if comments_get_calls["count"] == 1:
                     return _json_response(200, [])  # dedupe pre-check: no match
@@ -660,7 +660,7 @@ class TestPostAndVerifyReviewVerifyFailures:
         def opener(req, timeout=15):
             if req.full_url.endswith("/user"):
                 return _json_response(200, {"login": "me"})
-            if req.get_method() == "GET" and req.full_url.endswith("/comments"):
+            if req.get_method() == "GET" and req.full_url.split("?")[0].endswith("/comments"):
                 comments_get_calls["count"] += 1
                 if comments_get_calls["count"] == 1:
                     return _json_response(200, [])  # dedupe pre-check: no match
@@ -692,7 +692,7 @@ class TestPostAndVerifyReviewVerifyFailures:
         def opener(req, timeout=15):
             if req.full_url.endswith("/user"):
                 return _json_response(200, {"login": "me"})
-            if req.get_method() == "GET" and req.full_url.endswith("/comments"):
+            if req.get_method() == "GET" and req.full_url.split("?")[0].endswith("/comments"):
                 comments_get_calls["count"] += 1
                 return _json_response(200, [])  # empty on both dedupe + verify reads
             if req.get_method() == "POST":
@@ -721,7 +721,7 @@ class TestPostAndVerifyReviewVerifyFailures:
         def opener(req, timeout=15):
             if req.full_url.endswith("/user"):
                 return _json_response(200, {"login": "me"})
-            if req.get_method() == "GET" and req.full_url.endswith("/comments"):
+            if req.get_method() == "GET" and req.full_url.split("?")[0].endswith("/comments"):
                 comments_get_calls["count"] += 1
                 if comments_get_calls["count"] == 1:
                     return _json_response(200, [])  # dedupe pre-check: no match
@@ -856,7 +856,7 @@ class TestRedirectHardeningEachCallShape:
             request_log.append((req.get_method(), req.full_url))
             if req.full_url.endswith("/user"):
                 return _json_response(200, {"login": "some-role"})
-            if req.get_method() == "GET" and req.full_url.endswith("/comments"):
+            if req.get_method() == "GET" and req.full_url.split("?")[0].endswith("/comments"):
                 return _json_response(200, [])  # dedupe pre-check: no match
             raise _redirect_http_error(req.full_url, 302)
 
@@ -888,7 +888,7 @@ class TestRedirectHardeningEachCallShape:
             request_log.append((req.get_method(), req.full_url))
             if req.full_url.endswith("/user"):
                 return _json_response(200, {"login": "some-role"})
-            if req.get_method() == "GET" and req.full_url.endswith("/comments"):
+            if req.get_method() == "GET" and req.full_url.split("?")[0].endswith("/comments"):
                 comments_get_calls["count"] += 1
                 if comments_get_calls["count"] == 1:
                     return _json_response(200, [])  # dedupe pre-check: no match

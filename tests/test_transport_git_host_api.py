@@ -703,7 +703,7 @@ class TestMainVerifyCommentEndToEnd:
                 return _FakeResponse(200, b'{"id": 999}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, json.dumps({"login": own_login}).encode("utf-8"))
-            if url.endswith("/comments"):
+            if url.split("?")[0].endswith("/comments"):
                 created = comment_created_at or (
                     datetime.now(timezone.utc) + timedelta(seconds=1)
                 ).isoformat().replace("+00:00", "Z")
@@ -2481,7 +2481,7 @@ class TestMainExpectVerdictBlockEndToEnd:
                 return _FakeResponse(200, b'{"id": 999}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, json.dumps({"login": own_login}).encode("utf-8"))
-            if url.endswith("/comments"):
+            if url.split("?")[0].endswith("/comments"):
                 created = comment_created_at or (
                     datetime.now(timezone.utc) + timedelta(seconds=1)
                 ).isoformat().replace("+00:00", "Z")
@@ -2725,7 +2725,7 @@ class TestMainCallerTrackingIdEndToEnd:
                 return _FakeResponse(200, b'{"id": 42}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, json.dumps({"login": own_login}).encode("utf-8"))
-            if url.endswith("/comments"):
+            if url.split("?")[0].endswith("/comments"):
                 created = (
                     datetime.now(timezone.utc) + timedelta(seconds=1)
                 ).isoformat().replace("+00:00", "Z")
@@ -2967,7 +2967,7 @@ class TestMainBodyEnvEndToEnd:
                 return _FakeResponse(200, b'{"id": 42}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, json.dumps({"login": own_login}).encode("utf-8"))
-            if url.endswith("/comments"):
+            if url.split("?")[0].endswith("/comments"):
                 created = (
                     datetime.now(timezone.utc) + timedelta(seconds=1)
                 ).isoformat().replace("+00:00", "Z")

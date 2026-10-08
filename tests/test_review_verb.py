@@ -73,7 +73,7 @@ def _github_success_opener(*, pr_number=42, posted_id=5):
             return _json_resp(200, {"id": posted_id, "html_url": "http://post"})
         if url.endswith("/user"):
             return _json_resp(200, {"login": "some-role"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             return _json_resp(
                 200,
                 [
@@ -99,7 +99,7 @@ def _forgejo_success_opener(*, pr_number=42, comment_id=9):
             return _json_resp(200, {"id": comment_id})
         if url.endswith("/api/v1/user"):
             return _json_resp(200, {"login": "some-role"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             return _json_resp(
                 200,
                 [
@@ -433,7 +433,7 @@ def _forgejo_verdict_opener(*, pr_number=42, comment_id=9, landed_body=None, cap
             return _json_resp(200, {"id": comment_id})
         if url.endswith("/api/v1/user"):
             return _json_resp(200, {"login": "reviewer"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             if callable(landed_body):
                 body = landed_body(state["posted_body"])
             else:

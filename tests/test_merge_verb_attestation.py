@@ -169,7 +169,7 @@ def _forgejo_opener(
             return _json_resp(200, {"login": "loadout-merger"})
         if method == "GET" and url.endswith("/files"):
             return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and url.endswith("/comments"):
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
             return _json_resp(200, comments + posted_comments)
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": ci_state, "statuses": ci_statuses})
@@ -262,7 +262,7 @@ def _github_opener(
             return _json_resp(200, posted_comments[-1])
         if method == "GET" and url.endswith("/files"):
             return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and url.endswith("/comments"):
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
             return _json_resp(200, comments + posted_comments)
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": ci_state, "statuses": ci_statuses})

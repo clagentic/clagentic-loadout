@@ -64,7 +64,7 @@ def _make_success_opener(*, bot_login="git-host-bot", comment_id=7, pr_number=42
             return _FakeResponse(200, b'{"id": 7}')
         if url.endswith("/api/v1/user"):
             return _FakeResponse(200, json.dumps({"login": bot_login}).encode())
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             return _FakeResponse(
                 200,
                 json.dumps(
@@ -165,7 +165,7 @@ class TestPostAndVerifyCommentVerifyFailures:
                 return _FakeResponse(200, b'{"id": 7}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, b'{"login": "git-host-bot"}')
-            if url.endswith("/issues/1/comments"):
+            if url.split("?")[0].endswith("/issues/1/comments"):
                 return _FakeResponse(200, b"[]")  # nothing landed
             raise AssertionError(f"unexpected request: {method} {url}")
 
@@ -182,7 +182,7 @@ class TestPostAndVerifyCommentVerifyFailures:
                 return _FakeResponse(200, b'{"id": 7}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, b'{"login": "git-host-bot"}')
-            if url.endswith("/issues/1/comments"):
+            if url.split("?")[0].endswith("/issues/1/comments"):
                 return _FakeResponse(
                     200,
                     json.dumps(

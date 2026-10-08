@@ -214,7 +214,7 @@ def _shadow_opener(calls: list[tuple[str, str]]):
         if method == "GET" and url.endswith("/files"):
             calls.append(("GET", "files"))
             return _json_resp(200, [{"filename": f} for f in PR_42_CHANGED_FILES])
-        if method == "GET" and url.endswith("/comments"):
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
             calls.append(("GET", "comments"))
             return _json_resp(200, PR_42_COMMENTS + posted_comments)
         if method == "GET" and url.endswith("/status"):
@@ -406,7 +406,7 @@ class TestShadowParityPR42:
         def opener_blocking(req, timeout=15):
             url = req.full_url
             method = req.get_method()
-            if method == "GET" and url.endswith("/comments"):
+            if method == "GET" and url.split("?")[0].endswith("/comments"):
                 return _json_resp(200, comments)
             return _shadow_opener([])(req, timeout=timeout)
 
