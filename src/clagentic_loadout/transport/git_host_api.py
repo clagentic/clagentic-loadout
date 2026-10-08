@@ -461,7 +461,7 @@ _SAFE_CALLER_RE = re.compile(r"\A[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 # but still rejects control characters and whitespace so the value can never
 # smuggle a newline or other structural character into the JSON metadata
 # fence this module constructs.
-_SAFE_CALLER_TRACKING_ID_RE = re.compile(r"^[\x21-\x7e]{1,128}$")
+_SAFE_CALLER_TRACKING_ID_RE = re.compile(r"^[\x21-\x7e]{1,128}\Z")
 
 # Regex to extract owner from any /api/v1/repos/{owner}/{repo}/... path.
 # Anchored to the Forgejo path shape (/api/v1/repos/...) -- this is the

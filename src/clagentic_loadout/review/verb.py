@@ -243,7 +243,7 @@ from clagentic_loadout.transport.provider_config import resolve_platform_provide
 # review-post inconsistent with its sibling entry point's fail-fast posture.
 # Mirrors both backends' own digit-only pattern exactly (accepts only a bare
 # positive-decimal-integer string).
-_DELETE_COMMENT_ID_RE = re.compile(r"^\d+$")
+_DELETE_COMMENT_ID_RE = re.compile(r"^\d+\Z")
 
 # ---------------------------------------------------------------------------
 # Exit codes -- one reserved range for the review-post verb, distinct from

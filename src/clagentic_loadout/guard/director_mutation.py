@@ -210,7 +210,7 @@ from clagentic_loadout.guard.shell_parsing import (
 #: `guard.write_scope`'s "reuse landed primitives; never duplicate a
 #: boundary" convention, applied here as "share the GRAMMAR, not a
 #: cross-module import that would invert the dependency direction").
-_ROLE_TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_ROLE_TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 
 
 @dataclass(frozen=True)

@@ -388,7 +388,7 @@ ENV_OVERRIDE_PREFIX = "CLAGENTIC_LOADOUT_POST_MERGE_ENV_"
 #: own grammar for the VAR half of a `VAR=VALUE` prefix, so both env-override
 #: sources (a step's own inline prefix, and this deployment-wide tier) accept
 #: the identical variable-name shape.
-_ENV_OVERRIDE_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_ENV_OVERRIDE_VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 

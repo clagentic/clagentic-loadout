@@ -836,7 +836,7 @@ def check_builder_command(
 #: `_build_caller_flag_re` below — mirrors `provisioning.roles._TOKEN_RE`
 #: (alphanumeric/hyphen/underscore, 1-64 chars, no leading hyphen). See
 #: module docstring's FLAGGED LOSSY COLLAPSE POINTS, final bullet.
-_ROLE_TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_ROLE_TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 
 
 @dataclass(frozen=True)

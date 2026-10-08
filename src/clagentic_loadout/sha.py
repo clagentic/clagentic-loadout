@@ -36,12 +36,12 @@ from __future__ import annotations
 import re
 
 #: Full 40-character lowercase-hex git SHA.
-FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}\Z")
 
 #: Abbreviated-or-full lowercase-hex git SHA (7-40 chars) — the shape accepted
 #: at the envelope/CLI boundary before a tool can confirm the full value via
 #: `git rev-parse` or a platform API read.
-ABBREVIATED_SHA_RE = re.compile(r"^[0-9a-f]{7,40}$")
+ABBREVIATED_SHA_RE = re.compile(r"^[0-9a-f]{7,40}\Z")
 
 
 class InvalidShaError(ValueError):

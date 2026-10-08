@@ -86,7 +86,7 @@ CONFIG_SECTION_MODEL_ROUTING = "model_routing"
 #: hyphen). Model ids are opaque strings from this module's point of view
 #: (never interpreted, never defaulted to a real provider/model literal) —
 #: this grammar exists only for clear, unambiguous error reporting.
-_TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 
 #: Reference/default role -> scope-tiered model_chain mapping. Single,
 #: open-ended (`max_loc: None`) tier per seed role (builder, reviewer,
