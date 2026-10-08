@@ -26,8 +26,8 @@ gate than it believes it has.
 
 UNMIGRATED REPOS. When the base commit has NO tracked gate file, the gate keys
 are read from the deployment file exactly as they were before the gate moved
-(`gate_from_deployment_config`), and `pre_checks` run in the repo path as they
-always did. Refusing or ignoring would turn a repo that declared a gate into
+(`gate_from_deployment_config`), and `pre_checks` are still declared there
+(they execute in the merge-result worktree like any other). Refusing or ignoring would turn a repo that declared a gate into
 one that silently gates nothing. The deployment file is gitignored operator
 config, not PR content, so the PR under review still cannot relax its own gate.
 The result carries one notice naming the source; a readable file is never a
@@ -110,13 +110,9 @@ from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import resolve_git_working_tree
 from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS, pre_checks_from_section
 from clagentic_loadout.merge.reviewer_login import (
-    DeclaredRoleResolution,
     ReviewerLoginNotConfiguredError,
-    resolve_forgejo_declared_role,
-    resolve_reviewer_login,
-    resolve_role_via_mapping,
+    renamed_declared_role,
 )
-from clagentic_loadout.platform_detect import PLATFORM_FORGEJO
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, resolve_repo_config_path
 
 #: Keys that belong to the tracked gate file and are never honoured from the
@@ -372,20 +368,6 @@ def load_repo_gate_at_base(
     )
 
 
-def _resolve_declared_role(role: str, platform: str) -> DeclaredRoleResolution | None:
-    """The renaming resolution for *role*, or None when it stays required under
-    its own name. Raises ReviewerLoginNotConfiguredError when it resolves to no
-    login."""
-    try:
-        resolve_reviewer_login(role, platform)
-    except ReviewerLoginNotConfiguredError as unresolved:
-        return resolve_role_via_mapping(role, unresolved)
-    if platform != PLATFORM_FORGEJO:
-        return None
-    resolution = resolve_forgejo_declared_role(role)
-    return None if resolution.requirement == role else resolution
-
-
 def with_resolvable_reviewer_roles(
     gate: RepoGate, platform: str, *, flagged_roles: Iterable[str] = ()
 ) -> RepoGate:
@@ -430,7 +412,7 @@ def with_resolvable_reviewer_roles(
             kept.append(role)
             continue
         try:
-            mapped = _resolve_declared_role(role, platform)
+            mapped = renamed_declared_role(role, platform)
         except ReviewerLoginNotConfiguredError as exc:
             dropped.append(role)
             warnings.append(

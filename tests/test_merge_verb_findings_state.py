@@ -439,7 +439,7 @@ class TestRepoReviewerFloor:
                 )
             return name
 
-        monkeypatch.setattr("clagentic_loadout.merge.repo_gate_runtime.resolve_reviewer_login", resolve)
+        monkeypatch.setattr("clagentic_loadout.merge.reviewer_login.resolve_reviewer_login", resolve)
         monkeypatch.setattr(verb, "resolve_reviewer_login", resolve)
 
     def test_an_unresolvable_role_is_dropped_with_a_warning_and_the_rest_still_merges(

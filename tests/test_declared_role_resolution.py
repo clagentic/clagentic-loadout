@@ -24,6 +24,7 @@ from clagentic_loadout.merge.reviewer_login import (
     SOURCE_ROLE_CALLERS,
     SOURCE_SLUGS,
     ReviewerLoginNotConfiguredError,
+    renamed_declared_role,
     resolve_declared_role,
     resolve_reviewer_login,
 )
@@ -203,7 +204,7 @@ class TestMergeEnforcesAMappedRole:
                 raise ReviewerLoginNotConfiguredError(f"no GitHub App slug configured for reviewer {name!r}")
             return name
 
-        monkeypatch.setattr("clagentic_loadout.merge.repo_gate_runtime.resolve_reviewer_login", resolve)
+        monkeypatch.setattr("clagentic_loadout.merge.reviewer_login.resolve_reviewer_login", resolve)
 
     def _merge(self, tmp_path, gate, comments, *, flags=(), capsys):
         init_gate_repo(tmp_path, tracked_gate=gate)
@@ -404,3 +405,73 @@ class TestDoctorReportsResolutionPerRole:
             SOURCE_ROLE_CALLERS,
         )
         assert "unverified_on_forgejo" not in entry
+
+
+class TestTheGateAndTheExportedResolverAgree:
+    """`with_resolvable_reviewer_roles` and `resolve_declared_role` are one
+    resolution path: for every shape, the gate keeps, renames or drops a role
+    exactly as the exported resolver reports it."""
+
+    _CASES = {
+        "mapped-forgejo": (PLATFORM_FORGEJO, {"role_callers": {"reviewer": "peaches"}}),
+        "bare-forgejo": (PLATFORM_FORGEJO, {"slugs": {"peaches": "app-p"}}),
+        "listed-caller-forgejo": (PLATFORM_FORGEJO, {"callers": ["reviewer"]}),
+        "mapped-forgejo-to-itself": (PLATFORM_FORGEJO, {"role_callers": {"reviewer": "reviewer"}}),
+        "github-slug": (PLATFORM_GITHUB, {"slugs": {"reviewer": "app-r"}}),
+        "github-mapped": (
+            PLATFORM_GITHUB,
+            {"slugs": {"peaches": "app-p"}, "role_callers": {"reviewer": "peaches"}},
+        ),
+        "github-unresolvable": (PLATFORM_GITHUB, {"slugs": {"peaches": "app-p"}}),
+        "github-mapped-to-slugless-caller": (
+            PLATFORM_GITHUB,
+            {"slugs": {"peaches": "app-p"}, "role_callers": {"reviewer": "ghost"}},
+        ),
+    }
+
+    @pytest.mark.parametrize("case", sorted(_CASES))
+    def test_the_gate_applies_exactly_what_the_exported_resolver_reports(self, user_config, case):
+        platform, config = self._CASES[case]
+        user_config(**config)
+        try:
+            resolution = resolve_declared_role("reviewer", platform)
+        except ReviewerLoginNotConfiguredError:
+            resolution = None
+        gate = RepoGate(reviewer_roles=("reviewer",))
+        result = with_resolvable_reviewer_roles(gate, platform)
+        if resolution is None:
+            assert result.reviewer_roles == ()
+            assert any("DROPPED" in w for w in result.warnings)
+        elif resolution.requirement == "reviewer":
+            assert result is gate
+        else:
+            assert result.reviewer_roles == (resolution.requirement,)
+            assert any(resolution.login in n for n in result.notices)
+
+    @pytest.mark.parametrize(
+        ("case", "expected"),
+        [
+            ("mapped-forgejo", ("peaches", SOURCE_ROLE_CALLERS)),
+            ("bare-forgejo", None),
+            ("listed-caller-forgejo", None),
+            ("mapped-forgejo-to-itself", None),
+            ("github-slug", None),
+            ("github-mapped", ("peaches", SOURCE_ROLE_CALLERS)),
+        ],
+    )
+    def test_renamed_declared_role_reports_none_only_for_an_unchanged_role(
+        self, user_config, case, expected
+    ):
+        platform, config = self._CASES[case]
+        user_config(**config)
+        renamed = renamed_declared_role("reviewer", platform)
+        assert (None if renamed is None else (renamed.requirement, renamed.source)) == expected
+
+    @pytest.mark.parametrize("case", ["github-unresolvable", "github-mapped-to-slugless-caller"])
+    def test_an_unresolvable_role_raises_from_both(self, user_config, case):
+        platform, config = self._CASES[case]
+        user_config(**config)
+        with pytest.raises(ReviewerLoginNotConfiguredError):
+            resolve_declared_role("reviewer", platform)
+        with pytest.raises(ReviewerLoginNotConfiguredError):
+            renamed_declared_role("reviewer", platform)
