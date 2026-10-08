@@ -215,10 +215,23 @@ keep a broken config from blocking the merge that would fix it:
   read, so it fails closed: `pre_checks` **refuse** (the base SHA is the only
   source of the declaration, and an unverifiable declaration is never read as
   "no checks"), and the reviewer pair falls back with a warning.
-- `pre_checks` execute in a fresh git worktree of the merge result (the PR head
-  merged onto its base commit) under `TMPDIR`, removed afterwards; the shared
-  `--repo-path` checkout is neither read for execution nor modified. The
-  worktree carries no untracked or ignored state from that checkout (no in-repo
+- `pre_checks` execute in a private git clone of the merge result (the PR head
+  merged onto its base commit) under `TMPDIR`, removed afterwards however the
+  run ends; the shared `--repo-path` checkout is neither read for execution nor
+  modified. The clone is made with `git clone --shared --no-checkout` (it borrows
+  the shared object store read-only and never hardlinks it) and has its own
+  `.git`, so a hook, config entry, ref or object a check writes in its own
+  repository does not reach the shared one. `HEAD` in the clone is the merge
+  result: a head that is a fast-forward of base is checked out as it is,
+  otherwise the merge is committed in the clone (synthetic author and
+  committer, hooks off, no signing) and checked out, so the tree is clean and
+  `git diff origin/<base>..HEAD` shows only the PR change. The shared
+  repository's remote-tracking refs (`refs/remotes/origin/*`, and `origin/HEAD`
+  when present) are copied into the clone and `refs/remotes/origin/<base branch>`
+  is pinned to the PR's base commit, so a check that compares against `origin`
+  sees the true base. A head that conflicts with base refuses the merge before
+  `merge_pr`. The
+  clone carries no untracked or ignored state from that checkout (no in-repo
   virtualenv, build artifacts or uninitialised submodules), so a check must not
   depend on them. Their child processes receive the merger's environment minus
   identity and attestation variables, the `CLAGENTIC_LOADOUT_*` namespace and
@@ -230,32 +243,29 @@ keep a broken config from blocking the merge that would fix it:
   `HOME`, `LANG`, `LC_*`, `VIRTUAL_ENV`, `PYTHONPATH` and `TMPDIR` pass through.
   Variables that point at a credential source are withheld too: `GIT_ASKPASS`,
   `SSH_ASKPASS`, `SUDO_ASKPASS`, `NETRC`, `KUBECONFIG`, `DOCKER_CONFIG` and the
-  `GIT_CONFIG_*` family (which can inject a credential helper).
-  **Limits of the scrub.** It only controls the environment handed to the child.
-  The child still runs as the merger's user with the same `HOME`, so it can read
-  that user's credential files (`~/.git-credentials`, `~/.netrc`, ...) and the
-  merger's own unscrubbed `/proc/<pid>/environ`. Closing that needs process
-  isolation (a sandbox), which loadout does not provide.
-  **Shared git directory guard.** The worktree shares the repository's git common
-  directory, so check code can write there. Before the checks run, loadout
-  records the common directory's `hooks/` and `info/` trees and its `config` and
-  `config.worktree` files (entries, modes and content hashes). After the checks,
-  whatever their outcome, it compares; on any difference it restores the recorded
-  state and **refuses** the merge (`EXIT_PRE_CHECKS_FAILED`), naming the changed
-  paths. This covers only those four locations: other common-directory content
-  (refs, objects, `worktrees/`, `modules/`, ...) is neither checked nor
-  restored, and a change that leaves the recorded locations as found is not
-  noticed. A check that must write a hook or config there cannot pass the gate.
-  The restore first makes the guarded directories owner-writable (a check may have
-  made `hooks/` read-only), then restores contents, and applies the recorded modes
-  last; a path that still cannot be restored is named in the refusal. The guard
-  compares and restores before the worktree is torn down. Every git command loadout
-  runs against the worktree (add, checkout, merge, remove, prune) runs with hooks
-  and fsmonitor disabled and with the same scrubbed environment as the checks.
-  The optional deployment-tier `merge.pre_checks_env_passthrough` list (working-tree
-  config file only) keeps named variables. It widens what unmerged PR code can
-  read, so it must live in an **untracked** deployment config; `loadout-doctor`
-  warns when the config file holding that key is tracked by git.
+  `GIT_CONFIG_*` family (which can inject a credential helper). The git
+  repository/location selectors (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+  `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+  `GIT_NAMESPACE`, `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`,
+  `GIT_PREFIX`) are always withheld, so a check, and every git command loadout
+  runs for the merge result, resolves its repository from the working directory;
+  they cannot be passed through (naming one is a configuration error).
+  **Limits of the scrub and of the clone.** The shared repository and tree are
+  no longer handed to the checks, but a check still runs as the merger's user
+  with the same `HOME`: it can read that user's credential files
+  (`~/.git-credentials`, `~/.netrc`, ...) and the merger's own unscrubbed
+  `/proc/<pid>/environ`, and it can write anywhere that user can by absolute
+  path (the shared `.git`, `~/.gitconfig`) or start daemons. Closing that needs
+  process isolation (a sandbox), which loadout does not provide.
+  Every git command loadout runs for the merge result runs with hooks, fsmonitor
+  and signing disabled and with the same scrubbed environment as the checks.
+  The optional deployment-tier `merge.pre_checks_env_passthrough` list keeps
+  named variables (valid environment variable names, matched in full; a trailing
+  newline is a configuration error). It widens what unmerged PR code can read, so
+  it is honoured **only from an untracked** deployment config file: when the file
+  supplying the key is tracked by git in `--repo-path` (or git cannot say), the
+  key is ignored for the scrub and the merge log names the file and the reason.
+  `loadout-doctor` also warns when the config file holding that key is tracked.
 - A malformed `merge.git_working_tree` is the post-merge tree sync's own error,
   reported only after the merge has landed, so it must not let the gate be
   skipped. The reviewer pair falls back with a warning, and `pre_checks` are

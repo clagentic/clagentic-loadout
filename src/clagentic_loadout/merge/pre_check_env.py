@@ -37,9 +37,18 @@ removed when it is:
      `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` can name
      or inject a credential helper). `HOME` itself is kept by design.
 
+  5. a git repository/location selector (`GIT_DIR`, `GIT_WORK_TREE`,
+     `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`,
+     `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_NAMESPACE`,
+     `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`,
+     `GIT_PREFIX`). Left in place they would point git at a repository other
+     than the one the check runs in, so the check and every git command loadout
+     runs for the merge result resolve the repository from the working directory.
+
 A deployment keeps a named variable deliberately through the deployment-tier
 `merge.pre_checks_env_passthrough` list (`pre_checks_config`); a passed-through
-name survives every rule above.
+name survives rules 1 to 4. Rule 5 is not overridable: naming a selector in the
+list is a configuration error.
 """
 
 from __future__ import annotations
@@ -89,10 +98,40 @@ CREDENTIAL_NAME_PATTERNS = (
 )
 
 
+#: Variables that select which git repository, work tree, index or object store
+#: a git command operates on. Never passed to a check and never overridable.
+GIT_LOCATION_ENV_NAMES = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_NAMESPACE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+        "GIT_PREFIX",
+    }
+)
+
+
+def is_git_location_name(name: str) -> bool:
+    """True when *name* is a git repository/location selector variable."""
+    return name.upper() in GIT_LOCATION_ENV_NAMES
+
+
+def without_git_location(env: Mapping[str, str]) -> dict[str, str]:
+    """A copy of *env* without the git repository/location selectors."""
+    return {name: value for name, value in env.items() if not is_git_location_name(name)}
+
+
 def is_denied_pre_check_name(name: str, *, attestation_names: Iterable[str] = ()) -> bool:
     """True when *name* must not reach a pre_check child process."""
     upper = name.upper()
     if name in set(attestation_names) or upper.startswith(LOADOUT_ENV_PREFIX):
+        return True
+    if upper in GIT_LOCATION_ENV_NAMES:
         return True
     return any(fnmatch.fnmatchcase(upper, pattern) for pattern in CREDENTIAL_NAME_PATTERNS)
 
@@ -115,13 +154,17 @@ def pre_check_env(
     return {
         name: value
         for name, value in source.items()
-        if name in kept or not is_denied_pre_check_name(name, attestation_names=attestation_names)
+        if not is_git_location_name(name)
+        and (name in kept or not is_denied_pre_check_name(name, attestation_names=attestation_names))
     }
 
 
 __all__ = [
     "CREDENTIAL_NAME_PATTERNS",
+    "GIT_LOCATION_ENV_NAMES",
     "LOADOUT_ENV_PREFIX",
     "is_denied_pre_check_name",
+    "is_git_location_name",
     "pre_check_env",
+    "without_git_location",
 ]

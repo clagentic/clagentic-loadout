@@ -155,6 +155,7 @@ from clagentic_loadout.platform_detect import detect_platform_from_url
 from clagentic_loadout.push.git_coords import read_remote_url_best_effort
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH
+from clagentic_loadout.merge.tracked_file import git_tracks_path
 from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_POST_MERGE_STEPS,
     CONFIG_SECTION_MERGE,
@@ -961,16 +962,7 @@ def _is_tracked_by_git(repo_root: Path, path: Path) -> bool:
     """True when *path* is a file git tracks in the work tree at *repo_root*.
     A missing git binary or a tree that is not a repository counts as not
     tracked: there is nothing to warn about."""
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(repo_root), "ls-files", "--error-unmatch", "--", str(path)],
-            shell=False,
-            capture_output=True,
-            timeout=PROBE_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return completed.returncode == 0
+    return git_tracks_path(repo_root, path, timeout=PROBE_TIMEOUT_SECONDS) is True
 
 
 def _tracked_passthrough_warning(repo_root: Path, config_path: Path, raw: dict) -> str | None:

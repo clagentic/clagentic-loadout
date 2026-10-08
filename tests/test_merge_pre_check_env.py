@@ -3,7 +3,7 @@ credential variables from the merger's environment.
 
 The scrub is unit-tested on explicit mappings (so no test depends on the real
 process environment) and then exercised end to end: the merge verb runs real
-commands in a real merge-result worktree and the commands themselves report
+commands in a real merge-result clone and the commands themselves report
 what they can see."""
 
 from __future__ import annotations
@@ -18,16 +18,21 @@ from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.pre_check_env import (
     CREDENTIAL_NAME_PATTERNS,
+    GIT_LOCATION_ENV_NAMES,
     is_denied_pre_check_name,
     pre_check_env,
 )
-from clagentic_loadout.merge.pre_checks_config import resolve_pre_checks_env_passthrough
+from clagentic_loadout.merge.pre_checks_config import (
+    PassthroughDecision,
+    decide_pre_checks_env_passthrough,
+    resolve_pre_checks_env_passthrough,
+)
 from clagentic_loadout.transport.attestation import (
     ATTESTED_IDENTITY_ENV_VAR,
     ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR,
     attestation_env_var_names,
 )
-from tests._gate_repo import GateRepo, init_gate_repo, write_deployment_config
+from tests._gate_repo import GateRepo, git, init_gate_repo, write_deployment_config
 from tests._support.gate_merge import run_gate_merge as _merge
 
 _PY = sys.executable
@@ -240,11 +245,77 @@ class TestPassthroughConfig:
         write_deployment_config(tmp_path, {"pre_checks_env_passthrough": ["B_TOKEN", "A", "B_TOKEN"]})
         assert resolve_pre_checks_env_passthrough(tmp_path) == ("B_TOKEN", "A")
 
-    @pytest.mark.parametrize("value", ["A_TOKEN", ["not a name"], [1], {"A": 1}])
+    @pytest.mark.parametrize(
+        "value",
+        ["A_TOKEN", ["not a name"], [1], {"A": 1}, ["API_TOKEN\n"], ["API_TOKEN\n\n"], ["\nAPI_TOKEN"]],
+        ids=repr,
+    )
     def test_a_malformed_value_is_an_error(self, tmp_path, value):
         write_deployment_config(tmp_path, {"pre_checks_env_passthrough": value})
         with pytest.raises(PostMergeConfigError, match="pre_checks_env_passthrough"):
             resolve_pre_checks_env_passthrough(tmp_path)
+
+    @pytest.mark.parametrize("name", sorted(GIT_LOCATION_ENV_NAMES))
+    def test_naming_a_git_selector_is_a_config_error(self, tmp_path, name):
+        write_deployment_config(tmp_path, {"pre_checks_env_passthrough": ["OK_NAME", name]})
+        with pytest.raises(PostMergeConfigError, match=name):
+            resolve_pre_checks_env_passthrough(tmp_path)
+
+
+class TestGitSelectorsAreAlwaysScrubbed:
+    @pytest.mark.parametrize("name", sorted(GIT_LOCATION_ENV_NAMES))
+    def test_each_selector_is_denied_and_removed_even_when_passed_through(self, tmp_path, name):
+        env = {name: "/x", name.lower(): "/y", "PATH": "/usr/bin"}
+        assert is_denied_pre_check_name(name)
+        assert pre_check_env(env, config_root=tmp_path) == {"PATH": "/usr/bin"}
+        assert pre_check_env(env, passthrough=[name], config_root=tmp_path) == {"PATH": "/usr/bin"}
+
+    def test_the_selector_list_is_complete(self):
+        assert GIT_LOCATION_ENV_NAMES == {
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_COMMON_DIR",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_NAMESPACE",
+            "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+            "GIT_PREFIX",
+        }
+
+
+class TestPassthroughIsHonouredOnlyFromAnUntrackedFile:
+    def _repo_with_config(self, tmp_path, *, tracked: bool):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        git(repo, "init", "-q", "-b", "main")
+        write_deployment_config(repo, {"pre_checks_env_passthrough": ["AWS_SECRET_ACCESS_KEY"]})
+        if tracked:
+            git(repo, "add", "-f", "--", ".clagentic/loadout/config.yaml")
+        git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+        return repo
+
+    def test_an_untracked_file_is_honoured(self, tmp_path):
+        decision = decide_pre_checks_env_passthrough(self._repo_with_config(tmp_path, tracked=False))
+        assert decision.names == ("AWS_SECRET_ACCESS_KEY",) and decision.ignored_file is None
+
+    def test_a_tracked_file_is_ignored_and_named(self, tmp_path):
+        repo = self._repo_with_config(tmp_path, tracked=True)
+        decision = decide_pre_checks_env_passthrough(repo)
+        assert decision.names == ()
+        assert decision.ignored_file == repo / ".clagentic/loadout/config.yaml"
+        assert "tracked by git" in decision.reason
+
+    def test_a_tree_git_cannot_judge_is_ignored(self, tmp_path):
+        write_deployment_config(tmp_path, {"pre_checks_env_passthrough": ["A"]})
+        decision = decide_pre_checks_env_passthrough(tmp_path)
+        assert decision.names == () and decision.ignored_file is not None
+        assert "could not be checked" in decision.reason
+
+    def test_no_key_is_nothing_to_ignore(self, tmp_path):
+        write_deployment_config(tmp_path, {})
+        assert decide_pre_checks_env_passthrough(tmp_path) == PassthroughDecision()
 
 
 def _probe(*, absent: list[str] = (), present: list[str] = ()) -> dict:
@@ -308,6 +379,40 @@ class TestThroughTheMergeVerb:
         assert _merge(repo) == verb.EXIT_PRE_CHECKS_FAILED
         assert "pre_checks_env_passthrough" in capsys.readouterr().err
 
+    def test_a_tracked_config_cannot_widen_the_environment_and_the_log_says_why(
+        self, tmp_path, scratch_tmp, monkeypatch, capsys
+    ):
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
+        repo = _repo(
+            tmp_path,
+            [_probe(absent=["AWS_SECRET_ACCESS_KEY"])],
+            deployment_merge={"pre_checks_env_passthrough": ["AWS_SECRET_ACCESS_KEY"]},
+        )
+        config = ".clagentic/loadout/config.yaml"
+        git(repo.path, "add", "-f", "--", config)
+        git(repo.path, "commit", "-q", "-m", "track the config")
+        assert _merge(repo) == verb.EXIT_OK
+        err = capsys.readouterr().err
+        assert str(repo.path / config) in err and "tracked by git" in err
+
+    def test_an_untracked_config_does_widen_it(self, tmp_path, scratch_tmp, monkeypatch):
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "s")
+        repo = _repo(
+            tmp_path,
+            [_probe(present=["AWS_SECRET_ACCESS_KEY"])],
+            deployment_merge={"pre_checks_env_passthrough": ["AWS_SECRET_ACCESS_KEY"]},
+        )
+        assert _merge(repo) == verb.EXIT_OK
+
+    def test_a_git_selector_in_the_passthrough_refuses_before_any_check_runs(
+        self, tmp_path, scratch_tmp, capsys
+    ):
+        repo = _repo(
+            tmp_path, [_probe()], deployment_merge={"pre_checks_env_passthrough": ["GIT_DIR"]}
+        )
+        assert _merge(repo) == verb.EXIT_PRE_CHECKS_FAILED
+        assert "GIT_DIR" in capsys.readouterr().err
+
     def test_the_tracked_gate_cannot_declare_the_passthrough(self, tmp_path, scratch_tmp):
         gate = {
             "required_reviewer_roles": [],
@@ -332,7 +437,7 @@ class TestThroughTheMergeVerb:
         repo = _repo(tmp_path, steps, head_files={"scripts/validate.py": script, "change.txt": "x\n"})
         assert _merge(repo) == verb.EXIT_OK
 
-    def test_the_gate_log_names_the_worktree_as_the_execution_tree(self, tmp_path, scratch_tmp, capsys):
+    def test_the_gate_log_names_the_clone_as_the_execution_tree(self, tmp_path, scratch_tmp, capsys):
         marker = tmp_path / "ran-in"
         repo = _repo(
             tmp_path,
@@ -344,10 +449,10 @@ class TestThroughTheMergeVerb:
             ],
         )
         assert _merge(repo) == verb.EXIT_OK
-        worktree = marker.read_text(encoding="utf-8")
+        clone = marker.read_text(encoding="utf-8")
         line = next(
             ln for ln in capsys.readouterr().err.splitlines() if "pre_checks gate -- running" in ln
         )
-        assert f"in the merge-result worktree {worktree!r}" in line
+        assert f"in the merge-result clone {clone!r}" in line
         assert f"check(s) in {str(repo.path)!r}" not in line
         assert "is not used for execution" in line

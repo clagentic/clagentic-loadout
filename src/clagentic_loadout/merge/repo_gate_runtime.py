@@ -27,7 +27,7 @@ gate than it believes it has.
 UNMIGRATED REPOS. When the base commit has NO tracked gate file, the gate keys
 are read from the deployment file exactly as they were before the gate moved
 (`gate_from_deployment_config`), and `pre_checks` are still declared there
-(they execute in the merge-result worktree like any other). Refusing or ignoring would turn a repo that declared a gate into
+(they execute in the merge-result clone like any other). Refusing or ignoring would turn a repo that declared a gate into
 one that silently gates nothing. The deployment file is gitignored operator
 config, not PR content, so the PR under review still cannot relax its own gate.
 The result carries one notice naming the source; a readable file is never a

@@ -403,7 +403,7 @@ def _record_tmp_path_for_sibling_cleanup(request, tmp_path):
 @pytest.fixture
 def scratch_tmp(tmp_path, monkeypatch):
     """A per-test directory standing in for the per-process TMPDIR, so tests can
-    assert where a throwaway worktree is created and that it is gone."""
+    assert where a throwaway clone is created and that it is gone."""
     directory = tmp_path / "scratch-tmp"
     directory.mkdir()
     monkeypatch.setattr(tempfile, "tempdir", str(directory))

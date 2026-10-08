@@ -521,13 +521,12 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_require_model_attestation,
     resolve_sync_tree_after_merge,
 )
-from clagentic_loadout.merge.common_dir_guard import CommonDirGuardError, guard_common_dir
-from clagentic_loadout.merge.merge_result_worktree import (
-    MergeResultWorktreeError,
-    merge_result_worktree,
+from clagentic_loadout.merge.merge_result_clone import (
+    MergeResultCloneError,
+    merge_result_clone,
 )
 from clagentic_loadout.merge.pre_check_env import pre_check_env
-from clagentic_loadout.merge.pre_checks_config import resolve_pre_checks_env_passthrough
+from clagentic_loadout.merge.pre_checks_config import decide_pre_checks_env_passthrough
 from clagentic_loadout.merge.repo_gate_runtime import (
     load_repo_gate_at_base,
     resolve_gate_git_tree,
@@ -1635,8 +1634,8 @@ def _run(
     # 8b. Pre-merge checks gate (merge.pre_checks_config, lr-843900) -- see
     # this module's docstring, "PRE-MERGE CHECKS", for the full contract.
     # The checks are DECLARED by the tracked gate file at the PR's base commit
-    # (repo_gate, loaded above) and EXECUTED in a throwaway worktree of the
-    # merge result (merge.merge_result_worktree), never in the shared tree at
+    # (repo_gate, loaded above) and EXECUTED in a private clone holding the
+    # merge result (merge.merge_result_clone), never in the shared tree at
     # --repo-path, whose branch and uncommitted edits say nothing about what
     # this PR lands. No local tree
     # (--no-post-merge-tree/--skip-post-merge) declares no checks, the same
@@ -1663,32 +1662,35 @@ def _run(
             # load_repo_gate_at_base), so the merge result is built there too.
             gate_git_tree = args.repo_path
         try:
-            passthrough = resolve_pre_checks_env_passthrough(args.repo_path)
+            passthrough = decide_pre_checks_env_passthrough(args.repo_path)
         except PostMergeConfigError as exc:
             _fail(
                 f"pre_checks gate could not read merge.pre_checks_env_passthrough -- {exc} -- "
                 f"refusing to merge PR #{args.pr_number} in {owner}/{repo}.",
                 code=EXIT_PRE_CHECKS_FAILED,
             )
+        if passthrough.ignored_file is not None:
+            print(
+                f"merge: WARNING -- merge.pre_checks_env_passthrough in "
+                f"{str(passthrough.ignored_file)!r} is ignored: {passthrough.reason}",
+                file=sys.stderr,
+            )
         try:
-            # A linked worktree shares the git common dir: the guard records
-            # hooks/, info/, config and config.worktree there, and refuses
-            # (after restoring them) if the checks changed any of it. The guard
-            # is the INNER context so it compares and restores before the
-            # worktree is torn down; the worktree's own git commands run with
-            # hooks and fsmonitor off and the same scrubbed environment as the
-            # checks.
-            check_env = pre_check_env(passthrough=passthrough)
-            with merge_result_worktree(
+            # The checks get a private clone of the merge result (its own .git),
+            # so nothing they write there reaches the shared repository. The
+            # clone's git commands run with hooks and fsmonitor off and the
+            # same scrubbed environment as the checks.
+            check_env = pre_check_env(passthrough=passthrough.names)
+            with merge_result_clone(
                 gate_git_tree,
                 resolve_base_sha(pr_info),
                 current_head_sha,
                 base_branch=resolve_base_branch(pr_info),
                 env=check_env,
-            ) as check_tree, guard_common_dir(gate_git_tree):
+            ) as check_tree:
                 print(
                     f"merge: pre_checks gate -- running {len(pre_checks)} declared "
-                    f"check(s) in the merge-result worktree {str(check_tree)!r} (head "
+                    f"check(s) in the merge-result clone {str(check_tree)!r} (head "
                     f"{current_head_sha!r} merged onto base {resolve_base_sha(pr_info)!r}, "
                     f"where the checks are declared) before authorizing PR "
                     f"#{args.pr_number} in {owner}/{repo}; the checkout at "
@@ -1698,13 +1700,7 @@ def _run(
                     file=sys.stderr,
                 )
                 run_post_merge_steps(pre_checks, check_tree, base_env=check_env)
-        except CommonDirGuardError as exc:
-            _fail(
-                f"pre_checks gate -- {exc} -- refusing to merge "
-                f"PR #{args.pr_number} in {owner}/{repo}.",
-                code=EXIT_PRE_CHECKS_FAILED,
-            )
-        except MergeResultWorktreeError as exc:
+        except MergeResultCloneError as exc:
             _fail(
                 f"pre_checks gate could not build the merge result -- {exc} -- "
                 f"refusing to merge PR #{args.pr_number} in {owner}/{repo}.",
