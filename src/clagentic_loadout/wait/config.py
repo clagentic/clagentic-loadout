@@ -179,7 +179,7 @@ def load_scoped_test_patterns(
 
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise InvalidScopedTestConfigError(
             f"{config_path}: could not be read as YAML: {exc}."
         ) from exc

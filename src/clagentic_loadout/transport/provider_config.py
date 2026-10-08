@@ -184,7 +184,7 @@ def _read_yaml_mapping(path: Path) -> dict:
         return {}
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return {}
     return raw if isinstance(raw, dict) else {}
 

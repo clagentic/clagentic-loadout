@@ -131,7 +131,7 @@ def load_verify_entries(
 
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise InvalidVerifyConfigError(f"{config_path}: could not be read as YAML: {exc}.") from exc
 
     if not isinstance(raw, dict):

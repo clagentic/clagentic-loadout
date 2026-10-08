@@ -82,6 +82,27 @@ def _remote_has_branch(remote, branch="feature") -> bool:
     return bool(out.strip())
 
 
+def _track_upstream_at_head(repo) -> None:
+    subprocess.run(
+        ["git", "update-ref", "refs/remotes/origin/feature", "HEAD"], cwd=repo, check=True
+    )
+    subprocess.run(
+        ["git", "branch", "--set-upstream-to=origin/feature"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+
+def _commit_ahead(repo) -> None:
+    """Track the upstream at HEAD, then commit one more change so the
+    checkout is ahead of it."""
+    _track_upstream_at_head(repo)
+    (repo / "more.txt").write_text("more\n")
+    subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
+    )
+
+
 class TestConfig:
     def test_absent_config_is_empty(self, tmp_path):
         assert load_verify_entries(tmp_path) == ()
@@ -426,26 +447,6 @@ class TestVerbUpdatePath:
         assert code == verb.EXIT_VERIFY_FAILED
         assert sent == []
 
-    @staticmethod
-    def _track_upstream_at_head(repo) -> None:
-        subprocess.run(
-            ["git", "update-ref", "refs/remotes/origin/feature", "HEAD"], cwd=repo, check=True
-        )
-        subprocess.run(
-            ["git", "branch", "--set-upstream-to=origin/feature"],
-            cwd=repo, check=True, capture_output=True,
-        )
-
-    def _commit_ahead(self, repo) -> None:
-        """Track the upstream at HEAD, then commit one more change so the
-        checkout is ahead of it."""
-        self._track_upstream_at_head(repo)
-        (repo / "more.txt").write_text("more\n")
-        subprocess.run(["git", "add", "more.txt"], cwd=repo, check=True)
-        subprocess.run(
-            ["git", "commit", "-m", "feat: more work"], cwd=repo, check=True, capture_output=True
-        )
-
     def _title_update(self, repo, monkeypatch, sent=None):
         return _run_main(
             [
@@ -461,7 +462,7 @@ class TestVerbUpdatePath:
         self, repo_with_remote, monkeypatch, capsys
     ):
         repo, _remote = repo_with_remote
-        self._track_upstream_at_head(repo)
+        _track_upstream_at_head(repo)
         marker = repo.parent / "update-marker"
         _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
         sent: list = []
@@ -475,7 +476,7 @@ class TestVerbUpdatePath:
         self, repo_with_remote, monkeypatch
     ):
         repo, _remote = repo_with_remote
-        self._commit_ahead(repo)
+        _commit_ahead(repo)
         marker = repo.parent / "update-marker"
         _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
         assert self._title_update(repo, monkeypatch) == verb.EXIT_OK
@@ -485,7 +486,7 @@ class TestVerbUpdatePath:
         self, repo_with_remote, monkeypatch
     ):
         repo, _remote = repo_with_remote
-        self._commit_ahead(repo)
+        _commit_ahead(repo)
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
         sent: list = []
         code = _run_main(
@@ -502,7 +503,7 @@ class TestVerbUpdatePath:
 
     def test_no_body_pass_appends_record_to_existing_body(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
-        self._commit_ahead(repo)
+        _commit_ahead(repo)
         _write_verify(repo, [_py("unit", "print('fine')")])
         sent: list = []
         assert self._title_update(repo, monkeypatch, sent) == verb.EXIT_OK
@@ -512,7 +513,7 @@ class TestVerbUpdatePath:
 
     def test_no_body_fail_refuses_and_updates_nothing(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
-        self._commit_ahead(repo)
+        _commit_ahead(repo)
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
         sent: list = []
         code = _run_main(
@@ -529,7 +530,7 @@ class TestVerbUpdatePath:
 
     def test_no_body_skip_verify_records_skip_in_body(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
-        self._commit_ahead(repo)
+        _commit_ahead(repo)
         marker = repo.parent / "skip-marker"
         _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
         sent: list = []
@@ -734,7 +735,7 @@ class TestSectionReplacedInPlace:
         self, repo_with_remote, monkeypatch
     ):
         repo, _remote = repo_with_remote
-        TestVerbUpdatePath._commit_ahead(TestVerbUpdatePath(), repo)
+        _commit_ahead(repo)
         _write_verify(repo, [_py("unit", "print('fine')")])
         prior = append_section("existing body\n", self._section("stale-check", ok=False))
         sent: list = []

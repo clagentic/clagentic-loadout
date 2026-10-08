@@ -186,7 +186,7 @@ def _read_yaml_mapping(path: Path) -> dict:
         return {}
     try:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         # Treated as absent (a repo's broken file must not block a review), but
         # said out loud so an ignored override is never a mystery.
         print(
@@ -217,7 +217,7 @@ def load_run_root_override(*, config_root: str | Path | None = None) -> Path | N
 def _read_rulebook(path: Path, profile: str) -> str:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise ReviewProfileError(
             f"review profile {profile!r}: cannot read rulebook {str(path)!r}: {exc}"
         ) from exc
