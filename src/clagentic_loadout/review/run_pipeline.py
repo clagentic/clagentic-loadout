@@ -129,7 +129,7 @@ def bind_run_dir(
     path = run_dir / BINDING_FILENAME
     try:
         recorded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         recorded = None
     if recorded == binding:
         return
@@ -166,7 +166,7 @@ def _result_path(state_dir: Path, index: int) -> Path:
 def _load_record(state_dir: Path, index: int) -> dict[str, Any] | None:
     try:
         record = json.loads(_result_path(state_dir, index).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return record if isinstance(record, dict) else None
 

@@ -950,7 +950,7 @@ def find_crew_yaml_files_declaring_post_merge_steps(
     for crew_config_path in sorted(crew_dir.glob("*.yaml")):
         try:
             raw = yaml.safe_load(crew_config_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
         if not isinstance(raw, dict):
             continue

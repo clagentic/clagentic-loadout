@@ -759,6 +759,28 @@ def _credentialed_git_env(token: str, *, force_trace: bool = False):
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _hermeticity_preflight(action: str, git_cwd: Path | None) -> None:
+    """Fail-closed pre-flight shared by push, fetch and ls-remote: the
+    resolved git version must meet the enforced minimum and the target
+    repo's LOCAL config must carry no unsuppressable hazard. *action* is the
+    verb phrase folded into the refusal message ("push 'b' to 'origin'").
+    """
+    check_git_version(git_cwd=git_cwd)
+    hazards = check_repo_local_config_hazards(git_cwd)
+    if hazards:
+        raise RepoLocalConfigHazardError(
+            f"refusing to {action}: the target repo's "
+            f"LOCAL .git/config carries a hermeticity hazard this package "
+            f"cannot neutralize via environment isolation alone -- "
+            f"{sorted(set(hazards))!r}. Repo-local config is always read by "
+            f"git; there is no environment variable that suppresses it. "
+            f"Remove the offending repo-local config entry (credential.*, "
+            f"http.*.extraheader, includeIf.*, or url.*.insteadOf/"
+            f"pushInsteadOf) before retrying -- this check fails closed "
+            f"with no override."
+        )
+
+
 class GitFetchError(Exception):
     """Raised when the underlying `git fetch` subprocess (via
     `git_fetch_with_token`) exits non-zero. Carries the ALREADY-REDACTED
@@ -801,20 +823,7 @@ def git_fetch_with_token(
     operator constraint this fix is built against (ambient credentials may
     always exist and must never be allowed to silently win).
     """
-    check_git_version(git_cwd=git_cwd)
-    hazards = check_repo_local_config_hazards(git_cwd)
-    if hazards:
-        raise RepoLocalConfigHazardError(
-            f"refusing to fetch {remote!r} {branch!r}: the target repo's "
-            f"LOCAL .git/config carries a hermeticity hazard this package "
-            f"cannot neutralize via environment isolation alone -- "
-            f"{sorted(set(hazards))!r}. Repo-local config is always read by "
-            f"git; there is no environment variable that suppresses it. "
-            f"Remove the offending repo-local config entry (credential.*, "
-            f"http.*.extraheader, includeIf.*, or url.*.insteadOf/"
-            f"pushInsteadOf) before retrying -- this check fails closed "
-            f"with no override."
-        )
+    _hermeticity_preflight(f"fetch {remote!r} {branch!r}", git_cwd)
     with _credentialed_git_env(token) as env:
         result = subprocess.run(
             ["git", *_HERMETIC_ARGV_PREFIX, "fetch", remote, branch],
@@ -839,23 +848,14 @@ def git_ls_remote_with_token(
 ) -> subprocess.CompletedProcess:
     """Run `git ls-remote --exit-code <remote> refs/heads/<ref>` through the
     SAME credentialed, hermetic envelope the push itself used, and return the
-    completed process unexamined (stdout/stderr redacted of *token*).
+    completed process unexamined (stdout and stderr both redacted of *token*).
 
     The post-push readback needs this: an ls-remote under the caller's
     ambient credentials fails against any remote the ambient identity cannot
     read, which made a push that had landed look unconfirmed. Same
     hermeticity pre-flight as push and fetch, same fail-closed errors.
     """
-    check_git_version(git_cwd=git_cwd)
-    hazards = check_repo_local_config_hazards(git_cwd)
-    if hazards:
-        raise RepoLocalConfigHazardError(
-            f"refusing to read back {ref!r} from {remote!r}: the target "
-            f"repo's LOCAL .git/config carries a hermeticity hazard "
-            f"{sorted(set(hazards))!r} that environment isolation cannot "
-            f"neutralize (credential.*, http.*.extraheader, includeIf.*, "
-            f"or url.*.insteadOf/pushInsteadOf)."
-        )
+    _hermeticity_preflight(f"read back {ref!r} from {remote!r}", git_cwd)
     with _credentialed_git_env(token) as env:
         result = subprocess.run(
             ["git", *_HERMETIC_ARGV_PREFIX, "ls-remote", "--exit-code", remote, f"refs/heads/{ref}"],
@@ -867,7 +867,7 @@ def git_ls_remote_with_token(
     return subprocess.CompletedProcess(
         result.args,
         result.returncode,
-        stdout=result.stdout,
+        stdout=redact_push_secrets(result.stdout, known_secrets=(token,)),
         stderr=redact_push_secrets(result.stderr, known_secrets=(token,)),
     )
 
@@ -952,20 +952,7 @@ def git_push_with_token(
     success where a real push would refuse, a misleading affordance worse
     than none (module docstring).
     """
-    check_git_version(git_cwd=git_cwd)
-    hazards = check_repo_local_config_hazards(git_cwd)
-    if hazards:
-        raise RepoLocalConfigHazardError(
-            f"refusing to push {branch!r} to {remote!r}: the target repo's "
-            f"LOCAL .git/config carries a hermeticity hazard this package "
-            f"cannot neutralize via environment isolation alone -- "
-            f"{sorted(set(hazards))!r}. Repo-local config is always read by "
-            f"git; there is no environment variable that suppresses it. "
-            f"Remove the offending repo-local config entry (credential.*, "
-            f"http.*.extraheader, includeIf.*, or url.*.insteadOf/"
-            f"pushInsteadOf) before retrying -- this check fails closed "
-            f"with no override."
-        )
+    _hermeticity_preflight(f"push {branch!r} to {remote!r}", git_cwd)
     with _credentialed_git_env(token, force_trace=verbose) as env:
         refspec = f"{branch}:{branch}"
         push_cmd = ["git", *_HERMETIC_ARGV_PREFIX, "push", remote, refspec, "--set-upstream"]

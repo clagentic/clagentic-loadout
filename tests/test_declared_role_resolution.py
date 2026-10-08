@@ -4,9 +4,10 @@ then, only when that fails, the deployment's optional `github_app.role_callers`
 mapping. A deployment with no mapping behaves as it did before the mapping
 existed, on both platforms.
 
-Every GitHub-side read goes through a real user-level config file under a
-per-test directory, never a patched resolver, so the tests prove the
-config -> login path and not a stand-in for it."""
+Except for `TestMergeEnforcesAMappedRole`, which stubs the merge-side resolver
+to isolate the enforcement step, every GitHub-side read goes through a real
+user-level config file under a per-test directory, never a patched resolver,
+so those tests prove the config -> login path and not a stand-in for it."""
 
 from __future__ import annotations
 

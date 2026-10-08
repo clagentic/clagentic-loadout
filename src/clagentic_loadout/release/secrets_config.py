@@ -162,7 +162,7 @@ def read_role_env_file(
 
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
+    except (OSError, UnicodeDecodeError) as exc:
         raise SecretEnvError(f"cannot read secret-env file {path}: {exc}") from exc
 
     kvs: dict[str, str] = {}

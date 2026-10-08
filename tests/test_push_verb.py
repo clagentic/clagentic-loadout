@@ -1141,6 +1141,28 @@ class TestContentionCheck:
         assert code == verb.EXIT_WORKING_TREE_CONTENTION
         assert "other-branch" in capsys.readouterr().err
 
+    def test_real_contention_refuses_through_the_unstubbed_check(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """No stub: a local branch literally named `origin/feature` is
+        checked out while a remote-tracking `origin/feature` also exists, so
+        git reports the pushed branch under a different short name than the
+        checked-out ref. The real check must see a different matching branch
+        holding the tree and refuse before any token is resolved."""
+        repo, _remote = repo_with_remote
+        _git(["update-ref", "refs/remotes/origin/feature", "HEAD"], repo)
+        _git(["checkout", "-b", "origin/feature"], repo)
+        self._write_config(repo, enabled=True, pattern=r"^origin/")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_WORKING_TREE_CONTENTION
+        assert "working-tree contention detected" in capsys.readouterr().err
+
     def test_verb_excludes_its_own_branch_from_the_check(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
         self._write_config(repo, enabled=True)

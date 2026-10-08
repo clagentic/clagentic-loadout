@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.transport.github_app_config import (
     CONFIG_KEY_ROLE_CALLERS,
+    CONFIG_KEY_SLUGS,
     CONFIG_SECTION_GITHUB_APP,
     GithubAppSlugNotConfiguredError,
     read_configured_role_callers,
@@ -107,7 +108,7 @@ def resolve_reviewer_login(reviewer_name: str, platform: str) -> str:
 
 #: Resolution sources reported by resolve_declared_role.
 SOURCE_BARE_NAME = "bare name"
-SOURCE_SLUGS = "github_app.slugs"
+SOURCE_SLUGS = f"{CONFIG_SECTION_GITHUB_APP}.{CONFIG_KEY_SLUGS}"
 SOURCE_ROLE_CALLERS = f"{CONFIG_SECTION_GITHUB_APP}.{CONFIG_KEY_ROLE_CALLERS}"
 
 
@@ -158,7 +159,7 @@ def resolve_role_via_mapping(
         raise ReviewerLoginNotConfiguredError(
             f"{mapping_key} maps role {role!r} to caller {caller!r}, but no GitHub App "
             f"slug is configured for that caller -- add it under "
-            f"{CONFIG_SECTION_GITHUB_APP}.slugs.{caller}"
+            f"{CONFIG_SECTION_GITHUB_APP}.{CONFIG_KEY_SLUGS}.{caller}"
         ) from slug_exc
     return DeclaredRoleResolution(
         role=role,

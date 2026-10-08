@@ -100,7 +100,7 @@ def _load_existing(path: Path) -> dict:
         return {}
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SettingsWriteError(f"{path}: could not be read as JSON: {exc}.") from exc
     if not isinstance(raw, dict):
         raise SettingsWriteError(

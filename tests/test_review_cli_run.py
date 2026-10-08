@@ -197,7 +197,11 @@ def test_missing_executable_without_a_fallback_is_model_unavailable(env, capsys)
 
 
 def test_stall_is_persisted_and_resumes_before_blocking(env, capsys):
-    env.configure(carrier_mode="hang", timeout_seconds=0.5, max_attempts=2)
+    # The timeout clock starts at spawn, so it also covers the stub's own
+    # interpreter start-up and prompt logging before it writes the partial
+    # reply asserted below; 0.5s let a loaded runner kill it first and leave
+    # the excerpts empty. Siblings carry the same margin.
+    env.configure(carrier_mode="hang", timeout_seconds=3, max_attempts=2)
 
     first_code, first = env.run(capsys=capsys)
     second_code, second = env.run(capsys=capsys)

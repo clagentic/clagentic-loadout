@@ -47,7 +47,7 @@ class EngineBreaker:
             return
         try:
             stored = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return
         if not isinstance(stored, dict):
             return
