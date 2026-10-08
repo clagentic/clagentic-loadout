@@ -69,6 +69,25 @@ def _isolate_user_config_root(tmp_path, monkeypatch):
     monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
 
 
+@pytest.fixture(autouse=True)
+def _comment_lists_end_after_first_page(monkeypatch):
+    """The readback fakes in this file answer every comments GET with the same
+    short list. A real host answers an empty list for any page past the last,
+    and the comment reader (which walks pages until it sees an empty one)
+    refuses a host that repeats a page forever -- so emulate the empty
+    second page once here instead of in every fake."""
+    real_request = git_host_api.request
+
+    def request(git_host_base, method, path, token, **kwargs):
+        parsed = urllib.parse.urlparse(path)
+        page = urllib.parse.parse_qs(parsed.query).get("page", ["1"])[0]
+        if method == "GET" and parsed.path.endswith("/comments") and page != "1":
+            return 200, b"[]"
+        return real_request(git_host_base, method, path, token, **kwargs)
+
+    monkeypatch.setattr(git_host_api, "request", request)
+
+
 # ---------------------------------------------------------------------------
 # parse_json_body (post-Wave-B extraction, lr-e1f9) — the shared tolerant
 # raw-bytes-to-dict parse push.forgejo_backend and merge.forgejo_backend's
@@ -703,7 +722,7 @@ class TestMainVerifyCommentEndToEnd:
                 return _FakeResponse(200, b'{"id": 999}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, json.dumps({"login": own_login}).encode("utf-8"))
-            if url.endswith("/comments"):
+            if url.split("?")[0].endswith("/comments"):
                 created = comment_created_at or (
                     datetime.now(timezone.utc) + timedelta(seconds=1)
                 ).isoformat().replace("+00:00", "Z")
@@ -2481,7 +2500,7 @@ class TestMainExpectVerdictBlockEndToEnd:
                 return _FakeResponse(200, b'{"id": 999}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, json.dumps({"login": own_login}).encode("utf-8"))
-            if url.endswith("/comments"):
+            if url.split("?")[0].endswith("/comments"):
                 created = comment_created_at or (
                     datetime.now(timezone.utc) + timedelta(seconds=1)
                 ).isoformat().replace("+00:00", "Z")
@@ -2725,7 +2744,7 @@ class TestMainCallerTrackingIdEndToEnd:
                 return _FakeResponse(200, b'{"id": 42}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, json.dumps({"login": own_login}).encode("utf-8"))
-            if url.endswith("/comments"):
+            if url.split("?")[0].endswith("/comments"):
                 created = (
                     datetime.now(timezone.utc) + timedelta(seconds=1)
                 ).isoformat().replace("+00:00", "Z")
@@ -2967,7 +2986,7 @@ class TestMainBodyEnvEndToEnd:
                 return _FakeResponse(200, b'{"id": 42}')
             if url.endswith("/api/v1/user"):
                 return _FakeResponse(200, json.dumps({"login": own_login}).encode("utf-8"))
-            if url.endswith("/comments"):
+            if url.split("?")[0].endswith("/comments"):
                 created = (
                     datetime.now(timezone.utc) + timedelta(seconds=1)
                 ).isoformat().replace("+00:00", "Z")

@@ -51,6 +51,7 @@ from clagentic_loadout.transport.credential_provider import (
     DEFAULT_ROLE,
     CredentialProviderError,
 )
+from tests._support.fakes import paged
 
 _FULL_SHA = "a" * 40
 
@@ -155,7 +156,7 @@ def _merge_opener():
             return _json_resp(200, {"login": "loadout-merger"})
         if method == "GET" and url.endswith("/files"):
             return _json_resp(200, [{"filename": "a.py"}])
-        if method == "GET" and url.endswith("/comments"):
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
             return _json_resp(200, [])
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": "", "statuses": []})
@@ -363,10 +364,10 @@ def _review_success_opener(*, pr_number=42, comment_id=9):
             return _json_resp(200, {"id": comment_id})
         if url.endswith("/api/v1/user"):
             return _json_resp(200, {"login": "some-role"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             return _json_resp(
                 200,
-                [
+                paged(url, [
                     {
                         "id": comment_id,
                         "user": {"login": "some-role"},
@@ -374,7 +375,7 @@ def _review_success_opener(*, pr_number=42, comment_id=9):
                         "created_at": "2099-01-01T00:00:10Z",
                         "html_url": "http://readback",
                     }
-                ],
+                ]),
             )
         raise AssertionError(f"unexpected: {method} {url}")
 

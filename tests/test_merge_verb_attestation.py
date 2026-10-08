@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.verdict import build_verdict_block
+from tests._support.fakes import paged
 
 _FULL_SHA = "a" * 40
 
@@ -169,8 +170,8 @@ def _forgejo_opener(
             return _json_resp(200, {"login": "loadout-merger"})
         if method == "GET" and url.endswith("/files"):
             return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and url.endswith("/comments"):
-            return _json_resp(200, comments + posted_comments)
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
+            return _json_resp(200, paged(url, comments + posted_comments))
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": ci_state, "statuses": ci_statuses})
         if method == "GET" and "/compare/" in url:
@@ -262,8 +263,8 @@ def _github_opener(
             return _json_resp(200, posted_comments[-1])
         if method == "GET" and url.endswith("/files"):
             return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and url.endswith("/comments"):
-            return _json_resp(200, comments + posted_comments)
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
+            return _json_resp(200, paged(url, comments + posted_comments))
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": ci_state, "statuses": ci_statuses})
         if method == "GET" and url.endswith("/check-runs"):

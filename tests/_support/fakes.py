@@ -4,6 +4,7 @@ a minimal HTTP response with a JSON helper."""
 from __future__ import annotations
 
 import json
+import urllib.parse
 
 
 class RecordingTokenProvider:
@@ -38,6 +39,21 @@ class FakeResponse:
 
     def __exit__(self, *exc):
         return False
+
+
+def paged(url: str, items: list) -> list:
+    """The window of *items* that a real host would return for *url*'s
+    ``page`` and ``limit``/``per_page`` query. A fake comment endpoint must
+    honor paging: the comment reader walks pages until it sees an empty one,
+    and refuses (fail closed) a server that repeats the same page forever.
+    With no size parameter the whole list is returned."""
+    query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+    size_param = query.get("limit") or query.get("per_page")
+    if not size_param:
+        return items
+    size = int(size_param[0])
+    page = int(query.get("page", ["1"])[0])
+    return items[(page - 1) * size : page * size]
 
 
 def json_resp(status: int, payload) -> FakeResponse:

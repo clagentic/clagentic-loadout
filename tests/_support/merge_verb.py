@@ -16,6 +16,7 @@ from tests._support.fakes import (
     RecordingTokenProvider,
     RefusingTokenProvider,
     json_resp,
+    paged,
 )
 
 __all__ = [
@@ -139,8 +140,8 @@ def make_opener(
             return json_resp(200, {"login": "loadout-merger"})
         if method == "GET" and url.endswith("/files"):
             return json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and url.endswith("/comments"):
-            return json_resp(200, comments + posted_comments)
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
+            return json_resp(200, paged(url, comments + posted_comments))
         if method == "GET" and url.endswith("/status"):
             return json_resp(200, {"state": ci_state, "statuses": ci_statuses})
         if method == "GET" and url.endswith("/actions/tasks"):

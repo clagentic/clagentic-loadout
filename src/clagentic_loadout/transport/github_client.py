@@ -104,7 +104,7 @@ GITHUB_API_VERSION = "2022-11-28"
 ParseMode = Literal["strict", "content_type"]
 
 
-def request_json(
+def request_json_with_headers(
     method: str,
     url: str,
     token: str,
@@ -116,11 +116,16 @@ def request_json(
     timeout: int = 30,
     opener=None,
     opener_factory=no_redirect_opener,
-) -> tuple[int, Any]:
+) -> tuple[int, Any, dict[str, str]]:
     """Make an authenticated GitHub API request. Token appears ONLY in the
     Authorization header — never in the URL, never logged.
 
-    Returns (status_code, parsed_body). Success-path parsing depends on
+    Same contract as request_json() (which wraps this) but additionally
+    returns the response headers with lower-cased keys, so a paginating
+    caller can read ``Link``. Headers are ``{}`` on any error-path return and
+    for a response object that exposes none.
+
+    Returns (status_code, parsed_body, headers). Success-path parsing depends on
     parse_mode (see module docstring):
       "strict"       — a non-empty body is always json.loads'd; malformed
                        JSON on a 2xx propagates uncaught, matching push/
@@ -176,14 +181,20 @@ def request_json(
         with urlopen(req, timeout=timeout) as resp:
             raw = resp.read()
             status = getattr(resp, "status", None) or resp.getcode()
+            resp_headers = getattr(resp, "headers", None)
+            out_headers = (
+                {str(k).lower(): str(v) for k, v in resp_headers.items()}
+                if resp_headers is not None and hasattr(resp_headers, "items")
+                else {}
+            )
             if parse_mode == "content_type":
                 content_type = (
                     resp.headers.get("Content-Type", "") if hasattr(resp, "headers") else ""
                 )
                 if "json" in content_type:
-                    return status, json.loads(raw.decode("utf-8")) if raw else {}
-                return status, raw.decode("utf-8", errors="replace")
-            return status, json.loads(raw.decode("utf-8")) if raw else {}
+                    return status, json.loads(raw.decode("utf-8")) if raw else {}, out_headers
+                return status, raw.decode("utf-8", errors="replace"), out_headers
+            return status, json.loads(raw.decode("utf-8")) if raw else {}, out_headers
     except urllib.error.HTTPError as exc:
         if 300 <= exc.code < 400:
             # A 3xx here means no_redirect_opener()'s handler refused to
@@ -194,13 +205,46 @@ def request_json(
             # and never even attempts to read/parse a body whose content
             # (e.g. a Location-bearing redirect page) was never meant for
             # this caller.
-            return exc.code, {}
+            return exc.code, {}, {}
         try:
             raw = exc.read().decode("utf-8", errors="replace")
             body: Any = json.loads(raw) if raw else {}
         except Exception:
             body = {}
-        return exc.code, body
+        return exc.code, body, {}
 
 
-__all__ = ["GITHUB_API_BASE", "GITHUB_API_VERSION", "ParseMode", "request_json"]
+def request_json(
+    method: str,
+    url: str,
+    token: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    accept: str = "application/vnd.github+json",
+    extra_headers: dict[str, str] | None = None,
+    parse_mode: ParseMode = "strict",
+    timeout: int = 30,
+    opener=None,
+    opener_factory=no_redirect_opener,
+) -> tuple[int, Any]:
+    """Return (status_code, parsed_body); the full contract is
+    request_json_with_headers()'s, which this wraps minus the headers."""
+    status, body, _headers = request_json_with_headers(
+        method, url, token, payload,
+        accept=accept,
+        extra_headers=extra_headers,
+        parse_mode=parse_mode,
+        timeout=timeout,
+        opener=opener,
+        opener_factory=opener_factory,
+    )
+    return status, body
+
+
+__all__ = [
+    "GITHUB_API_BASE",
+    "GITHUB_API_VERSION",
+    "ParseMode",
+    "request_json",
+    "request_json_with_headers",
+]

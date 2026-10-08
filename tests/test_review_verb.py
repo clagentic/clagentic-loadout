@@ -32,6 +32,7 @@ import pytest
 from clagentic_loadout.review import verb
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
+from tests._support.fakes import paged
 from tests._support.review_verb import (
     RecordingTokenProvider as _RecordingTokenProvider,
     RefusingTokenProvider as _RefusingTokenProvider,
@@ -73,10 +74,10 @@ def _github_success_opener(*, pr_number=42, posted_id=5):
             return _json_resp(200, {"id": posted_id, "html_url": "http://post"})
         if url.endswith("/user"):
             return _json_resp(200, {"login": "some-role"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             return _json_resp(
                 200,
-                [
+                paged(url, [
                     {
                         "id": posted_id,
                         "user": {"login": "some-role"},
@@ -84,7 +85,7 @@ def _github_success_opener(*, pr_number=42, posted_id=5):
                         "created_at": "2099-01-01T00:00:10Z",
                         "html_url": "http://readback",
                     }
-                ],
+                ]),
             )
         raise AssertionError(f"unexpected: {req.get_method()} {url}")
 
@@ -99,10 +100,10 @@ def _forgejo_success_opener(*, pr_number=42, comment_id=9):
             return _json_resp(200, {"id": comment_id})
         if url.endswith("/api/v1/user"):
             return _json_resp(200, {"login": "some-role"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             return _json_resp(
                 200,
-                [
+                paged(url, [
                     {
                         "id": comment_id,
                         "user": {"login": "some-role"},
@@ -110,7 +111,7 @@ def _forgejo_success_opener(*, pr_number=42, comment_id=9):
                         "created_at": "2099-01-01T00:00:10Z",
                         "html_url": "http://git-host.example.com/comment/9",
                     }
-                ],
+                ]),
             )
         raise AssertionError(f"unexpected: {method} {url}")
 
@@ -433,14 +434,14 @@ def _forgejo_verdict_opener(*, pr_number=42, comment_id=9, landed_body=None, cap
             return _json_resp(200, {"id": comment_id})
         if url.endswith("/api/v1/user"):
             return _json_resp(200, {"login": "reviewer"})
-        if url.endswith(f"/issues/{pr_number}/comments"):
+        if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             if callable(landed_body):
                 body = landed_body(state["posted_body"])
             else:
                 body = landed_body if landed_body is not None else state["posted_body"]
             return _json_resp(
                 200,
-                [
+                paged(url, [
                     {
                         "id": comment_id,
                         "user": {"login": "reviewer"},
@@ -448,7 +449,7 @@ def _forgejo_verdict_opener(*, pr_number=42, comment_id=9, landed_body=None, cap
                         "created_at": "2099-01-01T00:00:10Z",
                         "html_url": "http://git-host.example.com/comment/9",
                     }
-                ],
+                ]),
             )
         raise AssertionError(f"unexpected: {method} {url}")
 

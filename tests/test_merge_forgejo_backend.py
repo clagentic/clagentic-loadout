@@ -117,7 +117,8 @@ class TestFetchChangedFiles:
 class TestFetchComments:
     def test_happy_path(self):
         body = json.dumps([{"id": 1, "user": {"login": "x"}, "body": "hi"}]).encode()
-        opener = _opener_sequence([(200, body)])
+        # The second response is the empty page that ends the list.
+        opener = _opener_sequence([(200, body), (200, b"[]")])
         comments = forgejo_backend.fetch_comments(_API_BASE, "owner", "repo", 1, token="tok", opener=opener)
         assert comments[0]["id"] == 1
 
@@ -131,8 +132,14 @@ class TestFetchComments:
         with pytest.raises(GateFactUnavailableError):
             forgejo_backend.fetch_comments(_API_BASE, "owner", "repo", 1, token="tok", opener=opener)
 
-    def test_empty_body_is_empty_list(self):
+    def test_empty_body_fails_closed(self):
+        # A healthy Forgejo sends "[]" for no comments; a bodyless 200 proves nothing.
         opener = _opener_sequence([(200, b"")])
+        with pytest.raises(GateFactUnavailableError):
+            forgejo_backend.fetch_comments(_API_BASE, "owner", "repo", 1, token="tok", opener=opener)
+
+    def test_empty_list_is_empty_comment_list(self):
+        opener = _opener_sequence([(200, b"[]")])
         assert forgejo_backend.fetch_comments(_API_BASE, "owner", "repo", 1, token="tok", opener=opener) == []
 
 

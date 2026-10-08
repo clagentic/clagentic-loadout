@@ -151,7 +151,12 @@ from clagentic_loadout.transport.github_app_config import (
     GithubAppSlugNotConfiguredError,
     resolve_github_app_slug,
 )
-from clagentic_loadout.transport.github_client import GITHUB_API_BASE, request_json
+from clagentic_loadout.transport import comment_paging
+from clagentic_loadout.transport.github_client import (
+    GITHUB_API_BASE,
+    request_json,
+    request_json_with_headers,
+)
 from clagentic_loadout.transport.redirect_guard import no_redirect_opener
 
 #: The real public GitHub API base URL — brand-neutral, not an operator
@@ -300,6 +305,49 @@ def _github_request(
         parse_mode="content_type",
         opener=opener,
         opener_factory=no_redirect_opener,
+    )
+
+
+def _github_request_with_headers(
+    method: str,
+    url: str,
+    token: str,
+    payload: dict | None = None,
+    *,
+    accept: str = "application/vnd.github+json",
+    user_agent: str = "clagentic-loadout-review/1.0",
+    opener=None,
+) -> tuple[int, dict | list | str, dict[str, str]]:
+    """_github_request with the response headers (lower-cased keys) returned
+    as well, for callers that paginate. Identical request shaping: same
+    defaults, User-Agent, parse mode and redirect-guarded opener."""
+    return request_json_with_headers(
+        method, url, token, payload,
+        accept=accept,
+        extra_headers={"User-Agent": user_agent},
+        parse_mode="content_type",
+        opener=opener,
+        opener_factory=no_redirect_opener,
+    )
+
+
+def _list_issue_comments(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    token: str,
+    *,
+    opener=None,
+) -> list:
+    """Every issue comment on the PR, all pages (see transport.comment_paging).
+    Same request shaping (User-Agent, content-type parse mode, redirect-guarded
+    opener) as every other call in this module."""
+
+    def fetch_page(url: str):
+        return _github_request_with_headers("GET", url, token, opener=opener)
+
+    return comment_paging.list_github_issue_comments(
+        owner, repo, pr_number, fetch_page, api_base=_GITHUB_API
     )
 
 
@@ -537,12 +585,15 @@ def post_and_verify_review(
     # raised before the dedupe check existed (no new failure mode).
     own_login = resolve_own_login(token, caller=caller, opener=opener)
 
-    dedupe_status, dedupe_comments = _github_request("GET", comments_url, token, opener=opener)
-    if dedupe_status == 200 and isinstance(dedupe_comments, list):
+    try:
+        dedupe_comments = _list_issue_comments(owner, repo, pr_number, token, opener=opener)
+    except comment_paging.CommentListError:
+        dedupe_comments = None
+    if dedupe_comments is not None:
         existing = _find_existing_own_comment(dedupe_comments, own_login=own_login, body=body)
         if existing is not None:
             return existing
-    # A non-200/non-list readback here is NOT fatal to the dedupe check --
+    # A failed/non-list/over-cap readback here is NOT fatal to the dedupe check --
     # falling through to a normal POST is safe (worst case: a duplicate that
     # the mandatory post-POST readback below still verifies as landed). The
     # dedupe check is an optimization on top of the mandatory post-and-verify
@@ -563,13 +614,25 @@ def post_and_verify_review(
     # never re-resolved here, so a caller's opener only ever sees ONE /user
     # call per post_and_verify_review invocation, on both the dedupe-hit and
     # dedupe-miss paths.
-    status, comments = _github_request("GET", comments_url, token, opener=opener)
-    if status != 200 or not isinstance(comments, list):
+    try:
+        comments = _list_issue_comments(owner, repo, pr_number, token, opener=opener)
+    except comment_paging.CommentPageStatusError as exc:
         raise ReviewVerifyError(
             f"post_and_verify FAILED -- GET {comments_url} returned HTTP "
-            f"{status} (or non-list body) during readback. Cannot confirm "
+            f"{exc.status} during readback. Cannot confirm "
             f"the comment landed on the correct PR."
-        )
+        ) from exc
+    except comment_paging.CommentPageCapError as exc:
+        raise ReviewVerifyError(
+            f"post_and_verify FAILED -- GET {comments_url} readback: {exc}. "
+            f"Cannot confirm the comment landed on the correct PR."
+        ) from exc
+    except comment_paging.CommentListError as exc:
+        raise ReviewVerifyError(
+            f"post_and_verify FAILED -- GET {comments_url} readback did not "
+            f"yield a complete comment list ({exc}). Cannot confirm "
+            f"the comment landed on the correct PR."
+        ) from exc
 
     not_before_with_tolerance = pre_post_utc.timestamp() - _FRESHNESS_SKEW_TOLERANCE_SECONDS
     stale_candidates: list = []

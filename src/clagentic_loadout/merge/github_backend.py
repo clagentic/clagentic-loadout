@@ -69,7 +69,12 @@ from clagentic_loadout.merge.errors import (
 )
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.sha import InvalidShaError, validate_sha
-from clagentic_loadout.transport.github_client import GITHUB_API_BASE, request_json
+from clagentic_loadout.transport import comment_paging
+from clagentic_loadout.transport.github_client import (
+    GITHUB_API_BASE,
+    request_json,
+    request_json_with_headers,
+)
 from clagentic_loadout.transport.redirect_guard import no_redirect_opener
 
 #: Default GitHub merge method. A caller wanting squash/rebase semantics
@@ -148,6 +153,23 @@ def _github_request(
     fail-closed behavior off the status code, not the presence of a body.
     """
     return request_json(
+        method, url, token, payload, opener=opener, timeout=30,
+        opener_factory=no_redirect_opener,
+    )
+
+
+def _github_request_with_headers(
+    method: str,
+    url: str,
+    token: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    opener=None,
+) -> tuple[int, Any, dict[str, str]]:
+    """_github_request with the response headers (lower-cased keys) returned
+    as well, for callers that paginate. Identical request shaping: same
+    strict parse mode, timeout and redirect-guarded opener."""
+    return request_json_with_headers(
         method, url, token, payload, opener=opener, timeout=30,
         opener_factory=no_redirect_opener,
     )
@@ -259,23 +281,25 @@ def fetch_comments(
     returns, with authorship verified by this list's own
     comment["user"]["login"] field — never by comment body text.
     """
-    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{pr_number}/comments"
+    def fetch_page(url: str) -> tuple[int, Any, dict[str, str]]:
+        return _github_request_with_headers("GET", url, token, opener=opener)
+
     try:
-        status, body = _github_request("GET", url, token, opener=opener)
+        return comment_paging.list_github_issue_comments(
+            owner, repo, pr_number, fetch_page, api_base=GITHUB_API_BASE
+        )
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise GateFactUnavailableError(
             f"cannot read comments for PR #{pr_number} in {owner}/{repo}: {exc}"
         ) from exc
-    if status != 200:
+    except comment_paging.CommentPageStatusError as exc:
         raise GateFactUnavailableError(
-            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: HTTP {status}"
-        )
-    if not isinstance(body, list):
+            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: HTTP {exc.status}"
+        ) from exc
+    except comment_paging.CommentListError as exc:
         raise GateFactUnavailableError(
-            f"comments endpoint returned a non-list body for PR #{pr_number} "
-            f"in {owner}/{repo}"
-        )
-    return body
+            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
 
 
 def fetch_ci_status(

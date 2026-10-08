@@ -68,6 +68,7 @@ import urllib.error
 from datetime import datetime, timezone
 
 from clagentic_loadout.merge import verb
+from tests._support.fakes import paged
 
 PR_42_HEAD_SHA = "156a5cb4f6f163dd9b7eeac47274aa4fad797af2"
 PR_42_TITLE = "feat(lr-30c0d0): tool-owned --expect-verdict-block in loadout-git-host-api"
@@ -214,9 +215,9 @@ def _shadow_opener(calls: list[tuple[str, str]]):
         if method == "GET" and url.endswith("/files"):
             calls.append(("GET", "files"))
             return _json_resp(200, [{"filename": f} for f in PR_42_CHANGED_FILES])
-        if method == "GET" and url.endswith("/comments"):
+        if method == "GET" and url.split("?")[0].endswith("/comments"):
             calls.append(("GET", "comments"))
-            return _json_resp(200, PR_42_COMMENTS + posted_comments)
+            return _json_resp(200, paged(url, PR_42_COMMENTS + posted_comments))
         if method == "GET" and url.endswith("/status"):
             calls.append(("GET", "ci_status"))
             return _json_resp(200, PR_42_CI_STATUS_EMPTY)
@@ -406,8 +407,8 @@ class TestShadowParityPR42:
         def opener_blocking(req, timeout=15):
             url = req.full_url
             method = req.get_method()
-            if method == "GET" and url.endswith("/comments"):
-                return _json_resp(200, comments)
+            if method == "GET" and url.split("?")[0].endswith("/comments"):
+                return _json_resp(200, paged(url, comments))
             return _shadow_opener([])(req, timeout=timeout)
 
         code = verb.main(

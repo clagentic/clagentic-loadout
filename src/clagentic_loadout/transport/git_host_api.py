@@ -255,6 +255,7 @@ from clagentic_loadout.platform_detect import (
     PLATFORM_GITHUB,
 )
 from clagentic_loadout.transport import caller_binding as _caller_binding
+from clagentic_loadout.transport import comment_paging
 from clagentic_loadout.transport import redirect_guard
 from clagentic_loadout.transport.attestation import (
     AttestationError,
@@ -1108,31 +1109,37 @@ def verify_comment_on_pr(
     within the readback comment body (tolerates markdown/whitespace
     normalization).
     """
-    status, raw = request(
-        git_host_base,
-        "GET",
-        f"/api/v1/repos/{owner}/{repo}/issues/{pr_number}/comments",
-        token,
-        opener=opener,
-    )
-    if status != 200:
-        _fail(
-            f"verify-comment FAILED -- GET issues/{pr_number}/comments returned "
-            f"HTTP {status}. Cannot confirm comment landed on the correct PR.",
-            code=EXIT_VERIFY_FAILED,
-        )
     try:
-        comments = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        comments = comment_paging.list_forgejo_issue_comments(
+            request, git_host_base, owner, repo, pr_number, token, opener=opener
+        )
+    except comment_paging.CommentPageStatusError as exc:
         _fail(
             f"verify-comment FAILED -- GET issues/{pr_number}/comments returned "
-            f"unparseable JSON: {exc}.",
+            f"HTTP {exc.status}. Cannot confirm comment landed on the correct PR.",
             code=EXIT_VERIFY_FAILED,
         )
-    if not isinstance(comments, list):
+    except comment_paging.CommentPageParseError as exc:
+        _fail(
+            f"verify-comment FAILED -- GET issues/{pr_number}/comments returned "
+            f"unparseable JSON: {exc.detail}.",
+            code=EXIT_VERIFY_FAILED,
+        )
+    except comment_paging.CommentPageEmptyBodyError as exc:
+        _fail(
+            f"verify-comment FAILED -- GET issues/{pr_number}/comments: {exc}.",
+            code=EXIT_VERIFY_FAILED,
+        )
+    except comment_paging.CommentPageShapeError:
         _fail(
             f"verify-comment FAILED -- GET issues/{pr_number}/comments returned "
             f"non-list.",
+            code=EXIT_VERIFY_FAILED,
+        )
+    except comment_paging.CommentListError as exc:
+        _fail(
+            f"verify-comment FAILED -- GET issues/{pr_number}/comments: {exc}. "
+            f"Cannot confirm comment landed on the correct PR.",
             code=EXIT_VERIFY_FAILED,
         )
 

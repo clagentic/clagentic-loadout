@@ -34,6 +34,7 @@ from clagentic_loadout.merge.verdict import (
     read_reviewer_verdict,
 )
 from clagentic_loadout.review import github_backend as review_github_backend
+from tests._support.fakes import paged
 
 _OWNER = "some-owner"
 _REPO = "some-repo"
@@ -87,8 +88,8 @@ class _SharedGithubServer:
         url = req.full_url
         if url.endswith("/user"):
             return _json_response(200, {"login": _REVIEWER_LOGIN})
-        if req.get_method() == "GET" and url.endswith(f"/issues/{_PR_NUMBER}/comments"):
-            return _json_response(200, list(self.comments))
+        if req.get_method() == "GET" and url.split("?")[0].endswith(f"/issues/{_PR_NUMBER}/comments"):
+            return _json_response(200, paged(url, list(self.comments)))
         if req.get_method() == "POST" and url.endswith(f"/issues/{_PR_NUMBER}/comments"):
             payload = json.loads(req.data.decode("utf-8"))
             comment = {
@@ -107,8 +108,8 @@ class _SharedGithubServer:
         """Opener injected into merge.github_backend calls -- read-only GET
         against the SAME comments list the review-side opener writes to."""
         url = req.full_url
-        if req.get_method() == "GET" and url.endswith(f"/issues/{_PR_NUMBER}/comments"):
-            return _json_response(200, list(self.comments))
+        if req.get_method() == "GET" and url.split("?")[0].endswith(f"/issues/{_PR_NUMBER}/comments"):
+            return _json_response(200, paged(url, list(self.comments)))
         raise AssertionError(f"unexpected merge-side request: {req.get_method()} {url}")
 
 
