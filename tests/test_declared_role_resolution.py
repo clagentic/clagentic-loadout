@@ -48,10 +48,15 @@ def user_config(tmp_path, monkeypatch):
     """Write the user-level `github_app:` section the resolvers read."""
     root = tmp_path / "user-config"
 
-    def write(*, slugs=None, role_callers=None, slug=None):
+    def write(*, slugs=None, role_callers=None, slug=None, callers=None):
         section = {
             key: value
-            for key, value in (("slugs", slugs), ("role_callers", role_callers), ("slug", slug))
+            for key, value in (
+                ("slugs", slugs),
+                ("role_callers", role_callers),
+                ("slug", slug),
+                ("callers", callers),
+            )
             if value is not None
         }
         root.mkdir(parents=True, exist_ok=True)
@@ -99,14 +104,37 @@ class TestResolveDeclaredRole:
         with pytest.raises(ReviewerLoginNotConfiguredError):
             resolve_reviewer_login("reviewer", PLATFORM_GITHUB)
 
-    def test_forgejo_resolves_the_bare_role_and_ignores_the_mapping(self, user_config):
+    def test_forgejo_resolves_a_mapped_role_to_the_callers_account(self, user_config):
         user_config(slugs={"peaches": "app-p"}, role_callers={"reviewer": "peaches"})
+        resolution = resolve_declared_role("reviewer", PLATFORM_FORGEJO)
+        assert (resolution.requirement, resolution.login, resolution.source) == (
+            "peaches",
+            "peaches",
+            SOURCE_ROLE_CALLERS,
+        )
+
+    def test_forgejo_mapping_wins_over_the_role_being_a_listed_caller(self, user_config):
+        user_config(role_callers={"reviewer": "peaches"}, callers=["reviewer", "peaches"])
+        assert resolve_declared_role("reviewer", PLATFORM_FORGEJO).login == "peaches"
+
+    def test_forgejo_a_listed_caller_resolves_as_the_bare_role(self, user_config):
+        user_config(callers=["reviewer"])
         resolution = resolve_declared_role("reviewer", PLATFORM_FORGEJO)
         assert (resolution.requirement, resolution.login, resolution.source) == (
             "reviewer",
             "reviewer",
             SOURCE_BARE_NAME,
         )
+
+    def test_forgejo_with_no_callers_list_keeps_the_bare_role(self, user_config):
+        user_config(slugs={"peaches": "app-p"})
+        resolution = resolve_declared_role("reviewer", PLATFORM_FORGEJO)
+        assert (resolution.login, resolution.source) == ("reviewer", SOURCE_BARE_NAME)
+
+    def test_forgejo_an_unmapped_role_outside_the_callers_list_is_unresolved(self, user_config):
+        user_config(callers=["peaches", "bobbie"])
+        with pytest.raises(ReviewerLoginNotConfiguredError, match=r"github_app\.role_callers\.reviewer"):
+            resolve_declared_role("reviewer", PLATFORM_FORGEJO)
 
 
 class TestGateRolesFollowTheMapping:
@@ -147,8 +175,29 @@ class TestGateRolesFollowTheMapping:
         gate = self._gate(["reviewer"])
         assert with_resolvable_reviewer_roles(gate, PLATFORM_GITHUB) is gate
 
-    def test_forgejo_is_returned_unchanged_whatever_is_mapped(self, user_config):
+    def test_forgejo_a_mapped_role_is_required_under_the_callers_account(self, user_config):
         user_config(role_callers={"reviewer": "peaches"})
+        gate = with_resolvable_reviewer_roles(
+            self._gate(["reviewer"], {"reviewer": ("a",)}), PLATFORM_FORGEJO
+        )
+        assert gate.reviewer_roles == ("peaches",)
+        assert gate.warnings == ()
+        assert gate.scanners_for("peaches") == ("a",)
+
+    def test_forgejo_an_unmapped_role_outside_the_callers_list_degrades_with_the_warning(self, user_config):
+        user_config(callers=["peaches"])
+        gate = with_resolvable_reviewer_roles(self._gate(["reviewer", "peaches"]), PLATFORM_FORGEJO)
+        assert gate.reviewer_roles == ("peaches",)
+        assert len(gate.warnings) == 1
+        assert "'reviewer'" in gate.warnings[0] and "DROPPED" in gate.warnings[0]
+
+    def test_forgejo_a_listed_caller_role_is_returned_unchanged(self, user_config):
+        user_config(callers=["reviewer"])
+        gate = self._gate(["reviewer"])
+        assert with_resolvable_reviewer_roles(gate, PLATFORM_FORGEJO) is gate
+
+    def test_forgejo_with_no_callers_list_is_returned_unchanged(self, user_config):
+        user_config()
         gate = self._gate(["reviewer"])
         assert with_resolvable_reviewer_roles(gate, PLATFORM_FORGEJO) is gate
 

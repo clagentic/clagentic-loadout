@@ -48,6 +48,7 @@ from clagentic_loadout.transport.github_app_config import (
     CONFIG_KEY_SLUGS,
     CONFIG_SECTION_GITHUB_APP,
     GithubAppSlugNotConfiguredError,
+    read_configured_callers,
     read_configured_role_callers,
     resolve_github_app_slug,
 )
@@ -169,24 +170,55 @@ def resolve_role_via_mapping(
     )
 
 
+def resolve_forgejo_declared_role(role: str) -> DeclaredRoleResolution:
+    """Resolve a repo-DECLARED reviewer role on Forgejo.
+
+    A Forgejo login is the caller's account name, so a declared role is
+    resolved in this order:
+
+      1. The deployment's `role_callers` mapping: the mapped caller's name is
+         both the login and the name the role is required under.
+      2. The bare role, when the deployment declares a callers list that names
+         the role, or declares no callers list at all (the role is then taken
+         to be an account, as it always was).
+      3. Otherwise the role names no account the deployment knows of, and
+         resolving it as a login would demand a verdict nobody can post:
+         raises ReviewerLoginNotConfiguredError, naming the mapping key.
+    """
+    caller = read_configured_role_callers().get(role)
+    if caller is not None:
+        return DeclaredRoleResolution(
+            role=role, requirement=caller, login=caller, source=SOURCE_ROLE_CALLERS
+        )
+    callers = read_configured_callers()
+    if callers is None or role in callers:
+        return DeclaredRoleResolution(role=role, requirement=role, login=role, source=SOURCE_BARE_NAME)
+    raise ReviewerLoginNotConfiguredError(
+        f"declared role {role!r} is not a configured caller and no caller is mapped to it. "
+        f"To resolve it, map it to the caller that posts it with "
+        f"{role_caller_mapping_key(role)}: <caller>"
+    )
+
+
 def resolve_declared_role(role: str, platform: str) -> DeclaredRoleResolution:
     """Resolve a repo-DECLARED reviewer role to the login that posts it.
 
-    The role is first resolved exactly as `resolve_reviewer_login` resolves a
-    `--required-reviewer` name, and any role that resolves that way is returned
-    unchanged. Only when that fails (github, no slug for the role) is the
+    On GitHub the role is first resolved exactly as `resolve_reviewer_login`
+    resolves a `--required-reviewer` name, and any role that resolves that way
+    is returned unchanged. Only when that fails (no slug for the role) is the
     OPTIONAL role mapping consulted (`resolve_role_via_mapping`). A deployment
     with no mapping therefore behaves exactly as it did before the mapping
-    existed.
+    existed. Forgejo follows `resolve_forgejo_declared_role`.
 
     Raises ReviewerLoginNotConfiguredError when the role resolves neither way.
     """
+    if platform == PLATFORM_FORGEJO:
+        return resolve_forgejo_declared_role(role)
     try:
         login = resolve_reviewer_login(role, platform)
     except ReviewerLoginNotConfiguredError as exc:
         return resolve_role_via_mapping(role, exc)
-    source = SOURCE_BARE_NAME if platform == PLATFORM_FORGEJO else SOURCE_SLUGS
-    return DeclaredRoleResolution(role=role, requirement=role, login=login, source=source)
+    return DeclaredRoleResolution(role=role, requirement=role, login=login, source=SOURCE_SLUGS)
 
 
 __all__ = [
@@ -196,6 +228,7 @@ __all__ = [
     "DeclaredRoleResolution",
     "ReviewerLoginNotConfiguredError",
     "resolve_declared_role",
+    "resolve_forgejo_declared_role",
     "resolve_role_via_mapping",
     "resolve_reviewer_login",
     "role_caller_mapping_key",

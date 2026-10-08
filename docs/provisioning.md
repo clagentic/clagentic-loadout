@@ -313,9 +313,18 @@ gate is not actually an enforceable one.
    `slugs.<caller>` + `[bot]`. The same caller named by `--required-reviewer`
    or by another declared role is one requirement, and the role's
    `required_scanners` entry moves with it. With no mapping the role degrades
-   per role with a warning, as before; Forgejo is unaffected. `loadout-doctor`
-   reports each declared role's resolution and names the
-   `github_app.role_callers.<role>` key that would resolve an unresolved one.
+   per role with a warning, as before. `loadout-doctor` reports each declared
+   role's resolution and names the `github_app.role_callers.<role>` key that
+   would resolve an unresolved one.
+
+   **Forgejo.** The same `role_callers` map applies (its section name is
+   historical; it is read on both platforms), and a Forgejo login is the
+   caller's account name. A declared role resolves, in order: the mapped
+   caller (the role is then required under that caller's name); else the bare
+   role when `github_app.callers` is declared and names it, or when no
+   `callers` list is declared at all; else, with a `callers` list that does
+   not name the role, the role degrades with the per-role warning instead of
+   requiring a verdict from an account that does not exist.
 
 ### `merge:` section — repo-tier (`.clagentic/loadout/config.yaml`)
 
