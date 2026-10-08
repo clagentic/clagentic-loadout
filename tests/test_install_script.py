@@ -212,7 +212,7 @@ def test_install_sh_missing_source_path_is_usage_error(tmp_path: Path) -> None:
     assert "does not exist" in result.stderr
 
 
-def test_install_sh_pep668_no_pipx_no_uv_selects_venv_tier(tmp_path: Path, shared_venv_data_dir: Path) -> None:
+def test_install_sh_pep668_no_pipx_no_uv_selects_venv_tier(tmp_path: Path) -> None:
     """The lr-f43b repro: no pipx, no uv, and the interpreter reports a PEP
     668 EXTERNALLY-MANAGED marker. install.sh must fall through past pip
     --user to the self-managed venv tier rather than attempting (and
@@ -223,8 +223,10 @@ def test_install_sh_pep668_no_pipx_no_uv_selects_venv_tier(tmp_path: Path, share
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     env["HOME"] = str(fake_home)
-    # The venv tier builds its venv even under --dry-run; reuse the shared one.
-    env["CLAGENTIC_LOADOUT_HOME"] = str(shared_venv_data_dir)
+    # A fresh data dir of its own: handing this test the shared prebuilt venv
+    # would take the "reusing existing venv" branch and skip the venv creation
+    # the PEP 668 fallback exists to perform.
+    env["CLAGENTIC_LOADOUT_HOME"] = str(tmp_path / "data")
 
     fake_source = tmp_path / "some-checkout"
     fake_source.mkdir()
@@ -233,6 +235,8 @@ def test_install_sh_pep668_no_pipx_no_uv_selects_venv_tier(tmp_path: Path, share
     assert result.returncode == 0, result.stderr
     assert "installer=venv" in result.stderr
     assert "externally-managed" in result.stderr
+    assert "creating venv" in result.stderr
+    assert "reusing existing venv" not in result.stderr
 
 
 def test_install_sh_venv_tier_symlink_refresh_is_idempotent(tmp_path: Path) -> None:
