@@ -77,7 +77,7 @@ def _github_success_opener(*, pr_number=42, posted_id=5):
         if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             return _json_resp(
                 200,
-                [
+                paged(url, [
                     {
                         "id": posted_id,
                         "user": {"login": "some-role"},
@@ -85,7 +85,7 @@ def _github_success_opener(*, pr_number=42, posted_id=5):
                         "created_at": "2099-01-01T00:00:10Z",
                         "html_url": "http://readback",
                     }
-                ],
+                ]),
             )
         raise AssertionError(f"unexpected: {req.get_method()} {url}")
 

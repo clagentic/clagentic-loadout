@@ -296,12 +296,7 @@ def fetch_comments(
         raise GateFactUnavailableError(
             f"cannot read comments for PR #{pr_number} in {owner}/{repo}: HTTP {exc.status}"
         ) from exc
-    except comment_paging.CommentPageShapeError as exc:
-        raise GateFactUnavailableError(
-            f"comments endpoint returned a non-list body for PR #{pr_number} "
-            f"in {owner}/{repo}"
-        ) from exc
-    except comment_paging.CommentPageCapError as exc:
+    except comment_paging.CommentListError as exc:
         raise GateFactUnavailableError(
             f"cannot read comments for PR #{pr_number} in {owner}/{repo}: {exc}"
         ) from exc

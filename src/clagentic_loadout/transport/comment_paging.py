@@ -8,20 +8,24 @@ comments than one page (a) a post-and-verify readback cannot find the comment
 it just posted, and (b) a merge gate picks an older reviewer verdict as the
 current one. Every comment reader goes through this module instead.
 
-Contract:
-  - GitHub: ``per_page=100``, ``page=N``. When a ``Link`` header is present,
-    pagination ends only when it carries no ``rel="next"`` (a short page does
-    not end it); with no ``Link`` header a short page ends it. The ``Link``
-    URL is never followed (the bearer token must only ever go to the URL this
-    module built), so it is used purely as an end-of-list signal.
-  - Forgejo: ``limit=50``, ``page=N``, until an EMPTY page (a server with a
-    lower page-size maximum returns short pages mid-list).
-  - Repeats: a page that adds no new comment is a repeat. If it is larger
-    than the requested limit the server ignored paging and sent the whole
-    list, which is returned; otherwise ``CommentPageRepeatError`` (a
-    ``CommentPageCapError``) fails closed.
-  - Bounded: at most ``MAX_PAGES`` pages. A list that is still going at the
-    cap raises ``CommentPageCapError``; it is never silently truncated.
+Contract -- success only on a signal that PROVES the list is complete; every
+other condition keeps paging or fails closed, never on a guess (page size,
+body length, repeat size):
+  - GitHub: ``per_page=100``, ``page=N``. Complete on (a) a parsed empty
+    ``[]`` page, or (b) a ``Link`` header present without ``rel="next"``.
+    With no ``Link`` header paging continues (a short page proves nothing)
+    until an empty page. If an earlier page advertised ``rel="next"`` and a
+    later page carries no ``Link`` header at all,
+    ``CommentPageLinkLostError`` fails closed. The ``Link`` URL is never
+    followed (the bearer token only goes to URLs this module built); it is
+    purely an end-of-list signal.
+  - Forgejo: ``limit=50``, ``page=N``. Complete only on a parsed empty
+    ``[]`` page. An HTTP 200 with an empty body fails closed
+    (``CommentPageEmptyBodyError``) on every page.
+  - Repeats: a page that adds no new comment id fails closed
+    (``CommentPageRepeatError``) on both platforms, whatever its size.
+  - Bounded: at most ``MAX_PAGES`` pages. A list still going at the cap
+    raises ``CommentPageCapError``; it is never silently truncated.
   - Output is de-duplicated by ``id`` (comments posted mid-walk shift page
     boundaries) and, when every comment carries an integer ``id``, ordered by
     it -- ids are monotonic on both platforms, so "latest" never depends on
@@ -81,6 +85,29 @@ class CommentPageParseError(CommentPageShapeError):
         self.detail = detail
 
 
+class CommentPageEmptyBodyError(CommentPageShapeError):
+    """A page answered HTTP 200 with no body; a healthy server sends ``[]``."""
+
+    def __init__(self, page: int) -> None:
+        CommentListError.__init__(
+            self, f"comments page {page} returned HTTP 200 with an empty body"
+        )
+        self.page = page
+
+
+class CommentPageLinkLostError(CommentListError):
+    """An earlier page advertised a next page but this one carries no Link
+    header, so completeness can no longer be proven (fail closed)."""
+
+    def __init__(self, page: int) -> None:
+        super().__init__(
+            f"comments page {page} carried no Link header after an earlier "
+            f"page advertised a next page; refusing to act on a possibly "
+            f"truncated list"
+        )
+        self.page = page
+
+
 class CommentPageCapError(CommentListError):
     """The list was still going after MAX_PAGES pages (fail closed)."""
 
@@ -94,17 +121,16 @@ class CommentPageCapError(CommentListError):
 
 
 class CommentPageRepeatError(CommentPageCapError):
-    """A page added no new comments and the server did not return the whole
-    list: it ignores the page parameter while capping the page size, so the
-    list cannot be completed (fail closed)."""
+    """A page added no new comments: the server is not advancing (it ignores
+    the page parameter), so the list cannot be proven complete (fail
+    closed)."""
 
     def __init__(self, page: int, limit: int) -> None:
         CommentListError.__init__(
             self,
             f"comment pagination stalled at page {page}: it returned only "
-            f"comments already seen, at or under the requested limit of "
-            f"{limit} (page cap guard); refusing to act on a possibly "
-            f"truncated list",
+            f"comments already seen (requested limit {limit}); refusing to "
+            f"act on a possibly truncated list",
         )
         self.max_pages = page
         self.page = page
@@ -129,16 +155,6 @@ def _absorb(page_items: list[Any], seen: set[str], collected: list[Any]) -> int:
         collected.append(item)
         fresh += 1
     return fresh
-
-
-def _fail_unless_oversized(page_items: list[Any], limit: int, page: int) -> None:
-    """Handle a page that added nothing new. A page LARGER than the requested
-    limit means the server ignored paging and sent the whole list on every
-    request, so the caller already holds all of it; anything else means paging
-    is not advancing and the list may be truncated."""
-    if len(page_items) > limit:
-        return
-    raise CommentPageRepeatError(page, limit)
 
 
 def _finalize(comments: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -180,26 +196,25 @@ def list_github_issue_comments(
     base = f"{api_base}/repos/{owner}/{repo}/issues/{number}/comments"
     collected: list[dict[str, Any]] = []
     seen: set[str] = set()
+    link_expected = False
     for page in range(1, max_pages + 1):
         status, body, headers = fetch_page(f"{base}?per_page={GITHUB_PER_PAGE}&page={page}")
         if status != 200:
             raise CommentPageStatusError(status, page)
         if not isinstance(body, list):
             raise CommentPageShapeError(page)
-        fresh = _absorb(body, seen, collected)
+        # A parsed empty list is the only end signal that needs no header.
+        if not body:
+            return _finalize(collected)
+        if _absorb(body, seen, collected) == 0:
+            raise CommentPageRepeatError(page, GITHUB_PER_PAGE)
         link = headers.get("link", "") if headers else ""
-        # With a Link header, rel="next" is the only authority: a short page
-        # in the middle of a list is legal when the server caps below
-        # per_page. Without one, GitHub is answering a single-page list, and
-        # a full page is the only reason to look further.
         if link:
             if not _LINK_NEXT_RE.search(link):
                 return _finalize(collected)
-        elif len(body) < GITHUB_PER_PAGE:
-            return _finalize(collected)
-        if fresh == 0:
-            _fail_unless_oversized(body, GITHUB_PER_PAGE, page)
-            return _finalize(collected)
+            link_expected = True
+        elif link_expected:
+            raise CommentPageLinkLostError(page)
     raise CommentPageCapError(max_pages, GITHUB_PER_PAGE)
 
 
@@ -234,20 +249,19 @@ def list_forgejo_issue_comments(
         if status != 200:
             raise CommentPageStatusError(status, page)
         if not raw:
-            return _finalize(collected)
+            raise CommentPageEmptyBodyError(page)
         try:
             parsed = json.loads(raw.decode("utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
             raise CommentPageParseError(page, str(exc)) from exc
         if not isinstance(parsed, list):
             raise CommentPageShapeError(page)
-        # Only an empty page ends the list: an instance configured with a
-        # smaller maximum page size returns short pages mid-list.
+        # Only a parsed empty list proves the end: an instance configured with
+        # a smaller maximum page size returns short pages mid-list.
         if not parsed:
             return _finalize(collected)
         if _absorb(parsed, seen, collected) == 0:
-            _fail_unless_oversized(parsed, FORGEJO_PAGE_LIMIT, page)
-            return _finalize(collected)
+            raise CommentPageRepeatError(page, FORGEJO_PAGE_LIMIT)
     raise CommentPageCapError(max_pages, FORGEJO_PAGE_LIMIT)
 
 
@@ -257,6 +271,8 @@ __all__ = [
     "MAX_PAGES",
     "CommentListError",
     "CommentPageCapError",
+    "CommentPageEmptyBodyError",
+    "CommentPageLinkLostError",
     "CommentPageParseError",
     "CommentPageRepeatError",
     "CommentPageShapeError",

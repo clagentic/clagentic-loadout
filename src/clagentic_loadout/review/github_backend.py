@@ -629,8 +629,8 @@ def post_and_verify_review(
         ) from exc
     except comment_paging.CommentListError as exc:
         raise ReviewVerifyError(
-            f"post_and_verify FAILED -- GET {comments_url} returned HTTP "
-            f"200 but a non-list body during readback ({exc}). Cannot confirm "
+            f"post_and_verify FAILED -- GET {comments_url} readback did not "
+            f"yield a complete comment list ({exc}). Cannot confirm "
             f"the comment landed on the correct PR."
         ) from exc
 

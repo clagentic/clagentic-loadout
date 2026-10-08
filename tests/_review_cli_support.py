@@ -275,7 +275,8 @@ def github_opener(
         if method == "GET" and url.endswith("/user"):
             return _json({"login": login})
         if method == "GET" and url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
-            if recorded["posted_body"] is None:
+            # A real server answers a page past the end with an empty list.
+            if recorded["posted_body"] is None or not url.endswith("&page=1"):
                 return _json([])
             return _json(
                 [

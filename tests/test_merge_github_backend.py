@@ -144,8 +144,12 @@ class TestFetchChangedFiles:
 
 class TestFetchComments:
     def test_happy_path(self):
+        # The second response is the empty page that ends a Link-less list.
         opener = _opener_sequence(
-            [_json_response(200, [{"id": 1, "user": {"login": "x"}, "body": "hi"}])]
+            [
+                _json_response(200, [{"id": 1, "user": {"login": "x"}, "body": "hi"}]),
+                _json_response(200, []),
+            ]
         )
         comments = github_backend.fetch_comments(_OWNER, _REPO, 1, token="tok", opener=opener)
         assert comments[0]["id"] == 1

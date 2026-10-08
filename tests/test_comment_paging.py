@@ -154,11 +154,44 @@ class TestGithubReader:
         got = merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=server)
         assert len(got) == 250
 
-    def test_single_page_costs_one_request(self):
+    def test_single_page_costs_two_requests(self):
+        # No Link header proves nothing, so the empty page after it ends the list.
         server = _GithubServer(_fillers(5))
         got = merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=server)
         assert len(got) == 5
-        assert server.comment_gets == 1
+        assert server.comment_gets == 2
+
+    def test_no_link_header_and_server_page_cap_below_per_page_returns_all(self):
+        server = _GithubServer(_fillers(75), link_headers=False, max_page_size=30)
+        got = merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=server)
+        assert [c["id"] for c in got] == list(range(1, 76))
+
+    def test_link_without_next_ends_the_list_without_an_extra_request(self):
+        server = _GithubServer(_fillers(250))
+        merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=server)
+        assert server.comment_gets == 3
+
+    def test_link_header_disappearing_after_next_fails_closed(self):
+        calls = {"n": 0}
+
+        def opener(req, timeout=30):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Resp(
+                    json.dumps(_fillers(100)).encode(),
+                    {"Content-Type": "application/json", "Link": '<http://x>; rel="next"'},
+                )
+            return _Resp(json.dumps([_comment(i) for i in range(101, 120)]).encode())
+
+        with pytest.raises(GateFactUnavailableError, match="Link header"):
+            merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=opener)
+
+    def test_empty_body_200_fails_closed(self):
+        def opener(req, timeout=30):
+            return _Resp(b"")
+
+        with pytest.raises(GateFactUnavailableError):
+            merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=opener)
 
     def test_order_does_not_depend_on_api_ordering(self):
         server = _GithubServer(_fillers(150), descending=True)
@@ -178,10 +211,14 @@ class TestGithubReader:
         ]
 
     def test_page_cap_fails_closed(self):
-        # Every page is full and advertises a next page, forever.
+        # Every page is full, brand new, and advertises a next page, forever.
+        calls = {"n": 0}
+
         def opener(req, timeout=30):
+            calls["n"] += 1
+            start = calls["n"] * 1000
             return _Resp(
-                json.dumps([_comment(i) for i in range(100)]).encode(),
+                json.dumps([_comment(start + i) for i in range(100)]).encode(),
                 {"Content-Type": "application/json", "Link": '<http://x>; rel="next"'},
             )
 
@@ -193,14 +230,14 @@ class TestGithubReader:
         got = merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=server)
         assert [c["id"] for c in got] == list(range(1, 251))
 
-    def test_server_ignoring_page_with_full_list_returns_it_once(self):
+    def test_server_ignoring_page_with_full_list_fails_closed(self):
         comments = _fillers(150)
 
         def opener(req, timeout=30):
             return _Resp(json.dumps(comments).encode())
 
-        got = merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=opener)
-        assert [c["id"] for c in got] == list(range(1, 151))
+        with pytest.raises(GateFactUnavailableError, match="stalled"):
+            merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=opener)
 
     def test_server_ignoring_page_at_exactly_per_page_fails_closed(self):
         comments = _fillers(comment_paging.GITHUB_PER_PAGE)
@@ -255,16 +292,53 @@ class TestForgejoReader:
         )
         assert [c["id"] for c in got] == list(range(1, 76))
 
-    def test_server_ignoring_page_with_full_list_returns_it_once(self):
+    def test_server_ignoring_page_with_full_list_fails_closed(self):
         comments = _fillers(75)
 
         def opener(req, timeout=15):
             return _Resp(json.dumps(comments).encode())
 
+        with pytest.raises(GateFactUnavailableError, match="stalled"):
+            merge_forgejo.fetch_comments(
+                "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=opener
+            )
+
+    def test_empty_body_200_on_page_one_fails_closed(self):
+        def opener(req, timeout=15):
+            return _Resp(b"")
+
+        with pytest.raises(GateFactUnavailableError, match="empty body"):
+            merge_forgejo.fetch_comments(
+                "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=opener
+            )
+
+    def test_empty_body_200_on_page_two_fails_closed(self):
+        calls = {"n": 0}
+
+        def opener(req, timeout=15):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Resp(json.dumps(_fillers(50)).encode())
+            return _Resp(b"")
+
+        with pytest.raises(GateFactUnavailableError, match="page 2"):
+            merge_forgejo.fetch_comments(
+                "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=opener
+            )
+
+    def test_empty_list_on_page_two_ends_the_list(self):
+        calls = {"n": 0}
+
+        def opener(req, timeout=15):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Resp(json.dumps(_fillers(3)).encode())
+            return _Resp(b"[]")
+
         got = merge_forgejo.fetch_comments(
             "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=opener
         )
-        assert [c["id"] for c in got] == list(range(1, 76))
+        assert [c["id"] for c in got] == [1, 2, 3]
 
     def test_server_ignoring_page_at_exactly_limit_fails_closed(self):
         comments = _fillers(comment_paging.FORGEJO_PAGE_LIMIT)
@@ -285,8 +359,12 @@ class TestForgejoReader:
         assert [c["id"] for c in got] == list(range(1, 121))
 
     def test_page_cap_fails_closed(self):
+        calls = {"n": 0}
+
         def opener(req, timeout=15):
-            return _Resp(json.dumps([_comment(i) for i in range(50)]).encode())
+            calls["n"] += 1
+            start = calls["n"] * 1000
+            return _Resp(json.dumps([_comment(start + i) for i in range(50)]).encode())
 
         with pytest.raises(GateFactUnavailableError, match="page cap"):
             merge_forgejo.fetch_comments(
@@ -294,8 +372,12 @@ class TestForgejoReader:
             )
 
     def test_cap_error_carries_cap(self):
+        calls = {"n": 0}
+
         def request_fn(base, method, path, token, opener=None):
-            return 200, json.dumps([_comment(i) for i in range(50)]).encode()
+            calls["n"] += 1
+            start = calls["n"] * 1000
+            return 200, json.dumps([_comment(start + i) for i in range(50)]).encode()
 
         with pytest.raises(comment_paging.CommentPageCapError):
             comment_paging.list_forgejo_issue_comments(

@@ -1125,13 +1125,18 @@ def verify_comment_on_pr(
             f"unparseable JSON: {exc.detail}.",
             code=EXIT_VERIFY_FAILED,
         )
+    except comment_paging.CommentPageEmptyBodyError as exc:
+        _fail(
+            f"verify-comment FAILED -- GET issues/{pr_number}/comments: {exc}.",
+            code=EXIT_VERIFY_FAILED,
+        )
     except comment_paging.CommentPageShapeError:
         _fail(
             f"verify-comment FAILED -- GET issues/{pr_number}/comments returned "
             f"non-list.",
             code=EXIT_VERIFY_FAILED,
         )
-    except comment_paging.CommentPageCapError as exc:
+    except comment_paging.CommentListError as exc:
         _fail(
             f"verify-comment FAILED -- GET issues/{pr_number}/comments: {exc}. "
             f"Cannot confirm comment landed on the correct PR.",

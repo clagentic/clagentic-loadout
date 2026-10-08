@@ -42,10 +42,14 @@ def github_verdict_opener(*, pr_number=42, posted_id=5, landed_body=None, captur
     def opener(req, timeout=15):
         url = req.full_url
         method = req.get_method()
-        if method == "GET" and url.split("?")[0].endswith(f"/issues/{pr_number}/comments") and state["posted_body"] is None:
-            # Pre-POST dedupe readback (the GitHub backend's idempotency
-            # check): nothing has been posted yet, so no existing-own-comment
-            # match is possible.
+        if (
+            method == "GET"
+            and url.split("?")[0].endswith(f"/issues/{pr_number}/comments")
+            and (state["posted_body"] is None or not url.endswith("&page=1"))
+        ):
+            # Pre-POST dedupe readback (nothing posted yet, so no match is
+            # possible), and any page past the first: a real server answers a
+            # page past the end with an empty list.
             return json_resp(200, [])
         if method == "POST" and url.endswith(f"/issues/{pr_number}/comments"):
             state["posted_body"] = json.loads(req.data.decode("utf-8"))["body"]
