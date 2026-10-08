@@ -53,9 +53,10 @@ post_merge_steps. Nothing here is identity-bearing.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
-from clagentic_loadout.merge.post_merge import validate_post_merge_steps
+from clagentic_loadout.merge.post_merge import PostMergeConfigError, validate_post_merge_steps
 from clagentic_loadout.merge.post_merge_config import CONFIG_SECTION_MERGE, read_repo_merge_section
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
@@ -66,6 +67,13 @@ from clagentic_loadout.repo_config import (
 #: Sibling of CONFIG_KEY_POST_MERGE_STEPS within the SAME `merge:` section —
 #: pre_checks run BEFORE the merge call, post_merge_steps run AFTER it.
 CONFIG_KEY_PRE_CHECKS = "pre_checks"
+
+#: Optional deployment-tier key in the same `merge:` section: environment
+#: variable names kept in the pre_check child environment although the
+#: default scrub (`merge.pre_check_env`) would remove them.
+CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH = "pre_checks_env_passthrough"
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def load_pre_checks(
@@ -122,8 +130,44 @@ def pre_checks_from_section(merge_section: dict) -> list[dict]:
     return steps
 
 
+def resolve_pre_checks_env_passthrough(
+    repo_root: str | Path | None,
+    *,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+) -> tuple[str, ...]:
+    """The environment variable names a deployment deliberately lets through
+    to pre_check child processes (`merge.pre_checks_env_passthrough`).
+
+    Deployment tier: read from the working-tree config file at *repo_root*,
+    never from the tracked gate file, so the PR under review cannot widen what
+    its own checks see. `()` when *repo_root* is None or the key is absent.
+
+    Raises:
+        PostMergeConfigError: the file cannot be read, or the key is not a list
+            of valid environment variable names.
+    """
+    if repo_root is None:
+        return ()
+    config_path = resolve_repo_config_path(
+        repo_root, config_relative_path=config_relative_path, warn=False
+    )
+    value = read_repo_merge_section(config_path).get(CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH)
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(
+        isinstance(name, str) and _ENV_NAME_RE.match(name) for name in value
+    ):
+        raise PostMergeConfigError(
+            f"{config_path}: {CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH!r} must be a list of "
+            f"environment variable names, got {value!r}."
+        )
+    return tuple(dict.fromkeys(value))
+
+
 __all__ = [
     "CONFIG_KEY_PRE_CHECKS",
+    "CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH",
+    "resolve_pre_checks_env_passthrough",
     "CONFIG_SECTION_MERGE",
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "load_pre_checks",

@@ -525,6 +525,8 @@ from clagentic_loadout.merge.merge_result_worktree import (
     MergeResultWorktreeError,
     merge_result_worktree,
 )
+from clagentic_loadout.merge.pre_check_env import pre_check_env
+from clagentic_loadout.merge.pre_checks_config import resolve_pre_checks_env_passthrough
 from clagentic_loadout.merge.repo_gate_runtime import (
     load_repo_gate_at_base,
     resolve_gate_git_tree,
@@ -1660,6 +1662,14 @@ def _run(
             # load_repo_gate_at_base), so the merge result is built there too.
             gate_git_tree = args.repo_path
         try:
+            passthrough = resolve_pre_checks_env_passthrough(args.repo_path)
+        except PostMergeConfigError as exc:
+            _fail(
+                f"pre_checks gate could not read merge.pre_checks_env_passthrough -- {exc} -- "
+                f"refusing to merge PR #{args.pr_number} in {owner}/{repo}.",
+                code=EXIT_PRE_CHECKS_FAILED,
+            )
+        try:
             with merge_result_worktree(
                 gate_git_tree,
                 resolve_base_sha(pr_info),
@@ -1668,13 +1678,18 @@ def _run(
             ) as check_tree:
                 print(
                     f"merge: pre_checks gate -- running {len(pre_checks)} declared "
-                    f"check(s) in {args.repo_path!r} before authorizing PR "
-                    f"#{args.pr_number} in {owner}/{repo} (declared at base "
-                    f"{resolve_base_sha(pr_info)!r}); executing in a worktree of the "
-                    f"merge result of head {current_head_sha!r} at {str(check_tree)!r}",
+                    f"check(s) in the merge-result worktree {str(check_tree)!r} (head "
+                    f"{current_head_sha!r} merged onto base {resolve_base_sha(pr_info)!r}, "
+                    f"where the checks are declared) before authorizing PR "
+                    f"#{args.pr_number} in {owner}/{repo}; the checkout at "
+                    f"{args.repo_path!r} is not used for execution; identity, attestation "
+                    f"and credential-shaped environment variables are withheld from the "
+                    f"checks",
                     file=sys.stderr,
                 )
-                run_post_merge_steps(pre_checks, check_tree)
+                run_post_merge_steps(
+                    pre_checks, check_tree, base_env=pre_check_env(passthrough=passthrough)
+                )
         except MergeResultWorktreeError as exc:
             _fail(
                 f"pre_checks gate could not build the merge result -- {exc} -- "

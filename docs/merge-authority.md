@@ -215,6 +215,17 @@ keep a broken config from blocking the merge that would fix it:
   read, so it fails closed: `pre_checks` **refuse** (the base SHA is the only
   source of the declaration, and an unverifiable declaration is never read as
   "no checks"), and the reviewer pair falls back with a warning.
+- `pre_checks` execute in a fresh git worktree of the merge result (the PR head
+  merged onto its base commit) under `TMPDIR`, removed afterwards; the shared
+  `--repo-path` checkout is neither read for execution nor modified. The
+  worktree carries no untracked or ignored state from that checkout (no in-repo
+  virtualenv, build artifacts or uninitialised submodules), so a check must not
+  depend on them. Their child processes receive the merger's environment minus
+  identity and attestation variables, the `CLAGENTIC_LOADOUT_*` namespace and
+  credential-shaped names (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`,
+  `GH_*`, `GITHUB_TOKEN`, `FORGEJO_*`, `BAO_*`, `VAULT_*`); the optional
+  deployment-tier `merge.pre_checks_env_passthrough` list (working-tree config
+  file only) keeps named variables.
 - A malformed `merge.git_working_tree` is the post-merge tree sync's own error,
   reported only after the merge has landed, so it must not let the gate be
   skipped. The reviewer pair falls back with a warning, and `pre_checks` are

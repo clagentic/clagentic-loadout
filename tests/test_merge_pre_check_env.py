@@ -1,0 +1,285 @@
+"""A pre_check child process does not receive identity, attestation or
+credential variables from the merger's environment.
+
+The scrub is unit-tested on explicit mappings (so no test depends on the real
+process environment) and then exercised end to end: the merge verb runs real
+commands in a real merge-result worktree and the commands themselves report
+what they can see."""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+from pathlib import Path
+
+import pytest
+import yaml
+
+from clagentic_loadout.merge import verb
+from clagentic_loadout.merge.post_merge import PostMergeConfigError
+from clagentic_loadout.merge.pre_check_env import (
+    CREDENTIAL_NAME_PATTERNS,
+    is_denied_pre_check_name,
+    pre_check_env,
+)
+from clagentic_loadout.merge.pre_checks_config import resolve_pre_checks_env_passthrough
+from clagentic_loadout.transport import attestation
+from clagentic_loadout.transport.attestation import (
+    ATTESTED_IDENTITY_ENV_VAR,
+    ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR,
+    attestation_env_var_names,
+)
+from tests._gate_repo import GateRepo, init_gate_repo, write_deployment_config
+from tests._support.merge_verb import (
+    AllowingAuthorityProvider,
+    RecordingTokenProvider,
+    base_args,
+    make_opener,
+)
+
+_PY = sys.executable
+
+
+def _write_user_config(root: Path, attestation_section: dict) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "config.yaml").write_text(
+        yaml.safe_dump({"attestation": attestation_section}), encoding="utf-8"
+    )
+    return root
+
+
+class TestAttestationNamesComeFromTheResolverCode:
+    def test_the_env_tier_variables_are_always_named(self, tmp_path):
+        names = attestation_env_var_names(env={}, config_root=tmp_path)
+        assert {ATTESTED_IDENTITY_ENV_VAR, ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR} <= names
+
+    def test_configured_identity_env_and_sidecar_session_envs_are_named(self, tmp_path):
+        root = _write_user_config(
+            tmp_path / "cfg",
+            {
+                "identity_env": "WHO_AM_I",
+                "sidecars": [
+                    {"dir": "/x", "file_prefix": "a", "session_id_env": "CLAGENTIC_SUBAGENT_ID"},
+                    {"dir": "/y", "file_prefix": "b", "session_id_env": "CLAUDE_CODE_SESSION_ID"},
+                    {"dir": "/z", "file_prefix": "c"},
+                ],
+            },
+        )
+        names = attestation_env_var_names(env={}, config_root=root)
+        assert {"WHO_AM_I", "CLAGENTIC_SUBAGENT_ID", "CLAUDE_CODE_SESSION_ID"} <= names
+
+    def test_a_variable_named_by_the_env_override_is_named(self, tmp_path):
+        names = attestation_env_var_names(
+            env={ATTESTED_IDENTITY_ENV_VAR: "OVERRIDE_IDENTITY"}, config_root=tmp_path
+        )
+        assert "OVERRIDE_IDENTITY" in names
+
+
+class TestTheScrub:
+    def _env(self, root: Path) -> dict[str, str]:
+        return {
+            "PATH": "/usr/bin",
+            "HOME": "/home/x",
+            "LANG": "C.UTF-8",
+            "LC_ALL": "C.UTF-8",
+            "VIRTUAL_ENV": "/venv",
+            "PLAIN_SETTING": "1",
+            "CLAGENTIC_SUBAGENT_ID": "spawn-1",
+            "CLAUDE_CODE_SESSION_ID": "sess-1",
+            "WHO_AM_I": "agent",
+            ATTESTED_IDENTITY_ENV_VAR: "WHO_AM_I",
+            ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR: "/tmp/side",
+            "CLAGENTIC_LOADOUT_TELEMETRY_SINK": "webhook",
+            "SERVICE_TOKEN": "t",
+            "SERVICE_SECRET": "s",
+            "DB_PASSWORD": "p",
+            "OPENAI_API_KEY": "k",
+            "GH_HOST": "h",
+            "GITHUB_TOKEN": "g",
+            "FORGEJO_BASE_URL": "u",
+            "BAO_ADDR": "b",
+            "VAULT_ADDR": "v",
+        }
+
+    @pytest.fixture
+    def root(self, tmp_path) -> Path:
+        return _write_user_config(
+            tmp_path / "cfg",
+            {
+                "identity_env": "WHO_AM_I",
+                "sidecars": [
+                    {"session_id_env": "CLAGENTIC_SUBAGENT_ID"},
+                    {"session_id_env": "CLAUDE_CODE_SESSION_ID"},
+                ],
+            },
+        )
+
+    def test_identity_sidecar_and_credential_variables_are_removed(self, root):
+        scrubbed = pre_check_env(self._env(root), config_root=root)
+        assert set(scrubbed) == {"PATH", "HOME", "LANG", "LC_ALL", "VIRTUAL_ENV", "PLAIN_SETTING"}
+
+    def test_the_input_mapping_is_not_modified(self, root):
+        env = self._env(root)
+        before = dict(env)
+        pre_check_env(env, config_root=root)
+        assert env == before
+
+    def test_passthrough_keeps_exactly_the_named_variables(self, root):
+        scrubbed = pre_check_env(
+            self._env(root), passthrough=["SERVICE_TOKEN", "CLAUDE_CODE_SESSION_ID"], config_root=root
+        )
+        assert scrubbed["SERVICE_TOKEN"] == "t"
+        assert scrubbed["CLAUDE_CODE_SESSION_ID"] == "sess-1"
+        assert "SERVICE_SECRET" not in scrubbed and "CLAGENTIC_SUBAGENT_ID" not in scrubbed
+
+    @pytest.mark.parametrize("pattern", CREDENTIAL_NAME_PATTERNS)
+    def test_every_credential_pattern_matches_a_lower_case_name_too(self, pattern):
+        sample = pattern.replace("*", "x").lower()
+        assert is_denied_pre_check_name(sample)
+
+    @pytest.mark.parametrize("name", ["PATH", "HOME", "LANG", "TMPDIR", "VIRTUAL_ENV", "TOKENIZERS_X"])
+    def test_ordinary_names_are_kept(self, name):
+        assert not is_denied_pre_check_name(name)
+
+
+class TestPassthroughConfig:
+    def test_absent_is_empty(self, tmp_path):
+        write_deployment_config(tmp_path, {})
+        assert resolve_pre_checks_env_passthrough(tmp_path) == ()
+
+    def test_no_repo_is_empty(self):
+        assert resolve_pre_checks_env_passthrough(None) == ()
+
+    def test_names_are_returned_in_order_without_duplicates(self, tmp_path):
+        write_deployment_config(tmp_path, {"pre_checks_env_passthrough": ["B_TOKEN", "A", "B_TOKEN"]})
+        assert resolve_pre_checks_env_passthrough(tmp_path) == ("B_TOKEN", "A")
+
+    @pytest.mark.parametrize("value", ["A_TOKEN", ["not a name"], [1], {"A": 1}])
+    def test_a_malformed_value_is_an_error(self, tmp_path, value):
+        write_deployment_config(tmp_path, {"pre_checks_env_passthrough": value})
+        with pytest.raises(PostMergeConfigError, match="pre_checks_env_passthrough"):
+            resolve_pre_checks_env_passthrough(tmp_path)
+
+
+@pytest.fixture
+def scratch_tmp(tmp_path, monkeypatch):
+    directory = tmp_path / "scratch-tmp"
+    directory.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(directory))
+    return directory
+
+
+def _probe(*, absent: list[str] = (), present: list[str] = ()) -> dict:
+    code = (
+        "import os, sys; "
+        f"bad = [n for n in {list(absent)!r} if n in os.environ] + "
+        f"[n for n in {list(present)!r} if n not in os.environ]; "
+        "print('env probe mismatch:', bad, file=sys.stderr); sys.exit(1 if bad else 0)"
+    )
+    return {"cmd": [_PY, "-c", code], "on_failure": "fail"}
+
+
+def _merge(repo: GateRepo) -> int:
+    argv = base_args(**{"--repo-path": str(repo.path)}) + ["--skip-post-merge"]
+    return verb.main(
+        argv,
+        token_provider=RecordingTokenProvider(),
+        authority_provider=AllowingAuthorityProvider(),
+        opener=make_opener(pr_info=repo.pr_info()),
+    )
+
+
+def _repo(tmp_path, steps, *, head_files=None, deployment_merge=None) -> GateRepo:
+    return init_gate_repo(
+        tmp_path / "shared",
+        tracked_gate={"required_reviewer_roles": [], "pre_checks": steps},
+        head_files=head_files,
+        deployment_merge=deployment_merge,
+    )
+
+
+class TestThroughTheMergeVerb:
+    @pytest.fixture(autouse=True)
+    def _ambient(self, monkeypatch):
+        monkeypatch.setenv("DEPLOY_TOKEN", "t")
+        monkeypatch.setenv("DEPLOY_PASSWORD", "p")
+        monkeypatch.setenv("CLAGENTIC_LOADOUT_PRECHECK_PROBE", "x")
+        monkeypatch.setenv("PRECHECK_PLAIN_SETTING", "kept")
+        monkeypatch.setenv("HOME", "/precheck-home")
+
+    def test_a_check_cannot_see_denied_variables_and_keeps_the_rest(self, tmp_path, scratch_tmp):
+        repo = _repo(
+            tmp_path,
+            [
+                _probe(
+                    absent=["DEPLOY_TOKEN", "DEPLOY_PASSWORD", "CLAGENTIC_LOADOUT_PRECHECK_PROBE"],
+                    present=["PATH", "HOME", "PRECHECK_PLAIN_SETTING"],
+                )
+            ],
+        )
+        assert _merge(repo) == verb.EXIT_OK
+
+    def test_the_probe_is_red_when_a_denied_variable_leaks(self, tmp_path, scratch_tmp):
+        repo = _repo(tmp_path, [_probe(present=["DEPLOY_TOKEN"])])
+        assert _merge(repo) == verb.EXIT_PRE_CHECKS_FAILED
+
+    def test_passthrough_keeps_a_named_variable_only(self, tmp_path, scratch_tmp):
+        repo = _repo(
+            tmp_path,
+            [_probe(present=["DEPLOY_TOKEN"], absent=["DEPLOY_PASSWORD"])],
+            deployment_merge={"pre_checks_env_passthrough": ["DEPLOY_TOKEN"]},
+        )
+        assert _merge(repo) == verb.EXIT_OK
+
+    def test_a_malformed_passthrough_refuses_before_any_check_runs(self, tmp_path, scratch_tmp, capsys):
+        repo = _repo(
+            tmp_path,
+            [_probe()],
+            deployment_merge={"pre_checks_env_passthrough": "DEPLOY_TOKEN"},
+        )
+        assert _merge(repo) == verb.EXIT_PRE_CHECKS_FAILED
+        assert "pre_checks_env_passthrough" in capsys.readouterr().err
+
+    def test_the_tracked_gate_cannot_declare_the_passthrough(self, tmp_path, scratch_tmp):
+        gate = {
+            "required_reviewer_roles": [],
+            "pre_checks": [_probe(absent=["DEPLOY_TOKEN"])],
+            "pre_checks_env_passthrough": ["DEPLOY_TOKEN"],
+        }
+        repo = init_gate_repo(tmp_path / "shared", tracked_gate=gate)
+        assert _merge(repo) == verb.EXIT_OK
+
+    def test_a_repo_relative_script_shaped_like_the_crew_manifest_checks_still_passes(
+        self, tmp_path, scratch_tmp
+    ):
+        script = (
+            "import sys\nfrom pathlib import Path\n"
+            "root = Path(__file__).resolve().parent.parent\n"
+            "sys.exit(0 if (root / 'change.txt').exists() and '--quiet' in sys.argv else 1)\n"
+        )
+        steps = [
+            {"cmd": [_PY, "scripts/validate.py", "--merge-gate", "--quiet"], "on_failure": "fail"},
+            {"cmd": [_PY, "scripts/validate.py", "full", "--quiet"], "on_failure": "fail"},
+        ]
+        repo = _repo(tmp_path, steps, head_files={"scripts/validate.py": script, "change.txt": "x\n"})
+        assert _merge(repo) == verb.EXIT_OK
+
+    def test_the_gate_log_names_the_worktree_as_the_execution_tree(self, tmp_path, scratch_tmp, capsys):
+        marker = tmp_path / "ran-in"
+        repo = _repo(
+            tmp_path,
+            [
+                {
+                    "cmd": [_PY, "-c", f"import os; open({str(marker)!r}, 'w').write(os.getcwd())"],
+                    "on_failure": "fail",
+                }
+            ],
+        )
+        assert _merge(repo) == verb.EXIT_OK
+        worktree = marker.read_text(encoding="utf-8")
+        line = next(
+            ln for ln in capsys.readouterr().err.splitlines() if "pre_checks gate -- running" in ln
+        )
+        assert f"in the merge-result worktree {worktree!r}" in line
+        assert f"check(s) in {str(repo.path)!r}" not in line
+        assert "is not used for execution" in line

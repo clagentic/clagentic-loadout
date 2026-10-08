@@ -1558,9 +1558,24 @@ an OPTIONAL, repo-declared `merge: pre_checks:` list (SAME
 step shape as `post_merge_steps` below — `{cmd, description, on_failure,
 detaches}`, declared in the TRACKED `.clagentic/loadout/gate.yaml` as it
 exists at the PR's base commit, reusing `merge.post_merge.run_post_merge_steps`
-verbatim), run in `--repo-path` BEFORE step 9's merge call. Only their
-configuration comes from base, so the PR under review cannot drop or weaken its
-own checks. The check gates the merge itself:
+verbatim), run BEFORE step 9's merge call in a fresh, throwaway git worktree of
+the merge result (the PR head merged onto its base commit) created under
+`TMPDIR` and always removed; the shared `--repo-path` checkout is never read for
+execution or modified, and a head that conflicts with base refuses before
+`merge_pr`. The worktree holds tracked content only: none of the shared
+checkout's untracked or ignored state (an in-repo virtualenv, build artifacts,
+`node_modules`) and no initialised submodules, so a check must not depend on
+them. The checks' configuration comes from base, so the PR under review cannot
+drop or weaken its own checks. Because a check runs PR-head code before the PR
+is merged, its environment is the merger's environment minus a denylist: every
+attestation/identity variable loadout reads (including each configured sidecar
+`session_id_env`), the `CLAGENTIC_LOADOUT_*` namespace, and credential-shaped
+names (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `GH_*`, `GITHUB_TOKEN`,
+`FORGEJO_*`, `BAO_*`, `VAULT_*`). `PATH`, `HOME`, locale and virtualenv
+variables pass through. A deployment keeps a named variable deliberately with
+the optional, deployment-tier `merge.pre_checks_env_passthrough` list in the
+working-tree config file (never the tracked gate file; a malformed value
+refuses). The check gates the merge itself:
 an `on_failure: fail` pre_check that exits non-zero (or times out, or a
 `detaches: true` step's `liveness_probe` never confirms) refuses the merge
 (`EXIT_PRE_CHECKS_FAILED`) BEFORE `merge_pr` is ever called. `pre_checks_config`
