@@ -87,11 +87,130 @@ def same_finding(a: dict[str, Any], b: dict[str, Any]) -> bool:
     )
 
 
+def _line_distance(a: dict[str, Any], b: dict[str, Any]) -> int:
+    la, lb = a.get("line"), b.get("line")
+    if isinstance(la, int) and isinstance(lb, int):
+        return abs(la - lb)
+    return 0
+
+
+def pair_findings(
+    priors: Sequence[dict[str, Any]],
+    fresh: Sequence[dict[str, Any]],
+    *,
+    fingerprint_only: bool = False,
+) -> list[tuple[int, int]]:
+    """One-to-one pairing of *priors* with *fresh* as ``(prior_index,
+    fresh_index)``. Findings sharing a fingerprint (two identical lines under
+    one rule) are interchangeable by identity alone, so each prior takes at
+    most one fresh finding and each fresh finding at most one prior, nearest
+    line first and original order breaking ties: distinct findings are never
+    collapsed into one. With *fingerprint_only*, a pair needs both sides
+    fingerprinted."""
+    by_print: dict[str, tuple[list[int], list[int]]] = {}
+    for side, items in ((0, priors), (1, fresh)):
+        for index, item in enumerate(items):
+            value = item.get(KEY_FINGERPRINT)
+            if is_fingerprint(value):
+                by_print.setdefault(value, ([], []))[side].append(index)
+    pairs: list[tuple[int, int]] = []
+    used_prior: set[int] = set()
+    used_fresh: set[int] = set()
+    for prior_ids, fresh_ids in by_print.values():
+        for i, j in _order_preserving_pairs(priors, prior_ids, fresh, fresh_ids):
+            pairs.append((i, j))
+            used_prior.add(i)
+            used_fresh.add(j)
+    if not fingerprint_only:
+        # What is left is matched by the old position identity, one to one.
+        open_fresh: dict[tuple[Any, Any, Any], list[int]] = {}
+        for j, item in enumerate(fresh):
+            if j not in used_fresh:
+                open_fresh.setdefault(_position_key(item), []).append(j)
+        for i, prior in enumerate(priors):
+            if i in used_prior:
+                continue
+            for j in open_fresh.get(_position_key(prior), []):
+                if j not in used_fresh and same_finding(prior, fresh[j]):
+                    pairs.append((i, j))
+                    used_prior.add(i)
+                    used_fresh.add(j)
+                    break
+    return sorted(pairs)
+
+
+def _position_key(finding: dict[str, Any]) -> tuple[Any, Any, Any]:
+    return (finding.get("file"), finding.get("line"), finding.get("rule_id"))
+
+
+def _order_preserving_pairs(
+    priors: Sequence[dict[str, Any]],
+    prior_ids: list[int],
+    fresh: Sequence[dict[str, Any]],
+    fresh_ids: list[int],
+) -> list[tuple[int, int]]:
+    """Pair interchangeable findings (equal fingerprint) so as to match as many
+    as possible, then to minimise the total line distance, without crossing:
+    the nth occurrence before an insertion stays the nth after it. Original
+    order breaks any remaining tie."""
+    ps = sorted(prior_ids, key=lambda i: (_line_of(priors[i]), i))
+    fs = sorted(fresh_ids, key=lambda j: (_line_of(fresh[j]), j))
+    n, m = len(ps), len(fs)
+    # best[a][b]: (-matches, distance) over ps[a:] and fs[b:].
+    best = [[(0, 0)] * (m + 1) for _ in range(n + 1)]
+    for a in range(n - 1, -1, -1):
+        for b in range(m - 1, -1, -1):
+            gap = abs(_line_of(priors[ps[a]]) - _line_of(fresh[fs[b]]))
+            take = best[a + 1][b + 1]
+            options = [(take[0] - 1, take[1] + gap), best[a + 1][b], best[a][b + 1]]
+            best[a][b] = min(options)
+    pairs: list[tuple[int, int]] = []
+    a = b = 0
+    while a < n and b < m:
+        gap = abs(_line_of(priors[ps[a]]) - _line_of(fresh[fs[b]]))
+        take = best[a + 1][b + 1]
+        if best[a][b] == (take[0] - 1, take[1] + gap):
+            pairs.append((ps[a], fs[b]))
+            a += 1
+            b += 1
+        elif best[a][b] == best[a + 1][b]:
+            a += 1
+        else:
+            b += 1
+    return pairs
+
+
+def _line_of(finding: dict[str, Any]) -> int:
+    line = finding.get("line")
+    return line if isinstance(line, int) and not isinstance(line, bool) else 0
+
+
+def match_priors(
+    findings: Sequence[dict[str, Any]], priors: Sequence[dict[str, Any]]
+) -> list[dict[str, Any] | None]:
+    """For each of *findings*, the prior it is the same finding as, else None;
+    a prior answers for at most one finding (see pair_findings)."""
+    matched: list[dict[str, Any] | None] = [None] * len(findings)
+    for prior_index, finding_index in pair_findings(priors, findings):
+        matched[finding_index] = priors[prior_index]
+    return matched
+
+
 def match_prior(
     finding: dict[str, Any], priors: Sequence[dict[str, Any]]
 ) -> dict[str, Any] | None:
-    """The first of *priors* that is the same finding as *finding*, else None."""
-    return next((prior for prior in priors if same_finding(finding, prior)), None)
+    """The prior that is the same finding as *finding* and nearest to it by
+    line (the first, on a tie), else None. Matching a whole batch? Use
+    match_priors, which never gives one prior to two findings."""
+    best: dict[str, Any] | None = None
+    best_distance = 0
+    for prior in priors:
+        if not same_finding(finding, prior):
+            continue
+        distance = _line_distance(finding, prior)
+        if best is None or distance < best_distance:
+            best, best_distance = prior, distance
+    return best
 
 
 def drop_rereported(
@@ -100,9 +219,8 @@ def drop_rereported(
     """*carried* findings minus those a fresh finding re-reports at a shifted
     line. Only a fingerprint match counts: the fresh copy carries the line as
     it is now, so keeping the stale carried one would list one defect twice.
-    Findings without fingerprints are left alone, as they always were."""
-    fresh_prints = {f[KEY_FINGERPRINT] for f in fresh if is_fingerprint(f.get(KEY_FINGERPRINT))}
-    return [
-        f for f in carried
-        if not (is_fingerprint(f.get(KEY_FINGERPRINT)) and f[KEY_FINGERPRINT] in fresh_prints)
-    ]
+    The match is one-to-one: a fresh finding retires one carried finding, so a
+    second carried finding on an identical line is kept. Findings without
+    fingerprints are left alone, as they always were."""
+    dropped = {i for i, _ in pair_findings(carried, fresh, fingerprint_only=True)}
+    return [f for i, f in enumerate(carried) if i not in dropped]

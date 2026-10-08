@@ -12,7 +12,9 @@ BLOCKED naming the chunk. Only ok chunks are ever reused: BLOCKED discards
 the failed records, so the next invocation gives every non-ok chunk a fresh
 attempt budget.
 
-All writes stay inside the run directory.
+All persisted writes stay inside the run directory. The only thing made
+elsewhere is each chunk attempt's empty, throwaway working directory (under the
+temporary directory, removed when the attempt ends).
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ import hashlib
 import json
 import re
 import shutil
+import sys
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -66,8 +70,8 @@ FINDINGS_SCHEMA = "loadout.review-findings/1"
 FINDINGS_FILENAME = "findings.json"
 BINDING_FILENAME = "run-binding.json"
 
-#: Run-directory subfolder holding one empty working directory per chunk.
-CHUNK_WORKDIR_DIRNAME = "chunk-work"
+#: Name prefix of the per-attempt chunk working directories made under TMPDIR.
+CHUNK_WORKDIR_PREFIX = "loadout-chunk-"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
@@ -165,18 +169,35 @@ def _resume_key(
     return digest.hexdigest()[:16]
 
 
-def fresh_chunk_workdir(run_dir: Path, index: int) -> Path:
-    """An empty working directory for one chunk's engine, under *run_dir*.
+def fresh_chunk_workdir() -> Path:
+    """A new, empty, uniquely named working directory for one chunk attempt,
+    under the temporary directory and outside the run directory.
 
     The run directory holds every chunk's persisted result and the merged
-    findings; an engine started inside it can list a sibling chunk's findings
-    and be steered by them. Each chunk therefore runs in a directory of its own
-    that holds nothing, recreated empty on every attempt so nothing an earlier
-    attempt left behind carries over. Raises OSError when it cannot be made."""
-    path = run_dir / CHUNK_WORKDIR_DIRNAME / f"chunk-{index:04d}"
-    shutil.rmtree(path, ignore_errors=True)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    findings; an engine started inside it (or in a directory beside it) can
+    list a sibling chunk's findings by walking up from its cwd and be steered by
+    them. This keeps that discovery from happening by accident. It is not a
+    filesystem sandbox: an engine that deliberately reads an absolute path can
+    still reach the run directory.
+
+    A directory is never reused, so a failed cleanup can never surface an
+    earlier attempt's artifacts. Raises OSError when it cannot be made."""
+    return Path(tempfile.mkdtemp(prefix=CHUNK_WORKDIR_PREFIX))
+
+
+def discard_chunk_workdir(path: Path) -> None:
+    """Remove a chunk attempt's working directory. A removal that fails is
+    reported on stderr and never blocks the run: the next attempt gets a
+    different directory, so nothing left here can reach it."""
+    try:
+        shutil.rmtree(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        print(
+            f"loadout-review: could not remove chunk working directory {str(path)!r}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _result_path(state_dir: Path, index: int) -> Path:
@@ -373,7 +394,7 @@ def run_review(
     def work(chunk: Chunk) -> dict[str, Any]:
         previous = _load_record(state_dir, chunk.index) or {}
         try:
-            chunk_cwd = fresh_chunk_workdir(run_dir, chunk.index)
+            chunk_cwd = fresh_chunk_workdir()
         except OSError as exc:
             return {
                 "index": chunk.index,
@@ -384,17 +405,20 @@ def run_review(
                 "reason": REASON_RUN_DIR_UNWRITABLE,
                 "detail": f"cannot create the chunk working directory: {exc}",
             }
-        record = review_chunk(
-            chunk,
-            len(chunks),
-            profile,
-            attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
-            cwd=chunk_cwd,
-            log_dir=run_dir / CARRIER_LOG_DIRNAME,
-            runner=runner,
-            delta_note=delta_notes.get(chunk.index, ""),
-            breaker=breaker,
-        )
+        try:
+            record = review_chunk(
+                chunk,
+                len(chunks),
+                profile,
+                attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
+                cwd=chunk_cwd,
+                log_dir=run_dir / CARRIER_LOG_DIRNAME,
+                runner=runner,
+                delta_note=delta_notes.get(chunk.index, ""),
+                breaker=breaker,
+            )
+        finally:
+            discard_chunk_workdir(chunk_cwd)
         try:
             _write_json(_result_path(state_dir, chunk.index), record)
         except OSError as exc:
