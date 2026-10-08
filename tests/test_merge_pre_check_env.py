@@ -75,6 +75,28 @@ class TestAttestationNamesComeFromTheResolverCode:
         assert "OVERRIDE_IDENTITY" in names
 
 
+class TestMalformedAttestationConfigNeverRaises:
+    @pytest.mark.parametrize("bad", [["a", "b"], {"k": "v"}, 7, True])
+    def test_a_non_string_identity_env_or_session_id_env_is_ignored(self, tmp_path, bad):
+        root = _write_user_config(
+            tmp_path / "cfg",
+            {
+                "identity_env": bad,
+                "sidecars": [
+                    {"session_id_env": bad},
+                    {"session_id_env": "REAL_SESSION_ENV"},
+                ],
+            },
+        )
+        names = attestation_env_var_names(env={}, config_root=root)
+        assert "REAL_SESSION_ENV" in names
+        assert all(isinstance(name, str) for name in names)
+
+    def test_a_list_valued_env_override_value_is_ignored(self, tmp_path):
+        names = attestation_env_var_names(env={ATTESTED_IDENTITY_ENV_VAR: ["x"]}, config_root=tmp_path)
+        assert {ATTESTED_IDENTITY_ENV_VAR, ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR} <= names
+
+
 class TestTheScrub:
     def _env(self, root: Path) -> dict[str, str]:
         return {
@@ -137,9 +159,54 @@ class TestTheScrub:
         sample = pattern.replace("*", "x").lower()
         assert is_denied_pre_check_name(sample)
 
-    @pytest.mark.parametrize("name", ["PATH", "HOME", "LANG", "TMPDIR", "VIRTUAL_ENV", "TOKENIZERS_X"])
+    @pytest.mark.parametrize(
+        "name", ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "VIRTUAL_ENV", "PYTHONPATH", "KEYBOARD", "PASSENGER"]
+    )
     def test_ordinary_names_are_kept(self, name):
         assert not is_denied_pre_check_name(name)
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_REGION",
+            "AZURE_CLIENT_ID",
+            "GITHUB_PAT",
+            "github_pat",
+            "SSH_AUTH_SOCK",
+            "DATABASE_URL",
+            "FOO_CREDENTIALS",
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            "SERVICE_PASSWD",
+            "DB_PASS",
+            "SENTRY_DSN",
+            "SIGNING_KEY",
+            "STRIPE_ACCESS_KEY_ID",
+            "TLS_PRIVATE_KEY_PATH",
+            "TOKENIZERS_PARALLELISM",
+        ],
+    )
+    def test_widened_credential_names_are_denied(self, name):
+        assert is_denied_pre_check_name(name)
+
+    def test_the_widened_denylist_strips_credentials_and_keeps_the_ordinary_environment(self, tmp_path):
+        env = {
+            "AWS_SECRET_ACCESS_KEY": "a",
+            "GITHUB_PAT": "b",
+            "SSH_AUTH_SOCK": "/s",
+            "DATABASE_URL": "postgres://x",
+            "FOO_CREDENTIALS": "c",
+            "PATH": "/usr/bin",
+            "HOME": "/h",
+            "LANG": "C",
+            "LC_ALL": "C",
+            "VIRTUAL_ENV": "/v",
+            "PYTHONPATH": "/p",
+            "TMPDIR": "/t",
+        }
+        scrubbed = pre_check_env(env, config_root=tmp_path)
+        assert set(scrubbed) == {"PATH", "HOME", "LANG", "LC_ALL", "VIRTUAL_ENV", "PYTHONPATH", "TMPDIR"}
 
 
 class TestPassthroughConfig:

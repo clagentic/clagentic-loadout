@@ -1570,12 +1570,18 @@ drop or weaken its own checks. Because a check runs PR-head code before the PR
 is merged, its environment is the merger's environment minus a denylist: every
 attestation/identity variable loadout reads (including each configured sidecar
 `session_id_env`), the `CLAGENTIC_LOADOUT_*` namespace, and credential-shaped
-names (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, `GH_*`, `GITHUB_TOKEN`,
-`FORGEJO_*`, `BAO_*`, `VAULT_*`). `PATH`, `HOME`, locale and virtualenv
-variables pass through. A deployment keeps a named variable deliberately with
+names (case-insensitive: any name containing `TOKEN`, `SECRET`, `PASSWORD`,
+`PASSWD`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY` or `PRIVATE_KEY`; any name ending
+`_KEY`, `_PAT`, `_PASS` or `_DSN`; `SSH_AUTH_SOCK`, `DATABASE_URL`,
+`GOOGLE_APPLICATION_CREDENTIALS`; and the `AWS_*`, `AZURE_*`, `GH_*`,
+`FORGEJO_*`, `BAO_*`, `VAULT_*` families). `PATH`, `HOME`, `LANG`, `LC_*`,
+`VIRTUAL_ENV`, `PYTHONPATH` and `TMPDIR` pass through. A deployment keeps a
+named variable deliberately with
 the optional, deployment-tier `merge.pre_checks_env_passthrough` list in the
 working-tree config file (never the tracked gate file; a malformed value
-refuses). The check gates the merge itself:
+refuses). That file must be untracked, since the list widens what unmerged PR
+code can read; `loadout-doctor` warns when the config file holding the key is
+tracked by git. The check gates the merge itself:
 an `on_failure: fail` pre_check that exits non-zero (or times out, or a
 `detaches: true` step's `liveness_probe` never confirms) refuses the merge
 (`EXIT_PRE_CHECKS_FAILED`) BEFORE `merge_pr` is ever called. `pre_checks_config`

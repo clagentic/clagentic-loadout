@@ -17,8 +17,12 @@ removed when it is:
   2. in loadout's own `CLAGENTIC_LOADOUT_` namespace, every variable of which
      is read by loadout itself (provider selection, token command, sidecar
      paths, telemetry webhook token);
-  3. credential-shaped: `*_TOKEN`, `*_SECRET`, `*_PASSWORD`, `*_API_KEY`,
-     `GH_*`, `GITHUB_TOKEN`, `FORGEJO_*`, `BAO_*`, `VAULT_*` (case-insensitive).
+  3. credential-shaped (case-insensitive): a name containing TOKEN, SECRET,
+     PASSWORD, PASSWD, CREDENTIAL, API_KEY, ACCESS_KEY or PRIVATE_KEY; a name
+     ending `_KEY`, `_PAT`, `_PASS` or `_DSN`; `SSH_AUTH_SOCK`, `DATABASE_URL`,
+     `GOOGLE_APPLICATION_CREDENTIALS`; and the `AWS_*`, `AZURE_*`, `GH_*`,
+     `FORGEJO_*`, `BAO_*` and `VAULT_*` families. PATH, HOME, LANG, LC_*,
+     VIRTUAL_ENV, PYTHONPATH and TMPDIR are not credential-shaped and survive.
 
 A deployment keeps a named variable deliberately through the deployment-tier
 `merge.pre_checks_env_passthrough` list (`pre_checks_config`); a passed-through
@@ -37,14 +41,28 @@ from clagentic_loadout.transport.attestation import attestation_env_var_names
 #: Prefix of every environment variable loadout's own code reads.
 LOADOUT_ENV_PREFIX = "CLAGENTIC_LOADOUT_"
 
-#: Credential-shaped name patterns, matched case-insensitively.
+#: Credential-shaped name patterns, matched case-insensitively against the
+#: whole name. A name CONTAINING a credential word, ENDING in a credential
+#: suffix, or starting with a credential-bearing vendor prefix is denied.
 CREDENTIAL_NAME_PATTERNS = (
-    "*_TOKEN",
-    "*_SECRET",
-    "*_PASSWORD",
-    "*_API_KEY",
+    "*TOKEN*",
+    "*SECRET*",
+    "*PASSWORD*",
+    "*PASSWD*",
+    "*CREDENTIAL*",
+    "*API_KEY*",
+    "*ACCESS_KEY*",
+    "*PRIVATE_KEY*",
+    "*_KEY",
+    "*_PAT",
+    "*_PASS",
+    "*_DSN",
+    "SSH_AUTH_SOCK",
+    "DATABASE_URL",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "AWS_*",
+    "AZURE_*",
     "GH_*",
-    "GITHUB_TOKEN",
     "FORGEJO_*",
     "BAO_*",
     "VAULT_*",

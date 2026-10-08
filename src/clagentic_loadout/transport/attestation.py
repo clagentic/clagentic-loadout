@@ -1049,11 +1049,18 @@ def attestation_env_var_names(
     resolved_config_root = config_root if config_root is not None else DEFAULT_USER_CONFIG_ROOT
     section = load_user_config_section(ATTESTATION_CONFIG_SECTION, config_root=resolved_config_root)
     names = {ATTESTED_IDENTITY_ENV_VAR, ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR}
-    names.add(active_env.get(ATTESTED_IDENTITY_ENV_VAR) or "")
-    names.add(section.get(ATTESTATION_CONFIG_KEY_IDENTITY_ENV) or "")
-    for adapter in _configured_sidecar_adapters(config_root=resolved_config_root):
-        names.add(adapter.get(SIDECAR_ADAPTER_KEY_SESSION_ID_ENV) or "")
-    return frozenset(name for name in names if isinstance(name, str) and name)
+    # A malformed config value (a list or mapping) is unhashable, so it is
+    # filtered before it reaches the set rather than after.
+    candidates = [
+        active_env.get(ATTESTED_IDENTITY_ENV_VAR),
+        section.get(ATTESTATION_CONFIG_KEY_IDENTITY_ENV),
+        *(
+            adapter.get(SIDECAR_ADAPTER_KEY_SESSION_ID_ENV)
+            for adapter in _configured_sidecar_adapters(config_root=resolved_config_root)
+        ),
+    ]
+    names.update(value for value in candidates if isinstance(value, str) and value)
+    return frozenset(names)
 
 
 def _adapters_with_scope(adapters: list[dict], scope: str) -> list[dict]:

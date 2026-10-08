@@ -547,7 +547,7 @@ def _run_liveness_probe_once(
         capture_output=True,
         text=True,
         cwd=cwd,
-        **({"env": dict(env)} if env is not None else {}),
+        **_env_kwarg(env),
     )
     if result.returncode != 0:
         return ""
