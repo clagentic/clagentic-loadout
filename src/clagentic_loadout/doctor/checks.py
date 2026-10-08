@@ -154,6 +154,8 @@ from clagentic_loadout.merge.reviewer_login import (
 from clagentic_loadout.platform_detect import detect_platform_from_url
 from clagentic_loadout.push.git_coords import read_remote_url_best_effort
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
+from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH
+from clagentic_loadout.merge.tracked_file import git_tracks_path
 from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_POST_MERGE_STEPS,
     CONFIG_SECTION_MERGE,
@@ -956,6 +958,33 @@ def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
     )
 
 
+def _is_tracked_by_git(repo_root: Path, path: Path) -> bool:
+    """True when *path* is a file git tracks in the work tree at *repo_root*.
+    A missing git binary or a tree that is not a repository counts as not
+    tracked: there is nothing to warn about."""
+    return git_tracks_path(repo_root, path, timeout=PROBE_TIMEOUT_SECONDS) is True
+
+
+def _tracked_passthrough_warning(repo_root: Path, config_path: Path, raw: dict) -> str | None:
+    """A warning when the deployment config holding
+    `merge.pre_checks_env_passthrough` is tracked by git, else None.
+
+    The passthrough widens what code from an unmerged PR can read from the
+    merger's environment, so it must live in a file a PR cannot change: a
+    tracked copy is one a PR can edit once it is merged. Silent when the key is
+    absent, whatever the file's tracking state."""
+    merge_section = raw.get(CONFIG_SECTION_MERGE)
+    if not isinstance(merge_section, dict) or CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH not in merge_section:
+        return None
+    if not _is_tracked_by_git(repo_root, config_path):
+        return None
+    return (
+        f"{config_path} declares {CONFIG_SECTION_MERGE}.{CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH} "
+        f"but is tracked by git -- keep the passthrough in an untracked deployment config so "
+        f"a pull request cannot widen the environment its own pre_checks receive"
+    )
+
+
 def check_repo_loadout_schema(
     repo_root: str | Path,
     *,
@@ -1172,6 +1201,9 @@ def check_repo_loadout_schema(
         )
     for notice in gate_findings.warnings:
         summary += f"; WARN: {notice}"
+    passthrough_warning = _tracked_passthrough_warning(repo_root_path, config_path, raw)
+    if passthrough_warning:
+        summary += f"; WARN: {passthrough_warning}"
     if gate_findings.role_resolution:
         summary += f"; reviewer role resolution: {_describe_role_resolution(gate_findings.role_resolution)}"
     if unknown_gate_roles:
@@ -1197,6 +1229,7 @@ def check_repo_loadout_schema(
             "unknown_gate_roles": unknown_gate_roles,
             "unsatisfiable_gate_roles": unsatisfiable_gate_roles,
             "gate_warnings": list(gate_findings.warnings),
+            "passthrough_tracked_warning": passthrough_warning,
             "reviewer_role_resolution": list(gate_findings.role_resolution),
             "errors": errors,
         },

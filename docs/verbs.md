@@ -1558,9 +1558,39 @@ an OPTIONAL, repo-declared `merge: pre_checks:` list (SAME
 step shape as `post_merge_steps` below — `{cmd, description, on_failure,
 detaches}`, declared in the TRACKED `.clagentic/loadout/gate.yaml` as it
 exists at the PR's base commit, reusing `merge.post_merge.run_post_merge_steps`
-verbatim), run in `--repo-path` BEFORE step 9's merge call. Only their
-configuration comes from base, so the PR under review cannot drop or weaken its
-own checks. The check gates the merge itself:
+verbatim), run BEFORE step 9's merge call in a private, throwaway git clone of
+the merge result (the PR head merged onto its base commit) created under
+`TMPDIR` and always removed; the shared `--repo-path` checkout is never read for
+execution or modified, and a head that conflicts with base refuses before
+`merge_pr`. In the clone `HEAD` is the merge result (the merge is committed with
+a synthetic identity when the head is not a fast-forward), the tree is clean,
+and `refs/remotes/origin/*` are the shared repository's with
+`origin/<base branch>` pinned to the PR's base commit. The clone holds tracked content only: none of the shared
+checkout's untracked or ignored state (an in-repo virtualenv, build artifacts,
+`node_modules`) and no initialised submodules, so a check must not depend on
+them. The checks' configuration comes from base, so the PR under review cannot
+drop or weaken its own checks. Because a check runs PR-head code before the PR
+is merged, its environment is the merger's environment minus a denylist: every
+attestation/identity variable loadout reads (including each configured sidecar
+`session_id_env`), the `CLAGENTIC_LOADOUT_*` namespace, and credential-shaped
+names (case-insensitive: any name containing `TOKEN`, `SECRET`, `PASSWORD`,
+`PASSWD`, `CREDENTIAL`, `API_KEY`, `ACCESS_KEY` or `PRIVATE_KEY`; any name ending
+`_KEY`, `_PAT`, `_PASS` or `_DSN`; `SSH_AUTH_SOCK`, `DATABASE_URL`,
+`GOOGLE_APPLICATION_CREDENTIALS`; and the `AWS_*`, `AZURE_*`, `GH_*`,
+`FORGEJO_*`, `BAO_*`, `VAULT_*` families). `PATH`, `HOME`, `LANG`, `LC_*`,
+`VIRTUAL_ENV`, `PYTHONPATH` and `TMPDIR` pass through. The git
+repository/location selectors (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+`GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`,
+`GIT_NAMESPACE`, `GIT_CEILING_DIRECTORIES`, `GIT_DISCOVERY_ACROSS_FILESYSTEM`,
+`GIT_PREFIX`) are always removed and cannot be passed through. A deployment keeps a
+named variable deliberately with
+the optional, deployment-tier `merge.pre_checks_env_passthrough` list in the
+working-tree config file (never the tracked gate file; a malformed value, a
+trailing newline in a name, or a git selector refuses). The list is honoured
+only from an untracked file, since it widens what unmerged PR code can read: a
+config file tracked by git in `--repo-path` has its key ignored and the merge
+log names the file and the reason; `loadout-doctor` warns when the config file
+holding the key is tracked by git. The check gates the merge itself:
 an `on_failure: fail` pre_check that exits non-zero (or times out, or a
 `detaches: true` step's `liveness_probe` never confirms) refuses the merge
 (`EXIT_PRE_CHECKS_FAILED`) BEFORE `merge_pr` is ever called. `pre_checks_config`

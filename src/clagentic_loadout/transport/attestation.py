@@ -1029,6 +1029,40 @@ def _configured_sidecar_adapters(*, config_root) -> list[dict]:
     return [adapter for adapter in adapters if isinstance(adapter, dict)]
 
 
+def attestation_env_var_names(
+    *,
+    env: dict[str, str] | None = None,
+    config_root: str | Path | None = None,
+) -> frozenset[str]:
+    """Every environment variable NAME this module reads to establish an
+    identity: the two env-tier override variables, the variable the
+    configured-provider layer points at (named by the env override or the
+    `identity_env` config key), and each sidecar adapter's `session_id_env`.
+
+    The names come from the same constants and config keys the resolvers
+    above read, so a variable added to the resolution chain is picked up here
+    without a second list. A caller that must not hand identity material to
+    another process (the merge gate's pre_checks) removes exactly these.
+    Config problems resolve to fewer names, never an error.
+    """
+    active_env = env if env is not None else dict(os.environ)
+    resolved_config_root = config_root if config_root is not None else DEFAULT_USER_CONFIG_ROOT
+    section = load_user_config_section(ATTESTATION_CONFIG_SECTION, config_root=resolved_config_root)
+    names = {ATTESTED_IDENTITY_ENV_VAR, ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR}
+    # A malformed config value (a list or mapping) is unhashable, so it is
+    # filtered before it reaches the set rather than after.
+    candidates = [
+        active_env.get(ATTESTED_IDENTITY_ENV_VAR),
+        section.get(ATTESTATION_CONFIG_KEY_IDENTITY_ENV),
+        *(
+            adapter.get(SIDECAR_ADAPTER_KEY_SESSION_ID_ENV)
+            for adapter in _configured_sidecar_adapters(config_root=resolved_config_root)
+        ),
+    ]
+    names.update(value for value in candidates if isinstance(value, str) and value)
+    return frozenset(names)
+
+
 def _adapters_with_scope(adapters: list[dict], scope: str) -> list[dict]:
     """Filter *adapters* to those declaring `scope: <scope>` exactly (see
     `SIDECAR_ADAPTER_KEY_SCOPE`) -- an adapter with no `scope` key, or a
@@ -1355,6 +1389,7 @@ __all__ = [
     "BoundAttestationError",
     "Identity",
     "IdentityProvider",
+    "attestation_env_var_names",
     "resolve_bound_identity",
     "resolve_bound_identity_policy",
     "resolve_identity",

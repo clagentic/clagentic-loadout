@@ -143,6 +143,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Mapping
 
 from clagentic_loadout.numeric_validation import is_finite_positive_number
 
@@ -524,7 +525,15 @@ def _run_verify(
     return True, first_line[0] if first_line else ""
 
 
-def _run_liveness_probe_once(argv: list[str], *, cwd: str) -> str:
+def _env_kwarg(env: Mapping[str, str] | None) -> dict:
+    """`{"env": env}` when an environment was chosen, else nothing, so a call
+    without one stays byte-identical to the pre-scrub behaviour."""
+    return {} if env is None else {"env": env}
+
+
+def _run_liveness_probe_once(
+    argv: list[str], *, cwd: str, env: Mapping[str, str] | None = None
+) -> str:
     """Run a liveness-probe argv once, returning its stripped stdout (empty
     string on any non-zero exit or on stderr-only output -- a probe that
     cannot currently report a value is treated as "no signal yet", the same
@@ -538,13 +547,16 @@ def _run_liveness_probe_once(argv: list[str], *, cwd: str) -> str:
         capture_output=True,
         text=True,
         cwd=cwd,
+        **_env_kwarg(env),
     )
     if result.returncode != 0:
         return ""
     return result.stdout.strip()
 
 
-def _capture_liveness_baseline(probe_config: dict, *, cwd: str, label: str) -> str:
+def _capture_liveness_baseline(
+    probe_config: dict, *, cwd: str, label: str, env: Mapping[str, str] | None = None
+) -> str:
     """Sample `probe_config['cmd']` ONCE and return its value, to be used as
     the pre-launch baseline `_verify_liveness` compares later samples
     against (see that function's docstring for why this must happen BEFORE
@@ -553,7 +565,7 @@ def _capture_liveness_baseline(probe_config: dict, *, cwd: str, label: str) -> s
     probe_argv, _probe_env_overrides = _resolve_argv(
         probe_config[LIVENESS_PROBE_KEY_CMD], step_label=f"{label}.{STEP_KEY_LIVENESS_PROBE}"
     )
-    return _run_liveness_probe_once(probe_argv, cwd=cwd)
+    return _run_liveness_probe_once(probe_argv, cwd=cwd, **_env_kwarg(env))
 
 
 def _verify_liveness(
@@ -563,6 +575,7 @@ def _verify_liveness(
     label: str,
     cmd_repr: str,
     baseline_sample: str,
+    env: Mapping[str, str] | None = None,
 ) -> None:
     """Poll `probe_config['cmd']` and assert its reported value ADVANCES
     away from *baseline_sample*, within `max_polls` samples total (see
@@ -618,7 +631,7 @@ def _verify_liveness(
 
     for poll_index in range(1, max_polls):
         time.sleep(poll_interval)
-        current_sample = _run_liveness_probe_once(probe_argv, cwd=cwd)
+        current_sample = _run_liveness_probe_once(probe_argv, cwd=cwd, **_env_kwarg(env))
         if baseline_sample and current_sample and current_sample != baseline_sample:
             print(
                 f"merge: post-merge {label}: liveness CONFIRMED for {cmd_repr} "
@@ -643,6 +656,7 @@ def run_post_merge_steps(
     *,
     deployment_env_overrides: dict[str, str] | None = None,
     default_timeout_seconds: int | float | None = None,
+    base_env: Mapping[str, str] | None = None,
 ) -> None:
     """Execute post_merge_steps IN ORDER inside *project_root*.
 
@@ -753,6 +767,12 @@ def run_post_merge_steps(
     step with no `timeout_seconds` of its own keeps `subprocess.run`'s
     unbounded wait, exactly as before this feature.
 
+    `base_env`: the environment every step, `verify` command and liveness
+    probe starts from, in place of `os.environ`. `None` (the default) keeps
+    the inherited process environment. The pre-merge gate passes a scrubbed
+    copy (see `merge.pre_check_env`) because it executes PR-head code. Step
+    `VAR=VALUE` prefixes and *deployment_env_overrides* layer on top of it.
+
     The whole list is validated (`validate_post_merge_steps`) BEFORE any
     step executes, so a malformed step later in the list is caught up front
     rather than after earlier steps already ran with side effects.
@@ -761,6 +781,7 @@ def run_post_merge_steps(
     root = str(project_root)
     host = _execution_host()
     active_deployment_overrides = deployment_env_overrides or {}
+    inherited_env = base_env if base_env is not None else os.environ
 
     for i, step in enumerate(steps):
         cmd = step["cmd"]
@@ -778,7 +799,17 @@ def run_post_merge_steps(
 
         argv, env_overrides = _resolve_argv(cmd, step_label=f"post_merge_steps[{i}]")
         combined_overrides = {**active_deployment_overrides, **env_overrides}
-        step_env = {**os.environ, **combined_overrides} if combined_overrides else None
+        step_env = (
+            {**inherited_env, **combined_overrides}
+            if combined_overrides or base_env is not None
+            else None
+        )
+
+        # The probe runs in the step's own environment when the caller chose a
+        # base environment. Without one it keeps the inherited process
+        # environment it always had, which never saw the step's VAR=VALUE
+        # prefixes or the deployment overrides.
+        probe_env = step_env if base_env is not None else None
 
         if detaches:
             liveness_probe = step.get(STEP_KEY_LIVENESS_PROBE)
@@ -791,7 +822,7 @@ def run_post_merge_steps(
                 # the race, rather than any adjustment to poll timing after
                 # the fact.
                 baseline_sample = _capture_liveness_baseline(
-                    liveness_probe, cwd=root, label=label
+                    liveness_probe, cwd=root, label=label, env=probe_env
                 )
 
             # lr-53556a: fire-and-forget. No PIPE is ever created for this
@@ -826,6 +857,7 @@ def run_post_merge_steps(
                     label=label,
                     cmd_repr=repr(cmd),
                     baseline_sample=baseline_sample,
+                    env=probe_env,
                 )
             continue
 

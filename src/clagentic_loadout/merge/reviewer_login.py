@@ -211,12 +211,26 @@ def resolve_declared_role(role: str, platform: str) -> DeclaredRoleResolution:
     return DeclaredRoleResolution(role=role, requirement=role, login=login, source=SOURCE_SLUGS)
 
 
+def renamed_declared_role(role: str, platform: str) -> DeclaredRoleResolution | None:
+    """`resolve_declared_role`, reporting None when the role stays required
+    under its own name (the resolution's requirement is the role itself).
+
+    For a caller that only needs to act on a role that is renamed: it shares the
+    one resolution path rather than re-deriving it, so the two cannot drift.
+
+    Raises ReviewerLoginNotConfiguredError when the role resolves to no login.
+    """
+    resolution = resolve_declared_role(role, platform)
+    return None if resolution.requirement == role else resolution
+
+
 __all__ = [
     "SOURCE_BARE_NAME",
     "SOURCE_ROLE_CALLERS",
     "SOURCE_SLUGS",
     "DeclaredRoleResolution",
     "ReviewerLoginNotConfiguredError",
+    "renamed_declared_role",
     "resolve_declared_role",
     "resolve_forgejo_declared_role",
     "resolve_role_via_mapping",

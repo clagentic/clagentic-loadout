@@ -128,6 +128,7 @@ own module namespace, never `provider_config`'s.
 from __future__ import annotations
 
 import shutil
+import tempfile
 
 import pytest
 
@@ -397,6 +398,16 @@ def _record_tmp_path_for_sibling_cleanup(request, tmp_path):
     diagnosis."""
     setattr(request.node, _TMP_PATH_ATTR, tmp_path)
     yield
+
+
+@pytest.fixture
+def scratch_tmp(tmp_path, monkeypatch):
+    """A per-test directory standing in for the per-process TMPDIR, so tests can
+    assert where a throwaway clone is created and that it is gone."""
+    directory = tmp_path / "scratch-tmp"
+    directory.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(directory))
+    return directory
 
 
 def pytest_configure(config: "pytest.Config") -> None:

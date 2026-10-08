@@ -26,6 +26,7 @@ from tests._support.merge_verb import (
     base_args as _base_args,
     make_opener as _make_opener,
 )
+from tests._support.unresolvable_roles import make_roles_unresolvable
 
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
@@ -432,6 +433,8 @@ class TestRepoReviewerFloor:
     def _only_ghost_is_unresolvable(monkeypatch):
         from clagentic_loadout.merge.reviewer_login import ReviewerLoginNotConfiguredError
 
+        make_roles_unresolvable(monkeypatch, lambda name: name.startswith("ghost"))
+
         def resolve(name, platform):
             if name.startswith("ghost"):
                 raise ReviewerLoginNotConfiguredError(
@@ -439,7 +442,6 @@ class TestRepoReviewerFloor:
                 )
             return name
 
-        monkeypatch.setattr("clagentic_loadout.merge.repo_gate_runtime.resolve_reviewer_login", resolve)
         monkeypatch.setattr(verb, "resolve_reviewer_login", resolve)
 
     def test_an_unresolvable_role_is_dropped_with_a_warning_and_the_rest_still_merges(
