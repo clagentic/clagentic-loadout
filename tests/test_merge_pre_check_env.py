@@ -22,7 +22,6 @@ from clagentic_loadout.merge.pre_check_env import (
     pre_check_env,
 )
 from clagentic_loadout.merge.pre_checks_config import resolve_pre_checks_env_passthrough
-from clagentic_loadout.transport import attestation
 from clagentic_loadout.transport.attestation import (
     ATTESTED_IDENTITY_ENV_VAR,
     ATTESTED_IDENTITY_SIDECAR_PATH_ENV_VAR,
