@@ -21,6 +21,7 @@ import concurrent.futures
 import hashlib
 import json
 import re
+import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,6 +31,7 @@ from clagentic_loadout.acquire.contract import AcquiredPr
 from clagentic_loadout.review.atomic_io import write_json_atomic as _write_json
 from clagentic_loadout.review.carrier import Runner, run_in_process_group
 from clagentic_loadout.review.chunk_review import (
+    CARRIER_LOG_DIRNAME,
     ENGINE_FALLBACK,
     STATUS_FAILED,
     STATUS_OK,
@@ -47,6 +49,7 @@ from clagentic_loadout.review.delta import (
     render_delta_note,
 )
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
+from clagentic_loadout.review.finding_identity import drop_rereported, with_fingerprints
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
 from clagentic_loadout.sha import FULL_SHA_RE
@@ -62,6 +65,9 @@ RESULT_BLOCKED = "blocked"
 FINDINGS_SCHEMA = "loadout.review-findings/1"
 FINDINGS_FILENAME = "findings.json"
 BINDING_FILENAME = "run-binding.json"
+
+#: Run-directory subfolder holding one empty working directory per chunk.
+CHUNK_WORKDIR_DIRNAME = "chunk-work"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
@@ -157,6 +163,20 @@ def _resume_key(
         digest.update(chunk.text.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()[:16]
+
+
+def fresh_chunk_workdir(run_dir: Path, index: int) -> Path:
+    """An empty working directory for one chunk's engine, under *run_dir*.
+
+    The run directory holds every chunk's persisted result and the merged
+    findings; an engine started inside it can list a sibling chunk's findings
+    and be steered by them. Each chunk therefore runs in a directory of its own
+    that holds nothing, recreated empty on every attempt so nothing an earlier
+    attempt left behind carries over. Raises OSError when it cannot be made."""
+    path = run_dir / CHUNK_WORKDIR_DIRNAME / f"chunk-{index:04d}"
+    shutil.rmtree(path, ignore_errors=True)
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def _result_path(state_dir: Path, index: int) -> Path:
@@ -352,12 +372,25 @@ def run_review(
 
     def work(chunk: Chunk) -> dict[str, Any]:
         previous = _load_record(state_dir, chunk.index) or {}
+        try:
+            chunk_cwd = fresh_chunk_workdir(run_dir, chunk.index)
+        except OSError as exc:
+            return {
+                "index": chunk.index,
+                "files": list(chunk.files),
+                "attempts": _attempts(previous) + 1,
+                "status": STATUS_FAILED,
+                "retriable": False,
+                "reason": REASON_RUN_DIR_UNWRITABLE,
+                "detail": f"cannot create the chunk working directory: {exc}",
+            }
         record = review_chunk(
             chunk,
             len(chunks),
             profile,
             attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
-            cwd=run_dir,
+            cwd=chunk_cwd,
+            log_dir=run_dir / CARRIER_LOG_DIRNAME,
             runner=runner,
             delta_note=delta_notes.get(chunk.index, ""),
             breaker=breaker,
@@ -436,11 +469,16 @@ def run_review(
             stages,
         )
 
-    per_chunk = [(index, record.get("findings", [])) for index, record in sorted(records.items())]
+    by_index = {chunk.index: chunk for chunk in chunks}
+    per_chunk = [
+        (index, with_fingerprints(record.get("findings", []), by_index[index]))
+        for index, record in sorted(records.items())
+    ]
     carried: list[dict[str, Any]] = []
     if delta is not None:
         touched = {name for chunk in chunks for name in chunk.files}
-        carried = carried_findings(delta, touched, chunks)
+        fresh = [f for _, found in per_chunk for f in found]
+        carried = drop_rereported(carried_findings(delta, touched, chunks), fresh)
         per_chunk.append((0, carried))
     findings = merge_findings(per_chunk)
     findings_path = run_dir / FINDINGS_FILENAME

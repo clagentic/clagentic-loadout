@@ -62,6 +62,54 @@ class Chunk:
         would miss it whenever earlier insertions shifted the file."""
         return any(s.file == file and s.old_first <= line <= s.old_last for s in self.hunks)
 
+    def new_side_line_text(self, file: str, line: int) -> str | None:
+        """The text of *line* of *file* in the NEW numbering, when this chunk
+        shows that line (an added or context line); None for a deleted line, a
+        line outside the chunk's hunks, or a file the chunk does not hold."""
+        lines = self.text.split("\n")
+        name = self.files[0] if self.files else ""
+        position = 0
+        while position < len(lines):
+            current = lines[position]
+            if current.startswith(_FILE_MARKER):
+                name = _file_name(current)
+            elif (
+                current.startswith("--- ")
+                and position + 2 < len(lines)
+                and lines[position + 1].startswith("+++ ")
+                and lines[position + 2].startswith(_HUNK_MARKER)
+            ):
+                name = _plain_name(current, lines[position + 1])
+            else:
+                match = _HUNK_HEADER_RE.match(current)
+                if match is not None and name == file:
+                    # The header's counts say how many body lines follow, which
+                    # is the only reliable end: a removed line that reads
+                    # "-- x" looks exactly like a "--- " file header.
+                    old_left = int(match.group(2)) if match.group(2) is not None else 1
+                    new_left = int(match.group(4)) if match.group(4) is not None else 1
+                    number = int(match.group(3))
+                    position += 1
+                    while position < len(lines) and (old_left > 0 or new_left > 0):
+                        body = lines[position]
+                        position += 1
+                        if body.startswith("\\"):
+                            continue
+                        if body.startswith("-"):
+                            old_left -= 1
+                            continue
+                        if body.startswith("+"):
+                            new_left -= 1
+                        else:
+                            old_left -= 1
+                            new_left -= 1
+                        if number == line:
+                            return body[1:]
+                        number += 1
+                    continue
+            position += 1
+        return None
+
 
 @dataclass(frozen=True)
 class _Piece:

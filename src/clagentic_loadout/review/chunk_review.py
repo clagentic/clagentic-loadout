@@ -169,6 +169,7 @@ def _run_one_engine(
     record: dict[str, Any],
     *,
     cwd: Path,
+    log_dir: Path | None = None,
     runner: Runner,
     breaker: EngineBreaker | None = None,
 ) -> dict[str, Any] | None:
@@ -178,7 +179,7 @@ def _run_one_engine(
     call = {
         "cwd": cwd,
         "runner": runner,
-        "log_dir": cwd / CARRIER_LOG_DIRNAME,
+        "log_dir": log_dir if log_dir is not None else cwd / CARRIER_LOG_DIRNAME,
         "label": f"chunk-{record['index']}-{engine}",
     }
     result = run_engine_with_retry(argv, prompt, timeout, **call)
@@ -269,6 +270,7 @@ def _fallback_after_carrier_failure(
     prompt: str,
     *,
     cwd: Path,
+    log_dir: Path | None,
     runner: Runner,
     breaker: EngineBreaker | None,
 ) -> dict[str, Any]:
@@ -283,7 +285,7 @@ def _fallback_after_carrier_failure(
     record = _new_record(chunk, failed["attempts"])
     finished = _run_one_engine(
         ENGINE_FALLBACK, fallback, profile.fallback_timeout_seconds, prompt, record,
-        cwd=cwd, runner=runner, breaker=breaker,
+        cwd=cwd, log_dir=log_dir, runner=runner, breaker=breaker,
     )
     if finished is None:
         # The fallback is absent too: report the carrier's own failure, which
@@ -302,18 +304,22 @@ def review_chunk(
     *,
     attempts_before: int,
     cwd: Path,
+    log_dir: Path | None = None,
     runner: Runner = run_in_process_group,
     delta_note: str = "",
     breaker: EngineBreaker | None = None,
 ) -> dict[str, Any]:
     """Review *chunk*; returns its persistable record. Never raises for an
-    engine problem: every outcome is a record with a status. *breaker* is the
-    run-wide record of engines known to be out of service. A record carries
-    the profile's display label for the engine that answered, when it has one,
-    so a posted verdict can name the model."""
+    engine problem: every outcome is a record with a status. *cwd* is the
+    engine's working directory (the pipeline gives each chunk an empty one of
+    its own, so an engine cannot list a sibling chunk's results); *log_dir* is
+    where a failed call's stderr is kept, default ``cwd/carrier-logs``.
+    *breaker* is the run-wide record of engines known to be out of service. A
+    record carries the profile's display label for the engine that answered,
+    when it has one, so a posted verdict can name the model."""
     record = _review_chunk(
-        chunk, total, profile, attempts_before=attempts_before, cwd=cwd, runner=runner,
-        delta_note=delta_note, breaker=breaker,
+        chunk, total, profile, attempts_before=attempts_before, cwd=cwd, log_dir=log_dir,
+        runner=runner, delta_note=delta_note, breaker=breaker,
     )
     label = profile.fallback_model if record.get("engine") == ENGINE_FALLBACK else profile.carrier_model
     if label:
@@ -328,6 +334,7 @@ def _review_chunk(
     *,
     attempts_before: int,
     cwd: Path,
+    log_dir: Path | None,
     runner: Runner,
     delta_note: str,
     breaker: EngineBreaker | None,
@@ -348,12 +355,13 @@ def _review_chunk(
     else:
         finished = _run_one_engine(
             ENGINE_CARRIER, profile.carrier, profile.timeout_seconds, prompt, record,
-            cwd=cwd, runner=runner, breaker=breaker,
+            cwd=cwd, log_dir=log_dir, runner=runner, breaker=breaker,
         )
     if finished is not None:
         if _carrier_attempts_exhausted(finished, profile):
             return _fallback_after_carrier_failure(
-                chunk, finished, profile, prompt, cwd=cwd, runner=runner, breaker=breaker
+                chunk, finished, profile, prompt,
+                cwd=cwd, log_dir=log_dir, runner=runner, breaker=breaker,
             )
         return finished
 
@@ -376,7 +384,7 @@ def _review_chunk(
 
     finished = _run_one_engine(
         ENGINE_FALLBACK, profile.fallback, profile.fallback_timeout_seconds, prompt, record,
-        cwd=cwd, runner=runner, breaker=breaker,
+        cwd=cwd, log_dir=log_dir, runner=runner, breaker=breaker,
     )
     if finished is not None:
         finished["carrier_unavailable"] = record.get(f"{ENGINE_CARRIER}_unavailable_detail", "")

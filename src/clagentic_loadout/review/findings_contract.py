@@ -14,6 +14,8 @@ import json
 import re
 from typing import Any
 
+from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
+
 SEVERITIES = ("blocking", "nit", "praise")
 
 #: Mirrors the "at most 200 characters" line in OUTPUT_CONTRACT.
@@ -65,6 +67,7 @@ def validate_finding(
     *,
     lenient_severity: bool = False,
     truncate_message: bool = True,
+    carry_fingerprint: bool = False,
 ) -> dict[str, Any]:
     """Validate one finding object and return it in canonical shape.
 
@@ -81,6 +84,12 @@ def validate_finding(
     is blocking and it is a non-empty string, and silently left out otherwise
     (OUTPUT_CONTRACT asks for it on blocking findings only), so a finding without it
     is exactly as valid as before.
+
+    ``fingerprint`` (see review.finding_identity) is optional and is carried
+    through only with ``carry_fingerprint``, for findings read back from a
+    findings file; a model reply never sets it, so a fingerprint in a reply is
+    dropped like any unknown key. A malformed one is dropped, not refused: the
+    finding keeps its position-only identity.
     """
     if not isinstance(item, dict):
         raise InvalidReplyError(f"finding {position} is not an object")
@@ -123,6 +132,8 @@ def validate_finding(
         if truncate_message and len(sequence) > MAX_FAILURE_SEQUENCE_CHARS:
             sequence = sequence[: MAX_FAILURE_SEQUENCE_CHARS - 3] + "..."
         validated[KEY_FAILURE_SEQUENCE] = sequence
+    if carry_fingerprint and is_fingerprint(item.get(KEY_FINGERPRINT)):
+        validated[KEY_FINGERPRINT] = item[KEY_FINGERPRINT]
     return validated
 
 
