@@ -39,6 +39,7 @@ from tests._support.merge_verb import (
     base_args,
     make_opener,
 )
+from tests._support.unresolvable_roles import make_roles_unresolvable
 
 HEAD = "b" * 40
 GITHUB_REMOTE = "https://github.com/some-owner/some-repo.git"
@@ -199,12 +200,7 @@ class TestMergeEnforcesAMappedRole:
 
     @pytest.fixture(autouse=True)
     def _role_names_are_not_callers(self, monkeypatch):
-        def resolve(name, platform):
-            if name.startswith("role-"):
-                raise ReviewerLoginNotConfiguredError(f"no GitHub App slug configured for reviewer {name!r}")
-            return name
-
-        monkeypatch.setattr("clagentic_loadout.merge.reviewer_login.resolve_reviewer_login", resolve)
+        make_roles_unresolvable(monkeypatch, lambda name: name.startswith("role-"))
 
     def _merge(self, tmp_path, gate, comments, *, flags=(), capsys):
         init_gate_repo(tmp_path, tracked_gate=gate)
@@ -475,3 +471,52 @@ class TestTheGateAndTheExportedResolverAgree:
             resolve_declared_role("reviewer", platform)
         with pytest.raises(ReviewerLoginNotConfiguredError):
             renamed_declared_role("reviewer", platform)
+
+    @pytest.mark.parametrize(
+        ("case", "expected_exported"),
+        [
+            ("mapped-forgejo", ("peaches", "peaches", SOURCE_ROLE_CALLERS)),
+            ("bare-forgejo", ("reviewer", "reviewer", SOURCE_BARE_NAME)),
+            ("listed-caller-forgejo", ("reviewer", "reviewer", SOURCE_BARE_NAME)),
+            ("mapped-forgejo-to-itself", ("reviewer", "reviewer", SOURCE_ROLE_CALLERS)),
+            ("github-slug", ("reviewer", "app-r[bot]", SOURCE_SLUGS)),
+            ("github-mapped", ("peaches", "app-p[bot]", SOURCE_ROLE_CALLERS)),
+            ("github-unresolvable", None),
+            ("github-mapped-to-slugless-caller", None),
+        ],
+    )
+    def test_the_exported_resolver_returns_what_main_returned(
+        self, user_config, case, expected_exported
+    ):
+        """Parity table: the Forgejo branch is taken first and never fails, so a
+        Forgejo role is never dropped; GitHub resolves the role's own slug, then
+        the mapping, else raises."""
+        platform, config = self._CASES[case]
+        user_config(**config)
+        if expected_exported is None:
+            with pytest.raises(ReviewerLoginNotConfiguredError):
+                resolve_declared_role("reviewer", platform)
+            return
+        resolution = resolve_declared_role("reviewer", platform)
+        assert (resolution.requirement, resolution.login, resolution.source) == expected_exported
+
+    def test_a_forgejo_role_resolves_without_consulting_the_github_login_resolver(
+        self, user_config, monkeypatch
+    ):
+        user_config(role_callers={"reviewer": "peaches"})
+
+        def fail(*_args, **_kwargs):
+            raise AssertionError("the Forgejo branch must not reach resolve_reviewer_login")
+
+        monkeypatch.setattr("clagentic_loadout.merge.reviewer_login.resolve_reviewer_login", fail)
+        assert resolve_declared_role("reviewer", PLATFORM_FORGEJO).requirement == "peaches"
+
+    def test_renamed_declared_role_is_none_when_the_mapping_names_the_role_itself(self, user_config):
+        user_config(role_callers={"reviewer": "reviewer"})
+        assert renamed_declared_role("reviewer", PLATFORM_FORGEJO) is None
+
+    def test_renamed_declared_role_returns_the_resolution_when_the_mapping_renames(self, user_config):
+        user_config(role_callers={"reviewer": "peaches"})
+        renamed = renamed_declared_role("reviewer", PLATFORM_FORGEJO)
+        assert renamed is not None
+        assert (renamed.requirement, renamed.login) == ("peaches", "peaches")

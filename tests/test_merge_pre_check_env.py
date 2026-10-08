@@ -91,7 +91,8 @@ class TestMalformedAttestationConfigNeverRaises:
 
 
 class TestTheScrub:
-    def _env(self, root: Path) -> dict[str, str]:
+    @staticmethod
+    def _env() -> dict[str, str]:
         return {
             "PATH": "/usr/bin",
             "HOME": "/home/x",
@@ -130,18 +131,18 @@ class TestTheScrub:
         )
 
     def test_identity_sidecar_and_credential_variables_are_removed(self, root):
-        scrubbed = pre_check_env(self._env(root), config_root=root)
+        scrubbed = pre_check_env(self._env(), config_root=root)
         assert set(scrubbed) == {"PATH", "HOME", "LANG", "LC_ALL", "VIRTUAL_ENV", "PLAIN_SETTING"}
 
     def test_the_input_mapping_is_not_modified(self, root):
-        env = self._env(root)
+        env = self._env()
         before = dict(env)
         pre_check_env(env, config_root=root)
         assert env == before
 
     def test_passthrough_keeps_exactly_the_named_variables(self, root):
         scrubbed = pre_check_env(
-            self._env(root), passthrough=["SERVICE_TOKEN", "CLAUDE_CODE_SESSION_ID"], config_root=root
+            self._env(), passthrough=["SERVICE_TOKEN", "CLAUDE_CODE_SESSION_ID"], config_root=root
         )
         assert scrubbed["SERVICE_TOKEN"] == "t"
         assert scrubbed["CLAUDE_CODE_SESSION_ID"] == "sess-1"

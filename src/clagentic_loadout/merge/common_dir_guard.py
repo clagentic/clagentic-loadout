@@ -14,7 +14,10 @@ content itself, so it can be restored). After the checks, whatever their
 outcome, it compares the live state to the record. On any difference it puts
 the recorded state back exactly (contents and modes; timestamps are not
 preserved) and raises `CommonDirModifiedError` naming the changed paths, so the
-caller refuses the merge.
+caller refuses the merge. The restore first makes every directory on the path
+owner-writable (a check may have chmod'ed `hooks/` read-only), rebuilds the file
+set and contents, and applies the recorded modes last. If any path still cannot
+be put back it raises `CommonDirRestoreError` naming each such path.
 
 What this does and does not cover:
 
@@ -73,6 +76,22 @@ class CommonDirModifiedError(CommonDirGuardError):
         super().__init__(message)
 
 
+class CommonDirRestoreError(CommonDirGuardError):
+    """Guarded common-dir state changed and could not be put fully back."""
+
+    def __init__(self, failures: dict[str, str], common_dir: Path) -> None:
+        self.failures = dict(failures)
+        names = sorted(failures)
+        shown = ", ".join(f"{n} ({failures[n][:_STDERR_EXCERPT]})" for n in names[:_MAX_NAMED_PATHS])
+        extra = len(names) - _MAX_NAMED_PATHS
+        if extra > 0:
+            shown += f" (and {extra} more)"
+        super().__init__(
+            f"the shared git directory {str(common_dir)!r} was changed by the pre_checks and "
+            f"could not be fully restored; check these paths by hand: {shown}"
+        )
+
+
 @dataclass(frozen=True)
 class _Entry:
     kind: str  # "file" | "dir" | "symlink"
@@ -126,14 +145,51 @@ def _changed(before: dict[str, _Entry], after: dict[str, _Entry]) -> list[str]:
     )
 
 
+_OWNER_RWX = stat.S_IRWXU
+
+
+def _make_owner_writable(path: Path) -> None:
+    """Give the owner rwx on *path* and every directory below it, so a check
+    that chmod'ed a directory read-only cannot block removing or re-creating
+    entries in it. Symlinks are never followed."""
+    if path.is_symlink() or not path.is_dir():
+        return
+    os.chmod(path, stat.S_IMODE(os.lstat(path).st_mode) | _OWNER_RWX)
+    for current, dirs, _files in os.walk(path, followlinks=False):
+        for child in dirs:
+            full = Path(current) / child
+            if not full.is_symlink():
+                os.chmod(full, stat.S_IMODE(os.lstat(full).st_mode) | _OWNER_RWX)
+
+
 def _remove(path: Path) -> None:
     if path.is_symlink() or not path.is_dir():
         path.unlink()
     else:
+        _make_owner_writable(path)
         shutil.rmtree(path)
 
 
+def _attempt(failures: dict[str, str], name: str, action) -> None:
+    """Run *action*; record an OSError against *name* instead of stopping, so
+    one stuck path does not hide the others."""
+    try:
+        action()
+    except OSError as exc:
+        failures.setdefault(name, str(exc))
+
+
 def _restore(common_dir: Path, before: dict[str, _Entry]) -> None:
+    """Put the recorded state back. Every directory on the path is made
+    owner-writable first, the file set and contents are restored, and the
+    recorded modes are applied last. Raises `CommonDirRestoreError` naming every
+    path that could not be restored or does not match the record afterwards."""
+    failures: dict[str, str] = {}
+    common_mode = stat.S_IMODE(os.lstat(common_dir).st_mode)
+    _attempt(failures, ".", lambda: os.chmod(common_dir, common_mode | _OWNER_RWX))
+    for name in _GUARDED_TREES:
+        _attempt(failures, name, lambda name=name: _make_owner_writable(common_dir / name))
+
     after = _scan(common_dir)
     # Deepest first, so a directory is emptied before it is judged.
     for name in sorted(after, key=lambda n: n.count("/"), reverse=True):
@@ -142,24 +198,30 @@ def _restore(common_dir: Path, before: dict[str, _Entry]) -> None:
         if want is None or want.kind != have.kind or (want.kind != "dir" and want != have):
             path = common_dir / name
             if os.path.lexists(path):
-                _remove(path)
+                _attempt(failures, name, lambda path=path: _remove(path))
     for name in sorted(before, key=lambda n: n.count("/")):
         entry = before[name]
         path = common_dir / name
-        if not os.path.lexists(path):
-            if entry.kind == "dir":
-                path.mkdir()
-            elif entry.kind == "symlink":
-                os.symlink(os.fsdecode(entry.data), path)
-            elif entry.kind == "file":
-                path.write_bytes(entry.data)
-        if entry.kind in ("dir", "file"):
-            os.chmod(path, entry.mode)
-    # Directory modes last: a restored read-only directory must not block the
-    # creation of its own children.
+        if os.path.lexists(path):
+            continue
+        if entry.kind == "dir":
+            _attempt(failures, name, path.mkdir)
+        elif entry.kind == "symlink":
+            _attempt(failures, name, lambda path=path, entry=entry: os.symlink(os.fsdecode(entry.data), path))
+        elif entry.kind == "file":
+            _attempt(failures, name, lambda path=path, entry=entry: path.write_bytes(entry.data))
+    # Modes last: a restored read-only directory must not block the creation of
+    # its own children, and a read-only file must not block its own content.
     for name in sorted(before, key=lambda n: n.count("/"), reverse=True):
-        if before[name].kind == "dir":
-            os.chmod(common_dir / name, before[name].mode)
+        entry = before[name]
+        if entry.kind in ("dir", "file") and os.path.lexists(common_dir / name):
+            _attempt(failures, name, lambda name=name, entry=entry: os.chmod(common_dir / name, entry.mode))
+    _attempt(failures, ".", lambda: os.chmod(common_dir, common_mode))
+
+    for name in _changed(before, _scan(common_dir)):
+        failures.setdefault(name, "does not match the recorded state after restore")
+    if failures:
+        raise CommonDirRestoreError(failures, common_dir)
 
 
 def resolve_common_dir(git_tree: str | Path) -> Path:
@@ -225,6 +287,7 @@ def guard_common_dir(git_tree: str | Path) -> Iterator[Path]:
 __all__ = [
     "CommonDirGuardError",
     "CommonDirModifiedError",
+    "CommonDirRestoreError",
     "guard_common_dir",
     "resolve_common_dir",
 ]

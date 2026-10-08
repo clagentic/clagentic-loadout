@@ -246,6 +246,12 @@ keep a broken config from blocking the merge that would fix it:
   (refs, objects, `worktrees/`, `modules/`, ...) is neither checked nor
   restored, and a change that leaves the recorded locations as found is not
   noticed. A check that must write a hook or config there cannot pass the gate.
+  The restore first makes the guarded directories owner-writable (a check may have
+  made `hooks/` read-only), then restores contents, and applies the recorded modes
+  last; a path that still cannot be restored is named in the refusal. The guard
+  compares and restores before the worktree is torn down. Every git command loadout
+  runs against the worktree (add, checkout, merge, remove, prune) runs with hooks
+  and fsmonitor disabled and with the same scrubbed environment as the checks.
   The optional deployment-tier `merge.pre_checks_env_passthrough` list (working-tree
   config file only) keeps named variables. It widens what unmerged PR code can
   read, so it must live in an **untracked** deployment config; `loadout-doctor`

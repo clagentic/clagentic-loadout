@@ -805,6 +805,12 @@ def run_post_merge_steps(
             else None
         )
 
+        # The probe runs in the step's own environment when the caller chose a
+        # base environment. Without one it keeps the inherited process
+        # environment it always had, which never saw the step's VAR=VALUE
+        # prefixes or the deployment overrides.
+        probe_env = step_env if base_env is not None else None
+
         if detaches:
             liveness_probe = step.get(STEP_KEY_LIVENESS_PROBE)
             baseline_sample = None
@@ -816,8 +822,7 @@ def run_post_merge_steps(
                 # the race, rather than any adjustment to poll timing after
                 # the fact.
                 baseline_sample = _capture_liveness_baseline(
-                    liveness_probe, cwd=root, label=label,
-                    env=step_env if base_env is not None else None,
+                    liveness_probe, cwd=root, label=label, env=probe_env
                 )
 
             # lr-53556a: fire-and-forget. No PIPE is ever created for this
@@ -852,7 +857,7 @@ def run_post_merge_steps(
                     label=label,
                     cmd_repr=repr(cmd),
                     baseline_sample=baseline_sample,
-                    env=step_env if base_env is not None else None,
+                    env=probe_env,
                 )
             continue
 

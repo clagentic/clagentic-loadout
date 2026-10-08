@@ -1673,13 +1673,19 @@ def _run(
         try:
             # A linked worktree shares the git common dir: the guard records
             # hooks/, info/, config and config.worktree there, and refuses
-            # (after restoring them) if the checks changed any of it.
-            with guard_common_dir(gate_git_tree), merge_result_worktree(
+            # (after restoring them) if the checks changed any of it. The guard
+            # is the INNER context so it compares and restores before the
+            # worktree is torn down; the worktree's own git commands run with
+            # hooks and fsmonitor off and the same scrubbed environment as the
+            # checks.
+            check_env = pre_check_env(passthrough=passthrough)
+            with merge_result_worktree(
                 gate_git_tree,
                 resolve_base_sha(pr_info),
                 current_head_sha,
                 base_branch=resolve_base_branch(pr_info),
-            ) as check_tree:
+                env=check_env,
+            ) as check_tree, guard_common_dir(gate_git_tree):
                 print(
                     f"merge: pre_checks gate -- running {len(pre_checks)} declared "
                     f"check(s) in the merge-result worktree {str(check_tree)!r} (head "
@@ -1691,9 +1697,7 @@ def _run(
                     f"checks",
                     file=sys.stderr,
                 )
-                run_post_merge_steps(
-                    pre_checks, check_tree, base_env=pre_check_env(passthrough=passthrough)
-                )
+                run_post_merge_steps(pre_checks, check_tree, base_env=check_env)
         except CommonDirGuardError as exc:
             _fail(
                 f"pre_checks gate -- {exc} -- refusing to merge "

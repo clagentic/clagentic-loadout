@@ -17,6 +17,7 @@ from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.common_dir_guard import (
     CommonDirGuardError,
     CommonDirModifiedError,
+    CommonDirRestoreError,
     guard_common_dir,
 )
 from tests._gate_repo import GateRepo, git, init_gate_repo, seed_base_commit
@@ -109,6 +110,44 @@ class TestAPreCheckThatChangesSharedGitStateRefuses:
         self._refused(tmp_path, scratch_tmp, capsys, f"import os; os.remove({str(hook)!r})", "hooks/pre-commit")
         assert hook.exists()
 
+    def test_a_planted_hook_in_a_directory_made_read_only_is_restored_and_refused(
+        self, tmp_path, scratch_tmp, capsys
+    ):
+        hooks = tmp_path / "shared" / ".git" / "hooks"
+        code = (
+            "import os; "
+            f"p = {str(hooks / 'post-merge')!r}; "
+            "open(p, 'w').write('#!/bin/sh\\ntouch /x\\n'); os.chmod(p, 0o755); "
+            f"os.chmod({str(hooks)!r}, 0o555)"
+        )
+        repo = _seeded_repo(tmp_path, [_check(code)])
+        common = repo.path / ".git"
+        before = _state(common)
+        mode_before = hooks.stat().st_mode & 0o7777
+        calls: list = []
+        assert run_gate_merge(repo, calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert calls == []
+        assert "hooks/post-merge" in capsys.readouterr().err
+        assert not (hooks / "post-merge").exists()
+        assert _state(common) == before
+        assert hooks.stat().st_mode & 0o7777 == mode_before
+
+    def test_a_read_only_directory_holding_a_planted_subtree_is_restored(
+        self, tmp_path, scratch_tmp, capsys
+    ):
+        hooks = tmp_path / "shared" / ".git" / "hooks"
+        sub = hooks / "nested"
+        code = (
+            "import os; "
+            f"os.makedirs({str(sub)!r}); open({str(sub / 'h')!r}, 'w').write('x'); "
+            f"os.chmod({str(sub)!r}, 0o500); os.chmod({str(hooks)!r}, 0o555)"
+        )
+        repo = _seeded_repo(tmp_path, [_check(code)])
+        before = _state(repo.path / ".git")
+        assert run_gate_merge(repo) == verb.EXIT_PRE_CHECKS_FAILED
+        assert not sub.exists()
+        assert _state(repo.path / ".git") == before
+
     def test_a_failing_check_that_also_changed_state_is_restored_and_refused(
         self, tmp_path, scratch_tmp, capsys
     ):
@@ -186,6 +225,31 @@ class TestTheGuardDirectly:
         assert isinstance(raised.value.__cause__, RuntimeError)
         assert "check blew up" in str(raised.value)
         assert not (tree / ".git" / "hooks" / "new").exists()
+
+    def test_a_read_only_hooks_directory_with_a_planted_file_is_restored_to_its_mode(self, tree):
+        hooks = tree / ".git" / "hooks"
+        hooks.chmod(0o755)
+        before = _state(tree / ".git")
+        with pytest.raises(CommonDirModifiedError):
+            with guard_common_dir(tree):
+                (hooks / "planted").write_text("x", encoding="utf-8")
+                hooks.chmod(0o555)
+        assert _state(tree / ".git") == before
+        assert hooks.stat().st_mode & 0o7777 == 0o755
+
+    def test_an_unrestorable_path_is_named_loudly(self, tree, monkeypatch):
+        planted = tree / ".git" / "hooks" / "planted"
+
+        def stuck(path):
+            raise PermissionError(13, "cannot remove", str(path))
+
+        monkeypatch.setattr("clagentic_loadout.merge.common_dir_guard._remove", stuck)
+        with pytest.raises(CommonDirRestoreError) as raised:
+            with guard_common_dir(tree):
+                planted.write_text("x", encoding="utf-8")
+        assert "hooks/planted" in str(raised.value)
+        assert "hooks/planted" in raised.value.failures
+        assert isinstance(raised.value, CommonDirGuardError)
 
     def test_a_path_that_is_not_a_git_tree_is_a_guard_error(self, tmp_path):
         with pytest.raises(CommonDirGuardError):

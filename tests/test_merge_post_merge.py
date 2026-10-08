@@ -26,6 +26,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -909,3 +910,49 @@ class TestLivenessProbeExecution:
         run_post_merge_steps(steps, tmp_path)
         elapsed = time.monotonic() - started
         assert elapsed < 10, "absent liveness_probe must add no wait at all"
+
+    def _probe_env_steps(self, tmp_path):
+        """A detached step that advances a heartbeat, and a probe that records
+        the environment variables it sees into a log."""
+        heartbeat = tmp_path / "heartbeat.txt"
+        heartbeat.write_text("0")
+        log = tmp_path / "probe-env.log"
+        probe_code = (
+            "import os\n"
+            f"print(open({str(heartbeat)!r}).read().strip())\n"
+            f"open({str(log)!r}, 'a').write(\n"
+            "    ','.join(k for k in ('PARENT_ONLY', 'BASE_ONLY', 'DEPLOY_OVR') if k in os.environ) + '\\n')\n"
+        )
+        steps = [
+            {
+                "cmd": [_PY, "-c", f"open({str(heartbeat)!r}, 'w').write('final')"],
+                "detaches": True,
+                "liveness_probe": {
+                    "cmd": [_PY, "-c", probe_code],
+                    "poll_interval_seconds": 0.2,
+                    "max_polls": 4,
+                },
+            }
+        ]
+        return steps, log
+
+    def test_probe_runs_with_the_scrubbed_env_its_step_ran_with_when_base_env_is_given(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PARENT_ONLY", "1")
+        steps, log = self._probe_env_steps(tmp_path)
+        base_env = {"PATH": os.environ["PATH"], "BASE_ONLY": "1"}
+        run_post_merge_steps(
+            steps, tmp_path, deployment_env_overrides={"DEPLOY_OVR": "1"}, base_env=base_env
+        )
+        lines = log.read_text().splitlines()
+        assert lines and all(line == "BASE_ONLY,DEPLOY_OVR" for line in lines)
+
+    def test_probe_without_base_env_keeps_the_inherited_environment_as_before(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PARENT_ONLY", "1")
+        steps, log = self._probe_env_steps(tmp_path)
+        run_post_merge_steps(steps, tmp_path, deployment_env_overrides={"DEPLOY_OVR": "1"})
+        lines = log.read_text().splitlines()
+        assert lines and all(line == "PARENT_ONLY" for line in lines)

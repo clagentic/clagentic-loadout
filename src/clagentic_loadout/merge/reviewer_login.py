@@ -202,12 +202,12 @@ def resolve_declared_role(role: str, platform: str) -> DeclaredRoleResolution:
 
     Raises ReviewerLoginNotConfiguredError when the role resolves neither way.
     """
+    if platform == PLATFORM_FORGEJO:
+        return resolve_forgejo_declared_role(role)
     try:
         login = resolve_reviewer_login(role, platform)
     except ReviewerLoginNotConfiguredError as exc:
         return resolve_role_via_mapping(role, exc)
-    if platform == PLATFORM_FORGEJO:
-        return resolve_forgejo_declared_role(role)
     return DeclaredRoleResolution(role=role, requirement=role, login=login, source=SOURCE_SLUGS)
 
 
