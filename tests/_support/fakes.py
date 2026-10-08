@@ -42,13 +42,13 @@ class FakeResponse:
 
 
 def paged(url: str, items: list) -> list:
-    """The window of *items* that a real host would return for *url*'s
-    ``page`` and ``limit``/``per_page`` query. A fake comment endpoint must
-    honor paging: the comment reader walks pages until it sees an empty one,
-    and refuses (fail closed) a server that repeats the same page forever.
-    With no size parameter the whole list is returned."""
+    """The window of *items* that a real host would return for *url*.
+
+    GitHub honors ``per_page``/``page``. Forgejo's issue-comments endpoint
+    ignores ``page`` and ``limit`` entirely and always returns the whole list,
+    so only ``per_page`` is read here and a Forgejo URL gets every item."""
     query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
-    size_param = query.get("limit") or query.get("per_page")
+    size_param = query.get("per_page")
     if not size_param:
         return items
     size = int(size_param[0])
