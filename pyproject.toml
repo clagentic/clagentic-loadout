@@ -76,11 +76,6 @@ clagentic_loadout = ["schemas/*.json", "loadout_init/*.yaml"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-# Keep the tmp_path tree only for failed tests: the suite builds thousands of
-# throwaway git repos, and keeping every one held tens of thousands of files in
-# the pytest base temp for the whole run and after it. Dropping passing
-# tests' trees as they finish lowers the peak, not just the leftover.
-tmp_path_retention_policy = "failed"
 
 [tool.ruff]
 target-version = "py310"

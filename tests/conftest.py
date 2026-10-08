@@ -351,23 +351,25 @@ def _init_git_repos_from_empty_template(monkeypatch, _empty_git_template_dir):
 _TMP_PATH_ATTR = "_loadout_tmp_path"
 
 
-def _remove_tmp_path_siblings(tmp_path):
-    for sibling in tmp_path.parent.glob(f"{tmp_path.name}-*"):
-        if sibling.is_dir() and not sibling.is_symlink():
-            shutil.rmtree(sibling)
-        else:
-            sibling.unlink()
+def _remove_tmp_path_and_siblings(tmp_path):
+    for doomed in [tmp_path, *tmp_path.parent.glob(f"{tmp_path.name}-*")]:
+        if doomed.is_dir() and not doomed.is_symlink():
+            shutil.rmtree(doomed)
+        elif doomed.exists() or doomed.is_symlink():
+            doomed.unlink()
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     """Collect each phase's report on the item, and once the teardown report
-    exists remove the test's tmp_path siblings if setup, call AND teardown all
-    passed.
+    exists remove the test's tmp_path and its siblings if setup, call AND
+    teardown all passed.
 
     The decision cannot live in a fixture's own teardown: that runs before the
     teardown phase has finished, so a later fixture's teardown failure would
-    not be seen yet."""
+    not be seen yet. pytest's own `tmp_path_retention_policy = "failed"` cannot
+    make it either: it deletes tmp_path after a setup or a late teardown
+    failure, losing the diagnostics of exactly those tests."""
     outcome = yield
     report = outcome.get_result()
     setattr(item, f"rep_{call.when}", report)
@@ -378,21 +380,21 @@ def pytest_runtest_makereport(item, call):
         return
     phases = [getattr(item, f"rep_{phase}", None) for phase in ("setup", "call", "teardown")]
     if all(rep is not None and rep.passed for rep in phases):
-        _remove_tmp_path_siblings(tmp_path)
+        _remove_tmp_path_and_siblings(tmp_path)
 
 
 @pytest.fixture(autouse=True)
 def _record_tmp_path_for_sibling_cleanup(request, tmp_path):
     """Autouse repo-wide: remember tmp_path so `pytest_runtest_makereport`
-    can remove a fully passing test's `<tmp_path name>-*` siblings.
+    can remove a fully passing test's tmp_path and `<tmp_path name>-*`
+    siblings.
 
-    With `tmp_path_retention_policy = "failed"` pytest deletes a passing
-    test's tmp_path, which frees its number for reuse by the next test whose
+    Removing tmp_path frees its number for reuse by the next test whose
     truncated directory name matches. Some tests build a sibling directory
     next to tmp_path (a bare `-origin.git` remote, marker files); left
     behind, they would be found already present by the test that reuses the
-    name. A test with any failed phase keeps its siblings for diagnosis, like
-    tmp_path."""
+    name. A test with any failed phase keeps tmp_path and siblings for
+    diagnosis."""
     setattr(request.node, _TMP_PATH_ATTR, tmp_path)
     yield
 
