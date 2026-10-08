@@ -9,7 +9,6 @@ what they can see."""
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,12 +29,7 @@ from clagentic_loadout.transport.attestation import (
     attestation_env_var_names,
 )
 from tests._gate_repo import GateRepo, init_gate_repo, write_deployment_config
-from tests._support.merge_verb import (
-    AllowingAuthorityProvider,
-    RecordingTokenProvider,
-    base_args,
-    make_opener,
-)
+from tests._support.gate_merge import run_gate_merge as _merge
 
 _PY = sys.executable
 
@@ -190,6 +184,31 @@ class TestTheScrub:
     def test_widened_credential_names_are_denied(self, name):
         assert is_denied_pre_check_name(name)
 
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "GIT_ASKPASS",
+            "SSH_ASKPASS",
+            "SUDO_ASKPASS",
+            "NETRC",
+            "KUBECONFIG",
+            "DOCKER_CONFIG",
+            "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_SYSTEM",
+            "GIT_CONFIG_COUNT",
+            "GIT_CONFIG_KEY_0",
+            "GIT_CONFIG_VALUE_0",
+            "git_config_key_12",
+        ],
+    )
+    def test_credential_source_pointers_are_denied(self, name, tmp_path):
+        assert is_denied_pre_check_name(name)
+        assert name not in pre_check_env({name: "x", "PATH": "/usr/bin"}, config_root=tmp_path)
+
+    def test_a_credential_source_pointer_can_be_passed_through_deliberately(self, tmp_path):
+        scrubbed = pre_check_env({"KUBECONFIG": "/k"}, passthrough=["KUBECONFIG"], config_root=tmp_path)
+        assert scrubbed == {"KUBECONFIG": "/k"}
+
     def test_the_widened_denylist_strips_credentials_and_keeps_the_ordinary_environment(self, tmp_path):
         env = {
             "AWS_SECRET_ACCESS_KEY": "a",
@@ -228,14 +247,6 @@ class TestPassthroughConfig:
             resolve_pre_checks_env_passthrough(tmp_path)
 
 
-@pytest.fixture
-def scratch_tmp(tmp_path, monkeypatch):
-    directory = tmp_path / "scratch-tmp"
-    directory.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(directory))
-    return directory
-
-
 def _probe(*, absent: list[str] = (), present: list[str] = ()) -> dict:
     code = (
         "import os, sys; "
@@ -244,16 +255,6 @@ def _probe(*, absent: list[str] = (), present: list[str] = ()) -> dict:
         "print('env probe mismatch:', bad, file=sys.stderr); sys.exit(1 if bad else 0)"
     )
     return {"cmd": [_PY, "-c", code], "on_failure": "fail"}
-
-
-def _merge(repo: GateRepo) -> int:
-    argv = base_args(**{"--repo-path": str(repo.path)}) + ["--skip-post-merge"]
-    return verb.main(
-        argv,
-        token_provider=RecordingTokenProvider(),
-        authority_provider=AllowingAuthorityProvider(),
-        opener=make_opener(pr_info=repo.pr_info()),
-    )
 
 
 def _repo(tmp_path, steps, *, head_files=None, deployment_merge=None) -> GateRepo:

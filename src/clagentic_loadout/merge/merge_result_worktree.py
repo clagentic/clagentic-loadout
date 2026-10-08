@@ -14,10 +14,19 @@ worktree and hands its path to the caller:
      is not mergeable, so no check can be run against its result.
 
 The worktree lives under the per-process temporary directory (`TMPDIR`), never
-inside the repository, and is always removed (`git worktree remove --force`,
-then `git worktree prune`) however the body exits. The shared tree at
-*git_tree* is never checked out, stashed or reset; the only thing git writes
-there is the worktree's own administrative entry, which the cleanup removes.
+inside the repository, and removal is attempted (`git worktree remove --force`,
+then `git worktree prune`) however the body exits. This module does not check
+out, stash or reset the shared tree at *git_tree*; the git operations it runs
+write there only the worktree's own administrative entry, which the cleanup
+removes.
+
+What this does NOT isolate: a linked worktree shares the repository's git
+common directory with *git_tree*, so code running in the worktree can write
+there (hooks, `config`, `info/`, refs, objects). This module does not prevent
+that. The merge verb wraps the checks in `merge.common_dir_guard`, which
+detects and undoes changes to `hooks/`, `info/`, `config` and `config.worktree`
+only; the rest of the common directory is neither guarded nor restored. The
+worktree is also not a process sandbox: code in it runs as the merger's user.
 """
 
 from __future__ import annotations

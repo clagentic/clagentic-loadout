@@ -1,10 +1,18 @@
 """merge.pre_check_env -- the environment a pre_check child process receives.
 
-A pre_check runs code from the PR head before that PR is merged, inside the
-merger's process environment. That environment carries identity and attestation
+A pre_check runs code from the PR head before that PR is merged, as a child of
+the merger's process. The merger's environment carries identity and attestation
 material (per-spawn and session sidecar variables, loadout's own sidecar-path
-and identity variables) and may carry credentials. A check executing unmerged
-code must not be able to read any of it.
+and identity variables) and may carry credentials. This module removes the
+variables it recognises from the environment the child is *handed*.
+
+What that does and does not protect against: the scrub controls only the
+environment passed to the child. The child still runs as the merger's user, so
+it can read that user's files (including credential files under `HOME` such as
+`~/.git-credentials` and `~/.netrc`, which `HOME` passing through leaves in
+reach) and the merger's own, unscrubbed `/proc/<pid>/environ`. A variable the
+patterns below do not recognise is passed on. Withholding those would need a
+process sandbox, which loadout does not provide.
 
 The child gets the parent environment MINUS a denylist, not an allowlist, so
 existing checks keep PATH, HOME, locale and virtualenv variables. A name is
@@ -22,7 +30,12 @@ removed when it is:
      ending `_KEY`, `_PAT`, `_PASS` or `_DSN`; `SSH_AUTH_SOCK`, `DATABASE_URL`,
      `GOOGLE_APPLICATION_CREDENTIALS`; and the `AWS_*`, `AZURE_*`, `GH_*`,
      `FORGEJO_*`, `BAO_*` and `VAULT_*` families. PATH, HOME, LANG, LC_*,
-     VIRTUAL_ENV, PYTHONPATH and TMPDIR are not credential-shaped and survive.
+     VIRTUAL_ENV, PYTHONPATH and TMPDIR are not credential-shaped and survive;
+  4. a variable that points at a credential source: `GIT_ASKPASS`,
+     `SSH_ASKPASS`, `SUDO_ASKPASS`, `NETRC`, `KUBECONFIG`, `DOCKER_CONFIG` and
+     the `GIT_CONFIG_*` family (`GIT_CONFIG_GLOBAL`, `GIT_CONFIG_SYSTEM`,
+     `GIT_CONFIG_COUNT`, `GIT_CONFIG_KEY_n` and `GIT_CONFIG_VALUE_n` can name
+     or inject a credential helper). `HOME` itself is kept by design.
 
 A deployment keeps a named variable deliberately through the deployment-tier
 `merge.pre_checks_env_passthrough` list (`pre_checks_config`); a passed-through
@@ -66,6 +79,13 @@ CREDENTIAL_NAME_PATTERNS = (
     "FORGEJO_*",
     "BAO_*",
     "VAULT_*",
+    "GIT_ASKPASS",
+    "SSH_ASKPASS",
+    "SUDO_ASKPASS",
+    "NETRC",
+    "KUBECONFIG",
+    "DOCKER_CONFIG",
+    "GIT_CONFIG_*",
 )
 
 

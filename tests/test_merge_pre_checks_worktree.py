@@ -9,7 +9,6 @@ HTTP surface is a canned double."""
 from __future__ import annotations
 
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -20,12 +19,7 @@ from clagentic_loadout.merge.merge_result_worktree import (
     merge_result_worktree,
 )
 from tests._gate_repo import GateRepo, commit_files, git, init_gate_repo
-from tests._support.merge_verb import (
-    AllowingAuthorityProvider,
-    RecordingTokenProvider,
-    base_args,
-    make_opener,
-)
+from tests._support.gate_merge import run_gate_merge as _merge
 
 _PY = sys.executable
 
@@ -42,39 +36,9 @@ def _record_cwd(marker: Path, *, then: str = "") -> dict:
     return _check(f"import os; open({str(marker)!r}, 'w').write(os.getcwd()); {then}")
 
 
-@pytest.fixture
-def scratch_tmp(tmp_path, monkeypatch):
-    """The per-process TMPDIR the worktree must live under."""
-    directory = tmp_path / "scratch-tmp"
-    directory.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(directory))
-    return directory
-
-
 def _repo(tmp_path, steps, **kwargs) -> GateRepo:
     gate = {"required_reviewer_roles": [], "pre_checks": steps}
     return init_gate_repo(tmp_path / "shared", tracked_gate=gate, **kwargs)
-
-
-def _merge(repo: GateRepo, merge_calls=None) -> int:
-    argv = base_args(**{"--repo-path": str(repo.path)}) + ["--skip-post-merge"]
-    return verb.main(
-        argv,
-        token_provider=RecordingTokenProvider(),
-        authority_provider=AllowingAuthorityProvider(),
-        opener=_counting_opener(repo, merge_calls),
-    )
-
-
-def _counting_opener(repo: GateRepo, merge_calls):
-    inner = make_opener(pr_info=repo.pr_info())
-
-    def opener(req, timeout=15):
-        if merge_calls is not None and req.get_method() == "POST" and req.full_url.endswith("/merge"):
-            merge_calls.append(req.full_url)
-        return inner(req, timeout=timeout)
-
-    return opener
 
 
 def _worktrees(repo: GateRepo) -> list[str]:

@@ -228,6 +228,24 @@ keep a broken config from blocking the merge that would fix it:
   `SSH_AUTH_SOCK`, `DATABASE_URL`, `GOOGLE_APPLICATION_CREDENTIALS`; and the
   `AWS_*`, `AZURE_*`, `GH_*`, `FORGEJO_*`, `BAO_*`, `VAULT_*` families); `PATH`,
   `HOME`, `LANG`, `LC_*`, `VIRTUAL_ENV`, `PYTHONPATH` and `TMPDIR` pass through.
+  Variables that point at a credential source are withheld too: `GIT_ASKPASS`,
+  `SSH_ASKPASS`, `SUDO_ASKPASS`, `NETRC`, `KUBECONFIG`, `DOCKER_CONFIG` and the
+  `GIT_CONFIG_*` family (which can inject a credential helper).
+  **Limits of the scrub.** It only controls the environment handed to the child.
+  The child still runs as the merger's user with the same `HOME`, so it can read
+  that user's credential files (`~/.git-credentials`, `~/.netrc`, ...) and the
+  merger's own unscrubbed `/proc/<pid>/environ`. Closing that needs process
+  isolation (a sandbox), which loadout does not provide.
+  **Shared git directory guard.** The worktree shares the repository's git common
+  directory, so check code can write there. Before the checks run, loadout
+  records the common directory's `hooks/` and `info/` trees and its `config` and
+  `config.worktree` files (entries, modes and content hashes). After the checks,
+  whatever their outcome, it compares; on any difference it restores the recorded
+  state and **refuses** the merge (`EXIT_PRE_CHECKS_FAILED`), naming the changed
+  paths. This covers only those four locations: other common-directory content
+  (refs, objects, `worktrees/`, `modules/`, ...) is neither checked nor
+  restored, and a change that leaves the recorded locations as found is not
+  noticed. A check that must write a hook or config there cannot pass the gate.
   The optional deployment-tier `merge.pre_checks_env_passthrough` list (working-tree
   config file only) keeps named variables. It widens what unmerged PR code can
   read, so it must live in an **untracked** deployment config; `loadout-doctor`

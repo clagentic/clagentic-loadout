@@ -521,6 +521,7 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_require_model_attestation,
     resolve_sync_tree_after_merge,
 )
+from clagentic_loadout.merge.common_dir_guard import CommonDirGuardError, guard_common_dir
 from clagentic_loadout.merge.merge_result_worktree import (
     MergeResultWorktreeError,
     merge_result_worktree,
@@ -1670,7 +1671,10 @@ def _run(
                 code=EXIT_PRE_CHECKS_FAILED,
             )
         try:
-            with merge_result_worktree(
+            # A linked worktree shares the git common dir: the guard records
+            # hooks/, info/, config and config.worktree there, and refuses
+            # (after restoring them) if the checks changed any of it.
+            with guard_common_dir(gate_git_tree), merge_result_worktree(
                 gate_git_tree,
                 resolve_base_sha(pr_info),
                 current_head_sha,
@@ -1690,6 +1694,12 @@ def _run(
                 run_post_merge_steps(
                     pre_checks, check_tree, base_env=pre_check_env(passthrough=passthrough)
                 )
+        except CommonDirGuardError as exc:
+            _fail(
+                f"pre_checks gate -- {exc} -- refusing to merge "
+                f"PR #{args.pr_number} in {owner}/{repo}.",
+                code=EXIT_PRE_CHECKS_FAILED,
+            )
         except MergeResultWorktreeError as exc:
             _fail(
                 f"pre_checks gate could not build the merge result -- {exc} -- "
