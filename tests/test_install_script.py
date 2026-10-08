@@ -21,9 +21,11 @@ empty/unset by design -- exactly the environment lr-e8cc's fix targets), so
 
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -69,6 +71,51 @@ def _restricted_path_env(tmp_path: Path, extra_bin_dirs: tuple[Path, ...] = ()) 
     env = dict(os.environ)
     env["PATH"] = path
     return env
+
+
+CHECKOUT = INSTALL_SH.parent.parent
+
+
+@pytest.fixture
+def shared_venv_data_dir(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[Path]:
+    """A data dir whose venv is built once per pytest run, not once per test.
+
+    A real venv-tier install builds a full virtualenv and pip-installs this
+    checkout into it, which is the dominant cost of this file. Tests that only
+    inspect what an install wrote OUTSIDE the venv (symlinks, config.yaml,
+    skills) point their own per-test HOME and bin dir at this shared data dir;
+    install.sh then takes its "reusing existing venv" path and re-installs the
+    same checkout in place, which leaves the venv equivalent for the next test.
+    A test whose assertions depend on a fresh venv build uses its own data dir.
+
+    The location is the base temp shared by every xdist worker, so the whole
+    run builds one venv rather than one per worker. An exclusive file lock is
+    held for the duration of each test that uses it: pip rewrites the venv in
+    place on every install, and two workers doing that at once would corrupt
+    it."""
+    base = tmp_path_factory.getbasetemp()
+    shared_root = (base.parent if hasattr(request.config, "workerinput") else base) / "shared-venv"
+    shared_root.mkdir(exist_ok=True)
+    data_dir = shared_root / "data"
+    built_marker = shared_root / "built"
+    with open(shared_root / ".lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not built_marker.exists():
+            home = shared_root / "home"
+            home.mkdir(exist_ok=True)
+            result = _run(
+                "--installer", "venv",
+                "--source", str(CHECKOUT),
+                "--data-dir", str(data_dir),
+                "--bin-dir", str(shared_root / "bin"),
+                "--skills-dir", str(shared_root / "skills"),
+                env={**os.environ, "HOME": str(home)},
+            )
+            assert result.returncode == 0, result.stderr
+            built_marker.write_text("built\n")
+        yield data_dir
 
 
 def _fake_externally_managed_python(tmp_path: Path) -> Path:
@@ -134,8 +181,12 @@ def test_install_sh_unknown_flag_is_usage_error(tmp_path: Path) -> None:
     not (shutil.which("pipx") or shutil.which("uv") or shutil.which("pip3") or shutil.which("pip")),
     reason="no installer (pipx/uv/pip) available in this test environment",
 )
-def test_install_sh_dry_run_resolves_a_plan_without_installing(tmp_path: Path) -> None:
-    result = _run("--dry-run", tmp_path=tmp_path)
+def test_install_sh_dry_run_resolves_a_plan_without_installing(tmp_path: Path, shared_venv_data_dir: Path) -> None:
+    # The venv tier builds its venv even under --dry-run, so point it at the
+    # shared one to avoid a fresh build when auto-detect lands on that tier.
+    env = _env_with_scratch_home(tmp_path)
+    env["CLAGENTIC_LOADOUT_HOME"] = str(shared_venv_data_dir)
+    result = _run("--dry-run", env=env)
     assert result.returncode == 0, result.stderr
     assert "installer=" in result.stderr
     assert "--dry-run -- not executing." in result.stderr
@@ -172,6 +223,10 @@ def test_install_sh_pep668_no_pipx_no_uv_selects_venv_tier(tmp_path: Path) -> No
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     env["HOME"] = str(fake_home)
+    # A fresh data dir of its own: handing this test the shared prebuilt venv
+    # would take the "reusing existing venv" branch and skip the venv creation
+    # the PEP 668 fallback exists to perform.
+    env["CLAGENTIC_LOADOUT_HOME"] = str(tmp_path / "data")
 
     fake_source = tmp_path / "some-checkout"
     fake_source.mkdir()
@@ -180,6 +235,8 @@ def test_install_sh_pep668_no_pipx_no_uv_selects_venv_tier(tmp_path: Path) -> No
     assert result.returncode == 0, result.stderr
     assert "installer=venv" in result.stderr
     assert "externally-managed" in result.stderr
+    assert "creating venv" in result.stderr
+    assert "reusing existing venv" not in result.stderr
 
 
 def test_install_sh_venv_tier_symlink_refresh_is_idempotent(tmp_path: Path) -> None:
@@ -521,7 +578,7 @@ def test_install_sh_auto_detect_data_dir_without_bin_dir_fails_fast(tmp_path: Pa
     assert _no_local_created(scratch_root)
 
 
-def test_install_sh_venv_tier_data_dir_and_bin_dir_flags_succeed(tmp_path: Path) -> None:
+def test_install_sh_venv_tier_data_dir_and_bin_dir_flags_succeed(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """Both --data-dir and --bin-dir given, HOME empty: the venv tier's base
     dir and symlink-target dir are both compensated, so the guard must not
     fire."""
@@ -534,7 +591,7 @@ def test_install_sh_venv_tier_data_dir_and_bin_dir_flags_succeed(tmp_path: Path)
 
     fake_source = tmp_path / "some-checkout"
     fake_source.mkdir()
-    data_dir = tmp_path / "explicit-data-dir"
+    data_dir = shared_venv_data_dir
     bin_dir = tmp_path / "explicit-bin-dir"
 
     result = subprocess.run(
@@ -554,7 +611,7 @@ def test_install_sh_venv_tier_data_dir_and_bin_dir_flags_succeed(tmp_path: Path)
     assert "HOME is empty or unset" not in result.stderr
 
 
-def test_install_sh_venv_tier_data_dir_and_clagentic_bin_dir_env_succeed(tmp_path: Path) -> None:
+def test_install_sh_venv_tier_data_dir_and_clagentic_bin_dir_env_succeed(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """Same as above but via the CLAGENTIC_LOADOUT_BIN_DIR env-var form
     instead of --bin-dir, HOME empty."""
     env = dict(os.environ)
@@ -564,7 +621,7 @@ def test_install_sh_venv_tier_data_dir_and_clagentic_bin_dir_env_succeed(tmp_pat
 
     fake_source = tmp_path / "some-checkout"
     fake_source.mkdir()
-    data_dir = tmp_path / "explicit-data-dir"
+    data_dir = shared_venv_data_dir
     bin_dir = tmp_path / "explicit-bin-dir-env"
     env["CLAGENTIC_LOADOUT_HOME"] = str(data_dir)
     env["CLAGENTIC_LOADOUT_BIN_DIR"] = str(bin_dir)
@@ -584,14 +641,14 @@ def test_install_sh_venv_tier_data_dir_and_clagentic_bin_dir_env_succeed(tmp_pat
     assert "HOME is empty or unset" not in result.stderr
 
 
-def test_install_sh_bin_dir_flag_overrides_venv_symlink_target(tmp_path: Path) -> None:
+def test_install_sh_bin_dir_flag_overrides_venv_symlink_target(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """A real (non-dry-run) venv-tier install with HOME set but --bin-dir
     forced to a different directory: console_scripts must land in the
     --bin-dir target, not the HOME-derived default, proving the override is
     actually wired into DEFAULT_BIN_DIR (not just accepted by argument
     parsing)."""
-    checkout = Path(__file__).resolve().parent.parent
-    data_dir = tmp_path / "data"
+    checkout = CHECKOUT
+    data_dir = shared_venv_data_dir
     bin_dir = tmp_path / "custom-bin"
     fake_home = tmp_path / "home"
     fake_home.mkdir()
@@ -628,13 +685,15 @@ def _config_yaml_path(fake_home: Path) -> Path:
     return fake_home / ".config" / "clagentic" / "loadout" / "config.yaml"
 
 
-def _run_venv_install(tmp_path: Path, fake_home: Path, *extra_args: str) -> subprocess.CompletedProcess[str]:
+def _run_venv_install(
+    data_dir: Path, tmp_path: Path, fake_home: Path, *extra_args: str
+) -> subprocess.CompletedProcess[str]:
     """A real (non-dry-run) install via the venv tier -- avoids depending on
     pipx/uv/an installable pip in the CI/sandbox environment (which may be
     PEP-668-externally-managed with neither pipx nor uv present), mirroring
-    how the pre-existing real-install tests in this file already install."""
-    checkout = Path(__file__).resolve().parent.parent
-    data_dir = tmp_path / "data"
+    how the pre-existing real-install tests in this file already install.
+    `data_dir` is passed in so callers can share one session-built venv."""
+    checkout = CHECKOUT
     bin_dir = tmp_path / "bin"
     env = {**os.environ, "HOME": str(fake_home)}
     return _run(
@@ -647,11 +706,11 @@ def _run_venv_install(tmp_path: Path, fake_home: Path, *extra_args: str) -> subp
     )
 
 
-def test_install_sh_seeds_git_host_base_url_when_supplied(tmp_path: Path) -> None:
+def test_install_sh_seeds_git_host_base_url_when_supplied(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
     assert result.returncode == 0, result.stderr
 
     config_path = _config_yaml_path(fake_home)
@@ -662,11 +721,11 @@ def test_install_sh_seeds_git_host_base_url_when_supplied(tmp_path: Path) -> Non
     assert "seeded forgejo.base_url" in result.stderr
 
 
-def test_install_sh_config_file_and_dir_have_safe_perms(tmp_path: Path) -> None:
+def test_install_sh_config_file_and_dir_have_safe_perms(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
     assert result.returncode == 0, result.stderr
 
     config_path = _config_yaml_path(fake_home)
@@ -674,11 +733,11 @@ def test_install_sh_config_file_and_dir_have_safe_perms(tmp_path: Path) -> None:
     assert oct(config_path.parent.stat().st_mode)[-3:] == "700"
 
 
-def test_install_sh_writes_template_when_no_url_supplied(tmp_path: Path) -> None:
+def test_install_sh_writes_template_when_no_url_supplied(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    result = _run_venv_install(tmp_path, fake_home)
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
     assert result.returncode == 0, result.stderr
 
     content = _config_yaml_path(fake_home).read_text()
@@ -689,16 +748,16 @@ def test_install_sh_writes_template_when_no_url_supplied(tmp_path: Path) -> None
     assert "wrote a commented forgejo.base_url TEMPLATE" in result.stderr
 
 
-def test_install_sh_does_not_clobber_existing_real_value(tmp_path: Path) -> None:
+def test_install_sh_does_not_clobber_existing_real_value(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """Re-running the installer with no --git-host-base-url must NOT
     overwrite a previously-seeded (or hand-edited) real value."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    first = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://first.example.com")
+    first = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://first.example.com")
     assert first.returncode == 0, first.stderr
 
-    second = _run_venv_install(tmp_path, fake_home)
+    second = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
     assert second.returncode == 0, second.stderr
     assert "already has a forgejo.base_url set" in second.stderr
 
@@ -707,16 +766,16 @@ def test_install_sh_does_not_clobber_existing_real_value(tmp_path: Path) -> None
     assert "https://second" not in content
 
 
-def test_install_sh_explicit_flag_replaces_existing_real_value(tmp_path: Path) -> None:
+def test_install_sh_explicit_flag_replaces_existing_real_value(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """An explicit --git-host-base-url THIS run is consent to replace a
     prior real value -- only the no-flag re-run case is protected."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    first = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://first.example.com")
+    first = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://first.example.com")
     assert first.returncode == 0, first.stderr
 
-    second = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://second.example.com")
+    second = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://second.example.com")
     assert second.returncode == 0, second.stderr
 
     content = _config_yaml_path(fake_home).read_text()
@@ -724,11 +783,11 @@ def test_install_sh_explicit_flag_replaces_existing_real_value(tmp_path: Path) -
     assert "https://first.example.com" not in content
 
 
-def test_install_sh_git_host_base_url_env_var_override(tmp_path: Path) -> None:
+def test_install_sh_git_host_base_url_env_var_override(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    checkout = Path(__file__).resolve().parent.parent
-    data_dir = tmp_path / "data"
+    checkout = CHECKOUT
+    data_dir = shared_venv_data_dir
     bin_dir = tmp_path / "bin"
     env = {
         **os.environ,
@@ -749,7 +808,7 @@ def test_install_sh_git_host_base_url_env_var_override(tmp_path: Path) -> None:
     assert "https://env.example.com" in content
 
 
-def test_install_sh_preserves_other_config_sections(tmp_path: Path) -> None:
+def test_install_sh_preserves_other_config_sections(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """Seeding forgejo: must not clobber an unrelated pre-existing
     top-level section in the same config.yaml (e.g. credentials:)."""
     fake_home = tmp_path / "home"
@@ -760,7 +819,7 @@ def test_install_sh_preserves_other_config_sections(tmp_path: Path) -> None:
         "credentials:\n  token_provider_forgejo: command\n"
     )
 
-    result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
     assert result.returncode == 0, result.stderr
 
     content = _config_yaml_path(fake_home).read_text()
@@ -770,7 +829,7 @@ def test_install_sh_preserves_other_config_sections(tmp_path: Path) -> None:
     assert "https://git.example.com" in content
 
 
-def test_install_sh_migrates_legacy_git_host_section_to_forgejo(tmp_path: Path) -> None:
+def test_install_sh_migrates_legacy_git_host_section_to_forgejo(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """Compat shim (lr-08b451): a pre-existing legacy `git_host:` section is
     recognized on the read side (idempotency check finds its real value and
     refuses to clobber it without an explicit flag) and, once the installer
@@ -785,13 +844,13 @@ def test_install_sh_migrates_legacy_git_host_section_to_forgejo(tmp_path: Path) 
         "git_host:\n  base_url: 'https://legacy.example.com'\n"
     )
 
-    no_flag_result = _run_venv_install(tmp_path, fake_home)
+    no_flag_result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
     assert no_flag_result.returncode == 0, no_flag_result.stderr
     assert "already has a forgejo.base_url set" in no_flag_result.stderr
     content = _config_yaml_path(fake_home).read_text()
     assert "https://legacy.example.com" in content
 
-    migrate_result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://migrated.example.com")
+    migrate_result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://migrated.example.com")
     assert migrate_result.returncode == 0, migrate_result.stderr
     content = _config_yaml_path(fake_home).read_text()
     assert "forgejo:" in content
@@ -799,7 +858,7 @@ def test_install_sh_migrates_legacy_git_host_section_to_forgejo(tmp_path: Path) 
     assert "git_host:" not in content
 
 
-def test_install_sh_git_host_base_url_yaml_single_quote_escaped(tmp_path: Path) -> None:
+def test_install_sh_git_host_base_url_yaml_single_quote_escaped(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """A URL value is written as a single-quoted YAML scalar with an
     embedded single quote doubled per YAML escaping rules -- never
     interpolated unescaped, and never a shell-injection vector since it is
@@ -808,23 +867,23 @@ def test_install_sh_git_host_base_url_yaml_single_quote_escaped(tmp_path: Path) 
     fake_home.mkdir()
 
     tricky_value = "https://example.com/it's-a-path"
-    result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", tricky_value)
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", tricky_value)
     assert result.returncode == 0, result.stderr
 
     content = _config_yaml_path(fake_home).read_text()
     assert "it''s-a-path" in content
 
 
-def test_install_sh_dry_run_does_not_seed_config(tmp_path: Path) -> None:
+def test_install_sh_dry_run_does_not_seed_config(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://git.example.com", "--dry-run")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://git.example.com", "--dry-run")
     assert result.returncode == 0, result.stderr
     assert not _config_yaml_path(fake_home).exists()
 
 
-def test_install_sh_refuses_symlink_at_config_target_read_side(tmp_path: Path) -> None:
+def test_install_sh_refuses_symlink_at_config_target_read_side(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """bobbie.sast.5: a symlink at the config.yaml target path pointing at
     a REGULAR file must be refused outright, before the file is read to
     preserve existing sections -- POSIX -f/-e follow a symlink, so an
@@ -846,7 +905,7 @@ def test_install_sh_refuses_symlink_at_config_target_read_side(tmp_path: Path) -
     config_path = _config_yaml_path(fake_home)
     config_path.symlink_to(attacker_target)
 
-    result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
     assert result.returncode == 0, result.stderr
     assert "is a symlink" in result.stderr
     assert "refusing to read through or write through it" in result.stderr
@@ -864,7 +923,7 @@ def test_install_sh_refuses_symlink_at_config_target_read_side(tmp_path: Path) -
     assert "ATTACKER_MARKER_SENTINEL" in attacker_target.read_text()
 
 
-def test_install_sh_refuses_symlink_at_config_target_dangling(tmp_path: Path) -> None:
+def test_install_sh_refuses_symlink_at_config_target_dangling(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """Same refusal for a DANGLING symlink (target does not exist) -- -L is
     checked independently of -e/-f, so this must refuse identically rather
     than falling through to "file does not exist, write a fresh one"."""
@@ -876,7 +935,7 @@ def test_install_sh_refuses_symlink_at_config_target_dangling(tmp_path: Path) ->
     config_path = _config_yaml_path(fake_home)
     config_path.symlink_to(tmp_path / "does-not-exist.yaml")
 
-    result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "https://git.example.com")
     assert result.returncode == 0, result.stderr
     assert "is a symlink" in result.stderr
     assert config_path.is_symlink()
@@ -924,11 +983,11 @@ def test_install_sh_whitespace_only_data_dir_is_treated_as_unset(tmp_path: Path)
     assert not any(p.name.strip() == "" for p in scratch_root.rglob("*"))
 
 
-def test_install_sh_whitespace_only_git_host_base_url_writes_template(tmp_path: Path) -> None:
+def test_install_sh_whitespace_only_git_host_base_url_writes_template(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    result = _run_venv_install(tmp_path, fake_home, "--git-host-base-url", "   ")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--git-host-base-url", "   ")
     assert result.returncode == 0, result.stderr
 
     content = _config_yaml_path(fake_home).read_text()
@@ -941,11 +1000,11 @@ def test_install_sh_whitespace_only_git_host_base_url_writes_template(tmp_path: 
 # ---------------------------------------------------------------------------
 
 
-def test_install_sh_installs_loadout_init_skill_to_home_default(tmp_path: Path) -> None:
+def test_install_sh_installs_loadout_init_skill_to_home_default(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    result = _run_venv_install(tmp_path, fake_home)
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
     assert result.returncode == 0, result.stderr
 
     skill_file = fake_home / ".claude" / "skills" / "loadout-init" / "SKILL.md"
@@ -953,12 +1012,12 @@ def test_install_sh_installs_loadout_init_skill_to_home_default(tmp_path: Path) 
     assert "installed skill loadout-init" in result.stderr
 
 
-def test_install_sh_skills_dir_flag_overrides_home_default(tmp_path: Path) -> None:
+def test_install_sh_skills_dir_flag_overrides_home_default(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     custom_skills_dir = tmp_path / "custom-skills"
 
-    result = _run_venv_install(tmp_path, fake_home, "--skills-dir", str(custom_skills_dir))
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--skills-dir", str(custom_skills_dir))
     assert result.returncode == 0, result.stderr
 
     skill_file = custom_skills_dir / "loadout-init" / "SKILL.md"
@@ -967,11 +1026,11 @@ def test_install_sh_skills_dir_flag_overrides_home_default(tmp_path: Path) -> No
     assert not default_location.exists()
 
 
-def test_install_sh_skills_dir_env_var_override(tmp_path: Path) -> None:
+def test_install_sh_skills_dir_env_var_override(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
-    checkout = Path(__file__).resolve().parent.parent
-    data_dir = tmp_path / "data"
+    checkout = CHECKOUT
+    data_dir = shared_venv_data_dir
     bin_dir = tmp_path / "bin"
     custom_skills_dir = tmp_path / "env-skills"
     env = {
@@ -992,23 +1051,23 @@ def test_install_sh_skills_dir_env_var_override(tmp_path: Path) -> None:
     assert (custom_skills_dir / "loadout-init" / "SKILL.md").is_file()
 
 
-def test_install_sh_skill_install_is_idempotent(tmp_path: Path) -> None:
+def test_install_sh_skill_install_is_idempotent(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """Re-running the installer replaces the skill's own subdirectory
     cleanly rather than erroring or duplicating content."""
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    first = _run_venv_install(tmp_path, fake_home)
+    first = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
     assert first.returncode == 0, first.stderr
 
-    second = _run_venv_install(tmp_path, fake_home)
+    second = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
     assert second.returncode == 0, second.stderr
 
     skill_file = fake_home / ".claude" / "skills" / "loadout-init" / "SKILL.md"
     assert skill_file.is_file()
 
 
-def test_install_sh_skill_install_does_not_touch_other_skills_in_same_dir(tmp_path: Path) -> None:
+def test_install_sh_skill_install_does_not_touch_other_skills_in_same_dir(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
     skills_dir = fake_home / ".claude" / "skills"
@@ -1016,18 +1075,18 @@ def test_install_sh_skill_install_does_not_touch_other_skills_in_same_dir(tmp_pa
     other_skill_dir.mkdir(parents=True)
     (other_skill_dir / "SKILL.md").write_text("unrelated skill content\n")
 
-    result = _run_venv_install(tmp_path, fake_home)
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
     assert result.returncode == 0, result.stderr
 
     assert (other_skill_dir / "SKILL.md").read_text() == "unrelated skill content\n"
     assert (skills_dir / "loadout-init" / "SKILL.md").is_file()
 
 
-def test_install_sh_dry_run_does_not_install_skills(tmp_path: Path) -> None:
+def test_install_sh_dry_run_does_not_install_skills(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     fake_home = tmp_path / "home"
     fake_home.mkdir()
 
-    result = _run_venv_install(tmp_path, fake_home, "--dry-run")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--dry-run")
     assert result.returncode == 0, result.stderr
 
     # --dry-run exits before the actual install command (and every step
@@ -1036,7 +1095,7 @@ def test_install_sh_dry_run_does_not_install_skills(tmp_path: Path) -> None:
     assert "--dry-run -- not executing." in result.stderr
 
 
-def test_install_sh_skill_install_skipped_when_home_empty_and_no_override(tmp_path: Path) -> None:
+def test_install_sh_skill_install_skipped_when_home_empty_and_no_override(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """HOME empty and no --skills-dir/CLAGENTIC_LOADOUT_SKILLS_DIR override:
     skill install is a soft skip (not a hard failure) as long as some OTHER
     override (e.g. --data-dir/--bin-dir for the venv tier itself) already
@@ -1051,8 +1110,8 @@ def test_install_sh_skill_install_skipped_when_home_empty_and_no_override(tmp_pa
     env.pop("PIPX_BIN_DIR", None)
     env.pop("UV_TOOL_BIN_DIR", None)
 
-    checkout = Path(__file__).resolve().parent.parent
-    data_dir = tmp_path / "data"
+    checkout = CHECKOUT
+    data_dir = shared_venv_data_dir
     bin_dir = tmp_path / "bin"
 
     result = subprocess.run(

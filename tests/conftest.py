@@ -127,6 +127,8 @@ own module namespace, never `provider_config`'s.
 
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 from clagentic_loadout.acquire import verb as acquire_verb
@@ -314,6 +316,87 @@ def _confine_git_discovery_to_tmp(monkeypatch, tmp_path):
     depend on the host's filesystem. A test that needs a different ceiling
     sets its own, which wins."""
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.resolve().parent))
+
+
+@pytest.fixture(scope="session")
+def _empty_git_template_dir(tmp_path_factory):
+    """One template directory shared by the whole session, holding only the
+    empty `hooks` and `info` directories. Tests install hook scripts straight
+    into `.git/hooks` and expect that directory to exist, so it must still be
+    created, just without the sample files. Reflogs are switched off in the
+    template's config too: a reflog is one more file per ref per repo, and no
+    test reads one."""
+    template = tmp_path_factory.mktemp("empty-git-template")
+    (template / "hooks").mkdir()
+    (template / "info").mkdir()
+    (template / "config").write_text("[core]\n\tlogAllRefUpdates = false\n", encoding="utf-8")
+    return template
+
+
+@pytest.fixture(autouse=True)
+def _init_git_repos_from_empty_template(monkeypatch, _empty_git_template_dir):
+    """Autouse repo-wide: `git init` copies no template into new repos.
+
+    The stock template adds about 15 sample hooks, an info/exclude and a
+    description to every repo, and the suite creates thousands of throwaway
+    repos, so a full run wrote hundreds of thousands of files into the pytest
+    base temp. None of those files affects what a test observes: sample hooks
+    are inert and nothing here reads info/exclude or description. Git reads
+    the template location from the environment, so every `git init` a test or
+    a verb under test spawns inherits it. A test that sets its own
+    GIT_TEMPLATE_DIR wins."""
+    monkeypatch.setenv("GIT_TEMPLATE_DIR", str(_empty_git_template_dir))
+
+
+_TMP_PATH_ATTR = "_loadout_tmp_path"
+
+
+def _remove_tmp_path_and_siblings(tmp_path):
+    for doomed in [tmp_path, *tmp_path.parent.glob(f"{tmp_path.name}-*")]:
+        if doomed.is_dir() and not doomed.is_symlink():
+            shutil.rmtree(doomed)
+        elif doomed.exists() or doomed.is_symlink():
+            doomed.unlink()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Collect each phase's report on the item, and once the teardown report
+    exists remove the test's tmp_path and its siblings if setup, call AND
+    teardown all passed.
+
+    The decision cannot live in a fixture's own teardown: that runs before the
+    teardown phase has finished, so a later fixture's teardown failure would
+    not be seen yet. pytest's own `tmp_path_retention_policy = "failed"` cannot
+    make it either: it deletes tmp_path after a setup or a late teardown
+    failure, losing the diagnostics of exactly those tests."""
+    outcome = yield
+    report = outcome.get_result()
+    setattr(item, f"rep_{call.when}", report)
+    if call.when != "teardown":
+        return
+    tmp_path = getattr(item, _TMP_PATH_ATTR, None)
+    if tmp_path is None:
+        return
+    phases = [getattr(item, f"rep_{phase}", None) for phase in ("setup", "call", "teardown")]
+    if all(rep is not None and rep.passed for rep in phases):
+        _remove_tmp_path_and_siblings(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _record_tmp_path_for_sibling_cleanup(request, tmp_path):
+    """Autouse repo-wide: remember tmp_path so `pytest_runtest_makereport`
+    can remove a fully passing test's tmp_path and `<tmp_path name>-*`
+    siblings.
+
+    Removing tmp_path frees its number for reuse by the next test whose
+    truncated directory name matches. Some tests build a sibling directory
+    next to tmp_path (a bare `-origin.git` remote, marker files); left
+    behind, they would be found already present by the test that reuses the
+    name. A test with any failed phase keeps tmp_path and siblings for
+    diagnosis."""
+    setattr(request.node, _TMP_PATH_ATTR, tmp_path)
+    yield
 
 
 def pytest_configure(config: "pytest.Config") -> None:
