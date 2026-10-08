@@ -16,7 +16,12 @@ in its own repository reaches the shared one.
      `origin/HEAD` when present) replace the clone's own, and
      `refs/remotes/origin/<base_branch>` is pinned to the PR base commit, so a
      check that diffs against `origin/<base>` sees the true base.
-  3. The merge result is built before anything is checked out. A head that is a
+  3. The clone's remote configuration (`remote.origin.*`) is then removed while
+     the remote-tracking refs stay: `origin/<base>` still resolves for diffing,
+     but `git push origin` and `git fetch origin` from the clone fail, so a check
+     cannot write refs into the shared repository through the remote nor
+     overwrite the pinned `origin/<base>`. The clone has no usable remote.
+  4. The merge result is built before anything is checked out. A head that is a
      fast-forward of base is checked out as it is. Otherwise the merge is
      computed with `git merge-tree --write-tree` and COMMITTED in the clone (fixed
      synthetic author and committer, hooks off, no signing), so `HEAD` is the
@@ -28,7 +33,7 @@ The clone is removed in `finally` however the body exits. This module never
 checks out, stashes, resets or otherwise touches the shared tree at *git_tree*;
 it only reads from it.
 
-Every git command run here carries `core.hooksPath=/dev/null` and
+Every git command run here carries the null device as `core.hooksPath` and
 `core.fsmonitor=false` on the command line, so no hook, no `core.hooksPath` from
 any config file and no fsmonitor helper executes, and runs with the git
 repository/location selectors (`GIT_DIR`, `GIT_WORK_TREE`, ...) removed from the
@@ -87,7 +92,7 @@ class MergeResultConflictError(MergeResultCloneError):
 #: Signing is off so the synthetic commit never asks for a key.
 _NO_EXECUTION_CONFIG = (
     "-c",
-    "core.hooksPath=/dev/null",
+    f"core.hooksPath={os.devnull}",
     "-c",
     "core.fsmonitor=false",
     "-c",
@@ -184,6 +189,10 @@ def _install_remote_refs(
             _git(["symbolic-ref", _REMOTE_HEAD, source_head], cwd=clone, env=env),
             f"pointing {_REMOTE_HEAD} at {source_head}",
         )
+    _require(
+        _git(["config", "--remove-section", f"remote.{_REMOTE}"], cwd=clone, env=env),
+        f"removing the clone's {_REMOTE} remote configuration",
+    )
 
 
 def _checkout(clone: Path, commit: str, env: Mapping[str, str] | None) -> None:
@@ -256,16 +265,24 @@ def _materialise(
 
 
 def _make_removable(scratch: Path) -> None:
-    """Give the owner full access to every directory under *scratch*: a check
-    may have made one read-only or unreadable, which would stop its removal.
-    Symbolic links are skipped so nothing outside *scratch* is changed."""
-    for root, dirs, _files in os.walk(scratch):
-        for directory in [Path(root), *(Path(root) / name for name in dirs)]:
-            if not directory.is_symlink():
-                try:
-                    os.chmod(directory, 0o700)
-                except OSError:
-                    pass
+    """Give the owner full access to every directory under *scratch*, top-down:
+    each directory is made owner-rwx BEFORE it is listed, because a check may
+    have made it unreadable (mode 000), which would hide everything below it from
+    a plain walk. Symbolic links are never followed, so nothing outside *scratch*
+    is changed."""
+    pending = [scratch]
+    while pending:
+        directory = pending.pop()
+        if directory.is_symlink():
+            continue
+        try:
+            os.chmod(directory, 0o700)
+            with os.scandir(directory) as entries:
+                pending.extend(
+                    Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False)
+                )
+        except OSError:
+            continue
 
 
 def _remove(scratch: Path) -> None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -293,6 +294,46 @@ class TestTheCloneIsAlwaysRemoved:
         repo = _repo(tmp_path, [_record_cwd(marker, then=locked)])
         assert _merge(repo) == verb.EXIT_OK
         self._assert_gone(repo, marker, scratch_tmp)
+
+
+class TestTheCloneHasNoUsableRemote:
+    def test_push_and_fetch_to_origin_fail_and_the_base_ref_still_resolves(self, tmp_path, scratch_tmp):
+        repo = _repo(tmp_path, [])
+        _seed_remote_refs(repo, repo.base_sha)
+        refs_before = git(repo.path, "for-each-ref")
+        with merge_result_clone(repo.path, repo.base_sha, repo.head_sha, base_branch="main") as tree:
+            push = subprocess.run(
+                ["git", "push", "origin", "HEAD:refs/heads/x"], cwd=tree, capture_output=True, text=True
+            )
+            fetch = subprocess.run(["git", "fetch", "origin"], cwd=tree, capture_output=True, text=True)
+            assert push.returncode != 0
+            assert fetch.returncode != 0
+            assert git(tree, "rev-parse", "origin/main") == repo.base_sha
+            assert git(tree, "rev-parse", "origin/other") == repo.head_sha
+            remote_keys = subprocess.run(
+                ["git", "config", "--get-regexp", "^remote\\.origin\\."],
+                cwd=tree,
+                capture_output=True,
+                text=True,
+            )
+            assert remote_keys.stdout == ""
+        assert git(repo.path, "for-each-ref") == refs_before
+
+
+class TestCleanupSurvivesChmodZero:
+    def test_a_check_that_locks_the_scratch_dir_and_a_nested_dir_leaves_nothing_behind(
+        self, tmp_path, scratch_tmp
+    ):
+        marker = tmp_path / "ran-in"
+        locked = (
+            "import os; os.makedirs('a/b/c'); open('a/b/c/f', 'w').write('x'); "
+            "os.chmod('a/b', 0); os.chmod('a', 0); os.chmod('..', 0)"
+        )
+        repo = _repo(tmp_path, [_record_cwd(marker, then=locked)])
+        assert _merge(repo) == verb.EXIT_OK
+        ran_in = Path(marker.read_text(encoding="utf-8"))
+        assert not ran_in.parent.exists()
+        assert list(scratch_tmp.iterdir()) == []
 
 
 class TestTheCloneHelper:

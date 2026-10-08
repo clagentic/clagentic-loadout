@@ -229,7 +229,11 @@ keep a broken config from blocking the merge that would fix it:
   repository's remote-tracking refs (`refs/remotes/origin/*`, and `origin/HEAD`
   when present) are copied into the clone and `refs/remotes/origin/<base branch>`
   is pinned to the PR's base commit, so a check that compares against `origin`
-  sees the true base. A head that conflicts with base refuses the merge before
+  sees the true base. The clone has no usable remote: its `remote.origin`
+  configuration is removed once those refs are installed (the refs stay), so
+  `git push origin` and `git fetch origin` from a check fail and can neither
+  write refs into the shared repository nor overwrite the pinned
+  `origin/<base>`. A head that conflicts with base refuses the merge before
   `merge_pr`. The
   clone carries no untracked or ignored state from that checkout (no in-repo
   virtualenv, build artifacts or uninitialised submodules), so a check must not
