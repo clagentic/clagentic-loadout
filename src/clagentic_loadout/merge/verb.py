@@ -521,8 +521,13 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_require_model_attestation,
     resolve_sync_tree_after_merge,
 )
+from clagentic_loadout.merge.merge_result_worktree import (
+    MergeResultWorktreeError,
+    merge_result_worktree,
+)
 from clagentic_loadout.merge.repo_gate_runtime import (
     load_repo_gate_at_base,
+    resolve_gate_git_tree,
     with_resolvable_reviewer_roles,
 )
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
@@ -1627,8 +1632,10 @@ def _run(
     # 8b. Pre-merge checks gate (merge.pre_checks_config, lr-843900) -- see
     # this module's docstring, "PRE-MERGE CHECKS", for the full contract.
     # The checks are DECLARED by the tracked gate file at the PR's base commit
-    # (repo_gate, loaded above) and EXECUTED in --repo-path, where they always
-    # ran; only their configuration comes from base. No local tree
+    # (repo_gate, loaded above) and EXECUTED in a throwaway worktree of the
+    # merge result (merge.merge_result_worktree), never in the shared tree at
+    # --repo-path, whose branch and uncommitted edits say nothing about what
+    # this PR lands. No local tree
     # (--no-post-merge-tree/--skip-post-merge) declares no checks, the same
     # pre-existing boundary every other repo-tier key has.
     if args.skip_pre_checks:
@@ -1646,15 +1653,34 @@ def _run(
         )
     elif repo_gate.pre_checks:
         pre_checks = list(repo_gate.pre_checks)
-        print(
-            f"merge: pre_checks gate -- running {len(pre_checks)} declared "
-            f"check(s) in {args.repo_path!r} before authorizing PR "
-            f"#{args.pr_number} in {owner}/{repo} (declared at base "
-            f"{resolve_base_sha(pr_info)!r})",
-            file=sys.stderr,
-        )
         try:
-            run_post_merge_steps(pre_checks, args.repo_path)
+            gate_git_tree = resolve_gate_git_tree(args.repo_path)
+        except PostMergeConfigError:
+            # The gate itself was read from repo_path in this case (see
+            # load_repo_gate_at_base), so the merge result is built there too.
+            gate_git_tree = args.repo_path
+        try:
+            with merge_result_worktree(
+                gate_git_tree,
+                resolve_base_sha(pr_info),
+                current_head_sha,
+                base_branch=resolve_base_branch(pr_info),
+            ) as check_tree:
+                print(
+                    f"merge: pre_checks gate -- running {len(pre_checks)} declared "
+                    f"check(s) in {args.repo_path!r} before authorizing PR "
+                    f"#{args.pr_number} in {owner}/{repo} (declared at base "
+                    f"{resolve_base_sha(pr_info)!r}); executing in a worktree of the "
+                    f"merge result of head {current_head_sha!r} at {str(check_tree)!r}",
+                    file=sys.stderr,
+                )
+                run_post_merge_steps(pre_checks, check_tree)
+        except MergeResultWorktreeError as exc:
+            _fail(
+                f"pre_checks gate could not build the merge result -- {exc} -- "
+                f"refusing to merge PR #{args.pr_number} in {owner}/{repo}.",
+                code=EXIT_PRE_CHECKS_FAILED,
+            )
         except (
             PostMergeStepFailedError,
             PostMergeStepTimeoutError,
