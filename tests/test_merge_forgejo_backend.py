@@ -117,7 +117,8 @@ class TestFetchChangedFiles:
 class TestFetchComments:
     def test_happy_path(self):
         body = json.dumps([{"id": 1, "user": {"login": "x"}, "body": "hi"}]).encode()
-        opener = _opener_sequence([(200, body)])
+        # The second response is the empty page that ends the list.
+        opener = _opener_sequence([(200, body), (200, b"[]")])
         comments = forgejo_backend.fetch_comments(_API_BASE, "owner", "repo", 1, token="tok", opener=opener)
         assert comments[0]["id"] == 1
 

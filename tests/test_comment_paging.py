@@ -72,7 +72,11 @@ class _GithubServer:
     """Serves GET .../issues/N/comments windows (ascending, honoring per_page
     and page), GET /user, and POST appending a comment."""
 
-    def __init__(self, comments, *, login="some-bot", link_headers=True, descending=False):
+    def __init__(
+        self, comments, *, login="some-bot", link_headers=True, descending=False,
+        max_page_size=100,
+    ):
+        self.max_page_size = max_page_size
         self.comments = list(comments)
         self.login = login
         self.link_headers = link_headers
@@ -97,7 +101,7 @@ class _GithubServer:
             self.comments.append(new)
             return _Resp(json.dumps(new).encode(), status=201)
         self.comment_gets += 1
-        per_page = int(query.get("per_page", ["30"])[0])
+        per_page = min(int(query.get("per_page", ["30"])[0]), self.max_page_size)
         page = int(query.get("page", ["1"])[0])
         ordered = list(reversed(self.comments)) if self.descending else self.comments
         window = ordered[(page - 1) * per_page : page * per_page]
@@ -110,9 +114,10 @@ class _GithubServer:
 
 
 class _ForgejoServer:
-    def __init__(self, comments, *, descending=False):
+    def __init__(self, comments, *, descending=False, max_page_size=50):
         self.comments = list(comments)
         self.descending = descending
+        self.max_page_size = max_page_size
         self.gets = 0
 
     def __call__(self, req, timeout=15):
@@ -131,7 +136,7 @@ class _ForgejoServer:
         if parsed.path.endswith("/user"):
             return _Resp(json.dumps({"login": "some-bot"}).encode())
         self.gets += 1
-        limit = min(int(query.get("limit", ["30"])[0]), 50)
+        limit = min(int(query.get("limit", ["30"])[0]), self.max_page_size)
         page = int(query.get("page", ["1"])[0])
         ordered = list(reversed(self.comments)) if self.descending else self.comments
         return _Resp(json.dumps(ordered[(page - 1) * limit : page * limit]).encode())
@@ -183,6 +188,32 @@ class TestGithubReader:
         with pytest.raises(GateFactUnavailableError, match="page cap"):
             merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=opener)
 
+    def test_short_non_final_page_continues_while_link_has_next(self):
+        server = _GithubServer(_fillers(250), max_page_size=40)
+        got = merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=server)
+        assert [c["id"] for c in got] == list(range(1, 251))
+
+    def test_server_ignoring_page_with_full_list_returns_it_once(self):
+        comments = _fillers(150)
+
+        def opener(req, timeout=30):
+            return _Resp(json.dumps(comments).encode())
+
+        got = merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=opener)
+        assert [c["id"] for c in got] == list(range(1, 151))
+
+    def test_server_ignoring_page_at_exactly_per_page_fails_closed(self):
+        comments = _fillers(comment_paging.GITHUB_PER_PAGE)
+
+        def opener(req, timeout=30):
+            return _Resp(
+                json.dumps(comments).encode(),
+                {"Content-Type": "application/json", "Link": '<http://x>; rel="next"'},
+            )
+
+        with pytest.raises(GateFactUnavailableError, match="stalled"):
+            merge_github.fetch_comments(_OWNER, _REPO, 7, token="t", opener=opener)
+
     def test_later_page_http_error_fails_closed(self):
         calls = {"n": 0}
 
@@ -206,14 +237,45 @@ class TestForgejoReader:
             "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=server
         )
         assert [c["id"] for c in got] == list(range(1, 131))
-        assert server.gets == 3
+        assert server.gets == 4
 
-    def test_single_page_costs_one_request(self):
+    def test_single_page_costs_one_extra_request(self):
+        # The extra request is the empty-page check that ends the list.
         server = _ForgejoServer(_fillers(3))
-        merge_forgejo.fetch_comments(
+        got = merge_forgejo.fetch_comments(
             "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=server
         )
-        assert server.gets == 1
+        assert len(got) == 3
+        assert server.gets == 2
+
+    def test_server_capping_page_size_below_limit_returns_everything(self):
+        server = _ForgejoServer(_fillers(75), max_page_size=30)
+        got = merge_forgejo.fetch_comments(
+            "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=server
+        )
+        assert [c["id"] for c in got] == list(range(1, 76))
+
+    def test_server_ignoring_page_with_full_list_returns_it_once(self):
+        comments = _fillers(75)
+
+        def opener(req, timeout=15):
+            return _Resp(json.dumps(comments).encode())
+
+        got = merge_forgejo.fetch_comments(
+            "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=opener
+        )
+        assert [c["id"] for c in got] == list(range(1, 76))
+
+    def test_server_ignoring_page_at_exactly_limit_fails_closed(self):
+        comments = _fillers(comment_paging.FORGEJO_PAGE_LIMIT)
+
+        def opener(req, timeout=15):
+            return _Resp(json.dumps(comments).encode())
+
+        with pytest.raises(GateFactUnavailableError, match="stalled"):
+            merge_forgejo.fetch_comments(
+                "http://git-host.example.com", _OWNER, _REPO, 7, token="t", opener=opener
+            )
 
     def test_order_does_not_depend_on_api_ordering(self):
         server = _ForgejoServer(_fillers(120), descending=True)
@@ -274,15 +336,23 @@ class TestPostAndVerifyBeyondFirstPage:
         assert verified.body == "my review body"
 
     def test_github_review_readback_over_cap_fails_closed(self, monkeypatch):
-        monkeypatch.setattr(
-            comment_paging, "list_github_issue_comments",
-            lambda *a, **k: (_ for _ in ()).throw(comment_paging.CommentPageCapError(1, 100)),
-        )
         server = _GithubServer(_fillers(5))
+        real_list = comment_paging.list_github_issue_comments
+
+        def list_then_cap_after_post(*args, **kwargs):
+            # The pre-POST dedupe read must succeed; only the readback fails.
+            if server.post_body is not None:
+                raise comment_paging.CommentPageCapError(1, 100)
+            return real_list(*args, **kwargs)
+
+        monkeypatch.setattr(
+            comment_paging, "list_github_issue_comments", list_then_cap_after_post
+        )
         with pytest.raises(ReviewVerifyError, match="page cap"):
             review_github.post_and_verify_review(
                 _OWNER, _REPO, 7, "my review body", "t", opener=server
             )
+        assert server.post_body == "my review body"
 
     def test_forgejo_verify_comment_finds_last_comment(self):
         server = _ForgejoServer(_fillers(130))

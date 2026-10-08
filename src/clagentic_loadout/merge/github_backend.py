@@ -158,6 +158,23 @@ def _github_request(
     )
 
 
+def _github_request_with_headers(
+    method: str,
+    url: str,
+    token: str,
+    payload: dict[str, Any] | None = None,
+    *,
+    opener=None,
+) -> tuple[int, Any, dict[str, str]]:
+    """_github_request with the response headers (lower-cased keys) returned
+    as well, for callers that paginate. Identical request shaping: same
+    strict parse mode, timeout and redirect-guarded opener."""
+    return request_json_with_headers(
+        method, url, token, payload, opener=opener, timeout=30,
+        opener_factory=no_redirect_opener,
+    )
+
+
 def get_pr_info(
     owner: str,
     repo: str,
@@ -265,10 +282,7 @@ def fetch_comments(
     comment["user"]["login"] field — never by comment body text.
     """
     def fetch_page(url: str) -> tuple[int, Any, dict[str, str]]:
-        return request_json_with_headers(
-            "GET", url, token, opener=opener, timeout=30,
-            opener_factory=no_redirect_opener,
-        )
+        return _github_request_with_headers("GET", url, token, opener=opener)
 
     try:
         return comment_paging.list_github_issue_comments(

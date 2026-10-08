@@ -32,6 +32,7 @@ import pytest
 from clagentic_loadout.review import verb
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
+from tests._support.fakes import paged
 from tests._support.review_verb import (
     RecordingTokenProvider as _RecordingTokenProvider,
     RefusingTokenProvider as _RefusingTokenProvider,
@@ -102,7 +103,7 @@ def _forgejo_success_opener(*, pr_number=42, comment_id=9):
         if url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             return _json_resp(
                 200,
-                [
+                paged(url, [
                     {
                         "id": comment_id,
                         "user": {"login": "some-role"},
@@ -110,7 +111,7 @@ def _forgejo_success_opener(*, pr_number=42, comment_id=9):
                         "created_at": "2099-01-01T00:00:10Z",
                         "html_url": "http://git-host.example.com/comment/9",
                     }
-                ],
+                ]),
             )
         raise AssertionError(f"unexpected: {method} {url}")
 
@@ -440,7 +441,7 @@ def _forgejo_verdict_opener(*, pr_number=42, comment_id=9, landed_body=None, cap
                 body = landed_body if landed_body is not None else state["posted_body"]
             return _json_resp(
                 200,
-                [
+                paged(url, [
                     {
                         "id": comment_id,
                         "user": {"login": "reviewer"},
@@ -448,7 +449,7 @@ def _forgejo_verdict_opener(*, pr_number=42, comment_id=9, landed_body=None, cap
                         "created_at": "2099-01-01T00:00:10Z",
                         "html_url": "http://git-host.example.com/comment/9",
                     }
-                ],
+                ]),
             )
         raise AssertionError(f"unexpected: {method} {url}")
 

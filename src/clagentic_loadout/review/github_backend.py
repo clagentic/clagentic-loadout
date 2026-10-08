@@ -308,6 +308,29 @@ def _github_request(
     )
 
 
+def _github_request_with_headers(
+    method: str,
+    url: str,
+    token: str,
+    payload: dict | None = None,
+    *,
+    accept: str = "application/vnd.github+json",
+    user_agent: str = "clagentic-loadout-review/1.0",
+    opener=None,
+) -> tuple[int, dict | list | str, dict[str, str]]:
+    """_github_request with the response headers (lower-cased keys) returned
+    as well, for callers that paginate. Identical request shaping: same
+    defaults, User-Agent, parse mode and redirect-guarded opener."""
+    return request_json_with_headers(
+        method, url, token, payload,
+        accept=accept,
+        extra_headers={"User-Agent": user_agent},
+        parse_mode="content_type",
+        opener=opener,
+        opener_factory=no_redirect_opener,
+    )
+
+
 def _list_issue_comments(
     owner: str,
     repo: str,
@@ -321,13 +344,7 @@ def _list_issue_comments(
     opener) as every other call in this module."""
 
     def fetch_page(url: str):
-        return request_json_with_headers(
-            "GET", url, token,
-            extra_headers={"User-Agent": "clagentic-loadout-review/1.0"},
-            parse_mode="content_type",
-            opener=opener,
-            opener_factory=no_redirect_opener,
-        )
+        return _github_request_with_headers("GET", url, token, opener=opener)
 
     return comment_paging.list_github_issue_comments(
         owner, repo, pr_number, fetch_page, api_base=_GITHUB_API
@@ -602,7 +619,7 @@ def post_and_verify_review(
     except comment_paging.CommentPageStatusError as exc:
         raise ReviewVerifyError(
             f"post_and_verify FAILED -- GET {comments_url} returned HTTP "
-            f"{exc.status} (or non-list body) during readback. Cannot confirm "
+            f"{exc.status} during readback. Cannot confirm "
             f"the comment landed on the correct PR."
         ) from exc
     except comment_paging.CommentPageCapError as exc:

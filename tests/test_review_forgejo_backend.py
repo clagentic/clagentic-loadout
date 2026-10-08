@@ -36,6 +36,7 @@ from clagentic_loadout.review.forgejo_backend import (
     delete_own_comment,
     post_and_verify_comment,
 )
+from tests._support.fakes import paged
 
 
 class _FakeResponse:
@@ -68,7 +69,7 @@ def _make_success_opener(*, bot_login="git-host-bot", comment_id=7, pr_number=42
             return _FakeResponse(
                 200,
                 json.dumps(
-                    [
+                    paged(url, [
                         {
                             "id": comment_id,
                             "user": {"login": bot_login},
@@ -76,7 +77,7 @@ def _make_success_opener(*, bot_login="git-host-bot", comment_id=7, pr_number=42
                             "created_at": "2099-01-01T00:00:10Z",
                             "html_url": "http://git-host.example.com/comment/7",
                         }
-                    ]
+                    ])
                 ).encode(),
             )
         raise AssertionError(f"unexpected request: {method} {url}")
@@ -186,14 +187,14 @@ class TestPostAndVerifyCommentVerifyFailures:
                 return _FakeResponse(
                     200,
                     json.dumps(
-                        [
+                        paged(url, [
                             {
                                 "id": 7,
                                 "user": {"login": "someone-else"},
                                 "body": "body",
                                 "created_at": "2099-01-01T00:00:10Z",
                             }
-                        ]
+                        ])
                     ).encode(),
                 )
             raise AssertionError(f"unexpected request: {method} {url}")
