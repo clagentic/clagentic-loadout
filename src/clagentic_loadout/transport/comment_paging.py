@@ -1,35 +1,32 @@
-"""transport.comment_paging -- the one paginated issue/PR comment reader per
-platform, used by every loadout site that lists a PR's comments.
+"""transport.comment_paging -- the one issue/PR comment reader per platform,
+used by every loadout site that lists a PR's comments.
 
-Why this exists: both GitHub (``per_page=30``, oldest first) and Forgejo
-return a single bounded page from ``GET .../issues/{n}/comments``. A reader
-that issues one bare GET only ever sees the OLDEST page, so on a PR with more
+Why this exists: GitHub returns a single bounded page (``per_page=30`` by
+default, oldest first) from ``GET .../issues/{n}/comments``. A reader that
+issues one bare GET only ever sees the OLDEST page, so on a PR with more
 comments than one page (a) a post-and-verify readback cannot find the comment
 it just posted, and (b) a merge gate picks an older reviewer verdict as the
 current one. Every comment reader goes through this module instead.
 
-Contract -- success only on a signal that PROVES the list is complete; every
-other condition keeps paging or fails closed, never on a guess (page size,
-body length, repeat size):
-  - GitHub: ``per_page=100``, ``page=N``. Complete on (a) a parsed empty
-    ``[]`` page, or (b) a ``Link`` header present without ``rel="next"``.
-    With no ``Link`` header paging continues (a short page proves nothing)
-    until an empty page. If an earlier page advertised ``rel="next"`` and a
-    later page carries no ``Link`` header at all,
-    ``CommentPageLinkLostError`` fails closed. The ``Link`` URL is never
+Per-platform contract:
+  - GitHub paginates via ``Link``: ``per_page=100``, ``page=N``. The list is
+    complete on (a) a parsed empty ``[]`` page, or (b) a ``Link`` header
+    present without ``rel="next"``. With no ``Link`` header paging continues
+    (a short page proves nothing) until an empty page. If an earlier page
+    advertised ``rel="next"`` and a later page carries no ``Link`` header at
+    all, ``CommentPageLinkLostError`` fails closed. The ``Link`` URL is never
     followed (the bearer token only goes to URLs this module built); it is
-    purely an end-of-list signal.
-  - Forgejo: ``limit=50``, ``page=N``. Complete only on a parsed empty
-    ``[]`` page. An HTTP 200 with an empty body fails closed
-    (``CommentPageEmptyBodyError``) on every page.
-  - Repeats: a page that adds no new comment id fails closed
-    (``CommentPageRepeatError``) on both platforms, whatever its size.
-  - Bounded: at most ``MAX_PAGES`` pages. A list still going at the cap
-    raises ``CommentPageCapError``; it is never silently truncated.
-  - Output is de-duplicated by ``id`` (comments posted mid-walk shift page
-    boundaries) and, when every comment carries an integer ``id``, ordered by
-    it -- ids are monotonic on both platforms, so "latest" never depends on
-    API ordering. Comments without integer ids keep their received order.
+    purely an end-of-list signal. A page that adds no new comment id fails
+    closed (``CommentPageRepeatError``), and at most ``MAX_PAGES`` pages are
+    read (``CommentPageCapError``); the list is never silently truncated.
+  - Forgejo returns the full list in one response: the endpoint accepts no
+    ``page`` or ``limit`` parameter, so exactly one GET is made with no query
+    string. A non-200 status, an empty body, unparseable JSON or a non-list
+    body fails closed; a parsed ``[]`` is a PR with no comments.
+  - Output is de-duplicated by ``id`` and, when every comment carries an
+    integer ``id``, ordered by it -- ids are monotonic on both platforms, so
+    "latest" never depends on API ordering. Comments without integer ids keep
+    their received order.
 
 The return shape is the plain ``list`` of comment dicts the single-page
 readers returned before.
@@ -41,14 +38,11 @@ import json
 import re
 from typing import Any, Callable
 
-#: Hard page cap shared by both platforms.
+#: Hard page cap for the GitHub walk.
 MAX_PAGES = 100
 
 #: GitHub allows up to 100 per page.
 GITHUB_PER_PAGE = 100
-
-#: Forgejo's server-side maximum page size.
-FORGEJO_PAGE_LIMIT = 50
 
 _LINK_NEXT_RE = re.compile(r'<[^>]*>\s*;\s*rel="?next"?', re.IGNORECASE)
 
@@ -121,8 +115,8 @@ class CommentPageCapError(CommentListError):
 
 
 class CommentPageRepeatError(CommentPageCapError):
-    """A page added no new comments: the server is not advancing (it ignores
-    the page parameter), so the list cannot be proven complete (fail
+    """A GitHub page added no new comments: the server is not advancing (it
+    ignores the page parameter), so the list cannot be proven complete (fail
     closed)."""
 
     def __init__(self, page: int, limit: int) -> None:
@@ -227,46 +221,38 @@ def list_forgejo_issue_comments(
     token: str,
     *,
     opener=None,
-    max_pages: int = MAX_PAGES,
 ) -> list[dict[str, Any]]:
-    """Return every comment on a Forgejo issue/PR.
+    """Return every comment on a Forgejo issue/PR with one GET.
+
+    Forgejo's issue-comments endpoint takes no ``page`` or ``limit``
+    parameter (only ``since``/``before``) and always answers with the whole
+    list, so exactly one request is made and it carries no query string.
 
     *request_fn* is ``transport.git_host_api.request`` (passed in so this
     module has no import cycle with it); its own errors (network failure,
     refused redirect) propagate unchanged.
     """
-    path = f"/api/v1/repos/{owner}/{repo}/issues/{number}/comments"
-    collected: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for page in range(1, max_pages + 1):
-        status, raw = request_fn(
-            api_base,
-            "GET",
-            f"{path}?limit={FORGEJO_PAGE_LIMIT}&page={page}",
-            token,
-            opener=opener,
-        )
-        if status != 200:
-            raise CommentPageStatusError(status, page)
-        if not raw:
-            raise CommentPageEmptyBodyError(page)
-        try:
-            parsed = json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise CommentPageParseError(page, str(exc)) from exc
-        if not isinstance(parsed, list):
-            raise CommentPageShapeError(page)
-        # Only a parsed empty list proves the end: an instance configured with
-        # a smaller maximum page size returns short pages mid-list.
-        if not parsed:
-            return _finalize(collected)
-        if _absorb(parsed, seen, collected) == 0:
-            raise CommentPageRepeatError(page, FORGEJO_PAGE_LIMIT)
-    raise CommentPageCapError(max_pages, FORGEJO_PAGE_LIMIT)
+    status, raw = request_fn(
+        api_base,
+        "GET",
+        f"/api/v1/repos/{owner}/{repo}/issues/{number}/comments",
+        token,
+        opener=opener,
+    )
+    if status != 200:
+        raise CommentPageStatusError(status, 1)
+    if not raw:
+        raise CommentPageEmptyBodyError(1)
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise CommentPageParseError(1, str(exc)) from exc
+    if not isinstance(parsed, list):
+        raise CommentPageShapeError(1)
+    return _finalize(parsed)
 
 
 __all__ = [
-    "FORGEJO_PAGE_LIMIT",
     "GITHUB_PER_PAGE",
     "MAX_PAGES",
     "CommentListError",
