@@ -48,7 +48,6 @@ from clagentic_loadout.transport.github_app_config import (
     CONFIG_KEY_SLUGS,
     CONFIG_SECTION_GITHUB_APP,
     GithubAppSlugNotConfiguredError,
-    read_configured_callers,
     read_configured_role_callers,
     resolve_github_app_slug,
 )
@@ -171,33 +170,24 @@ def resolve_role_via_mapping(
 
 
 def resolve_forgejo_declared_role(role: str) -> DeclaredRoleResolution:
-    """Resolve a repo-DECLARED reviewer role on Forgejo.
+    """Resolve a repo-DECLARED reviewer role on Forgejo. Never drops a role.
 
-    A Forgejo login is the caller's account name, so a declared role is
-    resolved in this order:
+    A Forgejo login is the caller's account name, so a declared role resolves:
 
-      1. The deployment's `role_callers` mapping: the mapped caller's name is
-         both the login and the name the role is required under.
-      2. The bare role, when the deployment declares a callers list that names
-         the role, or declares no callers list at all (the role is then taken
-         to be an account, as it always was).
-      3. Otherwise the role names no account the deployment knows of, and
-         resolving it as a login would demand a verdict nobody can post:
-         raises ReviewerLoginNotConfiguredError, naming the mapping key.
+      1. Through the deployment's `role_callers` mapping when it maps the role:
+         the mapped caller's name is both the login and the name the role is
+         required under.
+      2. Otherwise as the bare role, exactly as it was required before the
+         mapping existed. `callers` is the harness caller-ID space, not role
+         vocabulary, so a role absent from it is NOT evidence that no such
+         account exists; dropping it would silently lose a requirement.
     """
     caller = read_configured_role_callers().get(role)
     if caller is not None:
         return DeclaredRoleResolution(
             role=role, requirement=caller, login=caller, source=SOURCE_ROLE_CALLERS
         )
-    callers = read_configured_callers()
-    if callers is None or role in callers:
-        return DeclaredRoleResolution(role=role, requirement=role, login=role, source=SOURCE_BARE_NAME)
-    raise ReviewerLoginNotConfiguredError(
-        f"declared role {role!r} is not a configured caller and no caller is mapped to it. "
-        f"To resolve it, map it to the caller that posts it with "
-        f"{role_caller_mapping_key(role)}: <caller>"
-    )
+    return DeclaredRoleResolution(role=role, requirement=role, login=role, source=SOURCE_BARE_NAME)
 
 
 def resolve_declared_role(role: str, platform: str) -> DeclaredRoleResolution:

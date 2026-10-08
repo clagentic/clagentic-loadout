@@ -319,12 +319,14 @@ gate is not actually an enforceable one.
 
    **Forgejo.** The same `role_callers` map applies (its section name is
    historical; it is read on both platforms), and a Forgejo login is the
-   caller's account name. A declared role resolves, in order: the mapped
-   caller (the role is then required under that caller's name); else the bare
-   role when `github_app.callers` is declared and names it, or when no
-   `callers` list is declared at all; else, with a `callers` list that does
-   not name the role, the role degrades with the per-role warning instead of
-   requiring a verdict from an account that does not exist.
+   caller's account name. A declared role resolves to the mapped caller when
+   `role_callers` maps it (the role is then required under that caller's
+   name); otherwise it stays required under its bare name, exactly as before,
+   whether or not `github_app.callers` is declared (`callers` is the caller-ID
+   space, not role vocabulary, so it never removes a requirement). An unmapped
+   role whose bare name is not a real account keeps refusing the merge;
+   `loadout-doctor` reports it as `UNRESOLVED-ON-FORGEJO` and names the
+   `github_app.role_callers.<role>` key that would map it.
 
 ### `merge:` section — repo-tier (`.clagentic/loadout/config.yaml`)
 

@@ -146,6 +146,7 @@ from clagentic_loadout.merge.repo_gate_runtime import (
     with_resolvable_reviewer_roles,
 )
 from clagentic_loadout.merge.reviewer_login import (
+    SOURCE_BARE_NAME,
     ReviewerLoginNotConfiguredError,
     resolve_declared_role,
     role_caller_mapping_key,
@@ -862,23 +863,32 @@ def _role_resolution_report(roles: tuple[str, ...], platform: str) -> tuple[dict
                 }
             )
             continue
-        report.append(
-            {
-                "role": role,
-                "platform": platform,
-                "resolved": True,
-                "requirement": resolution.requirement,
-                "login": resolution.login,
-                "source": resolution.source,
-            }
-        )
+        entry = {
+            "role": role,
+            "platform": platform,
+            "resolved": True,
+            "requirement": resolution.requirement,
+            "login": resolution.login,
+            "source": resolution.source,
+        }
+        if platform == PLATFORM_FORGEJO and resolution.source == SOURCE_BARE_NAME:
+            # Still required (fail closed), but only an account literally named
+            # for the role can satisfy it; say which key would map it instead.
+            entry["unresolved_on_forgejo"] = True
+            entry["mapping_key"] = role_caller_mapping_key(role)
+        report.append(entry)
     return tuple(report)
 
 
 def _describe_role_resolution(report: tuple[dict, ...]) -> str:
     parts = []
     for entry in report:
-        if entry["resolved"]:
+        if entry.get("unresolved_on_forgejo"):
+            parts.append(
+                f"{entry['role']} -> UNRESOLVED-ON-FORGEJO (still required from an account named "
+                f"{entry['login']!r}; set {entry['mapping_key']}: <caller> to map it)"
+            )
+        elif entry["resolved"]:
             required_as = (
                 f"required as {entry['requirement']}, " if entry["requirement"] != entry["role"] else ""
             )

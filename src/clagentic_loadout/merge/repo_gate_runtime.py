@@ -401,8 +401,7 @@ def with_resolvable_reviewer_roles(
     verdict fence carries), so the same caller named by `--required-reviewer`
     or by another declared role is one requirement, and the role's
     `required_scanners` entry moves with it. On Forgejo the mapping is consulted
-    first, and a role that is neither mapped nor a caller of a deployment that
-    declares a callers list resolves to no account (see
+    first and an unmapped role stays required under its bare name (see
     `resolve_forgejo_declared_role`). A role that resolves neither way
     can never be checked, so ONLY that role is dropped from the
     reviewer floor and its own `required_scanners` entry is skipped, each with a
