@@ -628,9 +628,10 @@ _project_script_names() {
 }
 
 # Release id for this install. A git checkout is identified by its commit sha
-# (so re-installing the same tree reuses the same release); a dirty tree adds a
-# checksum of its diff and status so uncommitted edits never alias the clean
-# commit; an editable install is a different artifact than a built one. A
+# (so re-installing the same tree reuses the same release); only a fully
+# clean checkout (no changes, no untracked files) reuses a release. A dirty
+# tree gets the sha plus a timestamp-pid nonce, so uncommitted edits never alias
+# an earlier build; an editable install is a different artifact than a built one. A
 # source that is not the top level of a git work tree (sdist/wheel path, plain
 # directory, git absent or unusable) gets a timestamp-pid id, always fresh.
 _release_id() {
@@ -646,10 +647,9 @@ _release_id() {
             _sha="$(git -C "$SOURCE_PATH" rev-parse HEAD 2>/dev/null || true)"
             if [ -n "$_sha" ]; then
                 _rid="$(printf '%.12s' "$_sha")"
-                _gstatus="$(git -C "$SOURCE_PATH" status --porcelain 2>/dev/null || true)"
+                _gstatus="$(git -C "$SOURCE_PATH" status --porcelain --untracked-files=all 2>/dev/null || true)"
                 if [ -n "$_gstatus" ]; then
-                    _dsum="$( { git -C "$SOURCE_PATH" diff HEAD 2>/dev/null || true; printf '%s' "$_gstatus"; } | cksum | awk '{print $1}')"
-                    _rid="$_rid-d$_dsum"
+                    _rid="$_rid-$(date +%Y%m%d%H%M%S)-$$"
                 fi
             fi
         fi
@@ -663,15 +663,23 @@ _release_id() {
     echo "$_rid"
 }
 
-# 0 when every console script present in the venv dir $1 exits 0 on --help
-# and at least one is present. --help is the one flag every verb shares (two
-# release verbs reserve --version for a business argument) and it still
-# imports the whole entry-point module chain. A venv with no verb at all is not an install.
+# 0 when every console script in the venv dir $1 exits 0 on --help. When
+# SCRIPT_NAMES_DECLARED=1 (names read from pyproject) every name must exist --
+# a missing declared script is a failure; with the hard-coded fallback list
+# absent names are skipped but at least one must be present. --help is the one
+# flag every verb shares (two release verbs reserve --version for a business
+# argument) and it still imports the whole entry-point module chain.
 _verify_release() {
     _vdir="$1"
     _seen=0
     for _vname in $SCRIPT_NAMES; do
-        [ -x "$_vdir/bin/$_vname" ] || continue
+        if [ ! -x "$_vdir/bin/$_vname" ]; then
+            if [ "$SCRIPT_NAMES_DECLARED" -eq 1 ]; then
+                echo "$PROG: verification failed: declared script $_vdir/bin/$_vname is missing." >&2
+                return 1
+            fi
+            continue
+        fi
         _seen=$((_seen + 1))
         if ! "$_vdir/bin/$_vname" --help >/dev/null 2>&1; then
             echo "$PROG: verification failed: $_vdir/bin/$_vname --help did not exit 0." >&2
@@ -799,8 +807,10 @@ case "$INSTALLER" in
             exit "$EXIT_NO_INSTALLER"
         }
         SCRIPT_NAMES="$(_project_script_names "$SOURCE_PATH" 2>/dev/null || true)"
+        SCRIPT_NAMES_DECLARED=1
         if [ -z "$SCRIPT_NAMES" ]; then
             SCRIPT_NAMES="$_FALLBACK_SCRIPT_NAMES"
+            SCRIPT_NAMES_DECLARED=0
         fi
         RELEASE_ID="$(_release_id)"
         RELEASE_DIR="$DATA_DIR/venvs/$RELEASE_ID"

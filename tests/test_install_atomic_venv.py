@@ -245,3 +245,81 @@ def test_default_caller_shape_home_set_no_flags(tmp_path: Path) -> None:
         done = subprocess.run([str(link), "--help"], capture_output=True, text=True)
         assert done.returncode == 0, f"{name}: {done.stderr}"
     assert (home / ".config" / "clagentic" / "loadout" / "config.yaml").is_file()
+
+
+def _git_source(tmp_path: Path, name: str) -> Path:
+    """A source copy committed as a git work tree, so release ids are sha-based."""
+    src = _source_copy(tmp_path, name)
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "init", "-q"], cwd=src, check=True)
+    shutil.copy(CHECKOUT / ".gitignore", src / ".gitignore")
+    subprocess.run(["git", "add", "-A"], cwd=src, check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "init"], cwd=src, check=True)
+    return src
+
+
+def _live_python(layout: _Layout, code: str) -> str:
+    done = subprocess.run(
+        [str(layout.live / "bin" / "python3"), "-c", code], capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
+    return done.stdout.strip()
+
+
+def test_dirty_tree_never_reuses_a_release(tmp_path: Path) -> None:
+    layout = _Layout(tmp_path)
+    src = _git_source(tmp_path, "src-dirty")
+    module = src / "src" / "clagentic_loadout" / "untracked_probe.py"
+    module.write_text("VALUE = 'one'\n")
+
+    first = layout.install(src)
+    assert first.returncode == 0, first.stderr
+    release_1 = layout.live_release()
+    assert _live_python(layout, "import clagentic_loadout.untracked_probe as m; print(m.VALUE)") == "one"
+
+    module.write_text("VALUE = 'two'\n")
+    second = layout.install(src)
+
+    assert second.returncode == 0, second.stderr
+    assert "reusing existing venv" not in second.stderr
+    assert layout.live_release() != release_1
+    assert _live_python(layout, "import clagentic_loadout.untracked_probe as m; print(m.VALUE)") == "two"
+
+
+def test_clean_commit_reuses_its_verified_release(tmp_path: Path) -> None:
+    layout = _Layout(tmp_path)
+    src = _git_source(tmp_path, "src-clean")
+
+    first = layout.install(src)
+    assert first.returncode == 0, first.stderr
+    release_1 = layout.live_release()
+
+    second = layout.install(src)
+
+    assert second.returncode == 0, second.stderr
+    assert "already built and verified" in second.stderr
+    assert layout.live_release() == release_1
+
+
+def test_missing_declared_script_fails_verification_and_release_is_rebuilt(
+    tmp_path: Path,
+) -> None:
+    layout = _Layout(tmp_path)
+    src = _git_source(tmp_path, "src-missing")
+
+    first = layout.install(src)
+    assert first.returncode == 0, first.stderr
+    release_1 = layout.live_release()
+    (layout.data / "venvs" / release_1 / "bin" / "loadout-merge").unlink()
+
+    second = layout.install(src)
+
+    # The reused release fails re-verification, so it is never trusted: a
+    # sibling release is built and switched to, and the live venv is whole.
+    assert second.returncode == 0, second.stderr
+    assert "declared script" in second.stderr
+    assert "failed verification" in second.stderr
+    release_2 = layout.live_release()
+    assert release_2 != release_1
+    assert (layout.data / "venvs" / release_2 / "bin" / "loadout-merge").is_file()
+    layout.assert_bin_links_work()
