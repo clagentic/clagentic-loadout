@@ -1130,3 +1130,67 @@ def test_install_sh_skill_install_skipped_when_home_empty_and_no_override(tmp_pa
     assert result.returncode == 0, result.stderr
     assert "skipping skill install" in result.stderr
     assert _no_local_created(scratch_root)
+
+
+def _tree_listing(root: Path) -> list[str]:
+    return sorted(str(p.relative_to(root)) for p in root.rglob("*"))
+
+
+@pytest.mark.parametrize("via_env", [False, True], ids=["flag", "env"])
+def test_install_sh_no_seed_config_leaves_home_untouched(
+    tmp_path: Path, shared_venv_data_dir: Path, via_env: bool
+) -> None:
+    """--no-seed-config (or CLAGENTIC_LOADOUT_NO_SEED_CONFIG=1) with the venv
+    installer and all three dir flags writes nothing under HOME: no seeded
+    config.yaml and no pip cache. Console scripts still land in --bin-dir."""
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    skills_dir = tmp_path / "skills"
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    for var in ("PIP_CACHE_DIR", "PIP_NO_CACHE_DIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
+        env.pop(var, None)
+    args = [
+        "--installer", "venv",
+        "--source", str(CHECKOUT),
+        "--data-dir", str(shared_venv_data_dir),
+        "--bin-dir", str(bin_dir),
+        "--skills-dir", str(skills_dir),
+    ]
+    if via_env:
+        env["CLAGENTIC_LOADOUT_NO_SEED_CONFIG"] = "1"
+    else:
+        args.append("--no-seed-config")
+
+    result = _run(*args, env=env)
+
+    assert result.returncode == 0, result.stderr
+    assert _tree_listing(home) == []
+    assert "skipping git-host config seeding" in result.stderr
+    assert (bin_dir / "loadout-merge").is_symlink()
+    help_run = subprocess.run(
+        [str(bin_dir / "loadout-merge"), "--help"], capture_output=True, text=True, env=env
+    )
+    assert help_run.returncode == 0, help_run.stderr
+
+
+def test_install_sh_default_still_seeds_config(tmp_path: Path, shared_venv_data_dir: Path) -> None:
+    """Without the flag the seeding step runs exactly as before."""
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {**os.environ, "HOME": str(home)}
+    env.pop("CLAGENTIC_LOADOUT_NO_SEED_CONFIG", None)
+
+    result = _run(
+        "--installer", "venv",
+        "--source", str(CHECKOUT),
+        "--data-dir", str(shared_venv_data_dir),
+        "--bin-dir", str(tmp_path / "bin"),
+        "--skills-dir", str(tmp_path / "skills"),
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert (home / ".config" / "clagentic" / "loadout" / "config.yaml").is_file()
+    assert "skipping git-host config seeding" not in result.stderr

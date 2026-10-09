@@ -1909,6 +1909,22 @@ self-installs the new build (`loadout-git-host-api` on PATH, `config.yaml`
 `git_host.base_url` seeded) into whatever environment invokes
 `loadout-merge --repo-path <this checkout>` next.
 
+#### `--report-only` — dry-run the gate chain
+
+`--report-only` runs the whole gate chain exactly as a real merge would
+(namespace guard, merge authority, stale-SHA, reviewer verdicts, repo gate,
+diff-scope, PR title, commit subjects, CI status, and `merge: pre_checks` in the
+merge-result clone), prints the verdict it reached on stdout, and exits before the
+merge step. It does not call the merge API, run `post_merge_steps`, sync the
+tree, post the merge-completion attestation, or send any task signal.
+
+- Exit `0` when the merge would be authorized. Any refusal returns the same exit
+  code a real run would; no new exit codes.
+- The merger credential is still minted, for the read calls only.
+- `pre_checks` really execute (they are part of the gate); pass
+  `--skip-pre-checks` to bypass them as in a real run.
+- Without the flag, behavior is unchanged.
+
 ### `loadout-close-pr` — close a PR WITHOUT merging it
 
 `clagentic_loadout.merge.close_verb`. Abandons a superseded/dead PR: issues

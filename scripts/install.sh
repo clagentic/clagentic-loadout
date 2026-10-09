@@ -72,6 +72,14 @@
 #                                           # ~/.claude/skills, override via
 #                                           # CLAGENTIC_LOADOUT_SKILLS_DIR).
 #                                           # See "Skill install" below.
+#   scripts/install.sh --no-seed-config    # skip the user config.yaml seeding
+#                                           # entirely, and (venv tier) keep
+#                                           # the pip cache inside --data-dir,
+#                                           # so with --installer venv plus
+#                                           # --data-dir/--bin-dir/--skills-dir
+#                                           # nothing is written outside those
+#                                           # dirs and TMPDIR. See "Git-host
+#                                           # config seeding" below.
 #   scripts/install.sh --dry-run           # print the resolved plan, install
 #                                           # nothing
 #   scripts/install.sh --help
@@ -93,7 +101,9 @@
 #   CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL
 #                                     same as --git-host-base-url
 #   CLAGENTIC_LOADOUT_SKILLS_DIR      same as --skills-dir
-#   PIP_EDITABLE=1                    same as --editable, for the pip/venv
+#   CLAGENTIC_LOADOUT_NO_SEED_CONFIG=1
+#                                     same as --no-seed-config
+#   PIP_EDITABLE=1                   same as --editable, for the pip/venv
 #                                     fallback paths
 #
 # Skill install:
@@ -116,7 +126,7 @@
 #
 # Git-host config seeding:
 #   This installer seeds ~/.config/clagentic/loadout/config.yaml's
-#   `git_host: base_url:` key -- the config-file tier
+#   `forgejo: base_url:` key -- the config-file tier
 #   transport.git_host_api._resolve_git_host_base reads as its lowest-priority
 #   non-placeholder source (see docs/integration.md). This is the RELEASED
 #   mechanism for supplying a git-host base URL: install once, and no
@@ -127,6 +137,10 @@
 #   script (CLAUDE.md rule 1) -- if neither is given, a clearly-commented
 #   TEMPLATE entry is written for the user to fill in, never a dead
 #   localhost and never a baked URL.
+#
+#   --no-seed-config (or CLAGENTIC_LOADOUT_NO_SEED_CONFIG=1) skips this step
+#   entirely, for an install that must write nothing under HOME. The default
+#   is unchanged: seeding runs.
 #
 #   Idempotent: the config dir/file are created if absent (mode 700/600 --
 #   this file can carry deployment-identifying config even though this
@@ -172,6 +186,10 @@ GIT_HOST_BASE_URL=""
 # default, ~/.claude/skills -- see _install_skills below. Never a hardcoded
 # operator path (CLAUDE.md rule 1).
 SKILLS_DIR=""
+# 1 skips _seed_git_host_config and keeps the venv tier's pip cache inside
+# DATA_DIR. Overridable via --no-seed-config or
+# CLAGENTIC_LOADOUT_NO_SEED_CONFIG=1; default 0 leaves behavior unchanged.
+NO_SEED_CONFIG=0
 
 _usage() {
     cat <<'EOF'
@@ -210,6 +228,12 @@ Options:
                         CLAGENTIC_LOADOUT_SKILLS_DIR). Each shipped skill is
                         copied to <dir>/<skill-name>/, overwriting only that
                         skill's own subdirectory.
+  --no-seed-config       Do not seed ~/.config/clagentic/loadout/config.yaml
+                        (override via CLAGENTIC_LOADOUT_NO_SEED_CONFIG=1) and,
+                        on the venv tier, keep pip's cache under --data-dir.
+                        With --installer venv and --data-dir/--bin-dir/
+                        --skills-dir, nothing is written outside those dirs
+                        and TMPDIR.
   --dry-run              Print the resolved installer + command, install
                         nothing.
   -h, --help             Show this help and exit.
@@ -258,6 +282,10 @@ while [ "$#" -gt 0 ]; do
             SKILLS_DIR="$2"
             shift 2
             ;;
+        --no-seed-config)
+            NO_SEED_CONFIG=1
+            shift
+            ;;
         --dry-run)
             DRY_RUN=1
             shift
@@ -296,6 +324,10 @@ if [ -z "$GIT_HOST_BASE_URL" ] && [ -n "${CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL:-}
 fi
 if [ -z "$SKILLS_DIR" ] && [ -n "${CLAGENTIC_LOADOUT_SKILLS_DIR:-}" ]; then
     SKILLS_DIR="$CLAGENTIC_LOADOUT_SKILLS_DIR"
+fi
+if [ "$NO_SEED_CONFIG" -eq 0 ] && [ -n "${CLAGENTIC_LOADOUT_NO_SEED_CONFIG:-}" ] \
+    && [ "${CLAGENTIC_LOADOUT_NO_SEED_CONFIG:-0}" != "0" ]; then
+    NO_SEED_CONFIG=1
 fi
 
 # Trim leading/trailing whitespace from path-shaped values BEFORE the
@@ -624,6 +656,14 @@ echo "$PROG: command: $*" >&2
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "$PROG: --dry-run -- not executing." >&2
     exit "$EXIT_OK"
+fi
+
+# Without this, the venv tier's pip writes its cache under ~/.cache/pip. A
+# caller-set PIP_CACHE_DIR/PIP_NO_CACHE_DIR still wins.
+if [ "$NO_SEED_CONFIG" -eq 1 ] && [ "$INSTALLER" = "venv" ] \
+    && [ -z "${PIP_CACHE_DIR:-}" ] && [ -z "${PIP_NO_CACHE_DIR:-}" ]; then
+    PIP_CACHE_DIR="$DATA_DIR/pip-cache"
+    export PIP_CACHE_DIR
 fi
 
 if ! "$@"; then
@@ -983,7 +1023,11 @@ _seed_git_host_config() {
     echo "$PROG: $_seed_msg ($_CONFIG_FILE)." >&2
 }
 
-_seed_git_host_config
+if [ "$NO_SEED_CONFIG" -eq 1 ]; then
+    echo "$PROG: --no-seed-config -- skipping git-host config seeding." >&2
+else
+    _seed_git_host_config
+fi
 
 echo "$PROG: install complete (installer=$INSTALLER)." >&2
 exit "$EXIT_OK"
