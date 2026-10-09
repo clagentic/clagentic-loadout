@@ -27,6 +27,27 @@
 # --break-system-packages -- that flag defeats the protection PEP 668 exists
 # to provide and is not offered as a default anywhere in this script.
 #
+# Venv tier layout (atomic switch): every release is installed into its own
+# venv, DATA_DIR/venvs/<id> (id = the source checkout's commit sha, with a
+# dirty-tree checksum and/or "-e" suffix when applicable; a timestamp-pid for a
+# non-git source). Only after the new venv passes verification (every console
+# script exits 0 on --help; not --version, which two verbs spell --cli-version)
+# is DATA_DIR/venv -- a symlink to the live
+# release -- repointed at it with a single rename(2). The --bin-dir
+# console-script symlinks target DATA_DIR/venv/bin/<name>, so they never change
+# and a verb being executed while an install runs sees either the old release
+# or the new one, never a half-written one. The previous release is kept for
+# processes still running from it; older ones are pruned. A failed build or
+# verification leaves the live venv untouched (exit 3).
+#
+# One-time migration: an install that predates this layout has a real
+# DIRECTORY at DATA_DIR/venv, and a symlink cannot be renamed over a non-empty
+# directory. The first install after upgrading therefore moves the old
+# directory aside (into DATA_DIR/venvs/) and renames the symlink in, two
+# renames back to back, with a short window in which DATA_DIR/venv does not
+# exist. Run that first install while no loadout verb is executing; every
+# later install is atomic.
+#
 # No operator hostnames, no absolute /workspace paths, no lore references —
 # runnable by anyone against any checkout or published distribution.
 #
@@ -580,6 +601,170 @@ _pip_bin() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# Venv tier helpers (per-release venvs + atomic switch; see the header).
+#
+# The script list is read from pyproject.toml's [project.scripts] table
+# (parsed with a small awk state machine -- no TOML library available in plain
+# sh) so it never drifts from the package's own declared entry points; a
+# hardcoded fallback list covers the case where SOURCE_PATH isn't a checkout
+# with a readable pyproject.toml (e.g. a bare sdist/wheel path).
+# ---------------------------------------------------------------------------
+
+_FALLBACK_SCRIPT_NAMES="clagentic-loadout loadout-poll-wait loadout-scoped-test-wait loadout-release-dispatch loadout-release-detect loadout-git-host-api loadout-review-post loadout-push loadout-merge loadout-provision-allowlist"
+
+_project_script_names() {
+    _pyproject="$1/pyproject.toml"
+    [ -r "$_pyproject" ] || return 1
+    awk '
+        /^\[project\.scripts\]/ { in_section=1; next }
+        /^\[/ { in_section=0 }
+        in_section && /^[A-Za-z0-9_-]+[ \t]*=/ {
+            sub(/[ \t]*=.*/, "");
+            gsub(/[ \t]/, "");
+            print;
+        }
+    ' "$_pyproject"
+}
+
+# Release id for this install. A git checkout is identified by its commit sha
+# (so re-installing the same tree reuses the same release); only a fully
+# clean checkout (no changes, no untracked files) reuses a release. A dirty
+# tree gets the sha plus a timestamp-pid nonce, so uncommitted edits never alias
+# an earlier build; an editable install is a different artifact than a built one. A
+# source that is not the top level of a git work tree (sdist/wheel path, plain
+# directory, git absent or unusable) gets a timestamp-pid id, always fresh.
+_release_id() {
+    _rid=""
+    if _have_cmd git && [ -d "$SOURCE_PATH" ]; then
+        _src_real="$(CDPATH= cd -- "$SOURCE_PATH" && pwd -P)"
+        _top="$(git -C "$SOURCE_PATH" rev-parse --show-toplevel 2>/dev/null || true)"
+        _top_real=""
+        if [ -n "$_top" ]; then
+            _top_real="$(CDPATH= cd -- "$_top" && pwd -P)"
+        fi
+        if [ -n "$_top_real" ] && [ "$_top_real" = "$_src_real" ]; then
+            _sha="$(git -C "$SOURCE_PATH" rev-parse HEAD 2>/dev/null || true)"
+            if [ -n "$_sha" ]; then
+                _rid="$(printf '%.12s' "$_sha")"
+                _gstatus="$(git -C "$SOURCE_PATH" status --porcelain --untracked-files=all 2>/dev/null || true)"
+                if [ -n "$_gstatus" ]; then
+                    _rid="$_rid-$(date +%Y%m%d%H%M%S)-$$"
+                fi
+            fi
+        fi
+    fi
+    if [ -z "$_rid" ]; then
+        _rid="$(date +%Y%m%d%H%M%S)-$$"
+    fi
+    if [ "$EDITABLE" -eq 1 ]; then
+        _rid="$_rid-e"
+    fi
+    echo "$_rid"
+}
+
+# 0 when every console script in the venv dir $1 exits 0 on --help. When
+# SCRIPT_NAMES_DECLARED=1 (names read from pyproject) every name must exist --
+# a missing declared script is a failure; with the hard-coded fallback list
+# absent names are skipped but at least one must be present. --help is the one
+# flag every verb shares (two release verbs reserve --version for a business
+# argument) and it still imports the whole entry-point module chain.
+_verify_release() {
+    _vdir="$1"
+    _seen=0
+    for _vname in $SCRIPT_NAMES; do
+        if [ ! -x "$_vdir/bin/$_vname" ]; then
+            if [ "$SCRIPT_NAMES_DECLARED" -eq 1 ]; then
+                echo "$PROG: verification failed: declared script $_vdir/bin/$_vname is missing." >&2
+                return 1
+            fi
+            continue
+        fi
+        _seen=$((_seen + 1))
+        if ! "$_vdir/bin/$_vname" --help >/dev/null 2>&1; then
+            echo "$PROG: verification failed: $_vdir/bin/$_vname --help did not exit 0." >&2
+            return 1
+        fi
+    done
+    if [ "$_seen" -eq 0 ]; then
+        echo "$PROG: verification failed: no console script from [$SCRIPT_NAMES] found in $_vdir/bin." >&2
+        return 1
+    fi
+    return 0
+}
+
+# rename(2) $1 over $2 even when $2 is a symlink to a directory (a plain
+# `mv` would move $1 INTO that directory instead). GNU `mv -T` where it
+# exists; otherwise the interpreter's os.replace, which is rename(2) itself.
+_atomic_replace() {
+    if mv -T "$1" "$2" 2>/dev/null; then
+        return 0
+    fi
+    _py_replace="$(_py)" || return 1
+    "$_py_replace" -c 'import os, sys; os.replace(sys.argv[1], sys.argv[2])' "$1" "$2"
+}
+
+# Repoint DATA_DIR/venv (symlink) at venvs/$1. If DATA_DIR/venv is still a
+# real directory (pre-layout install), move it aside first -- the one
+# non-atomic step, kept to two back-to-back renames. Sets PREVIOUS_RELEASE to
+# the release now demoted to "previous" (empty when there was none).
+_switch_live_venv() {
+    _new_id="$1"
+    _live="$DATA_DIR/venv"
+    _tmp_link="$DATA_DIR/.venv.switch.$$"
+    PREVIOUS_RELEASE=""
+    rm -f "$_tmp_link"
+    ln -s "venvs/$_new_id" "$_tmp_link"
+    if [ -L "$_live" ]; then
+        _cur_dest="$(readlink "$_live" 2>/dev/null || true)"
+        case "$_cur_dest" in
+            venvs/*) PREVIOUS_RELEASE="${_cur_dest#venvs/}" ;;
+        esac
+        if ! _atomic_replace "$_tmp_link" "$_live"; then
+            rm -f "$_tmp_link"
+            echo "$PROG: could not switch $_live to venvs/$_new_id; live venv left untouched." >&2
+            return 1
+        fi
+    elif [ -e "$_live" ]; then
+        PREVIOUS_RELEASE="legacy-$(date +%Y%m%d%H%M%S)-$$"
+        echo "$PROG: MIGRATION: $_live is a real directory from a pre-layout install; moving it to venvs/$PREVIOUS_RELEASE and linking venvs/$_new_id in its place. This is the one non-atomic switch -- a verb executing right now may fail." >&2
+        if ! mv "$_live" "$DATA_DIR/venvs/$PREVIOUS_RELEASE"; then
+            rm -f "$_tmp_link"
+            echo "$PROG: could not move $_live aside; live venv left untouched." >&2
+            return 1
+        fi
+        if ! mv "$_tmp_link" "$_live"; then
+            mv "$DATA_DIR/venvs/$PREVIOUS_RELEASE" "$_live" || true
+            rm -f "$_tmp_link"
+            echo "$PROG: could not link venvs/$_new_id as $_live; restored the previous directory." >&2
+            return 1
+        fi
+    else
+        if ! mv "$_tmp_link" "$_live"; then
+            rm -f "$_tmp_link"
+            return 1
+        fi
+    fi
+    return 0
+}
+
+# Keep the current and previous release; remove every other release venv.
+# In-progress builds (dot-prefixed) and non-directories are never touched.
+_prune_releases() {
+    _keep_a="$1"
+    _keep_b="$2"
+    for _entry in "$DATA_DIR"/venvs/*; do
+        [ -d "$_entry" ] || continue
+        [ -L "$_entry" ] && continue
+        _ename="${_entry##*/}"
+        if [ "$_ename" = "$_keep_a" ] || [ "$_ename" = "$_keep_b" ]; then
+            continue
+        fi
+        echo "$PROG: pruning old release venvs/$_ename" >&2
+        rm -rf "$_entry"
+    done
+}
+
 case "$INSTALLER" in
     pipx)
         if [ "$EDITABLE" -eq 1 ]; then
@@ -611,23 +796,30 @@ case "$INSTALLER" in
         DEFAULT_BIN_DIR="$("$_pip" show pip >/dev/null 2>&1 && "$(command -v python3 || command -v python)" -c 'import sysconfig; print(sysconfig.get_path("scripts", f"{sysconfig.get_default_scheme()}_user"))' 2>/dev/null || echo "${HOME:-}/.local/bin")"
         ;;
     venv)
-        # Self-managed, idempotent venv tier: a virtualenv this
-        # script owns end to end, under DATA_DIR/venv. Re-running installs
-        # into the SAME venv (pip upgrades in place); nothing here ever
-        # passes --break-system-packages -- this tier exists precisely to
-        # avoid needing that flag.
+        # Self-managed venv tier: a virtualenv per release under
+        # DATA_DIR/venvs/<id>, switched in atomically via the DATA_DIR/venv
+        # symlink (see the header). Nothing here ever passes
+        # --break-system-packages -- this tier exists precisely to avoid
+        # needing that flag.
         VENV_DIR="$DATA_DIR/venv"
         _py_bin="$(_py)" || {
             echo "$PROG: venv tier selected but no python3/python interpreter is on PATH." >&2
             exit "$EXIT_NO_INSTALLER"
         }
-        if [ ! -x "$VENV_DIR/bin/python3" ] && [ ! -x "$VENV_DIR/bin/python" ]; then
-            echo "$PROG: creating venv at $VENV_DIR" >&2
-            "$_py_bin" -m venv "$VENV_DIR"
-        else
-            echo "$PROG: reusing existing venv at $VENV_DIR" >&2
+        SCRIPT_NAMES="$(_project_script_names "$SOURCE_PATH" 2>/dev/null || true)"
+        SCRIPT_NAMES_DECLARED=1
+        if [ -z "$SCRIPT_NAMES" ]; then
+            SCRIPT_NAMES="$_FALLBACK_SCRIPT_NAMES"
+            SCRIPT_NAMES_DECLARED=0
         fi
-        _venv_pip="$VENV_DIR/bin/pip"
+        RELEASE_ID="$(_release_id)"
+        RELEASE_DIR="$DATA_DIR/venvs/$RELEASE_ID"
+        if [ -x "$RELEASE_DIR/bin/python3" ] || [ -x "$RELEASE_DIR/bin/python" ]; then
+            echo "$PROG: reusing existing venv at $RELEASE_DIR" >&2
+        else
+            echo "$PROG: creating venv at $RELEASE_DIR" >&2
+        fi
+        _venv_pip="$RELEASE_DIR/bin/pip"
         if [ "$EDITABLE" -eq 1 ]; then
             set -- "$_venv_pip" install --upgrade --editable "$SOURCE_PATH"
         else
@@ -649,7 +841,7 @@ esac
 
 echo "$PROG: installer=$INSTALLER source=$SOURCE_PATH editable=$EDITABLE" >&2
 if [ "$INSTALLER" = "venv" ]; then
-    echo "$PROG: venv-dir=$VENV_DIR" >&2
+    echo "$PROG: venv-dir=$VENV_DIR release=$RELEASE_DIR" >&2
 fi
 echo "$PROG: command: $*" >&2
 
@@ -669,46 +861,67 @@ if [ "$NO_SEED_CONFIG" -eq 1 ] && [ "$INSTALLER" = "venv" ] \
     export PIP_CACHE_DIR
 fi
 
-if ! "$@"; then
+if [ "$INSTALLER" = "venv" ]; then
+    mkdir -p "$DATA_DIR/venvs"
+    _built_here=0
+    _current_id=""
+    if [ -L "$VENV_DIR" ]; then
+        _current_id="$(readlink "$VENV_DIR" 2>/dev/null || true)"
+        _current_id="${_current_id#venvs/}"
+    fi
+    if [ -x "$RELEASE_DIR/bin/python3" ] || [ -x "$RELEASE_DIR/bin/python" ]; then
+        if _verify_release "$RELEASE_DIR"; then
+            echo "$PROG: release $RELEASE_ID already built and verified." >&2
+        elif [ "$_current_id" = "$RELEASE_ID" ]; then
+            # Never rebuild the live release in place: build a sibling
+            # release instead and switch to it atomically.
+            RELEASE_ID="$RELEASE_ID-r$$"
+            RELEASE_DIR="$DATA_DIR/venvs/$RELEASE_ID"
+            shift
+            set -- "$RELEASE_DIR/bin/pip" "$@"
+            echo "$PROG: the live release failed verification; building a replacement at $RELEASE_DIR." >&2
+        else
+            echo "$PROG: existing release $RELEASE_ID failed verification; rebuilding it." >&2
+            rm -rf "$RELEASE_DIR"
+        fi
+    fi
+    if [ ! -x "$RELEASE_DIR/bin/python3" ] && [ ! -x "$RELEASE_DIR/bin/python" ]; then
+        _built_here=1
+        rm -rf "$RELEASE_DIR"
+        if ! "$_py_bin" -m venv "$RELEASE_DIR" || ! "$@" || ! _verify_release "$RELEASE_DIR"; then
+            rm -rf "$RELEASE_DIR"
+            echo "$PROG: install command failed (installer=$INSTALLER); live venv $VENV_DIR left untouched." >&2
+            exit "$EXIT_INSTALL_FAILED"
+        fi
+    fi
+
+    if [ "$_current_id" = "$RELEASE_ID" ]; then
+        echo "$PROG: $VENV_DIR already points at release $RELEASE_ID; nothing to switch." >&2
+    else
+        if ! _switch_live_venv "$RELEASE_ID"; then
+            if [ "$_built_here" -eq 1 ]; then
+                rm -rf "$RELEASE_DIR"
+            fi
+            exit "$EXIT_INSTALL_FAILED"
+        fi
+        echo "$PROG: switched $VENV_DIR -> venvs/$RELEASE_ID (previous: ${PREVIOUS_RELEASE:-none})." >&2
+        _prune_releases "$RELEASE_ID" "$PREVIOUS_RELEASE"
+    fi
+elif ! "$@"; then
     echo "$PROG: install command failed (installer=$INSTALLER)." >&2
     exit "$EXIT_INSTALL_FAILED"
 fi
 
 # ---------------------------------------------------------------------------
-# venv tier only: symlink the venv's console_scripts out to DEFAULT_BIN_DIR
+# venv tier only: symlink the venv's console_scripts out to DEFAULT_BIN_DIR.
+# The links target DATA_DIR/venv/bin/<name> (the live-release symlink), so
+# they are identical across releases and never need rewriting on a switch.
 # Idempotent: stale symlinks that already point into THIS venv's
 # bin dir are replaced; a pre-existing file/symlink that points somewhere
 # ELSE is left alone and reported, never clobbered.
-#
-# The script list is read from pyproject.toml's [project.scripts] table
-# (parsed with a small POSIX-sh state machine -- no TOML library available
-# in plain sh) so it never drifts from the package's own declared entry
-# points; a hardcoded fallback list covers the case where SOURCE_PATH isn't
-# a checkout with a readable pyproject.toml (e.g. a bare sdist/wheel path).
 # ---------------------------------------------------------------------------
 
-_FALLBACK_SCRIPT_NAMES="clagentic-loadout loadout-poll-wait loadout-scoped-test-wait loadout-release-dispatch loadout-release-detect loadout-git-host-api loadout-review-post loadout-push loadout-merge loadout-provision-allowlist"
-
-_project_script_names() {
-    _pyproject="$1/pyproject.toml"
-    [ -r "$_pyproject" ] || return 1
-    awk '
-        /^\[project\.scripts\]/ { in_section=1; next }
-        /^\[/ { in_section=0 }
-        in_section && /^[A-Za-z0-9_-]+[ \t]*=/ {
-            sub(/[ \t]*=.*/, "");
-            gsub(/[ \t]/, "");
-            print;
-        }
-    ' "$_pyproject"
-}
-
 if [ "$INSTALLER" = "venv" ]; then
-    SCRIPT_NAMES="$(_project_script_names "$SOURCE_PATH" 2>/dev/null || true)"
-    if [ -z "$SCRIPT_NAMES" ]; then
-        SCRIPT_NAMES="$_FALLBACK_SCRIPT_NAMES"
-    fi
-
     mkdir -p "$DEFAULT_BIN_DIR"
 
     _symlink_failures=""
