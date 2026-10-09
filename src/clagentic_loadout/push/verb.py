@@ -266,10 +266,10 @@ from clagentic_loadout.push.errors import (
 from clagentic_loadout.push.forgejo_backend import create_pr as forgejo_create_pr
 from clagentic_loadout.push.forgejo_backend import get_pr_body as forgejo_get_pr_body
 from clagentic_loadout.push.forgejo_backend import update_pr as forgejo_update_pr
-from clagentic_loadout.push.crew_identity import (
-    CrewBotIdentityNotResolvableError,
-    is_recognized_crew_caller,
-    resolve_crew_bot_identity,
+from clagentic_loadout.push.agent_identity import (
+    AgentBotIdentityNotResolvableError,
+    is_recognized_agent_caller,
+    resolve_agent_bot_identity,
 )
 from clagentic_loadout.push.git_hermeticity import (
     GitVersionTooOldError,
@@ -1361,7 +1361,7 @@ def _resolve_effective_bot_identity(
       1. --bot-name/--bot-email (CLI, always wins when BOTH are supplied on
          this invocation's own argv).
       2. PROVIDER-VERIFIED (lr-43c8d7 ADDITION): when *caller* is a
-         recognized crew caller on GitHub (same gate as the tier below) AND
+         recognized agent caller on GitHub (same gate as the tier below) AND
          *provider_verified_app_slug* is non-empty, the bot identity is
          derived from THAT value -- a credential-minting provider's own
          broker-verified App slug (transport.credential_provider.
@@ -1369,19 +1369,19 @@ def _resolve_effective_bot_identity(
          time, rather than an operator-typed `github_app.slugs.<caller>`
          config entry naming the SAME fact. See "PROVIDER-VERIFIED TIER"
          below for the full rationale and non-goals.
-      3. Derived from *caller* + config (push.crew_identity), when *caller*
-         is a recognized crew caller (present in this deployment's declared
+      3. Derived from *caller* + config (push.agent_identity), when *caller*
+         is a recognized agent caller (present in this deployment's declared
          `github_app.callers` registry) AND *platform* is `PLATFORM_GITHUB`
          -- see below. This is now the STANDALONE FALLBACK within the
-         recognized-crew-caller gate: reached when tier 2 has nothing to
+         recognized-agent-caller gate: reached when tier 2 has nothing to
          offer (no provider, or a provider that supplied an empty
          app_slug -- both real, non-error states).
       4. push.identity_config.load_builder_identity (the deployment-tier
          `builder_identity:` user-config section, lr-4e8a43 task ADDITION 2).
       5. Neither (source "none") -- ONLY reachable when *caller*/*platform*
-         is NOT a recognized crew caller on GitHub; see FAIL-CLOSED below.
+         is NOT a recognized agent caller on GitHub; see FAIL-CLOSED below.
 
-    DERIVED-FROM-CALLER, UNCONDITIONAL FOR A RECOGNIZED CREW CALLER ON
+    DERIVED-FROM-CALLER, UNCONDITIONAL FOR A RECOGNIZED AGENT CALLER ON
     GITHUB (lr-f145d2, restating lr-0902ba remediation item 1): lr-4e8a43
     wired load_builder_identity into this verb, but shipped OPT-IN -- with
     no `builder_identity:` section configured, re-authoring silently
@@ -1393,45 +1393,45 @@ def _resolve_effective_bot_identity(
     from) still produced commits attributed to the invoking human's own
     personal account, because nothing derived a bot COMMIT identity from
     that already-declared mapping. This tier closes that gap: for a
-    recognized crew caller pushing to GitHub, the bot identity is derived
+    recognized agent caller pushing to GitHub, the bot identity is derived
     from data the deployment already provided for token minting -- no
     second identity string to configure, no new required config key.
 
     PLATFORM IS PART OF THE GATE, NOT THE RESOLVER'S FAILURE PATH
     (lr-f145d2 follow-up, post-review correction): an earlier revision
-    gated only on caller here and let resolve_crew_bot_identity raise for
+    gated only on caller here and let resolve_agent_bot_identity raise for
     a non-GitHub platform, which converted EVERY Forgejo push from a
-    recognized crew caller -- the overwhelming majority of this
+    recognized agent caller -- the overwhelming majority of a typical
     deployment's actual push traffic -- into a hard EXIT_AUTHOR_MISMATCH
-    failure with no fix available. is_recognized_crew_caller now takes
+    failure with no fix available. is_recognized_agent_caller now takes
     *platform* directly and returns False for any non-GitHub platform,
     so a Forgejo push from a recognized caller never enters tier 2 at all
     and falls through to tier 3/4 exactly as it did before this module
-    existed -- see is_recognized_crew_caller's own docstring for the full
+    existed -- see is_recognized_agent_caller's own docstring for the full
     account.
 
-    FAIL-CLOSED FOR A RECOGNIZED CREW CALLER ON GITHUB (task requirement,
-    NOT additive): when *caller*+*platform* is_recognized_crew_caller but
-    resolve_crew_bot_identity cannot resolve an identity for it (no
+    FAIL-CLOSED FOR A RECOGNIZED AGENT CALLER ON GITHUB (task requirement,
+    NOT additive): when *caller*+*platform* is_recognized_agent_caller but
+    resolve_agent_bot_identity cannot resolve an identity for it (no
     github_app.slugs.<caller> entry configured), this function raises
-    CrewBotIdentityNotResolvableError rather than falling through to tier 3
+    AgentBotIdentityNotResolvableError rather than falling through to tier 3
     or tier 4 -- today's ambient-git-config inherit fallback is
-    UNREACHABLE for a recognized crew caller on GitHub. This is the one
+    UNREACHABLE for a recognized agent caller on GitHub. This is the one
     FAIL path in this function that is not "config present but malformed"
     (that is InvalidBuilderIdentityConfigError, tier 3, unchanged from
     lr-4e8a43).
 
     EXTERNAL-USER SAFETY (task non-negotiable constraint, argued explicitly
     in this task's own PR body): tier 2/3 is gated on
-    is_recognized_crew_caller, which itself requires *platform* to be
+    is_recognized_agent_caller, which itself requires *platform* to be
     GitHub AND a NON-EMPTY `github_app.callers` list to be configured at
     all. A deployment with no `github_app` section (the out-of-the-box,
     external-consumer state) -- or a caller string that is simply not in
     that list, or any push to a non-GitHub platform -- gets
-    is_recognized_crew_caller() == False unconditionally, so this function
+    is_recognized_agent_caller() == False unconditionally, so this function
     falls through past tier 2/3 exactly as it did before this change, all
     the way to tier 4/5 with ZERO behavior change from lr-4e8a43's shipped
-    shape. Only a deployment that has ALREADY told loadout who its crew
+    shape. Only a deployment that has ALREADY told loadout who its agent
     callers are, pushing to GitHub specifically (exactly the deployments
     this bug was observed against), sees tier 2/3 activate at all. A
     deployment with no credential-provider identity integration (the common
@@ -1440,16 +1440,16 @@ def _resolve_effective_bot_identity(
     behaves exactly as tier 2 did before this task.
 
     PROVIDER-VERIFIED TIER, NON-GOALS (lr-43c8d7): this tier does NOT widen
-    is_recognized_crew_caller's own gate -- a caller absent from
+    is_recognized_agent_caller's own gate -- a caller absent from
     `github_app.callers`, or a push to Forgejo, never reaches tier 2
     regardless of what *provider_verified_app_slug* carries (the platform
     gate stays exactly where lr-f145d2 put it, see
-    is_recognized_crew_caller's own docstring). This tier only changes
-    WHICH SLUG resolve_crew_bot_identity uses once that gate has already
+    is_recognized_agent_caller's own docstring). This tier only changes
+    WHICH SLUG resolve_agent_bot_identity uses once that gate has already
     passed -- it is a slug-SOURCE precedence change within an
     already-existing tier, not a new activation path. It also does NOT
     rescue a caller this function would otherwise raise
-    CrewBotIdentityNotResolvableError for: *this function itself* still
+    AgentBotIdentityNotResolvableError for: *this function itself* still
     fails closed on that condition even when *provider_verified_app_slug*
     is None (unresolvable via config, provider not yet consulted) -- see
     `_run_create_pr`'s own call-site comment for WHY that ordering is
@@ -1482,15 +1482,15 @@ def _resolve_effective_bot_identity(
             falling back to no identity, since a malformed config the
             operator believes is active is exactly the false-assurance
             class that wiring closes.
-        CrewBotIdentityNotResolvableError: *caller* is a recognized crew
+        AgentBotIdentityNotResolvableError: *caller* is a recognized agent
             caller but neither tier 2 nor tier 3 could resolve an identity
             for it (see FAIL-CLOSED above).
     """
     if bot_name and bot_email:
         return bot_name, bot_email, "cli"
 
-    if is_recognized_crew_caller(caller, platform, config_root=config_root):
-        derived_name, derived_email = resolve_crew_bot_identity(
+    if is_recognized_agent_caller(caller, platform, config_root=config_root):
+        derived_name, derived_email = resolve_agent_bot_identity(
             caller, platform, config_root=config_root,
             provider_verified_app_slug=provider_verified_app_slug,
         )
@@ -2220,7 +2220,7 @@ def _run_create_pr(
     # Builder-identity resolution happens BEFORE token resolution -- UNCHANGED
     # ordering from lr-4e8a43 (cheap, purely local YAML validation +
     # caller-derivation, no credential mint or network call yet): a
-    # malformed builder_identity: config, or a recognized crew caller with
+    # malformed builder_identity: config, or a recognized agent caller with
     # NO resolvable config-tier slug, must fail loud before this invocation
     # spends a token mint on a push it is about to refuse anyway. This
     # pass resolves with provider_verified_app_slug=None (the provider has
@@ -2241,11 +2241,11 @@ def _run_create_pr(
             f"produce false assurance.",
             code=EXIT_AUTHOR_MISMATCH,
         )
-    except CrewBotIdentityNotResolvableError as exc:
+    except AgentBotIdentityNotResolvableError as exc:
         _fail(
-            f"caller {caller!r} is a recognized crew caller but its bot "
+            f"caller {caller!r} is a recognized agent caller but its bot "
             f"commit identity could not be derived -- {exc} Refusing to "
-            f"fall back to ambient git config for a recognized crew caller "
+            f"fall back to ambient git config for a recognized agent caller "
             f"-- a mis-attributed commit is unrecoverable once merged.",
             code=EXIT_AUTHOR_MISMATCH,
         )
@@ -2271,7 +2271,7 @@ def _run_create_pr(
     # SAME (name, email) shape using the provider's slug instead of the
     # config one. This can only ever RUN when tier 2/3's gate already
     # accepted the caller as resolvable -- it never rescues a
-    # CrewBotIdentityNotResolvableError the gate above already raised (that
+    # AgentBotIdentityNotResolvableError the gate above already raised (that
     # ordering constraint -- resolving identity before spending a token
     # mint -- is preserved exactly as lr-4e8a43 established it; see this
     # task's own PR body for the trade-off this decision makes explicit).
@@ -2280,7 +2280,7 @@ def _run_create_pr(
     # touched by this override -- both already won at a higher or
     # independent precedence tier.
     if identity_source == "caller-derived" and resolved.app_slug and resolved.app_slug.strip():
-        effective_bot_name, effective_bot_email = resolve_crew_bot_identity(
+        effective_bot_name, effective_bot_email = resolve_agent_bot_identity(
             caller, args.platform, config_root=builder_identity_config_root,
             provider_verified_app_slug=resolved.app_slug,
         )
