@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 import subprocess
+from pathlib import Path
 
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import (
@@ -835,6 +836,34 @@ class TestFindForeignConfigFilesEdgeCases:
             tmp_path, ["x/*.yaml", "x/a.*"]
         )
         assert result == [str(foreign / "a.yaml")]
+
+    def test_a_pattern_the_glob_engine_rejects_is_skipped_with_a_warning(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        foreign = tmp_path / "x"
+        foreign.mkdir()
+        (foreign / "a.yaml").write_text("post_merge_steps: []\n", encoding="utf-8")
+        real_glob = Path.glob
+
+        def glob(self, pattern, *args, **kwargs):
+            if pattern == "bad[*":
+                raise ValueError("Invalid pattern")
+            return real_glob(self, pattern, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "glob", glob)
+        result = find_foreign_config_files_declaring_post_merge_steps(
+            tmp_path, ["bad[*", "x/*.yaml"]
+        )
+        assert result == [str(foreign / "a.yaml")]
+        assert "bad[*" in capsys.readouterr().err
+
+    def test_a_pattern_raising_oserror_is_skipped(self, tmp_path, capsys, monkeypatch):
+        def glob(self, pattern, *args, **kwargs):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "glob", glob)
+        assert find_foreign_config_files_declaring_post_merge_steps(tmp_path, ["x/*"]) == []
+        assert "denied" in capsys.readouterr().err
 
     def test_a_directory_matching_the_glob_is_not_read(self, tmp_path):
         (tmp_path / "x" / "sub.yaml").mkdir(parents=True)

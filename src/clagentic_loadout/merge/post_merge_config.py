@@ -217,6 +217,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -977,7 +978,16 @@ def find_foreign_config_files_declaring_post_merge_steps(
     repo_root_path = Path(repo_root)
     matched: set[Path] = set()
     for pattern in foreign_config_globs:
-        matched.update(p for p in repo_root_path.glob(pattern) if p.is_file())
+        # A pattern that pathlib rejects (e.g. '**.yaml' raises ValueError on
+        # Python < 3.13) or a directory it cannot walk must not abort the
+        # warn-only scan: skip that pattern, keep the others.
+        try:
+            matched.update(p for p in repo_root_path.glob(pattern) if p.is_file())
+        except (ValueError, OSError) as exc:
+            print(
+                f"warning: skipping foreign_config_globs pattern {pattern!r}: {exc}",
+                file=sys.stderr,
+            )
 
     offending_files: list[str] = []
     for config_path in sorted(matched):

@@ -634,7 +634,17 @@ guard:
 ```
 
 Absolute globs and any glob containing `..` are ignored, so a pattern cannot
-leave the repo root.
+leave the repo root. A pattern the Python glob engine rejects (for example
+`**.yaml` before Python 3.13) is skipped with a warning on stderr; it never
+aborts a merge or a doctor run.
+
+**Migration note.** Earlier releases hard-coded one harness's directory
+convention: the dead-config cross-check scanned that harness's per-repo config
+directory, and the dispatch-discipline guard treated that directory and a
+second state directory as trivial. Both are now off by default (the guard keeps
+only `docs`). A deployment that relied on the old behaviour must list its own
+directories under `merge.foreign_config_globs` and `guard.trivial_dir_segments`
+in the user-level config file to keep it.
 
 ### Conformance
 

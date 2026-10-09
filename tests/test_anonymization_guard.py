@@ -1073,12 +1073,18 @@ DEPLOYMENT_VOCABULARY_PATTERNS: dict[str, re.Pattern[str]] = {
     # not a letter" lookahead miss the capital that starts the next CamelCase
     # word.
     'deployment vocabulary ("crew")': re.compile(
-        r"(?<![A-Za-z0-9])[Cc]rew(?![a-z0-9])"
-        r"|(?<=[a-z0-9])Crew(?![a-z0-9])"
-        r"|(?<![A-Za-z0-9])CREW(?![A-Za-z0-9])"
+        r"(?<![A-Za-z0-9])[Cc]rews?(?![a-z0-9])"
+        r"|(?<=[a-z0-9])Crews?(?![a-z0-9])"
+        r"|(?<![A-Za-z0-9])CREWS?(?![A-Za-z0-9])"
     ),
-    "harness directory convention (.crew/)": re.compile(r"\.crew/", re.IGNORECASE),
-    "harness directory convention (.lore/)": re.compile(r"\.lore/", re.IGNORECASE),
+    # No trailing slash required: a bare ".crew" / ".lore" constant (for
+    # example a directory-name set entry) names the same convention.
+    "harness directory convention (.crew)": re.compile(
+        r"(?<![A-Za-z0-9_])\.crew(?![A-Za-z0-9])", re.IGNORECASE
+    ),
+    "harness directory convention (.lore)": re.compile(
+        r"(?<![A-Za-z0-9_])\.lore(?![A-Za-z0-9])", re.IGNORECASE
+    ),
 }
 
 #: src/-relative paths allowed to carry the vocabulary. Delete with the alias.
@@ -1196,6 +1202,13 @@ def test_deployment_vocabulary_allowance_is_exactly_the_deprecated_alias() -> No
         'CREW_CONFIG_DIR_NAME = "x"\n',
         "x = myCrew\n",
         "x = lead_crewRole\n",
+        "x = crews\n",
+        "x = Crews\n",
+        "x = CREWS\n",
+        "x = myCrews\n",
+        'TRIVIAL = frozenset({"docs", ".lore"})\n',
+        'TRIVIAL = frozenset({"docs", ".crew"})\n',
+        'D = ".LORE"\n',
     ],
 )
 def test_deployment_vocabulary_guard_catches_identifier_and_string_shapes(
@@ -1230,7 +1243,8 @@ def test_deployment_vocabulary_guard_ignores_docstrings_comments_and_longer_word
 @pytest.mark.parametrize(
     "line",
     ["See the crew roster.\n", "Config lives in .crew/amos.yaml\n", "state in .lore/codex\n",
-     "CREW_SPAWN_AGENT_ID is set\n"],
+     "CREW_SPAWN_AGENT_ID is set\n", "Several crews share it.\n", "Crews and CREWS\n",
+     "the .lore directory\n", "a bare .crew entry\n"],
 )
 def test_deployment_vocabulary_guard_catches_doc_shapes(line: str, tmp_path: Path) -> None:
     bad_doc = tmp_path / "synthetic.md"

@@ -129,6 +129,17 @@ class TestResolveAgentBotIdentityGithub:
         with pytest.raises(AgentBotIdentityNotResolvableError):
             resolve_agent_bot_identity("amos", PLATFORM_GITHUB, config_root=tmp_path)
 
+    def test_unresolvable_error_names_the_actual_env_var(self, tmp_path):
+        _write_user_config(
+            tmp_path,
+            {"github_app": {"slugs": {"peaches": "reviewer-app"}, "callers": ["amos", "peaches"]}},
+        )
+        with pytest.raises(AgentBotIdentityNotResolvableError) as excinfo:
+            resolve_agent_bot_identity("amos", PLATFORM_GITHUB, config_root=tmp_path)
+        message = str(excinfo.value)
+        assert "set CLAGENTIC_LOADOUT_GITHUB_APP_SLUG," in message
+        assert "GITHUB_APP_SLUG_ENV_VAR" not in message
+
 
 class TestResolveAgentBotIdentityProviderVerifiedSlug:
     """lr-43c8d7: resolve_agent_bot_identity's provider_verified_app_slug

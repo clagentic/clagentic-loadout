@@ -77,6 +77,7 @@ from pathlib import Path
 
 from clagentic_loadout.platform_detect import PLATFORM_GITHUB
 from clagentic_loadout.transport.github_app_config import (
+    GITHUB_APP_SLUG_ENV_VAR,
     GithubAppSlugNotConfiguredError,
     read_configured_callers,
     resolve_github_app_slug,
@@ -230,8 +231,7 @@ def resolve_agent_bot_identity(
                 f"ambient git config for a recognized agent caller -- a "
                 f"mis-attributed commit is unrecoverable once merged. Fix: "
                 f"add a github_app.slugs.{caller} entry, or set "
-                f"{resolve_github_app_slug.__module__}."
-                f"GITHUB_APP_SLUG_ENV_VAR, or configure a credential "
+                f"{GITHUB_APP_SLUG_ENV_VAR}, or configure a credential "
                 f"provider that supplies a verified app_slug."
             ) from exc
 
