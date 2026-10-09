@@ -659,9 +659,12 @@ if [ "$DRY_RUN" -eq 1 ]; then
 fi
 
 # Without this, the venv tier's pip writes its cache under ~/.cache/pip. A
-# caller-set PIP_CACHE_DIR/PIP_NO_CACHE_DIR still wins.
+# caller-set PIP_CACHE_DIR still wins. PIP_NO_CACHE_DIR is deliberately not
+# consulted: pip reads values such as 0/false as caching ENABLED, so honouring
+# "any nonempty value" would let pip fall back to its HOME cache; an unused
+# cache dir is harmless when caching really is off.
 if [ "$NO_SEED_CONFIG" -eq 1 ] && [ "$INSTALLER" = "venv" ] \
-    && [ -z "${PIP_CACHE_DIR:-}" ] && [ -z "${PIP_NO_CACHE_DIR:-}" ]; then
+    && [ -z "${PIP_CACHE_DIR:-}" ]; then
     PIP_CACHE_DIR="$DATA_DIR/pip-cache"
     export PIP_CACHE_DIR
 fi

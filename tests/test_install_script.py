@@ -1175,6 +1175,34 @@ def test_install_sh_no_seed_config_leaves_home_untouched(
     assert help_run.returncode == 0, help_run.stderr
 
 
+@pytest.mark.parametrize("no_cache_value", ["0", "1"])
+def test_install_sh_no_seed_config_ignores_pip_no_cache_dir(
+    tmp_path: Path, shared_venv_data_dir: Path, no_cache_value: str
+) -> None:
+    """pip reads PIP_NO_CACHE_DIR=0 as caching enabled, so the relocation of
+    the cache into --data-dir must not be skipped on any nonempty value."""
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["PIP_NO_CACHE_DIR"] = no_cache_value
+    for var in ("PIP_CACHE_DIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME"):
+        env.pop(var, None)
+
+    result = _run(
+        "--installer", "venv",
+        "--source", str(CHECKOUT),
+        "--data-dir", str(shared_venv_data_dir),
+        "--bin-dir", str(tmp_path / "bin"),
+        "--skills-dir", str(tmp_path / "skills"),
+        "--no-seed-config",
+        env=env,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _tree_listing(home) == []
+
+
 def test_install_sh_default_still_seeds_config(tmp_path: Path, shared_venv_data_dir: Path) -> None:
     """Without the flag the seeding step runs exactly as before."""
     home = tmp_path / "home"
