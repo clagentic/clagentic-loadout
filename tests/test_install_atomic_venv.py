@@ -14,7 +14,6 @@ timestamp-pid release id and therefore a genuinely new release.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import threading
 from pathlib import Path
@@ -26,16 +25,8 @@ from test_install_script import (
     _restricted_path_env,
 )
 
-_COPY_IGNORE = shutil.ignore_patterns(
-    ".git", "tests", "docs", "__pycache__", "*.egg-info", "build", "dist", ".pytest_cache"
-)
-
-
-def _source_copy(tmp_path: Path, name: str = "src-copy") -> Path:
-    dst = tmp_path / name
-    shutil.copytree(CHECKOUT, dst, ignore=_COPY_IGNORE)
-    return dst
-
+from _install_support import git_source as _git_source
+from _install_support import source_copy as _source_copy
 
 class _Layout:
     """Data dir, bin dir, HOME and env for one isolated install target."""
@@ -245,17 +236,6 @@ def test_default_caller_shape_home_set_no_flags(tmp_path: Path) -> None:
         done = subprocess.run([str(link), "--help"], capture_output=True, text=True)
         assert done.returncode == 0, f"{name}: {done.stderr}"
     assert (home / ".config" / "clagentic" / "loadout" / "config.yaml").is_file()
-
-
-def _git_source(tmp_path: Path, name: str) -> Path:
-    """A source copy committed as a git work tree, so release ids are sha-based."""
-    src = _source_copy(tmp_path, name)
-    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
-    subprocess.run(["git", "init", "-q"], cwd=src, check=True)
-    shutil.copy(CHECKOUT / ".gitignore", src / ".gitignore")
-    subprocess.run(["git", "add", "-A"], cwd=src, check=True)
-    subprocess.run([*git, "commit", "-q", "-m", "init"], cwd=src, check=True)
-    return src
 
 
 def _live_python(layout: _Layout, code: str) -> str:
