@@ -1099,6 +1099,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "refuses the merge (EXIT_PRE_CHECKS_FAILED) unless this flag is "
         "passed.",
     )
+    parser.add_argument(
+        "--report-only",
+        action="store_true",
+        default=False,
+        dest="report_only",
+        help="Run the entire gate chain exactly as a real merge would "
+        "(namespace, authority, stale-SHA, reviewer verdicts, repo gate, "
+        "diff-scope, title, CI status, pre_checks in the merge-result clone) "
+        "and print the verdict, then exit without merging, without "
+        "post_merge_steps, without tree sync and without posting the merge "
+        "attestation or any task signal. Exits 0 when the merge would be "
+        "authorized; a refusal returns the same exit code a real run would. "
+        "The merger credential is still minted, for the read calls only.",
+    )
     return parser
 
 
@@ -1721,6 +1735,17 @@ def _run(
             f"PASSED for PR #{args.pr_number} in {owner}/{repo}",
             file=sys.stderr,
         )
+
+    # --report-only stops here: every gate above ran exactly as a real merge
+    # would, and a refusal already exited with its own code. Nothing below
+    # mutates the host, the tree or any task state.
+    if args.report_only:
+        print(
+            f"merge: report-only -- all gates PASSED; PR #{args.pr_number} in "
+            f"{owner}/{repo} would be merged (method={args.merge_method!r}, "
+            f"head={current_head_sha!r}); nothing was merged"
+        )
+        return EXIT_OK
 
     # 9. All gates passed -- execute the merge.
     print(
