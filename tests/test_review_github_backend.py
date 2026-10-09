@@ -1114,3 +1114,22 @@ class TestGithubReviewBackendDeleteOwnComment:
         backend = github_backend.GithubReviewBackend("tok", opener=opener)
         backend.delete_own_comment(owner="o", repo="r", comment_id=123)
         assert state["deleted"] is True
+
+
+class TestReuseSignal:
+    def test_dedupe_hit_is_flagged_reused_with_the_earlier_created_at(self, monkeypatch):
+        _configure_app_slug(monkeypatch, "reviewer-bot")
+        server = _FakeReviewsServer()
+        first = github_backend.post_and_verify_review(
+            "some-owner", "some-repo", 42, "blocking: findings here", "tok",
+            opener=server.opener,
+        )
+        second = github_backend.post_and_verify_review(
+            "some-owner", "some-repo", 42, "blocking: findings here", "tok",
+            opener=server.opener,
+        )
+
+        assert first.reused is False
+        assert second.reused is True
+        assert second.id == first.id
+        assert second.created_at == server.reviews[0]["created_at"]

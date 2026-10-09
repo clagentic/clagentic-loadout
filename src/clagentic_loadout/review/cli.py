@@ -801,6 +801,9 @@ def _post_command(
         "verified_by_login": posted.get("verified_by_login"),
         "verdict_block_verified": True,
     }
+    for key in ("comment", "reused_from_created_at"):
+        if key in posted:
+            result[key] = posted[key]
     if KEY_DROPPED in evidence:
         result["dropped_count"] = len(evidence[KEY_DROPPED])
 

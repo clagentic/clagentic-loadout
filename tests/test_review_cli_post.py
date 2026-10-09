@@ -460,3 +460,45 @@ def test_a_hung_origin_probe_is_bounded_and_means_no_remote(tmp_path, monkeypatc
 
     assert review_cli._origin_url(tmp_path) == ""
     assert seen["timeout"] == review_cli._GIT_PROBE_TIMEOUT_SECONDS
+
+
+def test_a_fresh_post_reports_comment_created(env, tmp_path, capsys):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+
+    code, payload = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
+
+    assert code == 0
+    assert payload["result"] == "posted"
+    assert payload["comment"] == "created"
+    assert "reused_from_created_at" not in payload
+
+
+def test_a_repeated_post_reports_comment_reused_with_the_same_id(env, tmp_path, capsys):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+    args = ("--findings", str(findings), "--status", "blocking")
+
+    _, first = env.post(*args, capsys=capsys)
+    code, second = env.post(*args, capsys=capsys)
+
+    assert code == 0
+    assert second["result"] == "posted"
+    assert second["comment"] == "reused"
+    assert second["verified_id"] == first["verified_id"]
+    assert second["reused_from_created_at"] == "2099-01-01T00:00:10Z"
+
+
+def test_a_reused_comment_on_a_moved_head_keeps_both_signals(env, tmp_path, capsys, monkeypatch):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+    args = ("--findings", str(findings), "--status", "blocking")
+    env.post(*args, capsys=capsys)
+    reads: list[int] = []
+    monkeypatch.setattr(
+        review_cli, "_acquire", _acquire_moving_after(review_cli._acquire, reads, stable_reads=2)
+    )
+
+    code, payload = env.post(*args, capsys=capsys)
+
+    assert code == review_cli.EXIT_STALE_HEAD
+    assert payload["result"] == "posted_head_moved"
+    assert payload["comment"] == "reused"
+    assert payload["reused_from_created_at"] == "2099-01-01T00:00:10Z"
