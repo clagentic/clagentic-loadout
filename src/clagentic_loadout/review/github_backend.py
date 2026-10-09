@@ -763,7 +763,7 @@ def delete_own_comment(
         raise DeleteOwnCommentRefusedError(
             f"delete-own-comment REFUSED -- comment {comment_id!r} on "
             f"{owner}/{repo} is authored by {comment_login!r}, not the "
-            f"caller's own bot login {own_login!r}. No crew agent may "
+            f"caller's own bot login {own_login!r}. No agent may "
             f"delete another author's comment (cross-author delete is an "
             f"audit-tampering/censorship surface). DELETE not issued."
         )

@@ -9,6 +9,7 @@ real agent name hardcoded anywhere in the module under test.
 from __future__ import annotations
 
 from clagentic_loadout.guard.dispatch_discipline import (
+    DEFAULT_TRIVIAL_DIR_SEGMENTS,
     DispatchGuidance,
     check_dispatch_discipline,
     is_trivial_path,
@@ -42,11 +43,18 @@ class TestIsTrivialPath:
     def test_docs_dir_segment_is_trivial(self):
         assert is_trivial_path("/some/project/docs/guard-policy.md".replace(".md", "")) is True
 
-    def test_crew_dir_segment_is_trivial(self):
-        assert is_trivial_path("/some/project/.crew/amos.yaml") is True
+    def test_deployment_dir_segment_is_trivial_only_when_the_caller_supplies_it(self):
+        path = "/some/project/.crew/amos.yaml"
+        assert is_trivial_path(path) is False
+        assert is_trivial_path(path, DEFAULT_TRIVIAL_DIR_SEGMENTS | {".crew"}) is True
 
-    def test_lore_dir_segment_is_trivial(self):
-        assert is_trivial_path("/some/project/.lore/codex.md".replace(".md", "")) is True
+    def test_second_deployment_dir_segment_via_caller_supplied_set(self):
+        path = "/some/project/.lore/codex".replace(".md", "")
+        assert is_trivial_path(path) is False
+        assert is_trivial_path(path, {".lore"}) is True
+
+    def test_default_trivial_dir_segments_is_just_docs(self):
+        assert DEFAULT_TRIVIAL_DIR_SEGMENTS == frozenset({"docs"})
 
     def test_source_file_is_not_trivial(self):
         assert is_trivial_path("/some/project/src/module.py") is False
@@ -95,6 +103,18 @@ class TestCheckDispatchDiscipline:
             guidance=_GUIDANCE,
         )
         assert result is None
+
+    def test_caller_supplied_trivial_dir_segment_suppresses_warning(self):
+        path = "/repo/.agent-state/notes.yaml"
+        assert check_dispatch_discipline(
+            path, is_named_agent=False, guidance=_GUIDANCE
+        ) is not None
+        assert check_dispatch_discipline(
+            path,
+            is_named_agent=False,
+            guidance=_GUIDANCE,
+            trivial_dir_segments={".agent-state"},
+        ) is None
 
     def test_build_territory_edit_from_non_agent_warns(self):
         result = check_dispatch_discipline(

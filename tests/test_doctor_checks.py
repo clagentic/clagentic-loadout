@@ -21,7 +21,7 @@ from clagentic_loadout.doctor.checks import (
     check_builder_identity_config,
     check_credential_validity,
     check_credentials,
-    check_dead_crew_post_merge_config,
+    check_dead_foreign_post_merge_config,
     check_github_app_slugs_coverage,
     check_repo_loadout_schema,
 )
@@ -100,6 +100,21 @@ def _write_crew_config(repo_root, filename: str, yaml_text: str) -> None:
     crew_dir = repo_root / ".crew"
     crew_dir.mkdir(parents=True, exist_ok=True)
     (crew_dir / filename).write_text(yaml_text, encoding="utf-8")
+
+
+def _write_foreign_globs_config(config_root, globs) -> None:
+    config_root.mkdir(parents=True, exist_ok=True)
+    (config_root / "config.yaml").write_text(
+        yaml.safe_dump({"merge": {"foreign_config_globs": list(globs)}}), encoding="utf-8"
+    )
+
+
+def check_dead_crew_post_merge_config(repo_root):
+    """The dead-config check as the deployment that keeps `.crew/*.yaml`
+    configures it: those files are the foreign surface."""
+    config_root = repo_root / "_user_config"
+    _write_foreign_globs_config(config_root, [".crew/*.yaml"])
+    return check_dead_foreign_post_merge_config(repo_root, config_root=config_root)
 
 
 def _write_legacy_loadout_config(repo_root, yaml_text: str) -> None:
@@ -948,6 +963,58 @@ class TestCheckDeadCrewPostMergeConfig:
         result = check_dead_crew_post_merge_config(tmp_path)
         assert result.ok is True
         assert result.resolved["offending_files"] == []
+
+
+class TestCheckDeadForeignPostMergeConfigGlobs:
+    """The foreign-config cross-check is driven by the user-level
+    `merge.foreign_config_globs`, and is off when none are configured."""
+
+    _DEAD_STEPS = "post_merge_steps:\n  - cmd: 'make install'\n"
+
+    def test_no_globs_configured_disables_the_check_even_with_a_dead_declaration(
+        self, tmp_path
+    ):
+        _write_crew_config(tmp_path, "amos.yaml", self._DEAD_STEPS)
+        result = check_dead_foreign_post_merge_config(
+            tmp_path, config_root=tmp_path / "no-user-config"
+        )
+        assert result.ok is True
+        assert result.name == "dead_foreign_post_merge_config"
+        assert result.resolved["foreign_config_globs"] == []
+        assert result.resolved["offending_files"] == []
+
+    def test_empty_globs_list_disables_the_check(self, tmp_path):
+        _write_crew_config(tmp_path, "amos.yaml", self._DEAD_STEPS)
+        _write_foreign_globs_config(tmp_path / "cfg", [])
+        result = check_dead_foreign_post_merge_config(tmp_path, config_root=tmp_path / "cfg")
+        assert result.ok is True
+        assert result.resolved["foreign_config_globs"] == []
+
+    def test_any_configured_glob_works_not_just_one_directory_convention(self, tmp_path):
+        other = tmp_path / "tooling"
+        other.mkdir()
+        (other / "agent.yml").write_text(self._DEAD_STEPS, encoding="utf-8")
+        _write_foreign_globs_config(tmp_path / "cfg", ["tooling/*.yml"])
+        result = check_dead_foreign_post_merge_config(tmp_path, config_root=tmp_path / "cfg")
+        assert result.ok is False
+        assert result.resolved["offending_files"] == [str(other / "agent.yml")]
+        assert "tooling/*.yml" in result.summary
+
+    def test_second_glob_adds_files_to_the_scan(self, tmp_path):
+        _write_crew_config(tmp_path, "amos.yaml", self._DEAD_STEPS)
+        other = tmp_path / "tooling"
+        other.mkdir()
+        (other / "agent.yml").write_text(self._DEAD_STEPS, encoding="utf-8")
+        _write_foreign_globs_config(tmp_path / "cfg", [".crew/*.yaml", "tooling/*.yml"])
+        result = check_dead_foreign_post_merge_config(tmp_path, config_root=tmp_path / "cfg")
+        assert len(result.resolved["offending_files"]) == 2
+
+    @pytest.mark.parametrize("unsafe", ["../outside/*.yaml", "/etc/*.yaml"])
+    def test_absolute_and_parent_escaping_globs_are_ignored(self, tmp_path, unsafe):
+        _write_foreign_globs_config(tmp_path / "cfg", [unsafe])
+        result = check_dead_foreign_post_merge_config(tmp_path, config_root=tmp_path / "cfg")
+        assert result.ok is True
+        assert result.resolved["foreign_config_globs"] == []
 
 
 class TestCheckBuilderIdentityConfig:

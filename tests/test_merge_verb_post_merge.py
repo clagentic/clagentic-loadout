@@ -1263,7 +1263,40 @@ class TestDeadCrewPostMergeConfigWarning:
     that actually runs unattended. WARN, NEVER REFUSE (operator-directed
     disposition) -- every test here that reaches this shape still asserts
     EXIT_OK; there is no test in this class asserting a non-zero exit
-    caused by this warning, because none exists."""
+    caused by this warning, because none exists.
+
+    The cross-check is driven by the deployment's user-level
+    `merge.foreign_config_globs`; the autouse fixture configures
+    `.crew/*.yaml` the way a deployment that keeps that convention would."""
+
+    @pytest.fixture(autouse=True)
+    def _foreign_globs_configured(self, tmp_path, monkeypatch):
+        config_root = tmp_path.parent / f"{tmp_path.name}-user-config"
+        config_root.mkdir()
+        (config_root / "config.yaml").write_text(
+            "merge:\n  foreign_config_globs: ['.crew/*.yaml']\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", config_root)
+
+    def test_no_warning_without_configured_globs_even_with_a_stale_mention(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        monkeypatch.setattr(
+            provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "no-user-config"
+        )
+        _init_repo_with_origin(tmp_path)
+        _write_crew_yaml(
+            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+        )
+        argv = _base_args(**{"--repo-path": str(tmp_path)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        assert "NEVER reads that key" not in capsys.readouterr().err
 
     def test_stale_crew_yaml_mention_warns_but_still_exits_ok(self, tmp_path, capsys):
         _init_repo_with_origin(tmp_path)

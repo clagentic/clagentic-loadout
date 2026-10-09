@@ -1022,13 +1022,13 @@ section fails closed (`EXIT_AUTHOR_MISMATCH`) rather than silently
 falling back to no identity — a malformed config an operator believes is
 active must fail loud, not produce false assurance.
 
-**Caller-derived commit identity, unconditional for a recognized crew
+**Caller-derived commit identity, unconditional for a recognized agent
 caller on GitHub (no `builder_identity:` needed):** ahead of the
 `builder_identity:` fallback above, this verb derives a bot commit
 identity directly from the deployment's existing `github_app:` section
-(`push.crew_identity`) for a `--caller` present in `github_app.callers`,
+(`push.agent_identity`) for a `--caller` present in `github_app.callers`,
 pushing to GitHub — see
-[docs/provisioning.md](provisioning.md#derived-commit-identity-for-a-recognized-crew-caller-github-only)
+[docs/provisioning.md](provisioning.md#derived-commit-identity-for-a-recognized-agent-caller-github-only)
 for the full contract, the precedence order (`--bot-name`/`--bot-email` >
 caller-derived > `builder_identity:` config > none), the deliberate
 bot-badge-binding limitation and why it is a settled trade-off rather than
@@ -1158,7 +1158,7 @@ check holds **no state between invocations**, no lock file, no TTL, no release s
 janitor; every invocation recomputes its verdict fresh from live git state. (2) it had no
 operator-reachable override, which produced a circular dead end an entire follow-up task
 failed to escape — `--override-contention-check` (below) is the **required** escape
-hatch this design guarantees exists. (3) it only ever saw crew-dispatched callers (a
+hatch this design guarantees exists. (3) it only ever saw dispatcher-launched callers (a
 dispatch-hook enforcement point is blind to direct operator use) — this check is wired
 into the verb itself, so every caller goes through it.
 
@@ -1649,7 +1649,7 @@ lore-free (CLAUDE.md rule 6a): tool identity + version (`Merged via
 clagentic-loadout vX.Y.Z`), the gated HEAD SHA and the SHA that landed, the
 required-reviewer logins whose clean verdicts gated the merge (or `(none
 required)`), and the CI-status gate's own already-computed disposition. No
-lore references, no `LORE_*` env, no crew vocabulary — roles (reviewer
+lore references, no `LORE_*` env, no deployment vocabulary — roles (reviewer
 logins), never agent names. **Fail-open by design:** the merge above has
 already succeeded by this point, so a failed attestation POST (network
 error, non-2xx) is logged to stderr and swallowed — it never changes
@@ -1689,24 +1689,27 @@ API-only merge) or `--skip-post-merge` (skip regardless of tree). Omitting
 caller must now say what it means, never rely on what a missing flag happens
 to default to.
 
-**Dead `.crew/<role>.yaml` `post_merge_steps` cross-check, WARN not refuse:**
-`.crew/<role>.yaml` (crew-dispatch config, a DIFFERENT surface than this
-repo's own `.clagentic/loadout/config.yaml`) can declare a `post_merge_steps`
-key that `load_post_merge_steps` has never read — `loadout-doctor`'s
-`check_dead_crew_post_merge_config` (see that section above) flags this, but
-only when someone explicitly runs doctor. Step 10 also surfaces the SAME
-cross-check directly here, on the path that actually runs unattended: when no
-steps will run this invocation AND the repo's own live config never
-EXPLICITLY declares the `post_merge_steps` key (a repo that wrote
-`post_merge_steps: []` deliberately is never warned — only a repo where the
-key is absent everywhere) AND at least one `.crew/*.yaml` file mentions the
-key, a `merge: WARNING --` line on stderr names every offending file and
-proceeds with the merge exactly as before — never a refusal, never a changed
-exit code. A repo with a stale `.crew/*.yaml` comment must never become
-unmergeable over it; this is a diagnostic surfaced louder, not a new gate.
-Read-only: only the key's presence and the declaring filename are ever
-inspected or printed — `.crew/*.yaml` is not, and does not become, an
-executable step-loading path.
+**Dead foreign-config `post_merge_steps` cross-check, WARN not refuse:**
+another tool's per-repo config file (a DIFFERENT surface than this repo's own
+`.clagentic/loadout/config.yaml`) can declare a `post_merge_steps` key that
+`load_post_merge_steps` has never read — `loadout-doctor`'s
+`check_dead_foreign_post_merge_config` (see that section below) flags this,
+but only when someone explicitly runs doctor. Which files count as foreign
+config is deployment configuration: the user-level config file's
+`merge.foreign_config_globs` list (globs relative to the repo root, e.g.
+`[".agent/*.yaml"]`). It is empty by default, which turns the cross-check
+off. Step 10 also surfaces the SAME cross-check directly here, on the path
+that actually runs unattended: when no steps will run this invocation AND the
+repo's own live config never EXPLICITLY declares the `post_merge_steps` key (a
+repo that wrote `post_merge_steps: []` deliberately is never warned — only a
+repo where the key is absent everywhere) AND at least one file matching a
+configured glob mentions the key, a `merge: WARNING --` line on stderr names
+every offending file and the configured globs and proceeds with the merge
+exactly as before — never a refusal, never a changed exit code. A repo with a
+stale comment in such a file must never become unmergeable over it; this is a
+diagnostic surfaced louder, not a new gate. Read-only: only the key's presence
+and the declaring filename are ever inspected or printed — a foreign config
+file is not, and does not become, an executable step-loading path.
 
 **Working-tree sync after merge, and landing on the base branch
 (`sync_tree_after_merge`):** whenever `--repo-path` is given,
@@ -2144,25 +2147,28 @@ define, always reporting RESOLVED values rather than a guess:
    `.loadout/` marker dir (no config at the new path, or a config.yaml only
    present there) is a WARN, not a failure — migration-incomplete signal,
    removed once every repo finishes migrating onto the new path.
-3b. **Dead `.crew/<role>.yaml` `post_merge_steps` cross-check**
-   (`check_dead_crew_post_merge_config`, `--repo-root`) — `.crew/<role>.yaml`
-   is a DIFFERENT config surface than `.clagentic/loadout/config.yaml`
-   (per-role dispatch config, not this package's own repo-local config),
-   and `merge.post_merge_config.load_post_merge_steps` has NEVER read a
-   `post_merge_steps` key from it — both the missing-section and
+3b. **Dead foreign-config `post_merge_steps` cross-check**
+   (`check_dead_foreign_post_merge_config`, `--repo-root`) — files matching
+   the deployment's `merge.foreign_config_globs` (user-level config, globs
+   relative to the repo root; empty by default, which makes this check a
+   passing no-op) are a DIFFERENT config surface than
+   `.clagentic/loadout/config.yaml` (another tool's per-repo config, not
+   this package's own repo-local config), and
+   `merge.post_merge_config.load_post_merge_steps` has NEVER read a
+   `post_merge_steps` key from them — both the missing-section and
    missing-key path there are documented, silent no-ops. A repo whose
-   `.crew/<role>.yaml` declares `post_merge_steps` while its own
+   matched file declares `post_merge_steps` while its own
    `.clagentic/loadout/config.yaml` declares none gets a clean
    `loadout-merge` exit with `steps_run=0` and never deploys, with nothing
    in that run's own output naming the file the steps actually needed to
-   live in. This check FAILs that shape, naming every offending
-   `.crew/*.yaml` file and the one file `post_merge_steps` must actually
+   live in. This check FAILs that shape, naming every offending matched
+   file and the one file `post_merge_steps` must actually
    live in to run. A repo whose `.clagentic/loadout/config.yaml` already
-   declares its own live `post_merge_steps` passes even if `.crew/*.yaml`
+   declares its own live `post_merge_steps` passes even if a matched file
    also mentions the key — a leftover mention there is dead documentation,
    not a dead deploy. THIS CHECK IS DOCTOR-ONLY AND POST-HOC — it fires
    only when someone runs `loadout-doctor --repo-root`. `loadout-merge`'s
-   own step 10 (see the `loadout-merge` section, "Dead `.crew/<role>.yaml`
+   own step 10 (see the `loadout-merge` section, "Dead foreign-config
    `post_merge_steps` cross-check") surfaces the SAME cross-check as a
    loud, non-blocking WARNING at the point a merge actually happens, so the
    class is caught even on an unattended merge where nobody runs doctor.
@@ -2179,7 +2185,7 @@ define, always reporting RESOLVED values rather than a guess:
 
 Exits `2` (`EXIT_CHECKS_FAILED`) if any check's outcome is a failure, `0`
 if every check passes. `--repo-root` opts into the schema check and the
-dead-crew-post_merge_config cross-check, and scopes the slugs-coverage
+dead-foreign-post_merge_config cross-check, and scopes the slugs-coverage
 check's role taxonomy to that repo; omitting it skips both repo-scoped
 checks and falls back to the built-in reference role mapping for slugs
 coverage. The deployment-tier identity check (item 4 above) always runs,

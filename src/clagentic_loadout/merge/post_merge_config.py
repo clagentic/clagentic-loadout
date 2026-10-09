@@ -217,6 +217,8 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
@@ -846,7 +848,7 @@ def post_merge_steps_key_declared(
 ) -> bool:
     """Whether the repo's own live config EXPLICITLY names the
     `post_merge_steps` key inside its `merge:` section (lr-f9a01b followup
-    — see `merge.verb`'s module docstring, "DEAD .crew/<role>.yaml
+    — see `merge.verb`'s module docstring, "DEAD FOREIGN-CONFIG
     post_merge_steps CROSS-CHECK", for the caller this exists for).
 
     `load_post_merge_steps` returns `[]` for BOTH "this repo configured no
@@ -859,7 +861,7 @@ def post_merge_steps_key_declared(
     NOW (`merge.verb`'s step 10, `merge.post_merge_verb`, `doctor.checks`'
     `check_repo_loadout_schema` all only ever needed "will steps run,
     yes/no" — see that function's own docstring). A cross-check that warns
-    when a DIFFERENT config surface (`.crew/<role>.yaml`) mentions
+    when a DIFFERENT config surface (a foreign tool's config file) mentions
     `post_merge_steps` needs the finer distinction: a repo that explicitly
     wrote `post_merge_steps: []` in its OWN live config has made an
     informed choice at the CORRECT file and should never be warned about a
@@ -894,62 +896,103 @@ def post_merge_steps_key_declared(
     return CONFIG_KEY_POST_MERGE_STEPS in merge_section
 
 
-#: Directory name (repo-root-relative) holding per-role dispatch config
-#: files (one `<role>.yaml` file per role) -- a DIFFERENT config surface
-#: than this module's own repo-local config file. `load_post_merge_steps`
-#: has never read from here (see its own docstring) -- this constant/the
-#: scan function below exist ONLY to detect a `post_merge_steps` mention
-#: declared in one of these files, which silently never runs (lr-f9a01b).
-CREW_CONFIG_DIR_NAME = ".crew"
+#: Key within the USER-LEVEL `merge:` section (the deployment tier, read
+#: through `load_user_config_section` like every other deployment-owned knob
+#: here) listing glob patterns, relative to the repo root, that match config
+#: files belonging to SOME OTHER tool's config surface -- files that
+#: `load_post_merge_steps` has never read but where a repo author might
+#: still declare a `post_merge_steps` key that then silently never runs.
+#: Empty by default, which turns the cross-check off: loadout names no
+#: foreign tool's directory convention itself, a deployment lists its own.
+CONFIG_KEY_FOREIGN_CONFIG_GLOBS = "foreign_config_globs"
 
 
-def find_crew_yaml_files_declaring_post_merge_steps(
+def resolve_foreign_config_globs(
+    *,
+    config_root: str | Path | None = None,
+) -> tuple[str, ...]:
+    """The deployment's `merge.foreign_config_globs` list (user-level config),
+    or `()` when absent.
+
+    Lenient by design, like `resolve_env_overrides`: this feeds a
+    warn-only cross-check and must never block a merge or a doctor run, so
+    a non-list value or a non-string entry is ignored, and so is an
+    absolute pattern or one with a `..` segment (a glob must stay inside
+    the repo root it is evaluated against).
+    """
+    section = load_user_config_section(CONFIG_SECTION_MERGE, config_root=config_root)
+    raw = section.get(CONFIG_KEY_FOREIGN_CONFIG_GLOBS)
+    if not isinstance(raw, list):
+        return ()
+    globs: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        pattern = entry.strip()
+        parts = Path(pattern).parts
+        if Path(pattern).is_absolute() or ".." in parts:
+            continue
+        globs.append(pattern)
+    return tuple(globs)
+
+
+def find_foreign_config_files_declaring_post_merge_steps(
     repo_root: str | Path | None,
+    foreign_config_globs: Sequence[str],
 ) -> list[str]:
-    """Return the sorted, stringified paths of every `<repo_root>/.crew/
-    *.yaml` file that mentions a `post_merge_steps` key -- either at that
-    file's own top level, or nested one level under a `merge:` section (the
-    shape a repo author who has seen this module's own `merge:`-section
-    convention might reasonably also try there, even though neither shape
-    is ever read from `.crew/*.yaml`) (lr-f9a01b).
+    """Return the sorted, stringified paths of every file under *repo_root*
+    matching one of *foreign_config_globs* that mentions a
+    `post_merge_steps` key -- either at that file's own top level, or
+    nested one level under a `merge:` section (the shape a repo author who
+    has seen this module's own `merge:`-section convention might
+    reasonably also try there, even though neither shape is ever read from
+    such a file) (lr-f9a01b).
 
     SHARED SCAN LOGIC, ONE OWNER: both `doctor.checks.
-    check_dead_crew_post_merge_config` (the diagnostic, `--repo-root`-gated
-    doctor finding) and `merge.verb._run`'s step-10 warning (the same
+    check_dead_foreign_post_merge_config` (the diagnostic, `--repo-root`-
+    gated doctor finding) and `merge.verb._run`'s step-10 warning (the same
     cross-check surfaced loudly at the point a merge actually happens,
     added because a doctor-only check only fires when someone thinks to
-    run doctor -- see that module's docstring, "DEAD .crew/<role>.yaml
+    run doctor -- see that module's docstring, "DEAD FOREIGN-CONFIG
     post_merge_steps CROSS-CHECK") call this SAME function, so the two
     surfaces can never diverge on what counts as an offending file.
 
-    Returns `[]` when *repo_root* is None, there is no `.crew/` directory,
-    or no `.crew/*.yaml` file mentions the key anywhere -- the common case,
-    nothing to warn about. A `.crew/*.yaml` file that is unreadable or
-    malformed YAML, or whose top-level document is not a mapping, is
-    silently skipped (never raised) -- this is a read-only scan of a
-    config surface this module does not own the schema for; a malformed
-    `.crew/*.yaml` file is a conformance concern for whatever schema DOES
-    own that file's shape, not something this function should fail over.
+    Returns `[]` when *repo_root* is None, *foreign_config_globs* is empty
+    (the default deployment: cross-check off), no glob matches a file, or
+    no matched file mentions the key anywhere -- the common case, nothing
+    to warn about. A matched file that is unreadable or malformed YAML, or
+    whose top-level document is not a mapping, is silently skipped (never
+    raised) -- this is a read-only scan of a config surface this module
+    does not own the schema for; a malformed file is a conformance concern
+    for whatever schema DOES own that file's shape, not something this
+    function should fail over.
 
     Read-only: never parses/returns `post_merge_steps`' own VALUE (the
     step list itself) -- only whether the KEY is present and which file
-    declared it. A `.crew/*.yaml` mention is never treated as a source of
-    steps to execute; `.crew/*.yaml` was not, and is not by this function,
-    part of any executable step-loading path (see `load_post_merge_steps`'
-    own docstring).
+    declared it. A mention in a matched file is never treated as a source
+    of steps to execute (see `load_post_merge_steps`' own docstring).
     """
-    if repo_root is None:
+    if repo_root is None or not foreign_config_globs:
         return []
 
     repo_root_path = Path(repo_root)
-    crew_dir = repo_root_path / CREW_CONFIG_DIR_NAME
-    if not crew_dir.is_dir():
-        return []
+    matched: set[Path] = set()
+    for pattern in foreign_config_globs:
+        # A pattern that pathlib rejects (e.g. '**.yaml' raises ValueError on
+        # Python < 3.13) or a directory it cannot walk must not abort the
+        # warn-only scan: skip that pattern, keep the others.
+        try:
+            matched.update(p for p in repo_root_path.glob(pattern) if p.is_file())
+        except (ValueError, OSError) as exc:
+            print(
+                f"warning: skipping foreign_config_globs pattern {pattern!r}: {exc}",
+                file=sys.stderr,
+            )
 
     offending_files: list[str] = []
-    for crew_config_path in sorted(crew_dir.glob("*.yaml")):
+    for config_path in sorted(matched):
         try:
-            raw = yaml.safe_load(crew_config_path.read_text(encoding="utf-8"))
+            raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
         if not isinstance(raw, dict):
@@ -960,7 +1003,7 @@ def find_crew_yaml_files_declaring_post_merge_steps(
             isinstance(merge_section, dict) and CONFIG_KEY_POST_MERGE_STEPS in merge_section
         )
         if declares_top_level or declares_nested:
-            offending_files.append(str(crew_config_path))
+            offending_files.append(str(config_path))
 
     return offending_files
 
@@ -1434,6 +1477,7 @@ def resolve_env_overrides(
 __all__ = [
     "CONFIG_KEY_ENFORCE_MERGE_SHAPE",
     "CONFIG_KEY_ENFORCE_SINGLE_VERDICT_FENCE",
+    "CONFIG_KEY_FOREIGN_CONFIG_GLOBS",
     "CONFIG_KEY_GIT_WORKING_TREE",
     "CONFIG_KEY_MODEL_ATTESTATION_DENYLIST",
     "CONFIG_KEY_POST_MERGE_STEP_TIMEOUT_SECONDS",
@@ -1442,7 +1486,6 @@ __all__ = [
     "CONFIG_KEY_SYNC_TREE_AFTER_MERGE",
     "CONFIG_SECTION_MERGE",
     "CONFIG_SECTION_POST_MERGE_ENV",
-    "CREW_CONFIG_DIR_NAME",
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "DEFAULT_ENFORCE_MERGE_SHAPE",
     "DEFAULT_ENFORCE_SINGLE_VERDICT_FENCE",
@@ -1451,13 +1494,14 @@ __all__ = [
     "DEFAULT_SYNC_TREE_AFTER_MERGE",
     "ENV_OVERRIDE_PREFIX",
     "config_path_tracked_at_git_sha",
-    "find_crew_yaml_files_declaring_post_merge_steps",
+    "find_foreign_config_files_declaring_post_merge_steps",
     "load_post_merge_steps",
     "load_post_merge_steps_from_git_sha",
     "post_merge_steps_key_declared",
     "resolve_enforce_merge_shape",
     "resolve_enforce_single_verdict_fence",
     "resolve_env_overrides",
+    "resolve_foreign_config_globs",
     "resolve_git_tree_relative_config_paths",
     "resolve_git_working_tree",
     "resolve_model_attestation_denylist",

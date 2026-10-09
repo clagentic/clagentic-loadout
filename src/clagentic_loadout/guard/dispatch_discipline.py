@@ -44,11 +44,15 @@ PORT PATTERN — mirrors `guard.write_scope`'s established convention:
    redirect prose a caller's own harness wants surfaced; this module
    composes it into the final message but never invents the label itself.
 
-5. TRIVIAL-PATH CLASSIFICATION IS PORTED VERBATIM (a pure predicate with no
-   identity or harness coupling at all): `*.md` files, `.gitignore`/
-   `.gitattributes`, `LICENSE`/`LICENSE.*`, and any path under a `docs`,
-   `.crew`, or `.lore` directory segment are operator-trivial and never
-   trigger the warning, regardless of caller.
+5. TRIVIAL-PATH CLASSIFICATION IS A PURE PREDICATE with no identity or
+   harness coupling at all: `*.md` files, `.gitignore`/`.gitattributes`,
+   `LICENSE`/`LICENSE.*`, and any path under a directory segment in
+   `DEFAULT_TRIVIAL_DIR_SEGMENTS` (just `docs`) are operator-trivial and
+   never trigger the warning, regardless of caller. A deployment's own
+   harness directory conventions are NOT built in: the caller passes them
+   as `trivial_dir_segments` (see `guard.dispatch_config.
+   load_trivial_dir_segments` for the user-level config reader a harness
+   adapter can use to obtain them).
 
 ANSI-C HARD-DENY GATE — N/A, DOCUMENTED RATHER THAN OMITTED (per this task's
 dispatch instruction and the SE3/SE4 precedent in docs/guard-policy.md):
@@ -68,27 +72,37 @@ ceremony over a string that is never shell-parsed.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 _TRIVIAL_BASENAMES: frozenset[str] = frozenset({".gitignore", ".gitattributes"})
 _TRIVIAL_BASENAME_PREFIXES: tuple[str, ...] = ("LICENSE",)
-_TRIVIAL_DIR_SEGMENTS: frozenset[str] = frozenset({"docs", ".crew", ".lore"})
+
+#: Directory segments that are trivial for every deployment. Anything
+#: deployment-specific is supplied by the caller (`trivial_dir_segments`).
+DEFAULT_TRIVIAL_DIR_SEGMENTS: frozenset[str] = frozenset({"docs"})
 
 
-def is_trivial_path(file_path: str) -> bool:
+def is_trivial_path(
+    file_path: str,
+    trivial_dir_segments: Iterable[str] = DEFAULT_TRIVIAL_DIR_SEGMENTS,
+) -> bool:
     """Return True when *file_path* is operator-trivial (documentation / VCS
     metadata) and should never trigger a dispatch-discipline warning.
 
-    Trivial set (reference `_is_trivial_path`, ported verbatim):
+    Trivial set:
       - basename `*.md`
       - `.gitignore`, `.gitattributes`
       - `LICENSE` / `LICENSE.*`
-      - any path segment named `docs`, `.crew`, or `.lore`
+      - any path segment named in *trivial_dir_segments* (default: `docs`;
+        a caller replaces the whole set, so one that wants the default
+        too passes `DEFAULT_TRIVIAL_DIR_SEGMENTS | {...}`)
 
     Everything else (source files, scripts, configs) is build territory and
     is eligible to trigger the warning.
     """
+    segments = frozenset(trivial_dir_segments)
     try:
         p = Path(file_path)
     except (TypeError, ValueError):
@@ -111,7 +125,7 @@ def is_trivial_path(file_path: str) -> bool:
     except (OSError, RuntimeError, ValueError):
         parts = p.parts
 
-    if any(part in _TRIVIAL_DIR_SEGMENTS for part in parts):
+    if any(part in segments for part in parts):
         return True
 
     return False
@@ -147,6 +161,7 @@ def check_dispatch_discipline(
     is_named_agent: bool,
     guidance: DispatchGuidance,
     override_active: bool = False,
+    trivial_dir_segments: Iterable[str] = DEFAULT_TRIVIAL_DIR_SEGMENTS,
 ) -> str | None:
     """Return an advisory warning message, or None for silent allow.
 
@@ -161,7 +176,8 @@ def check_dispatch_discipline(
       2. *is_named_agent* — an attested agent editing its own build
          territory is legitimate; this hook exists to catch an
          *orchestrating* (non-agent) session doing build work in-session.
-      3. `is_trivial_path(file_path)` — operator-trivial paths never warn.
+      3. `is_trivial_path(file_path, trivial_dir_segments)` — operator-trivial
+         paths never warn.
 
     Any other Edit/Write call returns a warning message built from
     *guidance*.
@@ -170,7 +186,7 @@ def check_dispatch_discipline(
         return None
     if is_named_agent:
         return None
-    if is_trivial_path(file_path):
+    if is_trivial_path(file_path, trivial_dir_segments):
         return None
 
     override_line = (
@@ -191,6 +207,7 @@ def check_dispatch_discipline(
 
 
 __all__ = [
+    "DEFAULT_TRIVIAL_DIR_SEGMENTS",
     "DispatchGuidance",
     "check_dispatch_discipline",
     "is_trivial_path",

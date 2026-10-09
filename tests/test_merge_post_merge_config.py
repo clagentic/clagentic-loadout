@@ -18,6 +18,7 @@ import pytest
 import yaml
 
 import subprocess
+from pathlib import Path
 
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import (
@@ -36,12 +37,14 @@ from clagentic_loadout.merge.post_merge_config import (
     DEFAULT_POST_MERGE_STEP_TIMEOUT_SECONDS,
     DEFAULT_REQUIRE_MODEL_ATTESTATION,
     DEFAULT_SYNC_TREE_AFTER_MERGE,
-    find_crew_yaml_files_declaring_post_merge_steps,
+    CONFIG_KEY_FOREIGN_CONFIG_GLOBS,
+    find_foreign_config_files_declaring_post_merge_steps,
     load_post_merge_steps,
     load_post_merge_steps_from_git_sha,
     post_merge_steps_key_declared,
     resolve_enforce_merge_shape,
     resolve_enforce_single_verdict_fence,
+    resolve_foreign_config_globs,
     resolve_git_tree_relative_config_paths,
     resolve_git_working_tree,
     resolve_model_attestation_denylist,
@@ -773,10 +776,105 @@ class TestPostMergeStepsKeyDeclared:
             post_merge_steps_key_declared(tmp_path)
 
 
+def find_crew_yaml_files_declaring_post_merge_steps(repo_root):
+    """The shared scan as the deployment that keeps `.crew/*.yaml` configures
+    it: those files are the foreign surface."""
+    return find_foreign_config_files_declaring_post_merge_steps(repo_root, [".crew/*.yaml"])
+
+
+class TestResolveForeignConfigGlobs:
+    def test_absent_config_is_empty_so_the_cross_check_is_off(self, tmp_path):
+        assert resolve_foreign_config_globs(config_root=tmp_path) == ()
+
+    def test_absent_key_is_empty(self, tmp_path):
+        (tmp_path / "config.yaml").write_text("merge: {}\n", encoding="utf-8")
+        assert resolve_foreign_config_globs(config_root=tmp_path) == ()
+
+    def test_listed_globs_are_returned_in_order(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"merge": {CONFIG_KEY_FOREIGN_CONFIG_GLOBS: ["a/*.yaml", " b/*.yml "]}}),
+            encoding="utf-8",
+        )
+        assert resolve_foreign_config_globs(config_root=tmp_path) == ("a/*.yaml", "b/*.yml")
+
+    @pytest.mark.parametrize("bad", ["a/*.yaml", {"a": 1}, 3, None])
+    def test_non_list_value_is_ignored(self, tmp_path, bad):
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"merge": {CONFIG_KEY_FOREIGN_CONFIG_GLOBS: bad}}), encoding="utf-8"
+        )
+        assert resolve_foreign_config_globs(config_root=tmp_path) == ()
+
+    def test_bad_entries_are_dropped_and_good_ones_kept(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "merge": {
+                        CONFIG_KEY_FOREIGN_CONFIG_GLOBS: [
+                            "ok/*.yaml", "", "  ", 7, "/abs/*.yaml", "../up/*.yaml", "a/../b/*.yaml",
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        assert resolve_foreign_config_globs(config_root=tmp_path) == ("ok/*.yaml",)
+
+
+class TestFindForeignConfigFilesEdgeCases:
+    def test_empty_globs_scan_nothing_even_when_a_file_declares_the_key(self, tmp_path):
+        foreign = tmp_path / ".crew"
+        foreign.mkdir()
+        (foreign / "amos.yaml").write_text("post_merge_steps: []\n", encoding="utf-8")
+        assert find_foreign_config_files_declaring_post_merge_steps(tmp_path, []) == []
+        assert find_foreign_config_files_declaring_post_merge_steps(tmp_path, ()) == []
+
+    def test_overlapping_globs_report_each_file_once(self, tmp_path):
+        foreign = tmp_path / "x"
+        foreign.mkdir()
+        (foreign / "a.yaml").write_text("post_merge_steps: []\n", encoding="utf-8")
+        result = find_foreign_config_files_declaring_post_merge_steps(
+            tmp_path, ["x/*.yaml", "x/a.*"]
+        )
+        assert result == [str(foreign / "a.yaml")]
+
+    def test_a_pattern_the_glob_engine_rejects_is_skipped_with_a_warning(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        foreign = tmp_path / "x"
+        foreign.mkdir()
+        (foreign / "a.yaml").write_text("post_merge_steps: []\n", encoding="utf-8")
+        real_glob = Path.glob
+
+        def glob(self, pattern, *args, **kwargs):
+            if pattern == "bad[*":
+                raise ValueError("Invalid pattern")
+            return real_glob(self, pattern, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "glob", glob)
+        result = find_foreign_config_files_declaring_post_merge_steps(
+            tmp_path, ["bad[*", "x/*.yaml"]
+        )
+        assert result == [str(foreign / "a.yaml")]
+        assert "bad[*" in capsys.readouterr().err
+
+    def test_a_pattern_raising_oserror_is_skipped(self, tmp_path, capsys, monkeypatch):
+        def glob(self, pattern, *args, **kwargs):
+            raise PermissionError("denied")
+
+        monkeypatch.setattr(Path, "glob", glob)
+        assert find_foreign_config_files_declaring_post_merge_steps(tmp_path, ["x/*"]) == []
+        assert "denied" in capsys.readouterr().err
+
+    def test_a_directory_matching_the_glob_is_not_read(self, tmp_path):
+        (tmp_path / "x" / "sub.yaml").mkdir(parents=True)
+        assert find_foreign_config_files_declaring_post_merge_steps(tmp_path, ["x/*"]) == []
+
+
 class TestFindCrewYamlFilesDeclaringPostMergeSteps:
-    """lr-f9a01b: the shared .crew/*.yaml scan both doctor.checks.
-    check_dead_crew_post_merge_config and merge.verb._run's step-10
-    warning call -- one scan, two surfaces, never divergent."""
+    """The shared foreign-config scan both doctor.checks.
+    check_dead_foreign_post_merge_config and merge.verb._run's step-10
+    warning call -- one scan, two surfaces, never divergent. Exercised here
+    with `.crew/*.yaml` as the configured glob."""
 
     def _write_crew_yaml(self, repo_root, filename: str, text: str) -> None:
         crew_dir = repo_root / ".crew"

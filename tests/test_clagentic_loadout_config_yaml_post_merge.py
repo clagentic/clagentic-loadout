@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from clagentic_loadout.doctor.checks import check_dead_crew_post_merge_config
+from clagentic_loadout.doctor.checks import check_dead_foreign_post_merge_config
 from clagentic_loadout.merge.post_merge import validate_post_merge_steps
 from clagentic_loadout.merge.post_merge_config import load_post_merge_steps
 
@@ -137,6 +137,10 @@ class TestNoDeadCrewPostMergeConfig:
     .clagentic/loadout/config.yaml -- a regression here would be exactly the
     class this task's own doctor check exists to catch, in this repo."""
 
-    def test_repo_own_crew_yaml_files_pass_dead_config_check(self):
-        result = check_dead_crew_post_merge_config(REPO_ROOT)
+    def test_repo_own_crew_yaml_files_pass_dead_config_check(self, tmp_path):
+        (tmp_path / "config.yaml").write_text(
+            "merge:\n  foreign_config_globs: ['.crew/*.yaml']\n", encoding="utf-8"
+        )
+        result = check_dead_foreign_post_merge_config(REPO_ROOT, config_root=tmp_path)
+        assert result.resolved["foreign_config_globs"] == [".crew/*.yaml"]
         assert result.ok is True, result.summary
