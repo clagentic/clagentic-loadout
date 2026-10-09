@@ -1041,3 +1041,198 @@ def test_commit_subject_guard_degrades_gracefully_when_merge_base_unresolvable(
     assert subjects == []
     assert skip_reason is not None
     assert "origin" in skip_reason or "merge-base" in skip_reason
+
+
+# ---------------------------------------------------------------------------
+# DEPLOYMENT-VOCABULARY GUARD — CLAUDE.md hard rule 1: "crew" is one
+# deployment's own name for its agents, and `.crew/` / `.lore/` are one
+# harness's directory conventions. None of them is product vocabulary: the
+# product says "agent" for the actor and names roles (builder / reviewer /
+# security / merger / lead) for what it does, and a deployment's directory
+# names arrive via config.
+#
+# Scope: code IDENTIFIERS (names, attributes, parameters, keyword names,
+# imports, module file names) and non-docstring STRING CONSTANTS across
+# src/**, plus the public docs. Comments and docstrings of src/ are, as for
+# every other guard in this file, contributor-facing provenance and not
+# walked; a string constant is walked because a CLI user reads it.
+#
+# The one allowance is the deprecated alias module below, which has to name
+# the old identifiers to re-export them, and which is deleted in the release
+# after the one that introduced `push.agent_identity`. CLAUDE.md is exempt
+# for the same reason this test file is: the rule it states has to name the
+# terms it forbids.
+# ---------------------------------------------------------------------------
+
+DEPLOYMENT_VOCABULARY_PATTERNS: dict[str, re.Pattern[str]] = {
+    # Word-ish boundary on both sides, with `_` and `-` NOT counting as word
+    # characters, so crew_identity, CREW_SPAWN, crew-manifest and "a crew's"
+    # all match, as do CamelCase forms (CrewBotError, myCrew), while an
+    # unrelated longer word (e.g. "screw") does not. Three case-sensitive
+    # alternatives instead of IGNORECASE, which would make the "next char is
+    # not a letter" lookahead miss the capital that starts the next CamelCase
+    # word.
+    'deployment vocabulary ("crew")': re.compile(
+        r"(?<![A-Za-z0-9])[Cc]rew(?![a-z0-9])"
+        r"|(?<=[a-z0-9])Crew(?![a-z0-9])"
+        r"|(?<![A-Za-z0-9])CREW(?![A-Za-z0-9])"
+    ),
+    "harness directory convention (.crew/)": re.compile(r"\.crew/", re.IGNORECASE),
+    "harness directory convention (.lore/)": re.compile(r"\.lore/", re.IGNORECASE),
+}
+
+#: src/-relative paths allowed to carry the vocabulary. Delete with the alias.
+DEPLOYMENT_VOCABULARY_EXEMPT_SRC: frozenset[str] = frozenset(
+    {"src/clagentic_loadout/push/crew_identity.py"}
+)
+
+#: Public docs that define the rule itself.
+DEPLOYMENT_VOCABULARY_EXEMPT_DOCS: frozenset[str] = frozenset({"CLAUDE.md"})
+
+
+def _identifier_names(tree: ast.AST) -> list[tuple[int, str]]:
+    """Every (lineno, name) a module binds, references or imports: the
+    identifier surface, as opposed to string constants."""
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(tree):
+        lineno = getattr(node, "lineno", 0)
+        if isinstance(node, ast.Name):
+            found.append((lineno, node.id))
+        elif isinstance(node, ast.Attribute):
+            found.append((lineno, node.attr))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found.append((lineno, node.name))
+        elif isinstance(node, ast.arg):
+            found.append((lineno, node.arg))
+        elif isinstance(node, ast.keyword) and node.arg is not None:
+            found.append((lineno, node.arg))
+        elif isinstance(node, ast.alias):
+            found.append((lineno, node.name))
+            if node.asname:
+                found.append((lineno, node.asname))
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            found.append((lineno, node.module))
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            found.extend((lineno, name) for name in node.names)
+    return found
+
+
+def _check_deployment_vocabulary_py(path: Path, display: str) -> list[str]:
+    """Violations for one Python source file: its file name, its identifiers
+    and its non-docstring string constants."""
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    violations: list[str] = []
+
+    def _scan(kind: str, lineno: int, text: str) -> None:
+        for label, pattern in DEPLOYMENT_VOCABULARY_PATTERNS.items():
+            if pattern.search(text):
+                snippet = text.strip().replace("\n", " ")[:120]
+                violations.append(f"{display}:{lineno}: [{label}] ({kind}) {snippet}")
+
+    _scan("file name", 0, path.name)
+    for lineno, name in _identifier_names(tree):
+        _scan("identifier", lineno, name)
+    for const in _walk_user_facing_strings(tree):
+        _scan("string constant", const.lineno, const.value)
+    return violations
+
+
+def _src_python_files_under_vocabulary_guard() -> list[Path]:
+    return [
+        p
+        for p in _tracked_files("src", suffixes=(".py",))
+        if str(p.relative_to(REPO_ROOT)) not in DEPLOYMENT_VOCABULARY_EXEMPT_SRC
+    ]
+
+
+def _docs_under_vocabulary_guard() -> list[Path]:
+    return [
+        p
+        for p in _public_facing_files()
+        if str(p.relative_to(REPO_ROOT)) not in DEPLOYMENT_VOCABULARY_EXEMPT_DOCS
+    ]
+
+
+@pytest.mark.parametrize(
+    "path",
+    _src_python_files_under_vocabulary_guard(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
+def test_src_identifiers_and_strings_carry_no_deployment_vocabulary(path: Path) -> None:
+    violations = _check_deployment_vocabulary_py(path, str(path.relative_to(REPO_ROOT)))
+    assert not violations, "\n" + "\n".join(violations)
+
+
+@pytest.mark.parametrize(
+    "path",
+    _docs_under_vocabulary_guard(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
+def test_public_docs_carry_no_deployment_vocabulary(path: Path) -> None:
+    violations = _check_patterns(path, DEPLOYMENT_VOCABULARY_PATTERNS)
+    assert not violations, "\n" + "\n".join(violations)
+
+
+def test_deployment_vocabulary_allowance_is_exactly_the_deprecated_alias() -> None:
+    """The exemption list must not grow into a general escape hatch, and the
+    alias it names must still exist (delete both together)."""
+    assert DEPLOYMENT_VOCABULARY_EXEMPT_SRC == {"src/clagentic_loadout/push/crew_identity.py"}
+    assert (REPO_ROOT / "src/clagentic_loadout/push/crew_identity.py").is_file()
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "def is_recognized_crew_caller(): pass\n",
+        "class CrewBotError(Exception): pass\n",
+        "x = obj.crew_dir\n",
+        "f(crew_role_names=1)\n",
+        "from pkg.crew_identity import thing\n",
+        "def f(crew_names): pass\n",
+        'raise ValueError("a recognized crew caller")\n',
+        'print(f"read from {p}/.crew/x.yaml")\n',
+        'D = {"crew_dir": 1}\n',
+        'P = ".lore/codex"\n',
+        'CREW_CONFIG_DIR_NAME = "x"\n',
+        "x = myCrew\n",
+        "x = lead_crewRole\n",
+    ],
+)
+def test_deployment_vocabulary_guard_catches_identifier_and_string_shapes(
+    source: str, tmp_path: Path
+) -> None:
+    bad_file = tmp_path / "synthetic_vocab_bad.py"
+    bad_file.write_text(source)
+    violations = _check_deployment_vocabulary_py(bad_file, bad_file.name)
+    assert violations, f"expected the vocabulary guard to flag: {source!r}"
+
+
+def test_deployment_vocabulary_guard_flags_a_crew_named_module_file(tmp_path: Path) -> None:
+    bad_file = tmp_path / "crew_helper.py"
+    bad_file.write_text("x = 1\n")
+    assert _check_deployment_vocabulary_py(bad_file, bad_file.name)
+
+
+def test_deployment_vocabulary_guard_ignores_docstrings_comments_and_longer_words(
+    tmp_path: Path,
+) -> None:
+    clean_file = tmp_path / "synthetic_vocab_ok.py"
+    clean_file.write_text(
+        '"""Module docstring mentioning the crew and .crew/ directory."""\n'
+        "# a comment about the crew\n"
+        "def f():\n"
+        '    """Function docstring: crew, .lore/."""\n'
+        '    return "screw driver"\n'
+    )
+    assert _check_deployment_vocabulary_py(clean_file, clean_file.name) == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["See the crew roster.\n", "Config lives in .crew/amos.yaml\n", "state in .lore/codex\n",
+     "CREW_SPAWN_AGENT_ID is set\n"],
+)
+def test_deployment_vocabulary_guard_catches_doc_shapes(line: str, tmp_path: Path) -> None:
+    bad_doc = tmp_path / "synthetic.md"
+    bad_doc.write_text(line)
+    assert _check_patterns(bad_doc, DEPLOYMENT_VOCABULARY_PATTERNS)

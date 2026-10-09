@@ -149,7 +149,7 @@ prints — this class never content-sniffs stdout to guess its shape. See
 `transport.credential_provider`'s module docstring ("PROVIDER-SUPPLIED
 VERIFIED IDENTITY") for the full mechanism, and
 [docs/provisioning.md](provisioning.md)'s "Derived commit identity for a
-recognized crew caller" section for how `push`'s bot-commit-identity
+recognized agent caller" section for how `push`'s bot-commit-identity
 resolution consumes the resulting `app_slug`.
 
 **`--caller`/`--role` is an already-attested value at the credential/
@@ -179,7 +179,7 @@ process's own attested invoking identity, fail-closed** (`push`, `merge`,
 `git-host-api` — `transport.caller_binding.bind_caller`; this used to be
 wired into `transport.git_host_api` alone, and is now shared by every
 mutating verb). This is layer (1)->(2) of the three-layer trust
-model — attested invoking identity -> crew role (`--caller`/`--role`) ->
+model — attested invoking identity -> agent role (`--caller`/`--role`) ->
 credential grantor — and is native to `clagentic: loadout`'s transport, not
 delegated to an external wrapper. An EXPLICIT `--caller`/`--role` value
 that does not equal the identity resolved by
@@ -1434,7 +1434,7 @@ should not) assume:**
   Enforcement is an explicit, separately-scoped, config-gated follow-up —
   shipping it unconditionally here would impose a NEW failure mode on
   every existing external consumer of this verb, which a shipped tool with
-  users beyond one crew must not do unilaterally.
+  users beyond one deployment must not do unilaterally.
 - **A missing/`null` `remote_head_sha` is informative, not a push
   failure.** A transient failure of this diagnostic re-read (e.g. a
   network blip in the seconds after a successful push) never turns an

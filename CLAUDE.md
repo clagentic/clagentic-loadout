@@ -14,12 +14,17 @@ Roles (builder / reviewer / security / merger / lead), never agent names.
 
 ## Hard rules
 
-1. **No internal identity in product code.** No agent names, no operator org/host/path
-   hardcodes. Namespaces, endpoints, registries, and casts arrive via config. `clagentic`
-   appears only as brand, never as a hardcoded owner check.
+1. **No internal identity in product code.** No agent names, no deployment or harness
+   vocabulary (a deployment's own name for its agents or orchestrator, e.g. crew), no
+   harness directory conventions (e.g. .crew/, .lore/), no operator org/host/path
+   hardcodes. Use generic terms: agent for the actor, roles (builder / reviewer /
+   security / merger / lead) for what it does. Namespaces, endpoints, registries, casts
+   and any deployment-specific directory names arrive via config. `clagentic` appears
+   only as brand, never as a hardcoded owner check. Enforced by
+   `tests/test_anonymization_guard.py`.
 2. **Orchestration boundary, not a capability limit.** loadout does not own agent
    spawning, agent identity/roster, or agent-to-agent transport — that's the harness's
-   or crew's job, and loadout composes with a credential-minting provider, a
+   or the deployment's job, and loadout composes with a credential-minting provider, a
    merge-authority provider, and release/telemetry sinks, all via seams, rather than
    importing any of them directly. This rule constrains WHO owns orchestration; it does
    NOT narrow what capability surface belongs in this package. A capability agents act

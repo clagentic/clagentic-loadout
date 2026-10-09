@@ -439,9 +439,9 @@ review:
 (`github_app.slugs.<role>` + `[bot]`); this is the schema itself, since
 every login and commit-identity derivation on GitHub in this package —
 `review.github_backend.resolve_own_login`, `merge.reviewer_login.resolve_reviewer_login`,
-`merge.verb`'s required-reviewer resolution, and `push.crew_identity`'s
+`merge.verb`'s required-reviewer resolution, and `push.agent_identity`'s
 derived commit identity (see "Derived commit identity for a recognized
-crew caller" below) — reads from this ONE section:
+agent caller" below) — reads from this ONE section:
 
 ```yaml
 github_app:
@@ -464,7 +464,7 @@ github_app:
 - **`github_app.callers`** — the deployment's declared caller registry: the
   exact `--caller`/`--role` strings this deployment's harness actually
   passes at runtime. This is the key-space `slugs` is keyed by, and is also
-  the ONLY gate deciding whether `push.crew_identity` may derive a commit
+  the ONLY gate deciding whether `push.agent_identity` may derive a commit
   identity unconditionally for a caller (see below) — a caller absent from
   this list, or a deployment with no `github_app:` section at all, is
   unaffected by that derivation.
@@ -497,16 +497,16 @@ globally** (the same user-level `~/.config/clagentic/loadout/config.yaml`
 every other identity-bearing tier in this document uses) — nothing
 per-repo is needed, or possible.
 
-### Derived commit identity for a recognized crew caller (GitHub only)
+### Derived commit identity for a recognized agent caller (GitHub only)
 
-`push.crew_identity` derives a bot **commit** identity (not just a login)
+`push.agent_identity` derives a bot **commit** identity (not just a login)
 directly from the `github_app:` section above, for a caller pushing to
 GitHub that is present in `github_app.callers` — **no `builder_identity:`
 section required**. This is a deliberate design choice, not a placeholder
 for future work; read the trade-off below before treating the result as
 incomplete.
 
-**What happens.** For a recognized crew caller (present in
+**What happens.** For a recognized agent caller (present in
 `github_app.callers`) pushing to GitHub, `loadout-push` re-authors every
 commit on the branch to:
 
@@ -531,7 +531,7 @@ fail closed. The provider tier activates ONLY when the resolved
 `TokenProvider` for this push actually supplies a non-empty `app_slug` on
 this call, and OVERRIDES this section's slug for a caller that is
 ALREADY recognized-and-resolvable here — it is a slug-SOURCE upgrade
-within the existing gate above, not a way to become a "recognized crew
+within the existing gate above, not a way to become a "recognized agent
 caller" without `github_app.callers`, and not a way to rescue a caller
 this section's config alone could not resolve at all (see
 `push.verb._resolve_effective_bot_identity`'s own docstring for the exact
@@ -586,7 +586,7 @@ format's own completeness.
   one cosmetic field on exactly one platform. This package declines to
   add it.
 - **What this DOES guarantee, and is the actual property it exists for:**
-  for a recognized crew caller pushing to GitHub, the commit author is
+  for a recognized agent caller pushing to GitHub, the commit author is
   never an ambient or personal identity. That holds unconditionally, with
   no config beyond `github_app:` above (optionally sharpened by a
   provider-verified slug), and is unaffected by the bot-badge limitation
@@ -602,12 +602,39 @@ validate against GitHub's noreply convention.
 **Forgejo is unaffected.** Forgejo has no GitHub-style App-bot-login
 convention in this package's contract at all (see design call #4 above) —
 there is no slug-to-identity derivation to perform on that platform, so a
-recognized crew caller pushing to Forgejo sees no change from this
+recognized agent caller pushing to Forgejo sees no change from this
 section: no re-authoring beyond whatever `builder_identity:`/`--bot-name`/
 `--bot-email` already provide. This is unaffected by the provider-verified
 tier too — a credential provider's `app_slug` is only ever consulted on
-the GitHub platform code path, mirroring `is_recognized_crew_caller`'s own
+the GitHub platform code path, mirroring `is_recognized_agent_caller`'s own
 platform gate above.
+
+### Deployment-specific directory conventions (`merge.foreign_config_globs`, `guard.trivial_dir_segments`)
+
+loadout names no harness's directory convention. Two diagnostics that need to
+know about one read it from the user-level config file
+(`~/.config/clagentic/loadout/config.yaml`), both lenient (a malformed value
+is ignored, never an error) and both off or minimal by default:
+
+```yaml
+merge:
+  # Files, relative to the repo root, that belong to ANOTHER tool's per-repo
+  # config. A `post_merge_steps` key declared there is never read by
+  # loadout-merge; the dead-config cross-check (loadout-doctor --repo-root,
+  # and a warning at merge time) names such files. Empty/absent = check off.
+  foreign_config_globs:
+    - ".agent/*.yaml"
+guard:
+  # Directory names, added to the built-in `docs`, whose files
+  # guard.dispatch_discipline treats as trivial (never warns about an
+  # in-session edit). Read with guard.dispatch_config.load_trivial_dir_segments
+  # and passed to is_trivial_path / check_dispatch_discipline.
+  trivial_dir_segments:
+    - ".agent"
+```
+
+Absolute globs and any glob containing `..` are ignored, so a pattern cannot
+leave the repo root.
 
 ### Conformance
 
@@ -621,7 +648,7 @@ is covered in `tests/test_transport_credential_provider.py`
 (`ResolvedToken`/`resolve_token_result`, `CommandTokenProvider`'s
 `emit_structured_output` opt-in), `tests/test_transport_provider_config.py`
 (the `token_command_emits_json_forgejo`/`_github` config/env wiring), and
-`tests/test_push_crew_identity.py` /
+`tests/test_push_agent_identity.py` /
 `tests/test_push_verb.py::TestProviderVerifiedIdentityTier` (the actual
 slug-source precedence, non-vacuously proving the provider slug wins only
 when it DIFFERS from the config slug, and that a bare-token/empty-slug
