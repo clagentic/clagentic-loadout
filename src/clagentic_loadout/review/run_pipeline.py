@@ -53,7 +53,7 @@ from clagentic_loadout.review.delta import (
     render_delta_note,
 )
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
-from clagentic_loadout.review.finding_identity import drop_rereported, with_fingerprints
+from clagentic_loadout.review.finding_identity import with_fingerprints
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
 from clagentic_loadout.sha import FULL_SHA_RE
@@ -396,7 +396,9 @@ def run_review(
         try:
             chunk_cwd = fresh_chunk_workdir()
         except OSError as exc:
-            return {
+            # Persisted through the same write below as any other attempt
+            # outcome, so the attempt count and retriable=false survive a resume.
+            record = {
                 "index": chunk.index,
                 "files": list(chunk.files),
                 "attempts": _attempts(previous) + 1,
@@ -405,20 +407,21 @@ def run_review(
                 "reason": REASON_RUN_DIR_UNWRITABLE,
                 "detail": f"cannot create the chunk working directory: {exc}",
             }
-        try:
-            record = review_chunk(
-                chunk,
-                len(chunks),
-                profile,
-                attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
-                cwd=chunk_cwd,
-                log_dir=run_dir / CARRIER_LOG_DIRNAME,
-                runner=runner,
-                delta_note=delta_notes.get(chunk.index, ""),
-                breaker=breaker,
-            )
-        finally:
-            discard_chunk_workdir(chunk_cwd)
+        else:
+            try:
+                record = review_chunk(
+                    chunk,
+                    len(chunks),
+                    profile,
+                    attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
+                    cwd=chunk_cwd,
+                    log_dir=run_dir / CARRIER_LOG_DIRNAME,
+                    runner=runner,
+                    delta_note=delta_notes.get(chunk.index, ""),
+                    breaker=breaker,
+                )
+            finally:
+                discard_chunk_workdir(chunk_cwd)
         try:
             _write_json(_result_path(state_dir, chunk.index), record)
         except OSError as exc:
@@ -501,8 +504,7 @@ def run_review(
     carried: list[dict[str, Any]] = []
     if delta is not None:
         touched = {name for chunk in chunks for name in chunk.files}
-        fresh = [f for _, found in per_chunk for f in found]
-        carried = drop_rereported(carried_findings(delta, touched, chunks), fresh)
+        carried = carried_findings(delta, touched, chunks)
         per_chunk.append((0, carried))
     findings = merge_findings(per_chunk)
     findings_path = run_dir / FINDINGS_FILENAME

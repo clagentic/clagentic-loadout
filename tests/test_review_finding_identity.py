@@ -15,14 +15,11 @@ from clagentic_loadout.review.chunking import plan_chunks
 from clagentic_loadout.review.finding_identity import (
     KEY_FINGERPRINT,
     compute_fingerprint,
-    drop_rereported,
-    match_prior,
-    match_priors,
-    pair_findings,
-    same_finding,
     with_fingerprints,
 )
+from clagentic_loadout.review.delta import DeltaContext
 from clagentic_loadout.review.findings_contract import validate_finding
+from clagentic_loadout.review import run_pipeline
 from clagentic_loadout.review.run_pipeline import (
     CHUNK_WORKDIR_PREFIX,
     FINDINGS_FILENAME,
@@ -66,15 +63,18 @@ def test_the_same_line_keeps_its_fingerprint_after_an_unrelated_insertion_above_
 
     assert before["line"] == 2 and after["line"] == 4
     assert before[KEY_FINGERPRINT] == after[KEY_FINGERPRINT]
-    assert same_finding(before, after)
-    assert match_prior(after, [before]) is before
 
 
-def test_re_indented_code_is_the_same_finding():
-    flat = _fingerprinted(_diff("m.py", "x = 1\nreturn  eval(a)\n", 1), 2)
-    indented = _fingerprinted(_diff("m.py", "x = 1\n        return eval(a)\n", 1), 2)
+def test_leading_and_trailing_whitespace_is_ignored_but_internal_whitespace_is_not():
+    flat = _fingerprinted(_diff("m.py", "x = 1\nreturn eval(a)\n", 1), 2)
+    indented = _fingerprinted(_diff("m.py", "x = 1\n        return eval(a)  \n", 1), 2)
+    spaced = _fingerprinted(_diff("m.py", "x = 1\nreturn  eval(a)\n", 1), 2)
+    literal_a = _fingerprinted(_diff("m.py", 'x = 1\nrun("a b")\n', 1), 2)
+    literal_b = _fingerprinted(_diff("m.py", 'x = 1\nrun("a  b")\n', 1), 2)
 
     assert flat[KEY_FINGERPRINT] == indented[KEY_FINGERPRINT]
+    assert flat[KEY_FINGERPRINT] != spaced[KEY_FINGERPRINT]
+    assert literal_a[KEY_FINGERPRINT] != literal_b[KEY_FINGERPRINT]
 
 
 def test_a_different_rule_file_or_line_text_is_a_different_finding():
@@ -89,7 +89,7 @@ def test_a_different_rule_file_or_line_text_is_a_different_finding():
     assert compute_fingerprint("a.py", "R1", "x") != compute_fingerprint("b.py", "R1", "x")
 
 
-def test_a_line_the_chunk_does_not_show_gets_no_fingerprint_and_keeps_its_position_identity():
+def test_a_line_the_chunk_does_not_show_gets_no_fingerprint():
     chunk = plan_chunks(_diff("m.py", _BODY, 1), 600)[0]
 
     out = with_fingerprints([_finding(line=99), _finding(file="other.py")], chunk)
@@ -99,50 +99,28 @@ def test_a_line_the_chunk_does_not_show_gets_no_fingerprint_and_keeps_its_positi
 
 def test_a_fingerprint_a_model_put_in_its_reply_is_discarded():
     chunk = plan_chunks(_diff("m.py", _BODY, 1), 600)[0]
-    forged = {**_finding(), KEY_FINGERPRINT: "fp1:" + "0" * 16}
+    forged = {**_finding(), KEY_FINGERPRINT: "fp2:" + "0" * 16}
 
     out = with_fingerprints([forged], chunk)[0]
 
     assert out[KEY_FINGERPRINT] != forged[KEY_FINGERPRINT]
 
 
-def test_a_findings_file_without_the_field_loads_and_matches_as_today():
+def test_a_findings_file_without_the_field_loads_as_today():
     old = validate_finding(_finding(), 1, lenient_severity=True, truncate_message=False,
                            carry_fingerprint=True)
     assert old == _finding()
     assert KEY_FINGERPRINT not in old
 
-    assert same_finding(old, _finding())
-    assert not same_finding(old, _finding(line=4)), "no fingerprint: a moved line is a new finding"
-    assert not same_finding(old, _finding(rule="R2"))
-    assert match_prior(_finding(line=4), [old]) is None
-
-
-def test_a_prior_without_a_fingerprint_still_matches_a_fingerprinted_rereport_by_position():
-    chunk = plan_chunks(_diff("m.py", _BODY, 1), 600)[0]
-    fresh = with_fingerprints([_finding(line=2)], chunk)[0]
-
-    assert same_finding(_finding(line=2), fresh)
-    assert not same_finding(_finding(line=5), fresh)
-
 
 def test_a_fingerprint_is_carried_when_a_findings_file_is_loaded_and_ignored_in_a_reply():
-    fingerprint = "fp1:" + "a" * 16
+    fingerprint = "fp2:" + "a" * 16
     item = {**_finding(), KEY_FINGERPRINT: fingerprint}
 
     assert validate_finding(item, 1, carry_fingerprint=True)[KEY_FINGERPRINT] == fingerprint
     assert KEY_FINGERPRINT not in validate_finding(item, 1)
     junk = {**_finding(), KEY_FINGERPRINT: "not-a-fingerprint"}
     assert KEY_FINGERPRINT not in validate_finding(junk, 1, carry_fingerprint=True)
-
-
-def test_a_carried_finding_the_delta_re_reports_at_a_shifted_line_is_listed_once():
-    prior = {**_finding(line=2), KEY_FINGERPRINT: "fp1:" + "a" * 16}
-    unprinted = _finding(file="z.py", line=7)
-    fresh = [{**_finding(line=4), KEY_FINGERPRINT: "fp1:" + "a" * 16}]
-
-    assert drop_rereported([prior, unprinted], fresh) == [unprinted]
-    assert drop_rereported([prior, unprinted], []) == [prior, unprinted]
 
 
 def _scripted_runner(array: str, cwds: list[Path], listings: list[list[str]]):
@@ -229,45 +207,67 @@ def test_an_attempt_never_reuses_a_work_dir_even_when_the_old_one_cannot_be_remo
     assert list(second.iterdir()) == []
 
 
-def test_two_identical_lines_under_one_rule_are_two_findings_not_one():
-    same = "fp1:" + "a" * 16
-    prior = {**_finding(line=2), KEY_FINGERPRINT: same}
-    fresh = {**_finding(line=9), KEY_FINGERPRINT: same}
+def test_in_a_delta_merge_a_carried_finding_and_a_fresh_one_on_identical_lines_both_survive(
+    tmp_path,
+):
+    # The delta adds m.py with `return eval(a)` on line 2; the prior review had
+    # an open finding for an identical line (same file, same rule, same text)
+    # at line 90 that no chunk covers, so it is carried forward untouched.
+    diff = _diff("m.py", "x = 1\nreturn eval(a)\n", 1)
+    shared = compute_fingerprint("m.py", "R1", "return eval(a)")
+    carried = {**_finding(line=90, message="old"), KEY_FINGERPRINT: shared}
+    context = DeltaContext(since_head="c" * 40, open_findings=(carried,))
+    array = json.dumps([_finding(line=2, message="new")])
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
 
-    assert drop_rereported([prior], [fresh]) == []
-    # The carried prior on the other identical line has no fresh counterpart.
-    other_prior = {**_finding(line=3), KEY_FINGERPRINT: same}
-    kept = drop_rereported([prior, other_prior], [fresh])
-    assert kept == [prior], "the fresh finding retires the nearer prior (line 3) only"
-    assert match_priors([fresh], [prior, other_prior]) == [other_prior]
+    run_review(
+        _acquired(diff), profile(fallback=False), run_dir, emit=lambda *a, **k: None,
+        runner=_scripted_runner(array, [], []), delta=context,
+    )
 
+    document = json.loads((run_dir / FINDINGS_FILENAME).read_text(encoding="utf-8"))
 
-def test_each_prior_pairs_with_its_own_shifted_fresh_finding():
-    same = "fp1:" + "b" * 16
-    priors = [{**_finding(line=2), KEY_FINGERPRINT: same}, {**_finding(line=6), KEY_FINGERPRINT: same}]
-    fresh = [{**_finding(line=5), KEY_FINGERPRINT: same}, {**_finding(line=9), KEY_FINGERPRINT: same}]
-
-    assert match_priors(fresh, priors) == [priors[0], priors[1]]
-    assert drop_rereported(priors, fresh) == []
-
-
-def test_a_fresh_finding_on_the_other_identical_line_keeps_both():
-    same = "fp1:" + "c" * 16
-    carried = [{**_finding(line=2), KEY_FINGERPRINT: same}]
-    fresh = [{**_finding(line=2), KEY_FINGERPRINT: same}, {**_finding(line=8), KEY_FINGERPRINT: same}]
-
-    assert drop_rereported(carried, fresh) == []
-    assert match_priors(fresh, carried) == [carried[0], None]
+    by_message = {f["message"]: f for f in document["findings"]}
+    assert sorted(by_message) == ["new", "old"]
+    assert by_message["old"] == {**carried, "chunk": 0}
+    assert by_message["new"][KEY_FINGERPRINT] == shared
+    assert document["carried_count"] == 1
 
 
-def test_ties_in_line_distance_pair_in_original_order():
-    same = "fp1:" + "d" * 16
-    priors = [{**_finding(line=4, message="p1"), KEY_FINGERPRINT: same},
-              {**_finding(line=4, message="p2"), KEY_FINGERPRINT: same}]
-    fresh = [{**_finding(line=4, message="f1"), KEY_FINGERPRINT: same},
-             {**_finding(line=4, message="f2"), KEY_FINGERPRINT: same}]
+def test_a_chunk_workdir_failure_is_persisted_like_any_other_attempt_outcome(
+    tmp_path, monkeypatch
+):
+    def refuse():
+        raise OSError(28, "No space left on device")
 
-    assert pair_findings(priors, fresh) == [(0, 0), (1, 1)]
+    monkeypatch.setattr(run_pipeline, "fresh_chunk_workdir", refuse)
+    real_write = run_pipeline._write_json
+    persisted: list[dict] = []
+
+    def spy(path, data):
+        real_write(path, data)
+        if Path(path).name.startswith("result-"):
+            index = int(Path(path).stem.split("-")[1])
+            persisted.append(run_pipeline._load_record(Path(path).parent, index))
+
+    monkeypatch.setattr(run_pipeline, "_write_json", spy)
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+
+    outcome = run_review(
+        _acquired(_diff("m.py", _BODY, 1)), profile(fallback=False), run_dir,
+        emit=lambda *a, **k: None, runner=_scripted_runner("[]", [], []),
+    )
+
+    assert outcome.result == run_pipeline.RESULT_BLOCKED
+    # What the next run would load at the moment it was written.
+    (record,) = persisted
+    assert record["status"] == run_pipeline.STATUS_FAILED
+    assert record["retriable"] is False
+    assert record["attempts"] == 1
+    assert record["reason"] == run_pipeline.REASON_RUN_DIR_UNWRITABLE
+    assert "No space left on device" in record["detail"]
 
 
 def test_the_merged_findings_file_carries_a_fingerprint_beside_the_unchanged_fields(tmp_path):
@@ -286,4 +286,4 @@ def test_the_merged_findings_file_carries_a_fingerprint_beside_the_unchanged_fie
     assert document["schema"] == "loadout.review-findings/1"
     assert {k: found[k] for k in ("file", "line", "rule_id", "severity", "message")} == _finding()
     assert found["chunk"] == 1
-    assert found[KEY_FINGERPRINT].startswith("fp1:")
+    assert found[KEY_FINGERPRINT].startswith("fp2:")

@@ -300,3 +300,17 @@ def test_a_delta_findings_file_posts_with_its_carried_findings(env, tmp_path, ca
     assert payload["result"] == "posted"
     assert payload["finding_count"] == 1
     assert "a.py:3 [R1] (blocking) bad" in env.opener_state["posted_body"]
+
+
+def test_a_fingerprint_in_the_findings_file_is_never_posted(env, tmp_path, capsys):
+    env.configure(carrier_mode="empty")
+    hinted = {**_BLOCKING, "fingerprint": "fp2:" + "a" * 16}
+    findings = _prior(tmp_path / "findings.json", [hinted], head_sha=HEAD_SHA)
+
+    code, payload = env.post("--findings", findings, "--status", "blocking", capsys=capsys)
+
+    assert code == 0
+    assert payload["result"] == "posted"
+    assert "a.py:3 [R1] (blocking) bad" in env.opener_state["posted_body"]
+    assert "fingerprint" not in env.opener_state["posted_body"]
+    assert "fp2:" not in env.opener_state["posted_body"]
