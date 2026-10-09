@@ -123,9 +123,21 @@ the next tier only if the current one is unusable:
    out to a normal PATH bin dir — never passing `--break-system-packages`, which would
    defeat the protection PEP 668 exists to provide.
 
-Re-running `install.sh` against an existing venv-tier install is idempotent: it reuses the
-same virtualenv (upgrading the package in place) and refreshes the console-script symlinks
-rather than duplicating or erroring.
+The venv tier installs each release into its own virtualenv, `<data-dir>/venvs/<id>` (the
+source commit sha for a git checkout), verifies it (every console script must exit 0 on
+`--help`), and only then repoints the `<data-dir>/venv` symlink at it with a single
+atomic rename. The console-script symlinks in the bin dir target `<data-dir>/venv/bin/<name>`
+and never change, so a verb running while an install proceeds sees either the old release
+or the new one, never a half-written one. The previous release is kept for processes still
+running from it and older releases are pruned. A failed build or verification leaves the
+live venv untouched and exits 3. Re-running `install.sh` on an already-installed commit
+reuses its verified release and refreshes the symlinks rather than duplicating or erroring.
+
+**First install after upgrading:** an install made before this layout has a real
+`<data-dir>/venv` directory, and a symlink cannot be renamed over a non-empty directory.
+That one install moves the old directory aside and links the new release in with two
+back-to-back renames, leaving a brief window in which `<data-dir>/venv` does not exist. Run
+it while no loadout verb is executing. Every later install is atomic.
 
 ### Overrides
 
