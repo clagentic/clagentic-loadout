@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from clagentic_loadout.merge.post_merge_config import (
-    find_crew_yaml_files_declaring_post_merge_steps,
+    find_foreign_config_files_declaring_post_merge_steps,
 )
 from clagentic_loadout.provisioning.model_routing import (
     InvalidModelRoutingConfigError,
@@ -86,7 +86,9 @@ def test_dead_crew_config_scan_skips_a_non_utf8_file(tmp_path):
     (crew / "bad.yaml").write_bytes(NOT_UTF8)
     (crew / "good.yaml").write_text("post_merge_steps: []\n", encoding="utf-8")
 
-    assert find_crew_yaml_files_declaring_post_merge_steps(tmp_path) == [str(crew / "good.yaml")]
+    assert find_foreign_config_files_declaring_post_merge_steps(
+        tmp_path, [".crew/*.yaml"]
+    ) == [str(crew / "good.yaml")]
 
 
 def test_settings_writer_raises_settings_write_error(tmp_path):

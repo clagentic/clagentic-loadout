@@ -98,24 +98,47 @@ def test_no_repo_root_skips_schema_check(tmp_path, monkeypatch, capsys):
     assert "repo_loadout_schema" not in out
 
 
-def test_repo_root_opts_into_dead_crew_post_merge_config_check(tmp_path, monkeypatch, capsys):
-    """lr-f9a01b: --repo-root also runs the dead-config cross-check, and
-    surfaces a FAIL when .crew/<role>.yaml declares post_merge_steps that
-    the repo's own live loadout config never mentions."""
-    config_root = tmp_path / "user-config"
-    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", config_root)
+def _repo_with_dead_foreign_steps(tmp_path):
     repo_root = tmp_path / "repo"
     crew_dir = repo_root / ".crew"
     crew_dir.mkdir(parents=True)
     (crew_dir / "amos.yaml").write_text(
         "post_merge_steps:\n  - cmd: 'make install'\n", encoding="utf-8"
     )
+    return repo_root
+
+
+def test_repo_root_opts_into_dead_foreign_post_merge_config_check(tmp_path, monkeypatch, capsys):
+    """--repo-root also runs the dead-config cross-check, and surfaces a
+    FAIL when a file matching the deployment's merge.foreign_config_globs
+    declares post_merge_steps that the repo's own live loadout config never
+    mentions."""
+    config_root = tmp_path / "user-config"
+    config_root.mkdir()
+    (config_root / "config.yaml").write_text(
+        "merge:\n  foreign_config_globs: ['.crew/*.yaml']\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", config_root)
+    repo_root = _repo_with_dead_foreign_steps(tmp_path)
 
     rc = doctor_cli.main(["--config-root", str(config_root), "--repo-root", str(repo_root)])
     assert rc == doctor_cli.EXIT_CHECKS_FAILED
     out = capsys.readouterr().out
-    assert "dead_crew_post_merge_config" in out
+    assert "dead_foreign_post_merge_config" in out
     assert "FAIL" in out
+
+
+def test_repo_root_dead_foreign_check_is_a_passing_no_op_without_configured_globs(
+    tmp_path, monkeypatch, capsys
+):
+    config_root = tmp_path / "user-config"
+    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", config_root)
+    repo_root = _repo_with_dead_foreign_steps(tmp_path)
+
+    doctor_cli.main(["--config-root", str(config_root), "--repo-root", str(repo_root)])
+    out = capsys.readouterr().out
+    assert "[OK  ] dead_foreign_post_merge_config" in out
+    assert "cross-check disabled" in out
 
 
 def test_attestation_source_check_appears_in_default_run(tmp_path, monkeypatch, capsys):

@@ -391,26 +391,29 @@ it into this repo's own committed .clagentic/loadout/config.yaml. A step's
 own inline VAR=VALUE prefix still wins over this tier for the same name. See
 that module's docstring for the full design.
 
-DEAD .crew/<role>.yaml post_merge_steps CROSS-CHECK (lr-f9a01b, followup to
-doctor.checks.check_dead_crew_post_merge_config): that doctor check flags a
-repo whose .crew/<role>.yaml declares post_merge_steps while this repo's own
-.clagentic/loadout/config.yaml never declares the key — but a doctor check
-only fires when someone explicitly runs `loadout-doctor`, and the reported
-failure this class produced was an UNATTENDED merge reporting exit 0 with
-steps_run=0: nobody was running doctor. Step 10 now surfaces the SAME
+DEAD FOREIGN-CONFIG post_merge_steps CROSS-CHECK (lr-f9a01b, followup to
+doctor.checks.check_dead_foreign_post_merge_config): that doctor check flags a
+repo whose foreign-tool config file declares post_merge_steps while this
+repo's own .clagentic/loadout/config.yaml never declares the key — but a
+doctor check only fires when someone explicitly runs `loadout-doctor`, and
+the reported failure this class produced was an UNATTENDED merge reporting
+exit 0 with steps_run=0: nobody was running doctor. Which files count as
+"foreign-tool config" is deployment config, not code: the user-level
+`merge.foreign_config_globs` list (default empty, which turns this
+cross-check off). Step 10 now surfaces the SAME
 cross-check (via merge.post_merge_config.
-find_crew_yaml_files_declaring_post_merge_steps, the identical scan doctor's
-own check calls — one scan, two surfaces, never divergent) as a loud,
+find_foreign_config_files_declaring_post_merge_steps, the identical scan
+doctor's own check calls — one scan, two surfaces, never divergent) as a loud,
 non-blocking `merge: WARNING --` line on stderr whenever steps_will_run is
-False AND at least one .crew/*.yaml file mentions post_merge_steps AND this
+False AND at least one matched file mentions post_merge_steps AND this
 repo's own live config never explicitly declares the key
 (merge.post_merge_config.post_merge_steps_key_declared — deliberately NOT
 `bool(steps)`, so a repo that explicitly wrote `post_merge_steps: []` in its
 own config, an informed choice at the correct file, is never warned about an
-unrelated stale .crew/*.yaml mention).
+unrelated stale mention in a foreign file).
 
 WARN, NEVER REFUSE (deliberate, operator-directed disposition): this is a
-diagnostic surfaced louder, not a new gate. A repo with a stale .crew/*.yaml
+diagnostic surfaced louder, not a new gate. A repo with a stale foreign-config
 comment must never become unmergeable over it — turning this into a hard
 refusal would be a materially larger behavioral change than closing the
 "nobody saw the diagnosis" gap requires, and doctor.checks.
@@ -424,9 +427,9 @@ just with the silent no-op named loudly in its own output instead of only
 discoverable by a later, separate doctor run.
 
 READ-ONLY, NEVER A NEW EXECUTION SURFACE: this cross-check only asks WHICH
-.crew/*.yaml files mention the post_merge_steps KEY (a filename and a static
+foreign config files mention the post_merge_steps KEY (a filename and a static
 key-name string) — it never parses, returns, or executes that key's VALUE.
-.crew/*.yaml was not, and remains not, part of any executable
+A foreign config file was not, and remains not, part of any executable
 step-loading path; only this repo's own .clagentic/loadout/config.yaml
 (load_post_merge_steps) ever supplies commands run_post_merge_steps
 executes.
@@ -507,13 +510,14 @@ from clagentic_loadout.merge.post_merge import (
 from clagentic_loadout.merge.post_merge_config import (
     DEFAULT_CONFIG_RELATIVE_PATH as DEFAULT_POST_MERGE_CONFIG_RELATIVE_PATH,
     config_path_tracked_at_git_sha,
-    find_crew_yaml_files_declaring_post_merge_steps,
+    find_foreign_config_files_declaring_post_merge_steps,
     load_post_merge_steps,
     load_post_merge_steps_from_git_sha,
     post_merge_steps_key_declared,
     resolve_enforce_merge_shape,
     resolve_enforce_single_verdict_fence,
     resolve_env_overrides,
+    resolve_foreign_config_globs,
     resolve_git_tree_relative_config_paths,
     resolve_git_working_tree,
     resolve_model_attestation_denylist,
@@ -1958,24 +1962,26 @@ def _run(
             # was an UNATTENDED merge reporting exit 0 with steps_run 0,
             # which a doctor check alone cannot catch. Surface the SAME
             # cross-check loudly, right here on the path that actually runs
-            # unattended, WITHOUT making a stale .crew/*.yaml comment a
-            # merge blocker (see module docstring, "DEAD .crew/<role>.yaml
+            # unattended, WITHOUT making a stale foreign-config comment a
+            # merge blocker (see module docstring, "DEAD FOREIGN-CONFIG
             # post_merge_steps CROSS-CHECK", for why this warns rather than
             # refuses). `post_merge_steps_key_declared` (not `bool(steps)`)
             # is deliberately used for the live-config half of this check --
             # a repo that explicitly wrote `post_merge_steps: []` in its OWN
             # config has already made an informed choice at the correct
-            # file and must never be warned about a stale .crew/*.yaml
-            # mention elsewhere.
+            # file and must never be warned about a stale mention in a
+            # foreign config file elsewhere.
             if not steps_will_run and not post_merge_steps_key_declared(args.repo_path):
-                offending_crew_files = find_crew_yaml_files_declaring_post_merge_steps(
-                    args.repo_path
+                foreign_config_globs = resolve_foreign_config_globs()
+                offending_foreign_files = find_foreign_config_files_declaring_post_merge_steps(
+                    args.repo_path, foreign_config_globs
                 )
-                if offending_crew_files:
+                if offending_foreign_files:
                     print(
-                        f"merge: WARNING -- {', '.join(offending_crew_files)} "
+                        f"merge: WARNING -- {', '.join(offending_foreign_files)} "
                         f"declare post_merge_steps, but loadout-merge NEVER "
-                        f"reads that key from .crew/*.yaml -- it reads ONLY "
+                        f"reads that key from {', '.join(foreign_config_globs)} "
+                        f"-- it reads ONLY "
                         f"this repo's own .clagentic/loadout/config.yaml "
                         f"(merge.post_merge_steps), which does not declare "
                         f"it here. This merge is proceeding with 0 "
