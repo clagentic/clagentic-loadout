@@ -550,7 +550,8 @@ def _load_findings(
         try:
             validated.append(
                 validate_finding(
-                    item, position, lenient_severity=True, truncate_message=False
+                    item, position, lenient_severity=True, truncate_message=False,
+                    carry_fingerprint=True,
                 )
             )
         except InvalidReplyError as exc:
