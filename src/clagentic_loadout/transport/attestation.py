@@ -3,7 +3,7 @@
 Task lr-82c385 (tome #700), the loadout-native half of the three-layer trust
 model documented across `docs/merge-authority.md` §4 and
 `transport.credential_provider`'s own module docstring: attested invoking
-identity (1) -> crew/role (`--caller`, layer 2) -> credential grantor
+identity (1) -> agent role (`--caller`, layer 2) -> credential grantor
 (layer 3). Every seam downstream of layer (2) -- `credential_provider.
 resolve_token`, `merge.authority.check_authority` -- has always, deliberately,
 treated `--caller`/`--role` as an ALREADY-ATTESTED, opaque value (lr-e5eeab)

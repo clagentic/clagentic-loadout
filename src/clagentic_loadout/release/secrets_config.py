@@ -71,7 +71,7 @@ def _resolve_home_dir() -> Path:
 
 
 #: Loadout per-repo/per-role secret-env root (CLI-NAMING-STANDARD.md config
-#: convention, repo CLAUDE.md hard rule 3). No `crew` config-dir literal.
+#: convention, repo CLAUDE.md hard rule 3). No harness-specific config-dir literal.
 #: Resolved via `_resolve_home_dir` (lr-e84ae1), not a bare `Path.home()`
 #: call -- see that helper's docstring for the HOME-empty-vs-unset gap this
 #: closes.

@@ -102,7 +102,7 @@ dispatch instruction):
     only, no `$` — mirroring the reference's own security rationale exactly
     (an acked_by value is a human/operator identity string, never
     shell-interpreted, so it is constrained to the conservative safe-token
-    alphabet the reference's own `CREW_SPAWN_AGENT_ID=` hardening precedent
+    alphabet the reference's own spawn-identity-variable hardening precedent
     already established for an inline env-assignment prefix).
   - The `--template-params-file` path-containment follow-up
     (`is_infra_params_file_path_contained`) is a NEW, infra-specific
@@ -196,7 +196,7 @@ _INFRA_TEMPLATE_PARAMS_JSON_VALUE = r"\{[^\s'|&;<>$`]*\}"
 #: hyphen/underscore ONLY, no `$` — an acked_by value is a human/operator
 #: identity string, never shell-interpreted, so it is constrained to the
 #: same conservative safe-token alphabet the reference's own
-#: `CREW_SPAWN_AGENT_ID=` hardening precedent already established.
+#: spawn-identity-variable hardening precedent already established.
 _INFRA_ACK_VALUE_RE = r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}"
 
 

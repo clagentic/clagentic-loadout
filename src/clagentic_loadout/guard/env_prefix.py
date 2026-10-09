@@ -8,7 +8,7 @@ an UNCONSTRAINED grammar — ``[A-Za-z_][A-Za-z0-9_]*=\\S+`` — that admits ANY
 variable name and ANY non-whitespace value, not just the one variable and
 value-shape its own comments and error messages claim. That grammar is
 exactly the shape a sibling rule in the same file (the correct one,
-guarding ``CLAGENTIC_SUBAGENT_ID``/``CREW_SPAWN_AGENT_ID``) already
+guarding ``CLAGENTIC_SUBAGENT_ID`` and the deployment's spawn-identity variable) already
 documents as unsafe: a generic ``VAR=value`` prefix can smuggle a
 metacharacter-bearing value (e.g. ``${IFS}``-based word-splitting) that a
 naive ``\\S+`` value class does not exclude.
@@ -38,7 +38,7 @@ ALLOWED_ENV_PREFIX_VAR = "CLAGENTIC_LOADOUT_GITHUB_APP_SLUG"
 #: Safe-token value grammar: alphanumeric, hyphen, underscore, 1-128 chars,
 #: no leading hyphen (mirrors the value-class discipline the reference
 #: deployment's OWN correct sibling rule, CLAGENTIC_SUBAGENT_ID/
-#: CREW_SPAWN_AGENT_ID admission, already uses) — no shell metacharacter of
+#: the spawn-identity variable's admission, already uses) — no shell metacharacter of
 #: any kind is representable in this class, so no `${IFS}`/`;`/backtick/
 #: `$(...)` word-splitting or command-substitution smuggling is possible
 #: through the value position.

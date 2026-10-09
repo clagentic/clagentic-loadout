@@ -35,7 +35,7 @@ Three distinguishable states (task requirement, seq 2 item (d)):
     why not. A caller that only checks `readback.verified` can never
     mistake an honest "could not verify" for a confirmed fact -- the
     consumer's own stated requirement (task comment #1: "unverified is only
-    safe if the crew side cannot silently treat it as success" -- this
+    safe if the consumer side cannot silently treat it as success" -- this
     module makes that field ALWAYS present and ALWAYS boolean, never
     omitted, so a consumer's predicate is exactly `envelope["readback"]
     ["verified"] is True`, nothing more).

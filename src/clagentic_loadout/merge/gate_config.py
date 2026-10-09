@@ -12,7 +12,7 @@ DECLARATION half of that CLI surface (which roles/checks/limits apply to
 THIS repo), read by a caller (a dispatch/lead layer, or `merge.verb` itself
 in a future CLI-wiring slice — see this module's own scope note below)
 BEFORE building the CLI invocation, rather than baking the answer into an
-external, .crew-shaped config format loadout does not know about.
+external, harness-specific config format loadout does not know about.
 
 REPO-TIER (design call #1): every key this module owns is a POLICY value —
 "how many reviewers, how wide a diff, which roles" — never an identity, a

@@ -206,7 +206,7 @@ THE AGENT-NAME -> ROLE MAPPING FOR SE2 (mirrors the table above):
     read-only pre-merge security-audit gate    -> BashRole.SECURITY         -> check_security_command
     read-only troubleshooting detective        -> BashRole.ANALYSIS         -> check_analysis_command
     read-only platform observer                -> BashRole.ANALYSIS         -> check_analysis_command
-    read-only crew researcher                  -> BashRole.RESEARCH         -> check_research_command
+    read-only researcher                       -> BashRole.RESEARCH        -> check_research_command
     read-only build-planning agent             -> BashRole.PLANNING_READER  -> check_planning_reader_command
 
 COLLAPSE RATIONALE (why five roles, not six, and why the split is where it
@@ -231,7 +231,7 @@ flattened):
     two near-identical functions that would drift independently over time
     (exactly the `_GIT_READONLY_FULL`/`_GIT_READONLY_NARROW` shared-grammar
     precedent the reference itself already uses for these two).
-  - The reference's crew-researcher checker (`_is_allowed_prax`) is
+  - The reference's researcher checker (`_is_allowed_prax`) is
     DELIBERATELY NOT collapsed into `ANALYSIS` despite being read-only like
     the other two: it has ZERO git/systemctl/docker visibility at all (no
     infra or repo-state read surface whatsoever) and its entire admitted
@@ -427,7 +427,7 @@ class BashRole(Enum):
         probe, and bare file readers. No git write, no service mutation, no
         forge-read, no external-research-engine surface.
     RESEARCH — read-only external-research identity (reference: the
-        reference deployment's crew-researcher Bash-command checker,
+        reference deployment's researcher Bash-command checker,
         SE2/lr-a64227 — kept SEPARATE from ANALYSIS; see module docstring
         COLLAPSE RATIONALE for why): lore and bare file readers ONLY, plus a
         caller-configured external-research-engine verb set. ZERO git/
@@ -775,7 +775,7 @@ def check_builder_command(
          `AMOS_BUILD_TEST_LINT`).
       8. `config.extra_verb_patterns` — caller-supplied additional admitted
          command prefixes (e.g. an installed push/PR-transport verb, an
-         authenticated-API wrapper verb, a `/crew-deploy`-shaped script
+         authenticated-API wrapper verb, a deployment-bootstrap script
          trio) — the reference's fixed absolute-path literals for these,
          generalized to caller config per module docstring point 3.
 
@@ -1659,7 +1659,7 @@ def check_research_command(
     command: str, *, config: ResearchRoleConfig | None = None
 ) -> tuple[bool, str]:
     """Return (ok, reason) for `BashRole.RESEARCH` — port of the reference
-    deployment's read-only crew-researcher Bash-command checker (reference
+    deployment's read-only researcher Bash-command checker (reference
     `_is_allowed_prax`, ll.3303-3348).
 
     Deliberately has NO git/systemctl/docker surface at all (see module

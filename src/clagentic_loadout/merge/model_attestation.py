@@ -5,7 +5,7 @@ THE PROBLEM THIS CLOSES, AND THE ONE IT DOES NOT
 --------------------------------------------------
 A reviewer role backed by a cheap/local model can silently substitute for
 the model a deployment actually intends to run review reasoning on (its
-own crew's third recorded occurrence of this failure mode: two prior fixes
+own agents' third recorded occurrence of this failure mode: two prior fixes
 elsewhere guarded CONTRACT TEXT — a model-resolution default, a call-site
 placement check — while the actual failure was RUNTIME BEHAVIOR neither
 text-level fix could see). This module is the third attempt at a fix, and
@@ -56,9 +56,9 @@ pure git-host transport tools: they open a network connection, build a
 JSON body, and POST/verify a comment. Neither one, nor anything upstream
 of them in this package, wraps, launches, or has visibility into the
 process that ran the review's actual reasoning — that process is owned by
-the calling harness/crew entirely, on the other side of this repo's own
+the calling harness entirely, on the other side of this repo's own
 CLAUDE.md hard rule 2 boundary ("loadout does not own agent spawning...
-that's the harness's or crew's job"). `transport.attestation.
+that's the harness's or deployment's job"). `transport.attestation.
 resolve_identity`'s sidecar-file mechanism comes closest to a
 tool-witnessed analog (a file an EXTERNAL harness writes, that THIS
 process reads rather than trusting an argv claim) — but nothing in that

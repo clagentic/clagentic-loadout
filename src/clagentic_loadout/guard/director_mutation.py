@@ -166,7 +166,7 @@ the reference's own `EXIT_CALLER_MISMATCH` semantics precisely: "chain
 resolves nothing" and "chain resolves to the same name" are both
 non-mismatches; only "chain resolves to a DIFFERENT non-empty name" fails
 closed. No WARN-only rollout mode is ported (reference
-`CREW_CALLER_BINDING_MODE=warn`) — that is a bounded MIGRATION-WINDOW
+caller-binding warn-mode environment flag) — that is a bounded MIGRATION-WINDOW
 feature-flag for a live fleet's staged rollout, not a shell-command policy
 decision this module should own; a caller wanting a staged rollout
 implements it in its own harness adapter's resolver callable (e.g. having
@@ -176,7 +176,7 @@ never inside this module.
 WHY THIS IS A SEAM, NOT A DROP: per this task's dispatch instruction,
 silently omitting the carve-out in THIS PR (unlike PR1) would be an
 un-flagged narrowing of documented lead authority — a lead session
-legitimately dispatching a crew reviewer subagent's own forgejo-curl POST
+legitimately dispatching a reviewer subagent's own forgejo-curl POST
 would now hard-deny where the reference correctly deferred to that
 subagent's own narrower credential. The seam above ports the reference's
 actual DECISION LOGIC (attestation-bound deferral, ineligible-caller
@@ -593,7 +593,7 @@ class LeadMutationConfig:
         against a self-hosted forge is never silently unprotected by an
         assumption about which host it runs.
     review_runner_patterns: absolute-path or verb-prefix regexes for a
-        caller's own crew-reviewer-invocation surfaces (reference: a narrow
+        caller's own reviewer-invocation surfaces (reference: a narrow
         two-script carve-out for the reviewer/security-scanner runner
         scripts, ll.4360-4365) — these read a PR diff and post one review
         comment; they do not mutate repos or PRs. A caller supplies its own

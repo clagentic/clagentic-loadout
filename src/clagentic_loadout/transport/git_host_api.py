@@ -73,7 +73,7 @@ see bind_caller. A mismatch is refused BEFORE any I/O: an identity may use
 only its OWN credential, and this refusal happens unconditionally, even
 where a named-agent allowlist configured elsewhere would otherwise admit
 the mismatched role. This is layer (1)->(2) of the three-layer trust model
-(attested invoking identity -> crew role/--caller -> credential grantor);
+(attested invoking identity -> agent role/--caller -> credential grantor);
 credential_provider.resolve_token and merge.authority.check_authority
 remain layer (2)->(3), consuming --caller/--role as the pre-existing,
 already-attested opaque value they have always treated it as (lr-e5eeab) —
@@ -178,7 +178,7 @@ resolve_bot_login GET /api/v1/user this module's --verify-comment readback
 already uses) AND (comment body contains NO fenced ```review-result```
 block, re-parsed via merge.verdict.parse_verdict_block -- the SAME
 single-source-of-truth parser the merge gate itself uses, never a bespoke
-regex). No crew agent may delete another author's comment -- cross-author
+regex). No agent may delete another author's comment -- cross-author
 delete is an audit-tampering/censorship surface and is refused
 unconditionally, with no override; human-comment removal stays an operator
 action outside this tool entirely. Even a self-authored comment carrying a
@@ -1341,7 +1341,7 @@ def delete_own_comment(
     ADMISSIBLE OPERATION (operator-agreed): delete a
     comment IFF (author login == the caller's OWN bot identity, resolved
     from the token) AND (comment body contains NO fenced
-    ```review-result``` block). No crew agent may delete another author's
+    ```review-result``` block). No agent may delete another author's
     comment (cross-author delete is an audit-tampering/censorship surface --
     refused unconditionally, never an override). Even a self-authored
     comment carrying a landed verdict fence is refused, so deleting a
