@@ -194,6 +194,15 @@ that platform enforcement, not a replacement for it. A DELETE to
 issues/comments/<id> that OMITS --delete-own-comment is a hard refusal
 BEFORE any I/O, exactly like a comments POST omitting --verify-comment.
 
+--paginate: read-only exposure of transport.comment_paging, the
+one comment reader in this package, on the GET path. A GET of a PR/issue
+comments listing prints ONE JSON array of every comment (GitHub: the Link-
+proven walk; Forgejo: the single GET its endpoint needs). Any failure to
+prove the list complete exits EXIT_PAGINATION_FAILED with nothing on stdout,
+so a partial array can never be taken for the whole thread. A non-GET or a
+PATH that is not a comments listing is EXIT_USAGE before any I/O. Without the
+flag the GET path is untouched.
+
 Content-Type ownership: git_host_api sets 'Content-Type: application/json'
 itself whenever a JSON body is being sent and the caller has not already
 supplied their own Content-Type header.
@@ -256,6 +265,7 @@ from clagentic_loadout.platform_detect import (
 )
 from clagentic_loadout.transport import caller_binding as _caller_binding
 from clagentic_loadout.transport import comment_paging
+from clagentic_loadout.transport import github_client
 from clagentic_loadout.transport import redirect_guard
 from clagentic_loadout.transport.attestation import (
     AttestationError,
@@ -435,6 +445,14 @@ EXIT_HOST_DENIED = 20
 #: transport.read_host_guard.InvalidReadHostConfigError for the full
 #: argument.
 EXIT_HOST_CONFIG_INVALID = 21
+#: --paginate could not prove it read the COMPLETE comment list (a page came
+#: back non-200, unparseable or non-list, a GitHub page carried no completeness
+#: signal, the page cap was hit, or the request itself failed). FAILS CLOSED:
+#: nothing is written to stdout, so a caller never receives a partial array
+#: it could mistake for the whole thread. Distinct from EXIT_CURL_FAILED so a
+#: caller can tell "the list could not be proven complete" apart from an
+#: ordinary single-request transport failure.
+EXIT_PAGINATION_FAILED = 22
 
 # HTTP methods that mutate server state and require fail-on-HTTP-error
 # enforcement. GET/HEAD are read-only.
@@ -1579,6 +1597,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "a hard refusal BEFORE any I/O.",
     )
     parser.add_argument(
+        "--paginate",
+        action="store_true",
+        help="READ-ONLY, GET of a PR/issue comments listing only "
+        "(.../issues/<n>/comments, no query string): return EVERY comment "
+        "as ONE JSON array on stdout (de-duplicated, ordered by comment id) "
+        "instead of the first page. On GitHub the pages are walked until the "
+        "list is proven complete; on Forgejo the host returns the whole list "
+        "in one response, so exactly one GET is made. If completeness cannot "
+        f"be proven the call exits {EXIT_PAGINATION_FAILED} "
+        "(EXIT_PAGINATION_FAILED) with the reason on stderr and prints "
+        "nothing to stdout. Any other PATH, or a non-GET method, is a usage "
+        "error. Without this flag the call behaves exactly as before.",
+    )
+    parser.add_argument(
         "--git-host-base-url",
         default=None,
         help=f"Forgejo API base URL (default: ${GIT_HOST_BASE_URL_ENV_VAR} env "
@@ -1870,6 +1902,95 @@ def _check_cross_platform_url_shape_mistake(
             )
 
 
+#: A bare comments-listing path on a Forgejo host. No query string: the
+#: comment reader builds its own request, so a caller-supplied filter would be
+#: silently dropped and the "complete list" claim would be false.
+_FORGEJO_COMMENTS_LISTING_RE = re.compile(
+    r"^/api/v1/repos/([^/]+)/([^/]+)/issues/(\d+)/comments/?$"
+)
+
+#: The same listing on GitHub, as an absolute URL; group 1 is scheme://host.
+_GITHUB_COMMENTS_LISTING_RE = re.compile(
+    r"^(https?://[^/?#]+)/repos/([^/]+)/([^/]+)/issues/(\d+)/comments/?$"
+)
+
+
+def _parse_paginate_target(
+    method: str, path_arg: str, target_platform: str
+) -> tuple[str, str, str, str]:
+    """Validate a --paginate request and return (api_base, owner, repo,
+    number). api_base is the scheme://host the GitHub walk is built on, and ""
+    on Forgejo (the resolved git-host base is used there).
+
+    Raises GitHostApiError(EXIT_USAGE) before any I/O unless the request is a
+    GET of a PR/issue comments listing.
+    """
+    if method != "GET":
+        _fail(
+            f"--paginate applies only to a GET, got {method} {path_arg!r}.",
+            code=EXIT_USAGE,
+        )
+    if target_platform == PLATFORM_GITHUB:
+        match = _GITHUB_COMMENTS_LISTING_RE.match(path_arg)
+        if match:
+            return match.group(1), match.group(2), match.group(3), match.group(4)
+    else:
+        parts = urllib.parse.urlsplit(path_arg)
+        # An absolute URL is reduced to its path so the same shape check
+        # covers it; its host was already verified against the git-host base.
+        candidate = parts.path if parts.scheme in ("http", "https") else path_arg
+        if parts.query or parts.fragment:
+            candidate = ""
+        match = _FORGEJO_COMMENTS_LISTING_RE.match(candidate)
+        if match:
+            return "", match.group(1), match.group(2), match.group(3)
+    _fail(
+        f"--paginate requires a PR/issue comments listing "
+        f"(.../issues/<n>/comments, no query string); got {path_arg!r}.",
+        code=EXIT_USAGE,
+    )
+
+
+def _paginate_comments(
+    target_platform: str,
+    *,
+    api_base: str,
+    git_host_base: str,
+    owner: str,
+    repo: str,
+    number: str,
+    token: str,
+    opener,
+) -> list[dict[str, Any]]:
+    """Read every comment through transport.comment_paging (the one comment
+    reader in this package). Any failure to prove completeness raises
+    GitHostApiError(EXIT_PAGINATION_FAILED); nothing partial is returned."""
+
+    def fetch_page(url: str):
+        return github_client.request_json_with_headers("GET", url, token, opener=opener)
+
+    try:
+        if target_platform == PLATFORM_GITHUB:
+            return comment_paging.list_github_issue_comments(
+                owner, repo, number, fetch_page, api_base=api_base
+            )
+        return comment_paging.list_forgejo_issue_comments(
+            request, git_host_base, owner, repo, number, token, opener=opener
+        )
+    except comment_paging.CommentListError as exc:
+        _fail(f"--paginate FAILED -- {exc}.", code=EXIT_PAGINATION_FAILED)
+    except GitHostApiError as exc:
+        # request() already names the failing call; only the exit code is
+        # re-labelled so every paginate failure shares one code.
+        _fail(f"--paginate FAILED -- {exc}", code=EXIT_PAGINATION_FAILED)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
+        _fail(
+            f"--paginate FAILED -- comments request for {owner}/{repo}#{number} "
+            f"failed: {exc}",
+            code=EXIT_PAGINATION_FAILED,
+        )
+
+
 def bind_caller(
     caller: str,
     *,
@@ -2020,6 +2141,20 @@ def _run(
     path_owner_match = _REPOS_PATH_RE.match(path_arg)
     if path_owner_match:
         _validate_owner(path_owner_match.group(1), known_bad_owners=known_bad_owners)
+
+    # --paginate precondition, checked BEFORE any I/O and before every
+    # write-method precondition below (so --paginate on a write verb is
+    # always this usage error): a non-GET or a PATH that is not a comments
+    # listing is refused, never silently downgraded to the single-request
+    # path (which would hand the caller a first page it believes is the
+    # whole list).
+    paginate_target: tuple[str, str, str, str] | None = None
+    if args.paginate:
+        paginate_target = _parse_paginate_target(
+            method,
+            path_arg,
+            PLATFORM_GITHUB if _is_github_target(path_arg) else PLATFORM_FORGEJO,
+        )
 
     # --verify-comment is MANDATORY for a POST to issues/<pr>/comments.
     # Checked BEFORE any I/O -- a comments POST missing the flag is refused
@@ -2454,6 +2589,23 @@ def _run(
         )
         delete_own_comment(git_host_base, token, owner, repo, comment_id, opener=opener)
         print(json.dumps({"deleted_comment_id": int(comment_id)}))
+        return EXIT_OK
+
+    if paginate_target is not None:
+        api_base, owner, repo, number = paginate_target
+        comments = _paginate_comments(
+            target_platform,
+            api_base=api_base,
+            # git_host_base is "" for an absolute same-host URL; the comment
+            # reader builds its own request, so it needs the resolved base.
+            git_host_base=resolved_git_host_base or "",
+            owner=owner,
+            repo=repo,
+            number=number,
+            token=token,
+            opener=opener,
+        )
+        sys.stdout.write(json.dumps(comments) + "\n")
         return EXIT_OK
 
     comments_match = _ISSUE_COMMENTS_RE.match(path_arg) if args.verify_comment else None
