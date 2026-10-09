@@ -30,13 +30,13 @@ PORT PATTERN — mirrors `guard.write_scope`'s established convention
 
 3. THE DIRECTOR/LEAD DENYLIST IS A SEPARATE CONCERN, NOT A ROLE BRANCH. The
    reference's second enforcement path (an operator-driven director/lead
-   session denied from dispatching a NAMED CREW ROLE via the Agent tool,
-   forcing crew dispatch through the reviewed relay/orchestration path
+   session denied from dispatching a NAMED AGENT ROLE via the Agent tool,
+   forcing agent dispatch through the reviewed relay/orchestration path
    instead) does not key off `BashRole` at all — it fires for a session that
-   is *not* a spawned crew agent in the first place. `check_lead_agent_dispatch`
+   is *not* a spawned agent in the first place. `check_lead_agent_dispatch`
    takes the candidate `subagent_type` string and a caller-supplied
-   `crew_role_names` set (the bare names a caller's own role registry
-   considers "named crew roles" in its OWN vocabulary) instead of this
+   `named_agent_role_names` set (the bare names a caller's own role registry
+   considers "named agent roles" in its OWN vocabulary) instead of this
    module hardcoding any fixed identity roster — CLAUDE.md rule 1: no
    agent name literal anywhere in this file.
 
@@ -135,44 +135,43 @@ def check_task_dispatch(
 
 def check_lead_agent_dispatch(
     subagent_type: str,
-    crew_role_names: frozenset[str],
+    named_agent_role_names: frozenset[str],
 ) -> tuple[bool, str]:
     """Return (ok, reason): may a lead/director session (a session that is
-    NOT itself a spawned crew role — see module docstring point 3) dispatch
+    NOT itself a spawned agent role — see module docstring point 3) dispatch
     `Agent(subagent_type=subagent_type)`?
 
     This is the reference's second, INDEPENDENT enforcement path
-    (`_is_director_or_lead_session` + the crew-role denylist), evaluated
+    (`_is_director_or_lead_session` + the named-role denylist), evaluated
     ONLY once a caller's own harness adapter has already determined the
-    calling session is not itself an attested crew role (the reference's
-    `agent_type not in _CREW_AGENTS` branch) — `check_task_dispatch` above
-    is the correct function for an attested crew role's OWN Task-dispatch
-    admission.
+    calling session is not itself an attested agent role —
+    `check_task_dispatch` above is the correct function for an attested
+    agent role's OWN Task-dispatch admission.
 
-    *crew_role_names* is a caller-supplied set of bare role-name strings
-    (its own vocabulary for "these identities are named crew roles that
-    bypass the crew dispatch/review path if invoked directly via Agent") —
+    *named_agent_role_names* is a caller-supplied set of bare role-name
+    strings (its own vocabulary for "these identities are named agent roles
+    that bypass the dispatch/review path if invoked directly via Agent") —
     this module hardcodes no agent name (CLAUDE.md rule 1).
 
     An empty *subagent_type* is allowed (reference: a generic Task call with
-    no named target is not a crew-role-bypass attempt). Only a
+    no named target is not a named-role bypass attempt). Only a
     *subagent_type* that case-sensitively matches an entry in
-    *crew_role_names* is denied — every other value (researcher/utility/
-    catch-all subagent types) is allowed, matching the reference's DENYLIST
-    (not allowlist) posture: this function widens gracefully to any new,
-    non-crew subagent type a caller's harness introduces without an edit
-    here, per the reference module's own documented rationale.
+    *named_agent_role_names* is denied — every other value (researcher/
+    utility/catch-all subagent types) is allowed, matching the reference's
+    DENYLIST (not allowlist) posture: this function widens gracefully to any
+    new subagent type a caller's harness introduces without an edit here,
+    per the reference module's own documented rationale.
     """
     if not subagent_type:
         return True, ""
 
-    if subagent_type in crew_role_names:
+    if subagent_type in named_agent_role_names:
         return False, (
             f"a lead/director session attempted Agent dispatch to "
-            f"subagent_type={subagent_type!r}, a named crew role. Dispatching "
-            f"a crew role directly via the Agent tool from an orchestrating "
-            f"session bypasses the crew's dispatch/review path. Dispatch "
-            f"crew work through the reviewed orchestration path instead."
+            f"subagent_type={subagent_type!r}, a named agent role. Dispatching "
+            f"an agent role directly via the Agent tool from an orchestrating "
+            f"session bypasses the dispatch/review path. Dispatch "
+            f"agent work through the reviewed orchestration path instead."
         )
 
     return True, ""
