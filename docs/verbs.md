@@ -35,6 +35,38 @@ once set, the flag/env var can only narrow it. See integration.md's "Host
 restriction (git-host-api read verb)" section for the full precedence and
 the security rationale.
 
+**`--paginate` — read every comment on a PR or issue:**
+a bare `GET` of a comments listing returns only the host's first page; on
+GitHub that is the oldest 30 comments, so the newest verdict on a long PR is
+missed. `--paginate` reads the whole list through the same comment reader the
+merge gate and review verbs use (`transport.comment_paging`) and prints it as
+ONE JSON array on stdout (de-duplicated, ordered by comment id, so the last
+element is the newest), exit 0.
+
+```
+loadout-git-host-api --caller <role> --paginate GET https://api.github.com/repos/<owner>/<repo>/issues/<n>/comments
+loadout-git-host-api --caller <role> --paginate GET /api/v1/repos/<owner>/<repo>/issues/<n>/comments
+```
+
+- GitHub: pages are requested at 100 per page and the walk ends only on a
+  proving signal (an empty page, or a `Link` header with no `rel="next"`).
+  An earlier page that advertised a next page followed by a page with no
+  `Link` header, a page that adds no new comment, or more than 100 pages all
+  fail closed.
+- Forgejo: the host returns the whole list in one response, so exactly one
+  `GET` is made.
+- Fail closed: if completeness cannot be proven (non-200 page, unparseable or
+  non-list body, missing proving signal, page cap, network failure) the verb
+  exits `22` with the reason on stderr and writes nothing to stdout, so a
+  partial array is never mistaken for the whole thread.
+- Usage error (exit `1`, before any request): `--paginate` with a method
+  other than `GET`, or with a PATH that is not a `.../issues/<n>/comments`
+  listing (no query string; `pulls/<n>/comments` review comments and
+  single-comment URLs are not listings in this sense).
+- Same credential model as any other read: `--caller` is bound to the
+  attested identity and the token comes from the credential provider. Without
+  `--paginate` the verb behaves exactly as before.
+
 **`--body-env` — body-off-argv-and-pipe:**
 see the dedicated section below (shared by `loadout-git-host-api` and
 `loadout-review-post`) for the full mechanism and the harness-side staging
