@@ -37,7 +37,7 @@ import base64
 import urllib.parse
 from typing import Any
 
-from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile, RangeDiff
+from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile, RangeDiff, pr_text
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport import git_host_api
 
@@ -310,6 +310,8 @@ def fetch_pr_content(
         head_sha=head_sha,
         diff_text=diff_text,
         changed_files=tuple(changed_files),
+        title=pr_text(pr_info, "title"),
+        body=pr_text(pr_info, "body"),
     )
 
 

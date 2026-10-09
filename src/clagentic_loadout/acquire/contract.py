@@ -108,6 +108,10 @@ class AcquiredPr:
     head_sha: str
     diff_text: str = ""
     changed_files: tuple[ChangedFile, ...] = field(default_factory=tuple)
+    #: Title and description as the host reported them in the same metadata
+    #: read that produced head_sha; "" when the host sent none.
+    title: str = ""
+    body: str = ""
 
     @property
     def changed_filenames(self) -> list[str]:
@@ -116,6 +120,13 @@ class AcquiredPr:
         changed-file-count cap does not need to re-derive it from
         ``changed_files``."""
         return [cf.filename for cf in self.changed_files]
+
+
+def pr_text(pr_info: dict, key: str) -> str:
+    """A PR metadata text field (``title``/``body``) as a string: a null,
+    absent or non-string host value is ``""``."""
+    value = pr_info.get(key)
+    return value if isinstance(value, str) else ""
 
 
 @runtime_checkable
@@ -195,4 +206,5 @@ __all__ = [
     "ChangedFile",
     "RangeDiff",
     "RangeDiffBackend",
+    "pr_text",
 ]

@@ -242,12 +242,13 @@ def github_opener(
     login: str = "reviewer",
     state: dict | None = None,
     compare: dict | None = None,
+    pr_fields: dict | None = None,
 ):
     """Serves the acquire reads and the review-post comment writes for one PR.
     `state` collects the posted body and every request URL. `compare`, when
     given, serves the commit-range endpoint: {"status": "ahead", "diff": "..."}
     (or "http_status" for a failing read); without it a compare request is an
-    unexpected call."""
+    unexpected call. `pr_fields` adds fields (title, body) to the PR metadata."""
     recorded = state if state is not None else {}
     recorded.setdefault("posted_body", None)
     recorded.setdefault("requests", [])
@@ -260,7 +261,9 @@ def github_opener(
         if method == "GET" and url.endswith(f"/pulls/{pr_number}"):
             if accept == "application/vnd.github.v3.diff":
                 return _Response(200, diff.encode("utf-8"), "text/plain")
-            return _json({"base": {"sha": base_sha}, "head": {"sha": head_sha}})
+            return _json(
+                {"base": {"sha": base_sha}, "head": {"sha": head_sha}, **(pr_fields or {})}
+            )
         if method == "GET" and url.endswith(f"/pulls/{pr_number}/files"):
             return _json([])
         if method == "GET" and "/compare/" in url and compare is not None:
