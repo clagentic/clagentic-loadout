@@ -113,14 +113,21 @@ class TestResolveLeaseCredentialedFetch:
         isolated for this subprocess."""
         expected_token = "correct-minted-token-abc123"
 
+        # (Authorization header received, status sent) per request. The
+        # outcome is asserted from these, not from the error message, which
+        # embeds the random ephemeral port and so can contain "401" by chance.
+        seen: list[tuple[str, int]] = []
+
         class _AuthHandler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
                 auth = self.headers.get("Authorization", "")
                 if auth != f"Basic {_basic_auth_value(expected_token)}":
+                    seen.append((auth, 401))
                     self.send_response(401)
                     self.send_header("WWW-Authenticate", 'Basic realm="git"')
                     self.end_headers()
                     return
+                seen.append((auth, 404))
                 self.send_response(404)
                 self.end_headers()
 
@@ -157,14 +164,19 @@ class TestResolveLeaseCredentialedFetch:
             from clagentic_loadout.push.git_push import GitFetchError, git_fetch_with_token
 
             remote_url = f"http://127.0.0.1:{port}/synthetic-owner/synthetic-repo.git"
-            with pytest.raises(GitFetchError) as exc_info:
+            with pytest.raises(GitFetchError):
                 git_fetch_with_token(remote_url, "widget", expected_token, repo)
-            # A 401 here (not proven correct-auth) would mean the WRONG
-            # ambient credential (or no credential) was used -- assert the
-            # failure is NOT an auth failure, i.e. the correct token DID
-            # authenticate and the failure is purely "this isn't a real git
-            # smart-HTTP backend."
-            assert "401" not in str(exc_info.value)
+            # git probes without credentials first, so an anonymous 401 is
+            # expected. What must never happen is a request presenting a
+            # credential other than the minted token (the ambient one), and
+            # the minted token must have been presented and accepted; the
+            # remaining failure is then purely "not a real smart-HTTP backend."
+            correct = f"Basic {_basic_auth_value(expected_token)}"
+            presented = [auth for auth, _status in seen if auth]
+            assert presented, f"no credential was ever presented: {seen}"
+            assert all(auth == correct for auth in presented), seen
+            assert (correct, 404) in seen, seen
+            assert all(status != 401 for auth, status in seen if auth), seen
         finally:
             server.shutdown()
             thread.join(timeout=5)

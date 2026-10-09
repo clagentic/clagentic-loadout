@@ -29,6 +29,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from _install_support import git_source
 
 INSTALL_SH = Path(__file__).resolve().parent.parent / "scripts" / "install.sh"
 
@@ -246,7 +247,9 @@ def test_install_sh_venv_tier_symlink_refresh_is_idempotent(tmp_path: Path) -> N
     symlinks the first run created. DEFAULT_BIN_DIR for the venv tier is
     derived from $HOME (mirroring pipx/uv's own ~/.local/bin convention),
     so HOME is pointed at a scratch dir for the duration of this test."""
-    checkout = Path(__file__).resolve().parent.parent
+    # A committed copy, not the live checkout: install.sh gives a dirty tree a
+    # fresh release id, so reuse could not be observed with local changes present.
+    checkout = git_source(tmp_path, "src-committed")
     data_dir = tmp_path / "data"
     fake_home = tmp_path / "home"
     fake_home.mkdir()
