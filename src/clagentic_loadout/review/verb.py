@@ -1250,7 +1250,10 @@ def _run(
         "owner": owner,
         "repo": repo,
         "pr_number": pr_number,
+        "comment": "reused" if verified.reused else "created",
     }
+    if verified.reused:
+        result["reused_from_created_at"] = verified.created_at
 
     if verdict_review_status is not None:
         # Emit-and-verify (lr-482c20, extended by lr-c26110's foreign-block

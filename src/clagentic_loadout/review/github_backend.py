@@ -509,6 +509,8 @@ def _find_existing_own_comment(
                 url=comment.get("html_url", ""),
                 login=own_login,
                 body=comment_body,
+                reused=True,
+                created_at=str(comment.get("created_at", "")),
             )
     return None
 

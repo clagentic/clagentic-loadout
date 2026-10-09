@@ -63,12 +63,20 @@ class VerifiedReview:
     here rather than surfacing later as an opaque merge-gate refusal (the
     same mirror-verification property transport.git_host_api's
     --expect-verdict-block already established for the Forgejo-only path —
-    see that module's verify_verdict_block)."""
+    see that module's verify_verdict_block).
+
+    `reused` is True when the backend returned an already-landed comment with
+    an identical body instead of posting a new one; `created_at` is then that
+    comment's own creation timestamp, so a caller can tell a reused comment
+    from a fresh one. A backend that never reuses leaves both at their
+    defaults."""
 
     id: "int | str"
     url: str
     login: str
     body: str = ""
+    reused: bool = False
+    created_at: str = ""
 
 
 @runtime_checkable

@@ -2148,3 +2148,79 @@ class TestVerdictRequiredRoleRefusesFenceless:
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERDICT_ROUTE_INTENT_MISMATCH
+
+
+class TestCommentReuseSignal:
+    def _post(self, platform_args, opener, monkeypatch):
+        return _run_main(
+            ["--caller", "reviewer", *platform_args, "some-owner/some-repo", "42"],
+            stdin_bytes=b'{"body": "LGTM"}',
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+            monkeypatch=monkeypatch,
+        )
+
+    def test_new_github_comment_is_reported_created(self, monkeypatch, capsys):
+        landed: list[dict] = []
+
+        def opener(req, timeout=15):
+            url = req.full_url
+            if req.get_method() == "POST":
+                landed.append({
+                    "id": 5,
+                    "user": {"login": "some-role"},
+                    "body": "LGTM",
+                    "created_at": "2099-01-01T00:00:10Z",
+                    "html_url": "http://readback",
+                })
+                return _json_resp(200, {"id": 5, "html_url": "http://post"})
+            if url.endswith("/user"):
+                return _json_resp(200, {"login": "some-role"})
+            if url.split("?")[0].endswith("/issues/42/comments"):
+                return _json_resp(200, paged(url, list(landed)))
+            raise AssertionError(f"unexpected: {req.get_method()} {url}")
+
+        code = self._post(["--platform", "github"], opener, monkeypatch)
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert len(landed) == 1
+        assert out["comment"] == "created"
+        assert "reused_from_created_at" not in out
+
+    def test_identical_existing_github_comment_is_reported_reused(self, monkeypatch, capsys):
+        def opener(req, timeout=15):
+            url = req.full_url
+            if req.get_method() == "POST":
+                raise AssertionError("a reused comment must not be posted again")
+            if url.endswith("/user"):
+                return _json_resp(200, {"login": "some-role"})
+            if url.split("?")[0].endswith("/issues/42/comments"):
+                return _json_resp(
+                    200,
+                    paged(url, [{
+                        "id": 77,
+                        "user": {"login": "some-role"},
+                        "body": "LGTM",
+                        "created_at": "2020-01-01T00:00:10Z",
+                        "html_url": "http://earlier",
+                    }]),
+                )
+            raise AssertionError(f"unexpected: {req.get_method()} {url}")
+
+        code = self._post(["--platform", "github"], opener, monkeypatch)
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["comment"] == "reused"
+        assert out["verified_id"] == 77
+        assert out["reused_from_created_at"] == "2020-01-01T00:00:10Z"
+
+    def test_forgejo_comment_is_reported_created(self, monkeypatch, capsys):
+        code = self._post(
+            ["--platform", "forgejo", "--git-host-base-url", "http://git-host.example.com"],
+            _forgejo_success_opener(),
+            monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        out = json.loads(capsys.readouterr().out)
+        assert out["comment"] == "created"
+        assert "reused_from_created_at" not in out

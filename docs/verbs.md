@@ -816,7 +816,15 @@ cannot close the GitHub race, a landed verdict whose head has since moved is
 reported as `posted_head_moved` (exit **31**, with `current_head_sha`) rather
 than `posted`; the comment stays, and the review must be run again. A failed
 closing read leaves `posted` with `head_recheck` `unavailable`; otherwise
-`head_recheck` is `current`. With a findings file written by `run`, a `--head-sha` that differs from
+`head_recheck` is `current`. The result also carries `comment`: `created` when
+this call posted a new comment, or `reused` when an earlier comment by the same
+identity with an identical body already existed and was returned instead of
+posting again (then `reused_from_created_at` holds that comment's `created_at`,
+and `verified_id` is the earlier comment's id). `comment` is independent of
+`result`: it is present on every path that has a verified comment, including
+`posted_head_unconfirmed` and `posted_head_moved`, and `result` and the exit
+code are unchanged by it. A Forgejo post always reports `created`. The same
+`comment` field is on the `loadout-review-post` result. With a findings file written by `run`, a `--head-sha` that differs from
 the file's recorded head is refused (exit **32**).
 
 **Reviewer evidence in the posted comment.** A finding may carry an optional
