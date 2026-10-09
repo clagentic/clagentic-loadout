@@ -57,6 +57,7 @@ from clagentic_loadout.review.findings_contract import (
     InvalidReplyError,
     validate_finding,
 )
+from clagentic_loadout.review.pr_record import write_pr_record
 from clagentic_loadout.review.run_evidence import evidence_from_document
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
@@ -472,6 +473,13 @@ def _run_command(
         bind_run_dir(run_dir, owner, repo, args.pr, acquired.head_sha, delta_since)
     except OSError as exc:
         _fail(f"cannot prepare the run directory {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
+    # Rewritten on every invocation (resumed and delta runs included) from the
+    # fetch that fixed this run's head, so it can never describe an older head
+    # than findings.json.
+    try:
+        write_pr_record(run_dir, acquired, platform)
+    except OSError as exc:
+        _fail(f"cannot write the PR record in {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
 
     kwargs = {"runner": runner} if runner is not None else {}
     outcome = run_review(

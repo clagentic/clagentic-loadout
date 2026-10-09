@@ -736,6 +736,24 @@ then `<user config root>/state/review-runs`. It is deliberately not under a
 per-process `TMPDIR`, so a re-dispatched run resumes its finished chunks.
 `run` writes nothing outside the run directory.
 
+**`pr.json`.** The chunk reviewer sees only the diff, so facts about the PR
+description are invisible to it. Every `run` invocation (first, resumed, delta,
+and one that ends blocked) also writes `pr.json` beside `findings.json`, fetched
+from the host at the head being reviewed, so it never describes an older head
+than `findings.json` and replaces any stale copy left in `--out`:
+
+```json
+{"schema": "loadout.review-pr/1", "platform": "github|forgejo",
+ "repo": "<owner>/<repo>", "pr_number": 42, "head_sha": "<40 hex>",
+ "title": "...", "body": "...", "body_truncated": false}
+```
+
+`title` and `body` are exactly as the host reported them; a null or absent body
+is `""`. `body` is capped at 64 KiB (UTF-8 bytes), cut on a character boundary,
+and `body_truncated` is `true` when it was cut. The file is written atomically;
+`findings.json` is unaffected. A consumer that holds no host credential should
+refuse a `pr.json` whose `head_sha` differs from the head it is reviewing.
+
 **Profiles** live in deployment config, keyed by name (default: the `--caller`
 role). Loadout never names an agent or a model; the carrier is whatever argv you
 configure.
