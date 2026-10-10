@@ -69,19 +69,22 @@ def _document(payload: dict) -> dict:
 
 
 # Real shapes: the fix lands at a line other than the finding's own.
-@pytest.mark.parametrize(
-    ("file", "finding_line", "fix_line"),
+_FIX_SHAPES = pytest.mark.parametrize(
+    ("file", "finding_line", "fix_line", "shifted_line"),
     [
-        ("engram_sync_state.py", 86, 319),
-        ("tests/test_notifier.py", 140, 22),
-        ("notifier.py", 198, 61),
+        ("engram_sync_state.py", 86, 319, 86),
+        ("tests/test_notifier.py", 140, 22, 141),
+        ("notifier.py", 198, 61, 199),
     ],
     ids=["new-helper-after", "setup-before", "fixed-in-channel"],
 )
-def test_a_fix_at_a_different_line_of_the_same_file_resolves_the_finding(
-    env, tmp_path, capsys, file, finding_line, fix_line
+
+
+@_FIX_SHAPES
+def test_a_fix_at_a_different_line_is_resolved_only_when_the_reviewer_names_the_finding(
+    env, tmp_path, capsys, file, finding_line, fix_line, shifted_line
 ):
-    env.configure(carrier_mode="empty")
+    env.configure(carrier_mode="resolve_listed")
     prior = _prior(tmp_path, [_finding(file=file, line=finding_line)])
 
     code, payload = env.run(
@@ -96,6 +99,7 @@ def test_a_fix_at_a_different_line_of_the_same_file_resolves_the_finding(
     ]
     sent = prompts(env.stubs, "carrier")[0]
     assert f"- {file}:{finding_line} [R1] (blocking) bad (prior location: line {finding_line})" in sent
+    assert f"\n  id: {file}:{finding_line}:R1\n" in sent
 
     posted_code, _ = env.post("--findings", payload["findings_file"], "--status", "clean", capsys=capsys)
     assert posted_code == 0
@@ -103,6 +107,46 @@ def test_a_fix_at_a_different_line_of_the_same_file_resolves_the_finding(
     assert f"Resolved (1):\n- {file}:{finding_line} [R1] bad" in body
     assert "clean (0 finding(s), 1 resolved)" in body
     assert parse_verdict_block(body)["resolved"][0]["by"] == "reviewer"
+
+
+@_FIX_SHAPES
+def test_a_silent_reply_leaves_the_finding_open_at_its_re_anchored_line(
+    env, tmp_path, capsys, file, finding_line, fix_line, shifted_line
+):
+    env.configure(carrier_mode="empty")
+    prior = _prior(tmp_path, [_finding(file=file, line=finding_line)])
+
+    _, payload = env.run(
+        "--prior-findings", prior, capsys=capsys, compare=_edit_at(file, fix_line, fix_line)
+    )
+
+    document = _document(payload)
+    assert document["resolved"] == [] and document["resolved_count"] == 0
+    assert [(f["file"], f["line"], f["prior_line"]) for f in document["findings"]] == [
+        (file, shifted_line, finding_line)
+    ]
+    assert (document["prior_open_count"], document["kept_count"]) == (1, 1)
+
+
+def test_a_malformed_resolved_list_resolves_nothing(env, tmp_path, capsys):
+    env.configure(carrier_mode="resolve_malformed")
+    prior = _prior(tmp_path, [_finding(line=3)])
+
+    _, payload = env.run("--prior-findings", prior, capsys=capsys, compare=_edit_at("a.py", 20, 20))
+
+    document = _document(payload)
+    assert document["resolved"] == [] and len(document["findings"]) == 1
+    assert document["prior_open_count"] == 1 and document["kept_count"] == 1
+
+
+def test_a_failed_chunk_resolves_nothing(env, tmp_path, capsys):
+    env.configure(carrier_mode="exit1")
+    prior = _prior(tmp_path, [_finding(line=3)])
+
+    code, payload = env.run("--prior-findings", prior, capsys=capsys, compare=_edit_at("a.py", 20, 20))
+
+    assert code != 0
+    assert "resolved" not in payload and "findings_file" not in payload
 
 
 def test_a_finding_the_reviewer_reports_again_is_kept_and_re_anchored(env, tmp_path, capsys):
@@ -133,7 +177,7 @@ def test_a_finding_on_an_untouched_file_is_carried_with_its_line(env, tmp_path, 
 
 
 def test_every_prior_finding_is_accounted_for_exactly_once(env, tmp_path, capsys):
-    env.configure(carrier_mode="empty")
+    env.configure(carrier_mode="resolve_listed")
     prior = _prior(tmp_path, [
         _finding(file="a.py", line=3),
         _finding(file="b.py", line=4),
@@ -283,7 +327,46 @@ def test_account_for_prior_pairs_by_file_and_rule_with_the_closest_line():
 
     assert [f["file"] for f in accounting.carried] == ["z.py"]
     assert [(p["line"], r["line"]) for p, r in accounting.kept] == [(50, 48)]
+    assert accounting.resolved == [] and [f["line"] for f in accounting.left_open] == [10]
+    assert accounting.left_open[0]["prior_line"] == 10 and accounting.kept_count == 2
+
+
+def test_a_report_with_the_same_message_as_a_kept_prior_finding_is_not_absorbed():
+    context = DeltaContext("1" * 40, (_finding(line=10),))
+    reports = [_finding(line=12), _finding(line=40)]
+
+    accounting = account_for_prior(context, {"a.py"}, reports)
+
+    assert [(p["line"], r["line"]) for p, r in accounting.kept] == [(10, 12)]
+    assert not hasattr(accounting, "restatements")
+    assert accounting.kept_count == 1 and accounting.left_open == []
+
+
+def test_a_named_prior_finding_is_resolved_and_not_paired_with_an_unrelated_report():
+    prior = (_finding(line=10), _finding(line=50))
+    context = DeltaContext("1" * 40, prior)
+
+    accounting = account_for_prior(
+        context, {"a.py"}, [_finding(line=12, message="different")], resolved_positions={0}
+    )
+
     assert [(e["line"], e["by"]) for e in accounting.resolved] == [(10, "reviewer")]
+    assert [(p["line"], r["line"]) for p, r in accounting.kept] == [(50, 12)]
+    assert accounting.left_open == []
+
+
+def test_a_kept_prior_finding_and_one_left_open_both_stay_in_the_findings(env, tmp_path, capsys):
+    # The stub reports a.py:1 R1 "stub finding", which pairs with the closer
+    # prior finding; the other prior finding is not named by anyone and stays open.
+    env.configure(carrier_mode="array")
+    prior = _prior(tmp_path, [_finding(line=3, message="stub finding"), _finding(line=9, message="stub finding")])
+
+    _, payload = env.run("--prior-findings", prior, capsys=capsys, compare=_edit_at("a.py", 1, 1))
+
+    document = _document(payload)
+    assert (document["prior_open_count"], document["kept_count"]) == (2, 2)
+    assert sorted(f["prior_line"] for f in document["findings"]) == [3, 9]
+    assert len(document["findings"]) == 2
 
 
 def test_the_fence_state_validates_resolved_entries():

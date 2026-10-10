@@ -747,18 +747,34 @@ finding ends the round as exactly one of three outcomes:
 - **re-judged** — its file is touched anywhere in the delta, whether or not a
   changed hunk covers its old line. It goes to the reviewer model, in the prompt
   of exactly one chunk: the lowest-index chunk whose hunks cover its prior line,
-  else the lowest-index chunk holding that file (the existing prior-findings
-  path, not a mechanical re-anchor). A fix landing in another chunk of a split
-  file therefore leaves it kept, never a duplicate. It is shown at its **prior location** (`file:line` as of the
-  prior head). The reviewer either reports it again at a line of the new head
-  (**kept**: the merged finding carries `prior_line`, the line it had before), or
-  says nothing about it (**resolved**: it is listed in `resolved` with
-  `by: "reviewer"` and never re-posted as open). A fix made at a different line
-  of the same file (a new helper, a `setUp`, a refactor) therefore resolves it.
-  A reviewer finding is paired with a prior one by file and `rule_id` (closest
-  message, then closest line, one reviewer finding per prior finding); another
-  reviewer finding with the same file, `rule_id` and message as a kept prior
-  finding only restates it and is not posted as a separate open finding.
+  else the lowest-index chunk holding that file. It is shown with its **id**
+  (`<file>:<line>:<rule_id>`, the line as of the prior head), its prior
+  location, the line as it then read (when the delta shows it), where that line
+  now is in the new head (or the nearest position when the delta removed it),
+  and a bounded excerpt of the new head around there (about 20 lines either
+  side, at most 3000 characters; only lines the delta itself shows). The
+  reviewer's reply decides its outcome:
+  - reported again at a line of the new head: **kept**. The merged finding
+    carries `prior_line`, the line it had before. A reported finding is paired
+    with a prior one by file and `rule_id` (same message first, then closest
+    line; one reported finding per prior finding).
+  - its id named in the reply's `resolved` list: **resolved** (listed in
+    `resolved` with `by: "reviewer"`, never re-posted as open). Only the chunk
+    that was shown the finding can resolve it.
+  - neither: it **stays open**, counted in `kept_count`. It is posted as a
+    finding at the new head's line when the delta places the old line
+    unambiguously (outside every hunk, shifted by the hunks above it; or a
+    context line inside one), else at its prior line, with `prior_line` set.
+    Silence never resolves a finding, and a chunk that failed or ran out of
+    retries never resolves anything (the run does not account until every chunk
+    is ok).
+
+  A reported finding is never dropped for resembling a prior one; a duplicate is
+  visible instead (the only removal is the existing merge dedupe of identical
+  file, line, rule and message). The reply form is internal to the reviewer
+  prompt: a bare findings array (resolves nothing), or
+  `{"findings": [...], "resolved": ["<id>", ...]}`. An absent or malformed
+  `resolved` value (anything but a list of non-empty strings) resolves nothing.
 - **resolved by the caller** — the caller ruled it resolved or refuted with
   `--resolved-findings` (below). It is neither shown to the reviewer nor carried.
 
@@ -967,10 +983,10 @@ review's file is exactly as before); `prior_line` appears only on a kept finding
 | field | type | meaning |
 | --- | --- | --- |
 | `prior_open_count` | integer | prior open findings (non-praise) this run answered for |
-| `kept_count` | integer | re-judged findings the reviewer kept |
+| `kept_count` | integer | re-judged findings still open: restated by the reviewer, or neither restated nor resolved |
 | `resolved_count` | integer | length of `resolved` (reviewer plus caller) |
 | `resolved` | array of resolved entry | the prior findings closed this round; `[]` when none |
-| `findings[].prior_line` | integer, optional | on a kept finding only: the line the prior finding had at the prior head |
+| `findings[].prior_line` | integer, optional | on a kept finding only (restated or left open): the line the prior finding had at the prior head. A finding left open carries `chunk` 0 |
 
 The existing `carried_count` keeps its meaning. A resolved entry (also the item of
 the fence's `resolved` list):
@@ -981,7 +997,7 @@ the fence's `resolved` list):
 | `line` | integer >= 1 | its prior location (line at the prior head) |
 | `rule_id` | string | rule it was raised under |
 | `message` | string | what it claimed |
-| `by` | string | `reviewer` (re-judged, reported no longer applying) or `caller` (ruled by `--resolved-findings`) |
+| `by` | string | `reviewer` (re-judged; its id was named in the reply's `resolved` list) or `caller` (ruled by `--resolved-findings`) |
 | `reason` | string | the caller's reason; required when `by` is `caller`, omitted for `reviewer` |
 | `fingerprint` | string, optional | the prior finding's fingerprint, when it had one |
 

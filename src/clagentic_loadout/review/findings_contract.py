@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
@@ -45,6 +46,21 @@ no Markdown. Each element is an object with these keys:
     characters (string). A blocking finding that cannot state a concrete
     failure sequence should be reported as "nit" instead.
 Reply [] when the chunk has no findings.
+"""
+
+#: Precedes OUTPUT_CONTRACT (which stays last) in an incremental review, the one
+#: place a reply can name prior findings as resolved.
+RESOLVED_REPLY_ADDENDUM = """\
+## Incremental reply form
+
+The output contract below asks for a JSON array. When the incremental review
+section lists open findings, you may instead reply with exactly one JSON object
+and nothing else:
+  {"findings": [ ...the elements the contract describes... ], "resolved": ["<id>", ...]}
+"resolved" names, by the id shown for it, each listed finding that no longer
+applies. A listed finding you neither report again nor name in "resolved" stays
+open. A bare array is also accepted and resolves nothing.
+
 """
 
 #: Appended to the original prompt when a reply was not a findings array.
@@ -137,25 +153,54 @@ def validate_finding(
     return validated
 
 
-def parse_chunk_reply(text: str) -> list[dict[str, Any]]:
-    """Parse one chunk's reply into validated findings.
+@dataclass(frozen=True)
+class ChunkReply:
+    """A parsed chunk reply: its findings, and the ids of listed prior findings
+    the reviewer explicitly named as resolved (empty when it named none, or
+    when what it wrote was not a list of id strings)."""
 
-    Accepts a bare JSON array, optionally wrapped in one Markdown code fence
-    (models add it unprompted). Anything else raises InvalidReplyError.
+    findings: list[dict[str, Any]]
+    resolved: list[str]
+
+
+def _resolved_ids(value: Any) -> list[str]:
+    """The reply's ``resolved`` value as ids. Anything but a list of non-empty
+    strings resolves nothing: a malformed list must never close a finding."""
+    if not isinstance(value, list) or not all(isinstance(i, str) and i.strip() for i in value):
+        return []
+    return [i.strip() for i in value]
+
+
+def parse_chunk_output(text: str) -> ChunkReply:
+    """Parse one chunk's reply into validated findings and resolved ids.
+
+    Accepts a bare JSON array (findings only), or a JSON object
+    ``{"findings": [...], "resolved": [...]}``, either optionally wrapped in one
+    Markdown code fence (models add it unprompted). Anything else raises
+    InvalidReplyError.
     """
     stripped = text.strip()
     fenced = _FENCE_RE.match(stripped)
     if fenced:
         stripped = fenced.group(1).strip()
-    if not stripped.startswith("["):
+    if not stripped.startswith(("[", "{")):
         raise InvalidReplyError("reply is not a JSON array")
     try:
         data = json.loads(stripped)
     except json.JSONDecodeError as exc:
         raise InvalidReplyError(f"reply is not valid JSON: {exc.msg}") from exc
+    resolved: list[str] = []
+    if isinstance(data, dict):
+        resolved = _resolved_ids(data.get("resolved"))
+        data = data.get("findings")
     if not isinstance(data, list):
         raise InvalidReplyError("reply is not a JSON array")
-    return [validate_finding(item, i + 1) for i, item in enumerate(data)]
+    return ChunkReply([validate_finding(item, i + 1) for i, item in enumerate(data)], resolved)
+
+
+def parse_chunk_reply(text: str) -> list[dict[str, Any]]:
+    """The findings of one chunk's reply (see parse_chunk_output)."""
+    return parse_chunk_output(text).findings
 
 
 def merge_findings(

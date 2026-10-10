@@ -27,10 +27,14 @@ Every prior open finding ends a delta review as exactly one of:
     shown to the reviewer. `carried_findings` returns it, so a delta review
     can never turn "clean" by simply not looking;
   * re-judged: its file is touched anywhere in the delta. The reviewer gets it
-    with that file's chunk, shown at its prior location, and either reports it
-    again at a line of the new head (kept) or says nothing (resolved). A fix
-    made elsewhere in the file (a new helper, a setUp, a refactor) is a
-    resolution, which a hunk-coverage test on the old line could not see;
+    in exactly one chunk, with its prior location, the line as it then read and
+    a bounded excerpt of the new head around where it now is. The reviewer
+    either reports it again (kept), or names its id in the reply's `resolved`
+    list (resolved). A fix made elsewhere in the file (a new helper, a setUp, a
+    refactor) is a resolution, which a hunk-coverage test on the old line could
+    not see. Silence resolves nothing: a finding neither restated nor named
+    stays open, re-anchored where the delta places it, so a reply that omits it
+    can never turn a review clean;
   * resolved by the caller: the caller ruled it resolved or refuted (see
     review.resolutions). It is neither shown to the reviewer nor carried.
 
@@ -40,17 +44,24 @@ Every prior open finding ends a delta review as exactly one of:
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.acquire.contract import AcquiredPr, RangeDiffBackend
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.review.chunking import Chunk
+from clagentic_loadout.review.prior_view import (
+    MAX_LINE_CHARS,
+    locate_prior_line,
+    new_head_excerpt,
+    prior_line_text,
+)
 from clagentic_loadout.review.resolutions import (
     BY_CALLER,
     BY_REVIEWER,
     Resolution,
+    locator,
     resolved_entry,
     split_resolved,
 )
@@ -202,12 +213,44 @@ def findings_for_chunk(
     )
 
 
+def _render_listed_finding(finding: dict[str, Any], chunks: Sequence[Chunk]) -> list[str]:
+    """One listed finding: its id, claim, prior location, the line as it read
+    at the last reviewed head (when the diff shows it), and a bounded excerpt of
+    the new head around where it now is (only lines the diff shows)."""
+    lines = [
+        f"- {finding['file']}:{finding['line']} [{finding['rule_id']}] "
+        f"({finding['severity']}) {finding['message']} "
+        f"(prior location: line {finding['line']})",
+        f"  id: {locator(finding)}",
+    ]
+    old_text = prior_line_text(chunks, finding["file"], finding["line"])
+    if old_text is not None:
+        lines.append(f"  that line then read: {old_text.strip()[:MAX_LINE_CHARS]}")
+    place = locate_prior_line(chunks, finding["file"], finding["line"])
+    if place.mapped is not None:
+        lines.append(f"  that line is now line {place.mapped} of the new head")
+    else:
+        lines.append(
+            f"  that line is not present in the new head; the nearest new-head "
+            f"position is line {place.anchor}"
+        )
+    excerpt = new_head_excerpt(chunks, finding["file"], place.anchor)
+    if excerpt:
+        lines.append("  new head around there (only lines this diff shows):")
+        lines.extend(f"    {entry}" for entry in excerpt)
+    return lines
+
+
 def render_delta_note(
-    context: DeltaContext, listed: Sequence[dict[str, Any]] | None = None
+    context: DeltaContext,
+    listed: Sequence[dict[str, Any]] | None = None,
+    chunks: Sequence[Chunk] = (),
 ) -> str:
     """Prompt text framing each chunk as part of an incremental review.
     *listed* is the findings to list (default: every listable open finding,
-    see findings_for_chunk for the per-chunk subset)."""
+    see findings_for_chunk for the per-chunk subset). *chunks* is the whole
+    delta plan, which each listed finding's prior line text and new-head
+    excerpt are read from."""
     lines = [
         "## Incremental review",
         "",
@@ -217,14 +260,16 @@ def render_delta_note(
         "1. Report a new defect only when a line this diff adds or changes "
         "introduces it. Do not report problems on lines this diff does not touch.",
         "2. Each open finding listed below comes from the last review and names "
-        "a file this diff changes. Its file:line is its prior location, numbered "
-        "as of the last reviewed head; the code may have moved, and a fix may "
-        "sit anywhere in the file (a new helper, a setUp or tearDown, a "
-        "refactor), not only on that line. Decide against the code as it now "
-        "stands whether the finding still applies. If it does, report it again "
-        "at the line of the new code where it now is, keeping its file and "
-        "rule_id and the severity given. If it no longer applies, say nothing "
-        "about it; it is then recorded as resolved.",
+        "a file this diff changes. Its prior location is numbered as of the "
+        "last reviewed head; the code may have moved, and a fix may sit "
+        "anywhere in the file (a new helper, a setUp or tearDown, a refactor), "
+        "not only on that line. Decide against the code as it now stands "
+        "whether the finding still applies. If it does, report it again at the "
+        "line of the new code where it now is, keeping its file and rule_id "
+        "and the severity given. Only if it no longer applies, name its id in "
+        'the "resolved" list of your reply (see the incremental reply form '
+        "before the output contract). A finding you neither report again nor "
+        "name in that list stays open.",
         "",
         "Open findings from the last review:",
     ]
@@ -232,11 +277,7 @@ def render_delta_note(
     if not shown:
         lines.append("- none")
     for finding in shown:
-        lines.append(
-            f"- {finding['file']}:{finding['line']} [{finding['rule_id']}] "
-            f"({finding['severity']}) {finding['message']} "
-            f"(prior location: line {finding['line']})"
-        )
+        lines.extend(_render_listed_finding(finding, chunks))
     omitted = len(context.open_findings) - len(_listed(context))
     if omitted > 0:
         lines.append(
@@ -276,10 +317,16 @@ class PriorAccounting:
     kept: list[tuple[dict[str, Any], dict[str, Any]]]
     #: `resolved` entries: those the reviewer resolved, then those the caller did.
     resolved: list[dict[str, Any]]
-    #: Reported findings that only restate a kept prior finding (same file,
-    #: rule_id and message, another line), e.g. from a chunk that was not asked
-    #: about it. They are not new defects and must not be posted open.
-    restatements: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+    #: Re-judged prior findings the reviewer neither restated nor explicitly
+    #: resolved. They stay open, as findings of their own at the new head's line
+    #: when it maps unambiguously (else at the prior line), each carrying
+    #: `prior_line`.
+    left_open: list[dict[str, Any]] = dataclasses.field(default_factory=list)
+
+    @property
+    def kept_count(self) -> int:
+        """Prior findings still open after re-judgment, restated or not."""
+        return len(self.kept) + len(self.left_open)
 
 
 def _pair_reports(
@@ -308,37 +355,74 @@ def _pair_reports(
     return paired
 
 
+def reviewer_resolved_positions(
+    context: DeltaContext,
+    chunks: Sequence[Chunk],
+    resolved_ids: Mapping[int, Collection[str]],
+) -> frozenset[int]:
+    """Positions in context.open_findings of the prior findings the reviewer
+    explicitly resolved. Only the chunk that owns a finding (see
+    owner_chunk_index) can resolve it, and only by naming its id; a finding
+    that chunk was never shown (past the listing cap, or on an untouched file)
+    cannot be resolved by anyone's reply."""
+    positions: set[int] = set()
+    for position, finding in enumerate(_listed(context)):
+        owner = owner_chunk_index(finding, chunks)
+        if owner is not None and locator(finding) in resolved_ids.get(owner, ()):
+            positions.add(position)
+    return frozenset(positions)
+
+
+def _re_anchored(prior: dict[str, Any], chunks: Sequence[Chunk]) -> dict[str, Any]:
+    """*prior* as a finding at the new head: at its mapped line when the delta
+    places it unambiguously, else left at the prior line."""
+    mapped = locate_prior_line(chunks, prior["file"], prior["line"]).mapped
+    return {**prior, "line": mapped if mapped is not None else prior["line"], "prior_line": prior["line"]}
+
+
 def account_for_prior(
-    context: DeltaContext, touched_files: set[str], reported: Sequence[dict[str, Any]]
+    context: DeltaContext,
+    touched_files: set[str],
+    reported: Sequence[dict[str, Any]],
+    chunks: Sequence[Chunk] = (),
+    resolved_positions: Collection[int] = frozenset(),
 ) -> PriorAccounting:
     """Place every prior open finding in exactly one outcome.
 
-    *reported* is what the reviewer reported for the delta. A re-judged
-    finding (one that is neither carried nor ruled on by the caller) is kept
-    when the reviewer reported a finding with its file and rule_id, pairing
-    the closest unclaimed one; otherwise the reviewer said nothing about it
-    and it is resolved."""
+    *reported* is what the reviewer reported for the delta; *resolved_positions*
+    (see reviewer_resolved_positions) are the prior findings it explicitly
+    resolved. A re-judged finding (neither carried nor ruled on by the caller)
+    is:
+
+      * kept when the reviewer reported a finding with its file and rule_id,
+        pairing the closest unclaimed one;
+      * resolved only when the reviewer named it as resolved;
+      * otherwise left open, re-anchored via *chunks*. Silence never resolves.
+
+    A reported finding is never dropped for resembling a prior one: the only
+    removal is merge_findings' dedupe of an identical finding."""
     carried = carried_findings(context, touched_files)
     rejudged = [
         (position, prior)
         for position, prior in enumerate(context.open_findings)
         if not _is_carried(position, prior, touched_files)
     ]
-    paired = _pair_reports(rejudged, reported)
+    # An explicit resolution is authoritative, so it is not paired with a
+    # report that may be an unrelated finding of the same rule.
+    paired = _pair_reports(
+        [(position, prior) for position, prior in rejudged if position not in resolved_positions],
+        reported,
+    )
     kept = [(prior, reported[paired[position]]) for position, prior in rejudged if position in paired]
     resolved = [
-        resolved_entry(prior, BY_REVIEWER) for position, prior in rejudged if position not in paired
+        resolved_entry(prior, BY_REVIEWER)
+        for position, prior in rejudged
+        if position not in paired and position in resolved_positions
     ]
     resolved.extend(context.caller_resolved)
-    claimed = {id(report) for _prior, report in kept}
-    restatements = [
-        report
-        for report in reported
-        if id(report) not in claimed
-        and any(
-            (report["file"], report["rule_id"], report["message"])
-            == (prior["file"], prior["rule_id"], prior["message"])
-            for prior, _anchor in kept
-        )
+    left_open = [
+        _re_anchored(prior, chunks)
+        for position, prior in rejudged
+        if position not in paired and position not in resolved_positions
     ]
-    return PriorAccounting(carried, kept, resolved, restatements)
+    return PriorAccounting(carried, kept, resolved, left_open)

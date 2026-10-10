@@ -51,6 +51,7 @@ from clagentic_loadout.review.delta import (
     account_for_prior,
     findings_for_chunk,
     render_delta_note,
+    reviewer_resolved_positions,
 )
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
 from clagentic_loadout.review.finding_identity import with_fingerprints
@@ -75,7 +76,7 @@ CHUNK_WORKDIR_PREFIX = "loadout-chunk-"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
-PIPELINE_VERSION = "5"
+PIPELINE_VERSION = "6"
 
 #: Optional key on a merged finding that re-anchors a prior one: the line the
 #: prior finding had in the last reviewed head.
@@ -311,9 +312,18 @@ def _mark_prior_locations(
                 break
 
 
+def _resolved_ids_of(record: dict[str, Any]) -> list[str]:
+    """The ids a persisted chunk record says its reply resolved; a record
+    whose value is not a list of strings resolves nothing."""
+    value = record.get("resolved_ids")
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    return []
+
+
 def _accounting_fields(
     prior_open: int,
-    kept: list[tuple[dict[str, Any], dict[str, Any]]],
+    kept_count: int,
     resolved: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """How the prior open findings were accounted for: prior_open_count equals
@@ -321,7 +331,7 @@ def _accounting_fields(
     beside these)."""
     return {
         "prior_open_count": prior_open,
-        "kept_count": len(kept),
+        "kept_count": kept_count,
         "resolved_count": len(resolved),
         "resolved": resolved,
     }
@@ -396,7 +406,7 @@ def run_review(
     delta_notes: dict[int, str] = {}
     if delta is not None:
         delta_notes = {
-            chunk.index: render_delta_note(delta, findings_for_chunk(delta, chunk, chunks))
+            chunk.index: render_delta_note(delta, findings_for_chunk(delta, chunk, chunks), chunks)
             for chunk in chunks
         }
     resume_note = "\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else ""
@@ -544,18 +554,24 @@ def run_review(
     carried: list[dict[str, Any]] = []
     kept: list[tuple[dict[str, Any], dict[str, Any]]] = []
     resolved: list[dict[str, Any]] = []
+    left_open: list[dict[str, Any]] = []
     prior_open = 0
     if delta is not None:
         touched = {name for chunk in chunks for name in chunk.files}
-        accounting = account_for_prior(delta, touched, merge_findings(per_chunk))
+        # Accounting runs only here, after every chunk is ok, so a failed or
+        # exhausted chunk can never have resolved anything.
+        explicit = reviewer_resolved_positions(
+            delta,
+            chunks,
+            {index: _resolved_ids_of(record) for index, record in records.items()},
+        )
+        accounting = account_for_prior(
+            delta, touched, merge_findings(per_chunk), chunks, explicit
+        )
         carried, kept, resolved = accounting.carried, accounting.kept, accounting.resolved
+        left_open = accounting.left_open
         prior_open = delta.prior_open_count
-        restated = {_finding_key(f) for f in accounting.restatements}
-        per_chunk = [
-            (index, [f for f in found if _finding_key(f) not in restated])
-            for index, found in per_chunk
-        ]
-        per_chunk.append((0, carried))
+        per_chunk.append((0, carried + left_open))
     findings = merge_findings(per_chunk)
     _mark_prior_locations(findings, kept)
     findings_path = run_dir / FINDINGS_FILENAME
@@ -569,7 +585,11 @@ def run_review(
         "mode": MODE_DELTA if delta is not None else MODE_FULL,
         "since_head": delta.since_head if delta is not None else None,
         "carried_count": len(carried),
-        **(_accounting_fields(prior_open, kept, resolved) if delta is not None else {}),
+        **(
+            _accounting_fields(prior_open, len(kept) + len(left_open), resolved)
+            if delta is not None
+            else {}
+        ),
         "chunk_count": len(chunks),
         "chunks": [
             {
@@ -602,7 +622,11 @@ def run_review(
             "chunk_count": len(chunks),
             "finding_count": len(findings),
             "carried_count": len(carried),
-            **(_accounting_fields(prior_open, kept, resolved) if delta is not None else {}),
+            **(
+                _accounting_fields(prior_open, len(kept) + len(left_open), resolved)
+                if delta is not None
+                else {}
+            ),
             **(
                 {"unknown_resolved_findings": list(unknown_resolutions)}
                 if unknown_resolutions is not None

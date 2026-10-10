@@ -41,6 +41,11 @@ STUB_SCRIPT = textwrap.dedent(
         print(array)
     elif mode == "empty":
         print("[]")
+    elif mode == "resolve_listed":
+        ids = re.findall(r"^  id: (\\S+)$", prompt, re.M)
+        print(json.dumps({"findings": [], "resolved": ids}))
+    elif mode == "resolve_malformed":
+        print(json.dumps({"findings": [], "resolved": "everything"}))
     elif mode == "prose_then_array":
         print("Looks fine to me, nothing to add." if count == 0 else array)
     elif mode == "prose_then_exit127":

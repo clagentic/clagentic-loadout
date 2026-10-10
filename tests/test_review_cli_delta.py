@@ -118,7 +118,10 @@ def test_a_finding_on_a_file_the_delta_touches_is_left_to_the_reviewer_not_carri
 
     document = _document(payload)
     assert document["carried_count"] == 0
-    assert document["findings"] == []
+    # The reviewer's silence resolves nothing, and the removed line has no
+    # counterpart in the new head: the finding stays at its prior location.
+    assert [(f["line"], f["prior_line"]) for f in document["findings"]] == [(2, 2)]
+    assert document["resolved"] == []
 
 
 def test_a_finding_outside_the_hunks_of_a_touched_file_is_rejudged_not_carried(
@@ -132,10 +135,9 @@ def test_a_finding_outside_the_hunks_of_a_touched_file_is_rejudged_not_carried(
 
     document = _document(payload)
     assert document["carried_count"] == 0
-    assert document["findings"] == []
-    assert [(e["file"], e["line"], e["by"]) for e in document["resolved"]] == [
-        ("a.py", 3, "reviewer")
-    ]
+    assert document["resolved"] == []
+    # Two lines were added above it, so it is open at line 5 of the new head.
+    assert [(f["line"], f["prior_line"]) for f in document["findings"]] == [(5, 3)]
     assert "- a.py:3 [R1] (blocking) bad (prior location: line 3)" in prompts(env.stubs, "carrier")[0]
 
 

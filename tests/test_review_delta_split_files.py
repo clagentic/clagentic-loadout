@@ -108,18 +108,20 @@ def test_an_uncovered_finding_on_a_split_file_is_listed_in_the_lowest_chunk_hold
     assert carried_findings(context, {"big.py", "other.py"}) == []
 
 
-def test_both_chunks_of_a_split_file_restating_a_prior_finding_yield_one_open_finding():
+def test_a_second_report_of_a_prior_finding_from_another_chunk_is_not_absorbed():
     chunks = _split_chunks()
     prior = _finding("big.py", 50)
     context = _context(prior)
     owner_report = {**prior, "line": 51}
     other_report = {**prior, "line": 101}
 
-    accounting = account_for_prior(context, {"big.py"}, [owner_report, other_report])
+    accounting = account_for_prior(context, {"big.py"}, [owner_report, other_report], chunks)
 
+    # Only the owner's report is paired; the other stays a reported finding of
+    # its own (a visible duplicate at worst) rather than being dropped.
     assert [(p["line"], r["line"]) for p, r in accounting.kept] == [(50, 51)]
-    assert accounting.restatements == [other_report]
-    assert accounting.resolved == [] and accounting.carried == []
+    assert not hasattr(accounting, "restatements")
+    assert accounting.resolved == [] and accounting.carried == [] and accounting.left_open == []
     assert [c.index for c in chunks if findings_for_chunk(context, c, chunks)] == [2]
 
 
@@ -128,8 +130,8 @@ def test_every_prior_finding_on_a_split_file_is_accounted_for_exactly_once():
 
     accounting = account_for_prior(context, {"big.py"}, [_finding("big.py", 3), _finding("big.py", 60)])
 
-    assert len(accounting.carried) + len(accounting.kept) + len(accounting.resolved) == 3
-    assert len(accounting.kept) == 2 and [e["line"] for e in accounting.resolved] == [101]
+    assert accounting.kept_count + len(accounting.carried) + len(accounting.resolved) == 3
+    assert len(accounting.kept) == 2 and [f["line"] for f in accounting.left_open] == [101]
 
 
 def test_a_finding_on_a_file_held_whole_is_listed_only_in_the_chunk_holding_it():
@@ -296,13 +298,13 @@ def test_each_chunk_prompt_of_a_delta_run_lists_the_findings_on_its_file(tmp_pat
 
     assert outcome.result == RESULT_COMPLETE
     assert len(prompts) == 3
-    judged = [[line for line in ("big.py:1 ", "big.py:50 ", "big.py:70 ") if line in p] for p in prompts]
+    tokens = ("big.py:1 ", "big.py:50 ", "big.py:70 ")
+    judged = [[token for token in tokens if token in p] for p in prompts]
     # Line 70 is covered by no hunk, so the lowest chunk holding the file owns it.
-    assert judged == [["big.py:1 ", "big.py:70 "], ["big.py:50 "], []]
+    assert judged == [[tokens[0], tokens[2]], [tokens[1]], []]
     document = json.loads((run_dir / "findings.json").read_text(encoding="utf-8"))
-    # The reviewer answered [] for every chunk: all three are resolved, none
-    # silently carried, and each is accounted for exactly once.
-    assert document["findings"] == []
-    assert document["carried_count"] == 0
-    assert sorted(e["line"] for e in document["resolved"]) == [1, 50, 70]
-    assert document["prior_open_count"] == 3 and document["resolved_count"] == 3
+    # The reviewer answered [] for every chunk, which resolves nothing: all
+    # three stay open, none carried, and each is accounted for exactly once.
+    assert document["resolved"] == [] and document["carried_count"] == 0
+    assert sorted(f["prior_line"] for f in document["findings"]) == [1, 50, 70]
+    assert document["prior_open_count"] == 3 and document["kept_count"] == 3
