@@ -36,6 +36,7 @@ from clagentic_loadout.doctor.checks import (
     check_credentials,
     check_dead_foreign_post_merge_config,
     check_github_app_slugs_coverage,
+    check_pre_checks_sandbox,
     check_repo_loadout_schema,
 )
 
@@ -164,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     results.append(check_builder_identity_config(config_root=config_root))
     results.append(check_attestation_source_configured(config_root=config_root))
+    results.append(check_pre_checks_sandbox(config_root=config_root))
     if repo_root is not None:
         results.append(check_repo_loadout_schema(Path(repo_root)))
         results.append(
