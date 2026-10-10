@@ -322,8 +322,8 @@ from clagentic_loadout.transport.attestation import (
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
-    consume_caller_body,
-    read_caller_body_bytes,
+    ClaimedBody,
+    claim_caller_body,
 )
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
@@ -992,7 +992,7 @@ def _read_body_stdin() -> str:
 
 
 def _read_body_env(
-    *, caller: str, create_branch: str | None = None, target_pr: int | None = None
+    *, staged: "_StagedBody", caller: str, create_branch: str | None = None, target_pr: int | None = None
 ) -> str:
     """Read + validate --body-env content (lr-e1e2fb): a body a caller's
     harness already staged via `loadout-stage-body`, using the SAME
@@ -1022,42 +1022,42 @@ def _read_body_env(
     either way).
     """
     try:
-        raw = read_caller_body_bytes(
+        claim = claim_caller_body(
             caller=caller, expect_create_branch=create_branch, expect_target_pr=target_pr,
-            consume=False,
         )
     except BodyEnvError as exc:
         _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
-    return _unwrap_body_json(raw, source_label="--body-env")
+    staged.claim = claim
+    return _unwrap_body_json(claim.data, source_label="--body-env")
 
 
 class _StagedBody:
-    """Tracks whether this invocation still holds an unconsumed --body-env
-    staged pair, so the pair is deleted exactly once, immediately before the
-    first remote-mutating operation, and left untouched by any refusal that
-    happens earlier (a retry with a corrected invocation then needs no
-    re-stage). Single-use is preserved: once `consume` has been called the
-    pair is gone whatever the remote outcome."""
+    """Holds the --body-env pair this invocation claimed (renamed to a
+    private name, so a re-stage at the public path is never touched). The
+    claimed pair is deleted exactly once, immediately before the first
+    remote-mutating operation; a refusal earlier than that releases it back
+    to the public path (only if still empty) so a corrected retry needs no
+    re-stage."""
 
     def __init__(self) -> None:
-        self.caller: str | None = None
-        self.pending = False
+        self.claim: ClaimedBody | None = None
 
-    def mark_staged(self, caller: str) -> None:
-        self.caller = caller
-        self.pending = True
+    @property
+    def pending(self) -> bool:
+        return self.claim is not None
 
     def consume(self) -> None:
-        """No-op when no --body-env pair is pending (--body-stdin, no body, or
-        already consumed). Marks the pair spent before deleting so a failure
-        inside the delete is never mistaken for a still-retryable stage."""
-        if not self.pending or self.caller is None:
-            return
-        self.pending = False
-        try:
-            consume_caller_body(caller=self.caller)
-        except BodyEnvError as exc:
-            _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
+        """No-op when nothing is claimed (--body-stdin, no body, or already
+        consumed)."""
+        claim, self.claim = self.claim, None
+        if claim is not None:
+            claim.consume()
+
+    def release(self) -> str | None:
+        """Give back an unconsumed claim; returns `restored`/`discarded`, or
+        None when nothing was claimed."""
+        claim, self.claim = self.claim, None
+        return claim.release() if claim is not None else None
 
 
 def _check_title_gate(
@@ -1796,8 +1796,9 @@ def main(
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
 
     staged = _StagedBody()
+    completed = False
     try:
-        return _run(
+        code = _run(
             args,
             token_provider=token_provider,
             opener=opener,
@@ -1806,6 +1807,8 @@ def main(
             host_config_root=host_config_root,
             staged=staged,
         )
+        completed = True
+        return code
     except PushVerbError as exc:
         print(f"push: {exc}", file=sys.stderr)
         if exc.envelope is not None:
@@ -1849,13 +1852,29 @@ def main(
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_VERIFY_CONFIG_INVALID
     finally:
-        if staged.pending:
-            print(
-                "push: nothing was consumed -- the staged --body-env content "
-                "is untouched and does not need to be re-staged; correct the "
-                "invocation and retry.",
-                file=sys.stderr,
-            )
+        # A claim still held here means no remote write was attempted (a
+        # successful --dry-run included): give the pair back.
+        try:
+            outcome = staged.release()
+        except OSError as exc:
+            outcome = None
+            print(f"push: could not return the staged --body-env content: {exc}", file=sys.stderr)
+        if outcome is not None and not completed:
+            if outcome == "restored":
+                print(
+                    "push: nothing was consumed -- the staged --body-env content "
+                    "is untouched and does not need to be re-staged; correct the "
+                    "invocation and retry.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "push: nothing was consumed -- a newer --body-env stage "
+                    "already exists and was left untouched; the older content "
+                    "this invocation had claimed was discarded. Correct the "
+                    "invocation and retry with the newer stage.",
+                    file=sys.stderr,
+                )
 
 
 def _run(
@@ -1966,8 +1985,7 @@ def _run(
     body: str | None = None
     if args.body_env:
         if args.update_pr:
-            body = _read_body_env(caller=caller, target_pr=args.pr_number)
-            staged.mark_staged(caller)
+            body = _read_body_env(staged=staged, caller=caller, target_pr=args.pr_number)
         else:
             current_branch = git_coords.current_branch(project_root)
             if current_branch in git_coords.PROTECTED_BRANCHES:
@@ -1979,8 +1997,7 @@ def _run(
                     f"real branch.",
                     code=EXIT_PUSH_FAILED,
                 )
-            body = _read_body_env(caller=caller, create_branch=current_branch)
-            staged.mark_staged(caller)
+            body = _read_body_env(staged=staged, caller=caller, create_branch=current_branch)
     elif args.body_stdin:
         body = _read_body_stdin()
     elif not args.update_pr:
