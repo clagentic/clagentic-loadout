@@ -157,6 +157,11 @@ from clagentic_loadout.platform_detect import detect_platform_from_url
 from clagentic_loadout.push.git_coords import read_remote_url_best_effort
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH
+from clagentic_loadout.merge.pre_checks_sandbox import (
+    CONFIG_KEY_PRE_CHECKS_SANDBOX,
+    PreChecksSandboxConfigError,
+    resolve_pre_checks_sandbox,
+)
 from clagentic_loadout.merge.tracked_file import git_tracks_path
 from clagentic_loadout.merge.post_merge_config import (
     CONFIG_KEY_POST_MERGE_STEPS,
@@ -1470,6 +1475,53 @@ def check_builder_identity_config(
     )
 
 
+# ---------------------------------------------------------------------------
+# 5. DEPLOYMENT-TIER pre_checks sandbox.
+# ---------------------------------------------------------------------------
+
+
+def check_pre_checks_sandbox(*, config_root: str | Path | None = None) -> CheckResult:
+    """Report whether a pre_checks sandbox is configured in the USER-LEVEL
+    config and, when it is, the executable it resolves to.
+
+    Not configured is an OK result with an advisory: the sandbox is opt-in and
+    loadout requires none. A configured value that `loadout-merge` would refuse
+    (the same validator, never a second schema) is a FAILING finding.
+    """
+    resolved: dict = {
+        "config_root": str(config_root) if config_root is not None else None,
+        "configured": False,
+        "argv0": None,
+    }
+    try:
+        sandbox = resolve_pre_checks_sandbox(config_root=config_root)
+    except PreChecksSandboxConfigError as exc:
+        return CheckResult(
+            name="pre_checks_sandbox",
+            ok=False,
+            summary=f"{exc} loadout-merge refuses to run pre_checks until it is fixed.",
+            resolved=resolved,
+        )
+    if not sandbox:
+        return CheckResult(
+            name="pre_checks_sandbox",
+            ok=True,
+            summary=(
+                f"{CONFIG_SECTION_MERGE}.{CONFIG_KEY_PRE_CHECKS_SANDBOX} not configured -- "
+                f"pre_checks run unsandboxed as the merger's user (advisory: the environment "
+                f"scrub and the private merge-result clone do not stop a check reading that "
+                f"user's files or writing outside the clone)"
+            ),
+            resolved=resolved,
+        )
+    return CheckResult(
+        name="pre_checks_sandbox",
+        ok=True,
+        summary=f"{CONFIG_SECTION_MERGE}.{CONFIG_KEY_PRE_CHECKS_SANDBOX} configured; argv0={sandbox[0]}",
+        resolved={**resolved, "configured": True, "argv0": sandbox[0], "argv": list(sandbox)},
+    )
+
+
 __all__ = [
     "KNOWN_CONFIG_SECTIONS",
     "PLATFORMS",
@@ -1482,5 +1534,6 @@ __all__ = [
     "check_credentials",
     "check_dead_foreign_post_merge_config",
     "check_github_app_slugs_coverage",
+    "check_pre_checks_sandbox",
     "check_repo_loadout_schema",
 ]
