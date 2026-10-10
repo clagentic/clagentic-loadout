@@ -218,6 +218,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -1290,15 +1291,21 @@ def _run_task_id_guard_commit_check(
 #: Values of the `verification` field in the success envelope: what the verb
 #: did about the repo's declared `push.verify` checks on this invocation.
 VERIFICATION_RAN = "ran"
+VERIFICATION_RAN_DIRTY_TREE = "ran_dirty_tree"
+VERIFICATION_SKIPPED_DIRTY_TREE = "skipped_dirty_tree"
 VERIFICATION_SKIPPED_NOT_PR_HEAD = "skipped_not_pr_head"
 VERIFICATION_SKIPPED_NO_NEW_COMMITS = "skipped_no_new_commits"
 VERIFICATION_SKIPPED_FLAG = "skipped_flag"
 VERIFICATION_NONE = "none"
 
 
+#: A full object name in either git object format (SHA-1 or SHA-256).
+_FULL_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
 def _checkout_head_sha(project_root: Path) -> str | None:
-    """The 40-hex commit the checkout at *project_root* is on, or None when
-    it cannot be read (not a git work tree, git failure)."""
+    """The full (40- or 64-hex) commit the checkout at *project_root* is on,
+    or None when it cannot be read (not a git work tree, git failure)."""
     import subprocess
 
     probe = subprocess.run(
@@ -1306,9 +1313,25 @@ def _checkout_head_sha(project_root: Path) -> str | None:
         capture_output=True, text=True,
     )
     sha = probe.stdout.strip()
-    if probe.returncode != 0 or len(sha) != 40:
+    if probe.returncode != 0 or not _FULL_SHA_RE.match(sha):
         return None
     return sha
+
+
+def _dirty_path_count(project_root: Path) -> int | None:
+    """Number of paths with uncommitted state in the checkout: tracked changes
+    (staged or not) plus untracked, non-ignored files. 0 means a clean tree;
+    None means the state could not be read, which callers must not treat as
+    clean."""
+    import subprocess
+
+    probe = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=str(project_root), capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        return None
+    return len([line for line in probe.stdout.splitlines() if line.strip()])
 
 
 def _run_verification(
@@ -1360,14 +1383,19 @@ def _run_verification_outcome(
         )
     if tested_sha is None:
         tested_sha = _checkout_head_sha(project_root)
+    # Uncommitted changes mean the checks describe the commit plus local
+    # edits, which the PR does not contain; the record must say so.
+    dirty_paths = _dirty_path_count(project_root) or 0
     print(
         f"push: running {len(entries)} verification check(s) in {project_root}",
         file=sys.stderr,
     )
     results = run_verifications(entries, project_root)
     return (
-        _with_section(body, render_verification_section(results, tested_sha)),
-        VERIFICATION_RAN,
+        _with_section(
+            body, render_verification_section(results, tested_sha, dirty_paths=dirty_paths)
+        ),
+        VERIFICATION_RAN_DIRTY_TREE if dirty_paths else VERIFICATION_RAN,
         tested_sha,
     )
 
@@ -2108,7 +2136,7 @@ def _checkout_is_pr_head(
             )
     except PrOpenError as exc:
         pr_read_error = f" ({exc})"
-    if local_sha and pr_sha and local_sha == pr_sha:
+    if local_sha and _FULL_SHA_RE.match(pr_sha) and local_sha == pr_sha:
         return True
     print(
         f"push: push.verify checks SKIPPED -- the checkout is not the PR head "
@@ -2203,6 +2231,20 @@ def _run_update_pr(
             )
             if not run_checks:
                 verification = VERIFICATION_SKIPPED_NOT_PR_HEAD
+            else:
+                # The checkout is the PR head commit, but uncommitted edits
+                # would still make the run describe code the PR lacks.
+                dirty_paths = _dirty_path_count(project_root)
+                if dirty_paths is None or dirty_paths > 0:
+                    run_checks = False
+                    verification = VERIFICATION_SKIPPED_DIRTY_TREE
+                    shown = "an unreadable number of" if dirty_paths is None else str(dirty_paths)
+                    print(
+                        f"push: push.verify checks SKIPPED -- the checkout has "
+                        f"uncommitted changes in {shown} path(s); verification "
+                        f"would not describe the PR.",
+                        file=sys.stderr,
+                    )
         if run_checks:
             body, verification, verification_sha = _run_verification_outcome(
                 project_root, body=body, skip=args.skip_verify

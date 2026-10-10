@@ -51,6 +51,15 @@ def _write_verify(repo, entries) -> None:
     (config_dir / "config.yaml").write_text(
         yaml.safe_dump({"push": {"verify": entries}}), encoding="utf-8"
     )
+    # Keep the config out of `git status`: the tree must read clean unless a
+    # test makes it dirty on purpose. Skipped for non-git scratch dirs.
+    git_dir = repo / ".git"
+    if git_dir.is_dir():
+        exclude = git_dir / "info" / "exclude"
+        exclude.parent.mkdir(exist_ok=True)
+        existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+        if ".clagentic/" not in existing:
+            exclude.write_text(existing + ".clagentic/\n", encoding="utf-8")
 
 
 def _py(name, code, timeout=30):
@@ -408,8 +417,12 @@ class TestVerbCreatePath:
 
 
 class TestVerbUpdatePath:
-    def _update_opener(self, captured: list, head_sha: str | None = None):
+    def _update_opener(
+        self, captured: list, head_sha: str | None = None, requests: list | None = None
+    ):
         def opener(req, timeout=15):
+            if requests is not None:
+                requests.append((req.get_method(), req.full_url))
             if req.get_method() == "GET":
                 payload = {"body": "existing body"}
                 if head_sha is not None:
@@ -421,6 +434,15 @@ class TestVerbUpdatePath:
             raise AssertionError(f"unexpected: {req.get_method()} {req.full_url}")
 
         return opener
+
+    @staticmethod
+    def _assert_only_head_read(requests: list, sent: list) -> None:
+        """A refused update made exactly one host request, the PR-head GET,
+        and no write."""
+        assert len(requests) == 1
+        method, url = requests[0]
+        assert method == "GET" and url.endswith("/pulls/42")
+        assert sent == []
 
     def test_body_update_runs_verification_and_records_it(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
@@ -443,18 +465,19 @@ class TestVerbUpdatePath:
         repo, _remote = repo_with_remote
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
         sent: list = []
+        requests: list = []
         code = _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--body-stdin", "--replace-body",
             ],
             token_provider=_RecordingTokenProvider(),
-            opener=self._update_opener(sent, _head(repo)),
+            opener=self._update_opener(sent, _head(repo), requests),
             stdin_text=json.dumps({"body": "new body"}),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_FAILED
-        assert sent == []
+        self._assert_only_head_read(requests, sent)
 
     def _title_update(self, repo, monkeypatch, sent=None):
         return _run_main(
@@ -498,17 +521,18 @@ class TestVerbUpdatePath:
         _commit_ahead(repo)
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
         sent: list = []
+        requests: list = []
         code = _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--title", "feat: new title",
             ],
             token_provider=_RecordingTokenProvider(),
-            opener=self._update_opener(sent, _head(repo)),
+            opener=self._update_opener(sent, _head(repo), requests),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_FAILED
-        assert sent == []
+        self._assert_only_head_read(requests, sent)
 
     def test_no_body_pass_appends_record_to_existing_body(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
@@ -525,17 +549,18 @@ class TestVerbUpdatePath:
         _commit_ahead(repo)
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
         sent: list = []
+        requests: list = []
         code = _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--title", "feat: new title",
             ],
             token_provider=_RecordingTokenProvider(),
-            opener=self._update_opener(sent, _head(repo)),
+            opener=self._update_opener(sent, _head(repo), requests),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_FAILED
-        assert sent == []
+        self._assert_only_head_read(requests, sent)
 
     def test_no_body_skip_verify_records_skip_in_body(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
@@ -696,6 +721,141 @@ class TestUpdateVerifiesOnlyThePrHead:
         )
         assert code == verb.EXIT_OK
         assert self._result(capsys)["verification"] == "skipped_no_new_commits"
+
+
+class TestDirtyTreeAndShaFormats:
+    def _update(self, repo, monkeypatch, head: str):
+        sent: list = []
+
+        def opener(req, timeout=15):
+            if req.get_method() == "GET":
+                return _json_resp(200, {"body": "existing body", "head": {"sha": head}})
+            sent.append(json.loads(req.data.decode("utf-8")))
+            return _json_resp(200, {})
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--body-stdin", "--replace-body",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+            stdin_text=json.dumps({"body": "new body"}),
+            monkeypatch=monkeypatch,
+        )
+        return code, sent
+
+    def _result(self, capsys) -> dict:
+        return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    @pytest.mark.parametrize("dirtying", ["tracked", "untracked"])
+    def test_update_with_dirty_tree_runs_nothing(
+        self, repo_with_remote, monkeypatch, capsys, dirtying
+    ):
+        repo, _remote = repo_with_remote
+        marker = repo.parent / "dirty-marker"
+        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
+        if dirtying == "tracked":
+            (repo / "feature.txt").write_text("edited\n")
+        else:
+            (repo / "scratch.txt").write_text("new\n")
+        code, sent = self._update(repo, monkeypatch, _head(repo))
+        assert code == verb.EXIT_OK
+        assert not marker.exists()
+        assert sent[0]["body"] == "new body"
+        captured = capsys.readouterr()
+        assert "uncommitted changes in 1 path(s)" in captured.err
+        result = json.loads(captured.out.strip().splitlines()[-1])
+        assert result["verification"] == "skipped_dirty_tree"
+        assert "verification_sha" not in result
+
+    def test_update_ignored_file_does_not_make_tree_dirty(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _write_verify(repo, [_py("unit", "print('fine')")])
+        (repo / ".gitignore").write_text("*.log\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "commit", "-m", "chore: ignore logs"],
+            cwd=repo, check=True, capture_output=True,
+        )
+        (repo / "noise.log").write_text("x\n")
+        code, _sent = self._update(repo, monkeypatch, _head(repo))
+        assert code == verb.EXIT_OK
+        assert self._result(capsys)["verification"] == "ran"
+
+    def test_create_with_dirty_tree_still_verifies_and_says_so(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _write_verify(repo, [_py("unit", "print('fine')")])
+        (repo / "scratch.txt").write_text("new\n")
+        (repo / "feature.txt").write_text("edited\n")
+        sent: list = []
+        code = _run_main(
+            _create_argv(repo),
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_create_opener(sent),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert f"Tested commit: {_head(repo)} plus uncommitted changes in 2 path(s)" in (
+            sent[0]["body"]
+        )
+        assert self._result(capsys)["verification"] == "ran_dirty_tree"
+
+    def test_create_with_dirty_tree_and_failing_check_still_blocks(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, remote = repo_with_remote
+        _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
+        (repo / "scratch.txt").write_text("new\n")
+        code = _run_main(
+            _create_argv(repo),
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_create_opener([]),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_VERIFY_FAILED
+        assert not _remote_has_branch(remote)
+
+    def test_clean_tree_section_has_no_uncommitted_wording(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        _write_verify(repo, [_py("unit", "print('fine')")])
+        sent: list = []
+        _run_main(
+            _create_argv(repo),
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_create_opener(sent),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert f"Tested commit: {_head(repo)}\n" in sent[0]["body"]
+        assert "uncommitted" not in sent[0]["body"]
+
+    def test_sha256_length_head_is_accepted(self, tmp_path, monkeypatch):
+        sha64 = "c" * 64
+
+        class _Probe:
+            returncode = 0
+            stdout = sha64 + "\n"
+
+        monkeypatch.setattr("subprocess.run", lambda *a, **k: _Probe())
+        assert verb._checkout_head_sha(tmp_path) == sha64
+
+    @pytest.mark.parametrize("bad", ["abc123", "c" * 41, "C" * 40, ""])
+    def test_malformed_head_is_unreadable(self, tmp_path, monkeypatch, bad):
+        class _Probe:
+            returncode = 0
+            stdout = bad + "\n"
+
+        monkeypatch.setattr("subprocess.run", lambda *a, **k: _Probe())
+        assert verb._checkout_head_sha(tmp_path) is None
 
 
 class TestCreatePathStampsTestedCommit:
