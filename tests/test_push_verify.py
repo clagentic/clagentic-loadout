@@ -92,6 +92,12 @@ def _track_upstream_at_head(repo) -> None:
     )
 
 
+def _head(repo) -> str:
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True
+    ).stdout.strip()
+
+
 def _commit_ahead(repo) -> None:
     """Track the upstream at HEAD, then commit one more change so the
     checkout is ahead of it."""
@@ -402,10 +408,13 @@ class TestVerbCreatePath:
 
 
 class TestVerbUpdatePath:
-    def _update_opener(self, captured: list):
+    def _update_opener(self, captured: list, head_sha: str | None = None):
         def opener(req, timeout=15):
             if req.get_method() == "GET":
-                return _json_resp(200, {"body": "existing body"})
+                payload = {"body": "existing body"}
+                if head_sha is not None:
+                    payload["head"] = {"sha": head_sha}
+                return _json_resp(200, payload)
             if req.get_method() == "PATCH":
                 captured.append(json.loads(req.data.decode("utf-8")))
                 return _json_resp(200, {})
@@ -423,14 +432,14 @@ class TestVerbUpdatePath:
                 "--update-pr", "--pr", "42", "--body-stdin", "--replace-body",
             ],
             token_provider=_RecordingTokenProvider(),
-            opener=self._update_opener(sent),
+            opener=self._update_opener(sent, _head(repo)),
             stdin_text=json.dumps({"body": "new body"}),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_OK
         assert "## Verification" in sent[0]["body"]
 
-    def test_body_update_failure_refuses_before_token(self, repo_with_remote, monkeypatch):
+    def test_body_update_failure_refuses_and_updates_nothing(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
         _write_verify(repo, [_py("unit", "raise SystemExit(1)")])
         sent: list = []
@@ -439,8 +448,8 @@ class TestVerbUpdatePath:
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--body-stdin", "--replace-body",
             ],
-            token_provider=_RefusingTokenProvider(),
-            opener=self._update_opener(sent),
+            token_provider=_RecordingTokenProvider(),
+            opener=self._update_opener(sent, _head(repo)),
             stdin_text=json.dumps({"body": "new body"}),
             monkeypatch=monkeypatch,
         )
@@ -454,7 +463,7 @@ class TestVerbUpdatePath:
                 "--update-pr", "--pr", "42", "--title", "feat: new title",
             ],
             token_provider=_RecordingTokenProvider(),
-            opener=self._update_opener([] if sent is None else sent),
+            opener=self._update_opener([] if sent is None else sent, _head(repo)),
             monkeypatch=monkeypatch,
         )
 
@@ -494,8 +503,8 @@ class TestVerbUpdatePath:
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--title", "feat: new title",
             ],
-            token_provider=_RefusingTokenProvider(),
-            opener=self._update_opener(sent),
+            token_provider=_RecordingTokenProvider(),
+            opener=self._update_opener(sent, _head(repo)),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_FAILED
@@ -521,8 +530,8 @@ class TestVerbUpdatePath:
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--update-pr", "--pr", "42", "--title", "feat: new title",
             ],
-            token_provider=_RefusingTokenProvider(),
-            opener=self._update_opener(sent),
+            token_provider=_RecordingTokenProvider(),
+            opener=self._update_opener(sent, _head(repo)),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_VERIFY_FAILED
@@ -540,7 +549,7 @@ class TestVerbUpdatePath:
                 "--update-pr", "--pr", "42", "--title", "feat: new title", "--skip-verify",
             ],
             token_provider=_RecordingTokenProvider(),
-            opener=self._update_opener(sent),
+            opener=self._update_opener(sent, _head(repo)),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_OK
@@ -556,6 +565,171 @@ class TestVerbUpdatePath:
         _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
         assert self._title_update(repo, monkeypatch) == verb.EXIT_OK
         assert marker.exists()
+
+
+class TestUpdateVerifiesOnlyThePrHead:
+    _OTHER_SHA = "b" * 40
+
+    def _opener(self, sent: list, head_payload):
+        def opener(req, timeout=15):
+            if req.get_method() == "GET":
+                payload = {"body": "existing body"}
+                if head_payload is not None:
+                    payload["head"] = head_payload
+                return _json_resp(200, payload)
+            sent.append(json.loads(req.data.decode("utf-8")))
+            return _json_resp(200, {})
+
+        return opener
+
+    def _update(self, repo, monkeypatch, opener):
+        return _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--update-pr", "--pr", "42", "--body-stdin", "--replace-body",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=opener,
+            stdin_text=json.dumps({"body": "new body"}),
+            monkeypatch=monkeypatch,
+        )
+
+    def _result(self, capsys) -> dict:
+        return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    def test_checkout_not_at_pr_head_runs_nothing_and_names_both_shas(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        marker = repo.parent / "not-head-marker"
+        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
+        sent: list = []
+        code = self._update(
+            repo, monkeypatch, self._opener(sent, {"sha": self._OTHER_SHA})
+        )
+        assert code == verb.EXIT_OK
+        assert not marker.exists()
+        assert sent[0]["body"] == "new body"
+        captured = capsys.readouterr()
+        assert _head(repo) in captured.err and self._OTHER_SHA in captured.err
+        assert "not the PR head" in captured.err
+        result = json.loads(captured.out.strip().splitlines()[-1])
+        assert result["verification"] == "skipped_not_pr_head"
+        assert "verification_sha" not in result
+        assert result["pushed"] is False
+
+    def test_checkout_at_pr_head_runs_and_stamps_the_commit(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _write_verify(repo, [_py("unit", "print('fine')")])
+        sent: list = []
+        code = self._update(repo, monkeypatch, self._opener(sent, {"sha": _head(repo)}))
+        assert code == verb.EXIT_OK
+        assert f"Tested commit: {_head(repo)}" in sent[0]["body"]
+        result = self._result(capsys)
+        assert result["verification"] == "ran"
+        assert result["verification_sha"] == _head(repo)
+
+    @pytest.mark.parametrize("head_payload", [None, {}, {"sha": None}])
+    def test_unreadable_pr_head_fails_closed(
+        self, repo_with_remote, monkeypatch, capsys, head_payload
+    ):
+        repo, _remote = repo_with_remote
+        marker = repo.parent / "unreadable-marker"
+        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
+        sent: list = []
+        code = self._update(repo, monkeypatch, self._opener(sent, head_payload))
+        assert code == verb.EXIT_OK
+        assert not marker.exists()
+        assert "## Verification" not in sent[0]["body"]
+        captured = capsys.readouterr()
+        assert "PR head unreadable" in captured.err
+        assert json.loads(captured.out.strip().splitlines()[-1])["verification"] == (
+            "skipped_not_pr_head"
+        )
+
+    def test_pr_read_http_error_fails_closed(self, repo_with_remote, monkeypatch, capsys):
+        repo, _remote = repo_with_remote
+        marker = repo.parent / "http-error-marker"
+        _write_verify(repo, [_py("unit", f"open({str(marker)!r}, 'w')")])
+        sent: list = []
+
+        def opener(req, timeout=15):
+            if req.get_method() == "GET":
+                return _json_resp(500, {})
+            sent.append(json.loads(req.data.decode("utf-8")))
+            return _json_resp(200, {})
+
+        assert self._update(repo, monkeypatch, opener) == verb.EXIT_OK
+        assert not marker.exists()
+        assert "## Verification" not in sent[0]["body"]
+
+    def test_skip_flag_and_no_new_commits_and_unconfigured_are_reported(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        sent: list = []
+        opener = self._opener(sent, {"sha": _head(repo)})
+        assert self._update(repo, monkeypatch, opener) == verb.EXIT_OK
+        assert self._result(capsys)["verification"] == "none"
+
+        _write_verify(repo, [_py("unit", "pass")])
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo", "--update-pr",
+                "--pr", "42", "--body-stdin", "--replace-body", "--skip-verify",
+            ],
+            token_provider=_RecordingTokenProvider(), opener=opener,
+            stdin_text=json.dumps({"body": "b"}), monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert self._result(capsys)["verification"] == "skipped_flag"
+
+        _track_upstream_at_head(repo)
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo", "--update-pr",
+                "--pr", "42", "--title", "feat: new title",
+            ],
+            token_provider=_RecordingTokenProvider(), opener=opener, monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert self._result(capsys)["verification"] == "skipped_no_new_commits"
+
+
+class TestCreatePathStampsTestedCommit:
+    def test_section_and_envelope_carry_the_tested_sha(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _write_verify(repo, [_py("unit", "print('all green')")])
+        sent: list = []
+        code = _run_main(
+            _create_argv(repo),
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_create_opener(sent),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert f"Tested commit: {_head(repo)}" in sent[0]["body"]
+        result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert result["verification"] == "ran"
+        assert result["verification_sha"] == _head(repo)
+
+    def test_unconfigured_envelope_reports_none(self, repo_with_remote, monkeypatch, capsys):
+        repo, _remote = repo_with_remote
+        code = _run_main(
+            _create_argv(repo),
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_create_opener([]),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert result["verification"] == "none" and "verification_sha" not in result
 
 
 class TestRunVerificationWithoutBody:
@@ -742,7 +916,7 @@ class TestSectionReplacedInPlace:
 
         def opener(req, timeout=15):
             if req.get_method() == "GET":
-                return _json_resp(200, {"body": prior})
+                return _json_resp(200, {"body": prior, "head": {"sha": _head(repo)}})
             sent.append(json.loads(req.data.decode("utf-8")))
             return _json_resp(200, {})
 

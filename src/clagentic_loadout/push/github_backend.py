@@ -127,6 +127,39 @@ def get_pr_body(
     return (resp or {}).get("body") or ""
 
 
+def get_pr_head_sha(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    token: str,
+    opener=None,
+) -> str:
+    """Fetch the CURRENT head commit SHA of an existing GitHub PR, so a
+    caller can confirm a local checkout is the PR's head before claiming
+    anything about it.
+
+    Returns "" when the response carries no head SHA. Raises PrOpenError on
+    any non-2xx response or network failure.
+    """
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls/{pr_number}"
+    try:
+        status, resp = request_json(
+            "GET", url, token, None, opener=opener, opener_factory=no_redirect_opener,
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise PrOpenError(f"network error reaching GitHub API: {exc}") from exc
+    if status != 200:
+        server_msg = resp.get("message", "") if resp else ""
+        detail = f": {server_msg}" if server_msg else ""
+        raise PrOpenError(
+            f"GitHub PR head read returned HTTP {status} for PR #{pr_number} in {owner}/{repo}{detail}"
+        )
+    head = (resp or {}).get("head")
+    sha = head.get("sha") if isinstance(head, dict) else None
+    return sha if isinstance(sha, str) else ""
+
+
 def update_pr(
     owner: str,
     repo: str,
@@ -160,4 +193,4 @@ def update_pr(
         )
 
 
-__all__ = ["GITHUB_API_BASE", "create_pr", "get_pr_body", "update_pr"]
+__all__ = ["GITHUB_API_BASE", "create_pr", "get_pr_body", "get_pr_head_sha", "update_pr"]

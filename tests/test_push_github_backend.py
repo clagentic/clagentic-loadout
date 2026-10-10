@@ -11,7 +11,13 @@ import urllib.error
 import pytest
 
 from clagentic_loadout.push.errors import PrOpenError
-from clagentic_loadout.push.github_backend import GITHUB_API_BASE, create_pr, get_pr_body, update_pr
+from clagentic_loadout.push.github_backend import (
+    GITHUB_API_BASE,
+    create_pr,
+    get_pr_body,
+    get_pr_head_sha,
+    update_pr,
+)
 
 
 class _FakeResponse:
@@ -135,3 +141,26 @@ class TestGetPrBody:
 
         with pytest.raises(PrOpenError):
             get_pr_body("o", "r", 42, token="tok", opener=opener)
+
+
+class TestGetPrHeadSha:
+    def test_returns_live_head_sha(self):
+        def opener(req, timeout=30):
+            assert req.get_method() == "GET"
+            assert req.full_url == f"{GITHUB_API_BASE}/repos/o/r/pulls/42"
+            return _json_resp(200, {"number": 42, "head": {"sha": "a" * 40}})
+
+        assert get_pr_head_sha("o", "r", 42, token="tok", opener=opener) == "a" * 40
+
+    def test_missing_head_returns_empty_string(self):
+        def opener(req, timeout=30):
+            return _json_resp(200, {"number": 42})
+
+        assert get_pr_head_sha("o", "r", 42, token="tok", opener=opener) == ""
+
+    def test_non_2xx_raises_pr_open_error(self):
+        def opener(req, timeout=30):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", {}, None)
+
+        with pytest.raises(PrOpenError):
+            get_pr_head_sha("o", "r", 42, token="tok", opener=opener)
