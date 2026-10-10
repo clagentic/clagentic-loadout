@@ -226,10 +226,17 @@ def _inert(text: str, *, single_line: bool = False) -> str:
     return text.replace("<!--", "<! --")
 
 
-def render_verification_section(results: tuple[VerifyResult, ...]) -> str:
+def render_verification_section(
+    results: tuple[VerifyResult, ...],
+    tested_sha: str | None = None,
+) -> str:
     """Markdown `## Verification` section: one entry per check with its name,
-    exit status, and bounded output tails."""
+    exit status, and bounded output tails. *tested_sha*, when given, is
+    stamped as a `Tested commit:` line so a reader can tell which commit the
+    recorded results describe."""
     lines = []
+    if tested_sha:
+        lines.extend([f"Tested commit: {_inert(tested_sha, single_line=True)}", ""])
     for result in results:
         mark = "PASS" if result.passed else "FAIL"
         name = _inert(result.name, single_line=True)

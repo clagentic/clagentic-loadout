@@ -114,6 +114,45 @@ def get_pr_body(
     return resp.get("body") or ""
 
 
+def get_pr_head_sha(
+    api_base: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    token: str,
+    opener=None,
+) -> str:
+    """Fetch the CURRENT head commit SHA of an existing Forgejo PR, so a
+    caller can confirm a local checkout is the PR's head before claiming
+    anything about it.
+
+    Returns "" when the response carries no head SHA. Raises PrOpenError on
+    any non-2xx response or network failure.
+    """
+    try:
+        status, raw = git_host_api.request(
+            api_base,
+            "GET",
+            f"/api/v1/repos/{owner}/{repo}/pulls/{pr_number}",
+            token,
+            opener=opener,
+        )
+    except git_host_api.GitHostApiError as exc:
+        raise PrOpenError(
+            f"Forgejo PR head read failed for PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
+    if status < 200 or status >= 300:
+        raise PrOpenError(
+            f"Forgejo PR head read returned HTTP {status} for PR #{pr_number} in {owner}/{repo}",
+            status_code=status,
+        )
+    resp = git_host_api.parse_json_body(raw)
+    head = resp.get("head")
+    sha = head.get("sha") if isinstance(head, dict) else None
+    return sha if isinstance(sha, str) else ""
+
+
 def update_pr(
     api_base: str,
     owner: str,
@@ -156,4 +195,4 @@ def update_pr(
         ) from exc
 
 
-__all__ = ["create_pr", "get_pr_body", "update_pr"]
+__all__ = ["create_pr", "get_pr_body", "get_pr_head_sha", "update_pr"]

@@ -218,6 +218,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -265,6 +266,7 @@ from clagentic_loadout.push.errors import (
 )
 from clagentic_loadout.push.forgejo_backend import create_pr as forgejo_create_pr
 from clagentic_loadout.push.forgejo_backend import get_pr_body as forgejo_get_pr_body
+from clagentic_loadout.push.forgejo_backend import get_pr_head_sha as forgejo_get_pr_head_sha
 from clagentic_loadout.push.forgejo_backend import update_pr as forgejo_update_pr
 from clagentic_loadout.push.agent_identity import (
     AgentBotIdentityNotResolvableError,
@@ -1286,10 +1288,70 @@ def _run_task_id_guard_commit_check(
             print(f"push: WARNING -- {warning}", file=sys.stderr)
 
 
-def _run_verification(project_root: Path, *, body: str | None, skip: bool) -> str | None:
+#: Values of the `verification` field in the success envelope: what the verb
+#: did about the repo's declared `push.verify` checks on this invocation.
+VERIFICATION_RAN = "ran"
+VERIFICATION_SKIPPED_DIRTY_TREE = "skipped_dirty_tree"
+VERIFICATION_SKIPPED_NOT_PR_HEAD = "skipped_not_pr_head"
+VERIFICATION_SKIPPED_NO_NEW_COMMITS = "skipped_no_new_commits"
+VERIFICATION_SKIPPED_FLAG = "skipped_flag"
+VERIFICATION_NONE = "none"
+
+
+#: A full object name in either git object format (SHA-1 or SHA-256).
+_FULL_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+def _checkout_head_sha(project_root: Path) -> str | None:
+    """The full (40- or 64-hex) commit the checkout at *project_root* is on,
+    or None when it cannot be read (not a git work tree, git failure)."""
+    import subprocess
+
+    probe = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(project_root),
+        capture_output=True, text=True,
+    )
+    sha = probe.stdout.strip()
+    if probe.returncode != 0 or not _FULL_SHA_RE.match(sha):
+        return None
+    return sha
+
+
+def _dirty_path_count(project_root: Path) -> int | None:
+    """Number of paths with uncommitted state in the checkout: tracked changes
+    (staged or not) plus untracked, non-ignored files. 0 means a clean tree;
+    None means the state could not be read, which callers must not treat as
+    clean."""
+    import subprocess
+
+    probe = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=str(project_root), capture_output=True, text=True,
+    )
+    if probe.returncode != 0:
+        return None
+    return len([line for line in probe.stdout.splitlines() if line.strip()])
+
+
+def _run_verification(
+    project_root: Path, *, body: str | None, skip: bool, tested_sha: str | None = None
+) -> str | None:
+    """Body-only view of `_run_verification_outcome`."""
+    return _run_verification_outcome(
+        project_root, body=body, skip=skip, tested_sha=tested_sha
+    )[0]
+
+
+def _run_verification_outcome(
+    project_root: Path, *, body: str | None, skip: bool, tested_sha: str | None = None
+) -> tuple[str | None, str, str | None]:
     """Run the repo's declared `push.verify` commands (push.verify_run) in
-    *project_root* and return *body* with a `## Verification` section
-    appended recording the outcome.
+    *project_root* and return (body, outcome, tested sha): *body* with a
+    `## Verification` section appended recording the outcome, one of the
+    VERIFICATION_* values, and *tested_sha* when the checks actually ran.
+    *tested_sha* is stamped into the section only when the caller has
+    confirmed it is the commit under test (the `--update-pr` path); otherwise
+    the section carries no stamp.
 
     With nothing configured, returns *body* unchanged -- byte-identical to a
     build without this feature, including when *skip* is set (there is
@@ -1306,7 +1368,7 @@ def _run_verification(project_root: Path, *, body: str | None, skip: bool) -> st
     """
     entries = load_verify_entries(project_root)
     if not entries:
-        return body
+        return body, VERIFICATION_NONE, None
     if skip:
         names = ", ".join(e.name for e in entries)
         print(
@@ -1314,13 +1376,21 @@ def _run_verification(project_root: Path, *, body: str | None, skip: bool) -> st
             f"(checks not run: {names})",
             file=sys.stderr,
         )
-        return _with_section(body, render_skipped_section(entries))
+        return (
+            _with_section(body, render_skipped_section(entries)),
+            VERIFICATION_SKIPPED_FLAG,
+            None,
+        )
     print(
         f"push: running {len(entries)} verification check(s) in {project_root}",
         file=sys.stderr,
     )
     results = run_verifications(entries, project_root)
-    return _with_section(body, render_verification_section(results))
+    return (
+        _with_section(body, render_verification_section(results, tested_sha)),
+        VERIFICATION_RAN,
+        tested_sha,
+    )
 
 
 def _with_section(body: str | None, section: str) -> str:
@@ -2032,6 +2102,45 @@ def _warn_if_ahead_of_remote_tracking(project_root: Path) -> None:
         )
 
 
+def _checkout_is_pr_head(
+    args: argparse.Namespace,
+    owner: str,
+    repo: str,
+    api_base: str,
+    project_root: Path,
+    *,
+    token: str,
+    opener,
+) -> bool:
+    """True only when the checkout's HEAD equals the PR's live head SHA read
+    from the host. Anything else (different commit, unreadable either side)
+    returns False after one stderr line saying verification was skipped."""
+    local_sha = _checkout_head_sha(project_root)
+    pr_sha = ""
+    pr_read_error = ""
+    try:
+        if args.platform == PLATFORM_GITHUB:
+            pr_sha = github_backend.get_pr_head_sha(
+                owner, repo, args.pr_number, token=token, opener=opener
+            )
+        else:
+            pr_sha = forgejo_get_pr_head_sha(
+                api_base, owner, repo, args.pr_number, token=token, opener=opener
+            )
+    except PrOpenError as exc:
+        pr_read_error = f" ({exc})"
+    if local_sha and _FULL_SHA_RE.match(pr_sha) and local_sha == pr_sha:
+        return True
+    print(
+        f"push: push.verify checks SKIPPED -- the checkout is not the PR head "
+        f"(checkout HEAD {local_sha or 'unreadable'}, PR head "
+        f"{pr_sha or 'unreadable'}){pr_read_error}; verification would not "
+        f"describe the PR.",
+        file=sys.stderr,
+    )
+    return False
+
+
 def _run_update_pr(
     args: argparse.Namespace,
     *,
@@ -2071,37 +2180,79 @@ def _run_update_pr(
 
     _check_title_gate(args, owner, repo, project_root=project_root)
 
-    # Verification runs whenever the update could be carrying new work: a
-    # body is being written, or the checkout holds commits (or an unknown
-    # state) beyond its upstream. Only a metadata-only edit PROVABLY without
-    # new commits skips, and says so. This path never pushes, so the
-    # checkout's HEAD is verified as-is. With no body supplied the record is
-    # still written: the section becomes the body and is APPENDED to the PR's
-    # existing one (never replacing it), whatever body-mode flag was given.
+    # Token resolution is lazy: it is needed to read the PR's live head before
+    # a verification run, and again for the body append / PATCH below, but a
+    # call that never verifies still mints nothing earlier than it used to.
+    token_cache: list[str] = []
+
+    def _token() -> str:
+        if not token_cache:
+            print(f"push: resolving token for caller={caller!r} (PR update)", file=sys.stderr)
+            active_provider = (
+                token_provider
+                if token_provider is not None
+                else resolve_platform_provider(args.platform)
+            )
+            try:
+                token_cache.append(
+                    _resolve_token_result(caller, active_provider, repo=f"{owner}/{repo}").token
+                )
+            except CredentialProviderError as exc:
+                _fail(f"token resolution FAILED -- {exc}", code=EXIT_TOKEN_FETCH_FAILED)
+        return token_cache[0]
+
+    # Verification runs whenever the update could be carrying new work (a
+    # body is being written, or the checkout holds commits, or an unknown
+    # state, beyond its upstream) AND the checkout is provably the PR's
+    # current head. This path never pushes, so a checkout on any other commit
+    # would verify code the PR does not contain and stamp the PR as tested;
+    # an unreadable PR head is treated the same way (never verify an
+    # unconfirmed SHA). With no body supplied the record is still written:
+    # the section becomes the body and is APPENDED to the PR's existing one
+    # (never replacing it), whatever body-mode flag was given.
     ahead_state = _commits_ahead_of_upstream(project_root)
     has_new_commits = ahead_state is None or ahead_state[1] > 0
     force_append = False
+    verification = VERIFICATION_NONE
+    verification_sha: str | None = None
     if body is not None or has_new_commits:
         body_supplied = body is not None
-        body = _run_verification(project_root, body=body, skip=args.skip_verify)
-        force_append = body is not None and not body_supplied
+        run_checks = True
+        if not args.skip_verify and load_verify_entries(project_root):
+            run_checks = _checkout_is_pr_head(
+                args, owner, repo, api_base, project_root, token=_token(), opener=opener
+            )
+            if not run_checks:
+                verification = VERIFICATION_SKIPPED_NOT_PR_HEAD
+            else:
+                # The checkout is the PR head commit, but uncommitted edits
+                # would still make the run describe code the PR lacks.
+                dirty_paths = _dirty_path_count(project_root)
+                if dirty_paths is None or dirty_paths > 0:
+                    run_checks = False
+                    verification = VERIFICATION_SKIPPED_DIRTY_TREE
+                    shown = "an unreadable number of" if dirty_paths is None else str(dirty_paths)
+                    print(
+                        f"push: push.verify checks SKIPPED -- the checkout has "
+                        f"uncommitted changes in {shown} path(s); verification "
+                        f"would not describe the PR.",
+                        file=sys.stderr,
+                    )
+        if run_checks:
+            body, verification, verification_sha = _run_verification_outcome(
+                project_root, body=body, skip=args.skip_verify,
+                tested_sha=_checkout_head_sha(project_root),
+            )
+            force_append = body is not None and not body_supplied
     elif load_verify_entries(project_root):
+        verification = VERIFICATION_SKIPPED_NO_NEW_COMMITS
         print(
             "push: push.verify checks SKIPPED -- metadata-only update with no "
             "commits ahead of the upstream",
             file=sys.stderr,
         )
 
-    print(f"push: resolving token for caller={caller!r} (PR update)", file=sys.stderr)
-    active_provider = (
-        token_provider
-        if token_provider is not None
-        else resolve_platform_provider(args.platform)
-    )
-    try:
-        token = _resolve_token_result(caller, active_provider, repo=f"{owner}/{repo}").token
-    except CredentialProviderError as exc:
-        _fail(f"token resolution FAILED -- {exc}", code=EXIT_TOKEN_FETCH_FAILED)
+    token = _token()
 
     # Append mode (lr-2500b7): GET the CURRENT body immediately before the
     # update PATCH, then concatenate -- update_pr()'s own PATCH contract on
@@ -2146,10 +2297,13 @@ def _run_update_pr(
     _warn_if_ahead_of_remote_tracking(project_root)
 
     print(f"push: PR #{args.pr_number} updated: {pr_url}")
-    print(json.dumps({
+    result = {
         "pr_number": args.pr_number, "pr_url": pr_url, "owner": owner, "repo": repo,
-        "pushed": False,
-    }))
+        "pushed": False, "verification": verification,
+    }
+    if verification_sha:
+        result["verification_sha"] = verification_sha
+    print(json.dumps(result))
     return EXIT_OK
 
 

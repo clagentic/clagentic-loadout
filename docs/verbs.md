@@ -1324,17 +1324,42 @@ push:
 pushed (after bot-identity re-authoring settles it), before any ref moves and before the
 PR is created. Entries run in order and stop at the first failure. On `--update-pr` it
 runs whenever the update could carry new work: a body is being written, or the checkout
-has commits ahead of its upstream (or the upstream cannot be determined), in the
-checkout's current HEAD. With no body supplied, the `## Verification` section (or the
-skip notice) is still written: it is appended to the PR's existing body, never replacing
-it, whatever body-mode flag was given. Only a metadata-only update provably
-without new commits skips, and it says so on stderr. `--dry-run` pushes nothing and does
-not run it.
+has commits ahead of its upstream (or the upstream cannot be determined) — and only when
+the checkout's HEAD equals the PR's live head SHA, read from the host before anything
+runs. `--update-pr` never pushes, so a checkout on any other commit would verify code the
+PR does not contain; in that case nothing runs, no `## Verification` section is appended,
+and one stderr line names both SHAs (checkout HEAD and PR head). If the PR head cannot be
+read, verification is skipped the same way (never run against an unconfirmed SHA). Commit
+SHAs may be 40-hex (SHA-1) or 64-hex (SHA-256 object format). On `--update-pr` a checkout
+with uncommitted changes (tracked, staged or unstaged, or untracked non-ignored files) is
+treated the same way: nothing runs, no section is appended, and one stderr line names the
+number of dirty paths. The create path is unchanged by this gate. With no
+body supplied, the `## Verification` section (or the skip notice) is still written: it is
+appended to the PR's existing body, never replacing it, whatever body-mode flag was given.
+A metadata-only update provably without new commits skips, and it says so on stderr.
+`--dry-run` pushes nothing and does not run it.
+
+Known limitations of the `--update-pr` gate:
+
+- HEAD and tree state are read once before the run, so a change to a shared checkout
+  during the run is not detected (the write-verb contention check covers concurrent work).
+- Git-ignored files do not count as dirty.
+- A repo whose per-repo config is untracked and not ignored reads as dirty and always
+  skips (a safe skip, stated on stderr).
 
 **What it records.** On success a `## Verification` section is appended to the PR body:
 each check's name, exit status, and the bounded tail (last 2000 characters) of its stdout
-and stderr, passed through the same redaction as other push output. The section sits in a
-marked block, so a later `--update-pr` replaces it in place instead of adding a second one.
+and stderr, passed through the same redaction as other push output. On `--update-pr` the
+section also starts with a `Tested commit: <sha>` line naming the commit the checks ran
+against. The section sits in a marked block, so a later `--update-pr` replaces it in place
+instead of adding a second one.
+
+**Result field.** The `--update-pr` JSON result carries an additive `verification` field:
+`ran`, `skipped_not_pr_head` (the checkout is not the PR head, or the PR head was
+unreadable), `skipped_dirty_tree` (the checkout has uncommitted changes),
+`skipped_no_new_commits`, `skipped_flag` (`--skip-verify`), or `none` (nothing
+configured). When it is `ran`, `verification_sha` holds the commit the checks ran against.
+The create-path result is unchanged.
 
 **Failure.** A non-zero exit, a timeout, or a command that cannot start refuses the
 push, exit `EXIT_VERIFY_FAILED` (38), naming the check and printing its output tail. The
