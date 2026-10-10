@@ -479,7 +479,7 @@ _SAFE_CALLER_RE = re.compile(r"\A[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 # but still rejects control characters and whitespace so the value can never
 # smuggle a newline or other structural character into the JSON metadata
 # fence this module constructs.
-_SAFE_CALLER_TRACKING_ID_RE = re.compile(r"^[\x21-\x7e]{1,128}$")
+_SAFE_CALLER_TRACKING_ID_RE = re.compile(r"\A[\x21-\x7e]{1,128}\Z")
 
 # Regex to extract owner from any /api/v1/repos/{owner}/{repo}/... path.
 # Anchored to the Forgejo path shape (/api/v1/repos/...) -- this is the
@@ -519,7 +519,7 @@ _BARE_REPOS_PATH_RE = re.compile(r"^/repos/([^/]+)/([^/]+)")
 # (both route identically at the HTTP layer) without swallowing a distinct
 # sub-resource such as .../comments/123.
 _ISSUE_COMMENTS_RE = re.compile(
-    r"^/api/v1/repos/([^/]+)/([^/]+)/issues/(\d+)/comments/?(?:\?.*)?$"
+    r"^/api/v1/repos/([^/]+)/([^/]+)/issues/(\d+)/comments/?(?:\?.*)?\Z"
 )
 
 # Pattern matching the single-comment sub-resource endpoint (lr-e2ce66):
@@ -531,7 +531,7 @@ _ISSUE_COMMENTS_RE = re.compile(
 # conflating the two would make a DELETE target ambiguously match the POST
 # collection endpoint's precondition checks.
 _ISSUE_COMMENT_ID_RE = re.compile(
-    r"^/api/v1/repos/([^/]+)/([^/]+)/issues/comments/(\d+)/?(?:\?.*)?$"
+    r"^/api/v1/repos/([^/]+)/([^/]+)/issues/comments/(\d+)/?(?:\?.*)?\Z"
 )
 
 #: Default Forgejo API base URL. Overridable via --git-host-base-url or the
@@ -1661,10 +1661,18 @@ def _split_method_and_path(args: argparse.Namespace) -> tuple[str, str]:
     methods = ("GET", "POST", "PATCH", "PUT", "DELETE")
     first = args.method_or_path
     if first.upper() in methods and args.path_if_method:
-        return first.upper(), args.path_if_method
-    if first.upper() in methods and args.path_if_method is None:
+        method, path = first.upper(), args.path_if_method
+    elif first.upper() in methods and args.path_if_method is None:
         _fail(f"PATH argument required after method {first.upper()!r}.", code=EXIT_USAGE)
-    return "GET", first
+    else:
+        method, path = "GET", first
+    # A control character (a trailing newline included) in the path can never
+    # be part of a real API path, and refusing it here keeps the endpoint-gate
+    # patterns below from ever seeing a value they would treat differently
+    # from the request actually sent.
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in path):
+        _fail("PATH argument must not contain control characters.", code=EXIT_USAGE)
+    return method, path
 
 
 def _is_github_target(path_arg: str, *, github_hostname: str = DEFAULT_GITHUB_HOSTNAME) -> bool:
@@ -1906,12 +1914,12 @@ def _check_cross_platform_url_shape_mistake(
 #: comment reader builds its own request, so a caller-supplied filter would be
 #: silently dropped and the "complete list" claim would be false.
 _FORGEJO_COMMENTS_LISTING_RE = re.compile(
-    r"^/api/v1/repos/([^/]+)/([^/]+)/issues/(\d+)/comments/?$"
+    r"^/api/v1/repos/([^/]+)/([^/]+)/issues/(\d+)/comments/?\Z"
 )
 
 #: The same listing on GitHub, as an absolute URL; group 1 is scheme://host.
 _GITHUB_COMMENTS_LISTING_RE = re.compile(
-    r"^(https?://[^/?#]+)/repos/([^/]+)/([^/]+)/issues/(\d+)/comments/?$"
+    r"^(https?://[^/?#]+)/repos/([^/]+)/([^/]+)/issues/(\d+)/comments/?\Z"
 )
 
 

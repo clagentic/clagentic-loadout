@@ -182,7 +182,7 @@ _FRESHNESS_SKEW_TOLERANCE_SECONDS = 5
 #: non-digit content (including a leading sign, decimal point, or embedded
 #: path separator) BEFORE comment_id is interpolated into a URL, matching
 #: the Forgejo side's belt-and-suspenders posture on the parity path.
-_ISSUE_COMMENT_ID_RE = re.compile(r"^\d+$")
+_ISSUE_COMMENT_ID_RE = re.compile(r"\A\d+\Z")
 
 
 def _parse_github_timestamp(raw: str) -> "datetime | None":

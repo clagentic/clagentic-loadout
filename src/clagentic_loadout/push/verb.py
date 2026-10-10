@@ -1299,7 +1299,7 @@ VERIFICATION_NONE = "none"
 
 
 #: A full object name in either git object format (SHA-1 or SHA-256).
-_FULL_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+_FULL_SHA_RE = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 
 
 def _checkout_head_sha(project_root: Path) -> str | None:
