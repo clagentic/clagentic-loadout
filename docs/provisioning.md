@@ -484,7 +484,13 @@ path holds the credentials to hide, whether the check needs the network).
   can never change or remove its own sandbox. A repo file carrying the key has it
   ignored, and the merge log says so.
 - **Placeholders.** `{clone}` (the private merge-result clone the check runs in)
-  and `{tmpdir}` (the check's `TMPDIR`) are substituted per check. Nothing else is
+  and `{tmpdir}` are substituted per check. Both are paths loadout creates:
+  `{tmpdir}` is a private mode-0700 directory made for each check under the
+  merger's own `TMPDIR` (resolved before any step or deployment override) and
+  removed after the check. The check's `TMPDIR` is set to that same directory, so
+  the bind and the environment agree. While a sandbox is configured, a step's
+  inline `TMPDIR=` (or a deployment env override) does not change it; a repo
+  therefore cannot choose the read-write path the sandbox binds. Nothing else is
   expanded and no shell is involved.
 - **Where it applies.** The prefix is the outermost argv of every `pre_checks`
   command, its `verify` command and its `liveness_probe`, applied after a step's

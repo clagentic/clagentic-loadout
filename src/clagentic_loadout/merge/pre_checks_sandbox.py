@@ -17,9 +17,13 @@ config file, that is prepended to every pre_check command:
 
 Two placeholders are substituted per check, with no other expansion and no
 shell: `{clone}` is the private merge-result clone the check runs in, and
-`{tmpdir}` is the check's `TMPDIR`. The prefix is applied after a step's inline
-`VAR=VALUE` env prefix has been split off, so the environment still reaches the
-launched process and the prefix is the outermost argv.
+`{tmpdir}` is a private mode-0700 directory loadout creates for that check
+(under the merger's own `TMPDIR`) and removes afterwards. The check's `TMPDIR`
+is forced to that same directory, so the sandbox bind and the environment agree
+and a step's inline `TMPDIR=` cannot pick the read-write path the sandbox
+binds. The prefix is applied after a step's inline `VAR=VALUE` env prefix has
+been split off, so the rest of the environment still reaches the launched
+process and the prefix is the outermost argv.
 
 USER-LEVEL ONLY. The key is never read from a repo's config file, tracked or
 not: a PR that could set or remove its own sandbox would defeat it. A repo
@@ -97,6 +101,16 @@ def resolve_pre_checks_sandbox(*, config_root: str | Path | None = None) -> tupl
     return validate_pre_checks_sandbox(section[CONFIG_KEY_PRE_CHECKS_SANDBOX])
 
 
+def ignored_sandbox_warning(location: object) -> str:
+    """The one warning text for a repo config *location* carrying the sandbox
+    key, shared by every path that reads repo config so they cannot drift."""
+    return (
+        f"merge.{CONFIG_KEY_PRE_CHECKS_SANDBOX} in {location} is IGNORED -- the sandbox is "
+        f"read only from the user-level config file, so a repository cannot set or remove "
+        f"its own sandbox"
+    )
+
+
 def ignored_repo_sandbox_warnings(repo_path: str | Path | None) -> tuple[str, ...]:
     """A warning for the repo config file at *repo_path* when it carries the
     sandbox key, which is honoured from the user-level file only.
@@ -113,17 +127,14 @@ def ignored_repo_sandbox_warnings(repo_path: str | Path | None) -> tuple[str, ..
         return ()
     if CONFIG_KEY_PRE_CHECKS_SANDBOX not in merge_section:
         return ()
-    return (
-        f"merge.{CONFIG_KEY_PRE_CHECKS_SANDBOX} in {config_path} is IGNORED -- the sandbox is "
-        f"read only from the user-level config file, so a repository cannot set or remove "
-        f"its own sandbox",
-    )
+    return (ignored_sandbox_warning(config_path),)
 
 
 __all__ = [
     "CONFIG_KEY_PRE_CHECKS_SANDBOX",
     "PreChecksSandboxConfigError",
     "ignored_repo_sandbox_warnings",
+    "ignored_sandbox_warning",
     "resolve_pre_checks_sandbox",
     "validate_pre_checks_sandbox",
 ]

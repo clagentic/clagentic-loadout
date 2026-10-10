@@ -20,10 +20,11 @@ import yaml
 
 from clagentic_loadout.doctor.checks import check_pre_checks_sandbox
 from clagentic_loadout.merge import verb
-from clagentic_loadout.merge.post_merge import run_post_merge_steps
+from clagentic_loadout.merge.post_merge import PostMergeStepFailedError, run_post_merge_steps
 from clagentic_loadout.merge.pre_checks_sandbox import (
     CONFIG_KEY_PRE_CHECKS_SANDBOX,
     PreChecksSandboxConfigError,
+    ignored_sandbox_warning,
     resolve_pre_checks_sandbox,
     validate_pre_checks_sandbox,
 )
@@ -79,35 +80,53 @@ def _prefix(launcher_path: Path) -> list[str]:
     return [str(launcher_path), "--clone", "{clone}", "--tmp", "{tmpdir}", "--"]
 
 
+def _scratch(tmp_path: Path, name: str = "merger-tmp") -> Path:
+    directory = tmp_path / name
+    directory.mkdir()
+    return directory
+
+
+def _private_dir_under(parent: Path, argv: list[str]) -> Path:
+    """The `{tmpdir}` the launcher was handed: a fresh child of *parent*."""
+    private = Path(argv[argv.index("--tmp") + 1])
+    assert private.parent == parent and private.name.startswith("pre-check-")
+    return private
+
+
 class TestWrappingEachCheckArgv:
     def test_list_form_step_is_wrapped_with_substituted_placeholders(self, tmp_path, launcher):
         launcher_path, log = launcher
         clone = tmp_path / "clone"
         clone.mkdir()
+        merger_tmp = _scratch(tmp_path)
         marker = tmp_path / "ran.txt"
         step = {"cmd": [_PY, "-c", f"open({str(marker)!r}, 'w').write('x')"], "on_failure": "fail"}
 
         run_post_merge_steps(
-            [step], clone, base_env={**os.environ, "TMPDIR": "/the/check/tmp"},
+            [step], clone, base_env={**os.environ, "TMPDIR": str(merger_tmp)},
             argv_prefix=_prefix(launcher_path),
         )
 
-        assert _logged(log) == [
-            ["--clone", str(clone), "--tmp", "/the/check/tmp", "--", *step["cmd"]]
-        ]
+        [argv] = _logged(log)
+        private = _private_dir_under(merger_tmp, argv)
+        assert argv == ["--clone", str(clone), "--tmp", str(private), "--", *step["cmd"]]
         assert marker.exists()
 
     def test_string_form_step_is_wrapped(self, tmp_path, launcher):
         launcher_path, log = launcher
         clone = tmp_path / "clone"
         clone.mkdir()
+        merger_tmp = _scratch(tmp_path)
         run_post_merge_steps(
             [{"cmd": f"{_PY} -c 'import sys'", "on_failure": "fail"}],
             clone,
-            base_env={**os.environ, "TMPDIR": "/t"},
+            base_env={**os.environ, "TMPDIR": str(merger_tmp)},
             argv_prefix=_prefix(launcher_path),
         )
-        assert _logged(log) == [["--clone", str(clone), "--tmp", "/t", "--", _PY, "-c", "import sys"]]
+        [argv] = _logged(log)
+        _private_dir_under(merger_tmp, argv)
+        assert argv[:3] == ["--clone", str(clone), "--tmp"]
+        assert argv[4:] == ["--", _PY, "-c", "import sys"]
 
     @pytest.mark.parametrize("as_list", [True, False])
     def test_inline_env_prefix_is_split_off_and_still_reaches_the_check(self, tmp_path, launcher, as_list):
@@ -129,29 +148,98 @@ class TestWrappingEachCheckArgv:
         assert not any(part.startswith("SANDBOX_PROBE=") for part in argv)
         assert out.read_text(encoding="utf-8") == "from-step"
 
-    def test_step_tmpdir_assignment_is_what_tmpdir_expands_to(self, tmp_path, launcher):
+    @pytest.mark.parametrize("as_list", [True, False])
+    def test_an_inline_tmpdir_never_chooses_the_bound_path_or_the_check_tmpdir(
+        self, tmp_path, launcher, as_list
+    ):
         launcher_path, log = launcher
         clone = tmp_path / "clone"
         clone.mkdir()
+        merger_tmp = _scratch(tmp_path)
+        elsewhere = tmp_path / "attacker-chosen"
+        elsewhere.mkdir()
+        seen = tmp_path / "seen-tmpdir.txt"
+        code = f"import os; open({str(seen)!r}, 'w').write(os.environ['TMPDIR'])"
+        inline = f"TMPDIR={elsewhere}"
+        cmd = [inline, _PY, "-c", code] if as_list else f"{inline} {_PY} -c {code!r}"
+
         run_post_merge_steps(
-            [{"cmd": ["TMPDIR=/step/tmp", _PY, "-c", "pass"], "on_failure": "fail"}],
+            [{"cmd": cmd, "on_failure": "fail"}],
             clone,
-            base_env={**os.environ, "TMPDIR": "/base/tmp"},
+            deployment_env_overrides={"TMPDIR": str(elsewhere)},
+            base_env={**os.environ, "TMPDIR": str(merger_tmp)},
             argv_prefix=_prefix(launcher_path),
         )
-        assert _logged(log)[0][:4] == ["--clone", str(clone), "--tmp", "/step/tmp"]
+
+        [argv] = _logged(log)
+        private = _private_dir_under(merger_tmp, argv)
+        assert str(elsewhere) not in argv
+        assert seen.read_text(encoding="utf-8") == str(private)
+
+    def test_the_private_directory_is_private_and_removed_after_the_check(self, tmp_path, launcher):
+        launcher_path, log = launcher
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        merger_tmp = _scratch(tmp_path)
+        mode_file = tmp_path / "mode.txt"
+        code = (
+            "import os, stat; d = os.environ['TMPDIR']; "
+            "open(os.path.join(d, 'leftover'), 'w').write('x'); "
+            f"open({str(mode_file)!r}, 'w').write(oct(stat.S_IMODE(os.stat(d).st_mode)))"
+        )
+        run_post_merge_steps(
+            [{"cmd": [_PY, "-c", code], "on_failure": "fail"}] * 2,
+            clone,
+            base_env={**os.environ, "TMPDIR": str(merger_tmp)},
+            argv_prefix=_prefix(launcher_path),
+        )
+
+        assert mode_file.read_text(encoding="utf-8") == "0o700"
+        first, second = (_private_dir_under(merger_tmp, argv) for argv in _logged(log))
+        assert first != second
+        assert list(merger_tmp.iterdir()) == []
+
+    def test_the_private_directory_is_removed_when_the_check_fails(self, tmp_path, launcher):
+        launcher_path, _ = launcher
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        merger_tmp = _scratch(tmp_path)
+        with pytest.raises(PostMergeStepFailedError):
+            run_post_merge_steps(
+                [{"cmd": [_PY, "-c", "raise SystemExit(3)"], "on_failure": "fail"}],
+                clone,
+                base_env={**os.environ, "TMPDIR": str(merger_tmp)},
+                argv_prefix=_prefix(launcher_path),
+            )
+        assert list(merger_tmp.iterdir()) == []
+
+    def test_an_unusable_merger_tmpdir_fails_the_step_rather_than_binding_another(
+        self, tmp_path, launcher
+    ):
+        launcher_path, log = launcher
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        with pytest.raises(PostMergeStepFailedError):
+            run_post_merge_steps(
+                [{"cmd": [_PY, "-c", "pass"], "on_failure": "warn"}],
+                clone,
+                base_env={**os.environ, "TMPDIR": str(tmp_path / "missing")},
+                argv_prefix=_prefix(launcher_path),
+            )
+        assert not log.exists()
 
     def test_a_substituted_value_is_not_expanded_again(self, tmp_path, launcher):
         launcher_path, log = launcher
         clone = tmp_path / "clone"
         clone.mkdir()
+        merger_tmp = _scratch(tmp_path, "{clone}")
         run_post_merge_steps(
             [{"cmd": [_PY, "-c", "pass"], "on_failure": "fail"}],
             clone,
-            base_env={**os.environ, "TMPDIR": "/t/{clone}"},
+            base_env={**os.environ, "TMPDIR": str(merger_tmp)},
             argv_prefix=_prefix(launcher_path),
         )
-        assert _logged(log)[0][3] == "/t/{clone}"
+        assert _private_dir_under(merger_tmp, _logged(log)[0])
 
     def test_verify_command_is_wrapped_too(self, tmp_path, launcher):
         launcher_path, log = launcher
@@ -160,7 +248,7 @@ class TestWrappingEachCheckArgv:
         run_post_merge_steps(
             [{"cmd": [_PY, "-c", "pass"], "verify": [_PY, "-c", "print('ok')"], "on_failure": "fail"}],
             clone,
-            base_env={**os.environ, "TMPDIR": "/t"},
+            base_env={**os.environ, "TMPDIR": str(_scratch(tmp_path))},
             argv_prefix=_prefix(launcher_path),
         )
         assert [entry[entry.index("--") + 1:] for entry in _logged(log)] == [
@@ -168,8 +256,44 @@ class TestWrappingEachCheckArgv:
             [_PY, "-c", "print('ok')"],
         ]
 
+    def test_a_verify_inline_tmpdir_cannot_repoint_the_check_tmpdir(self, tmp_path, launcher):
+        launcher_path, log = launcher
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        merger_tmp = _scratch(tmp_path)
+        seen = tmp_path / "verify-tmpdir.txt"
+        verify = [
+            "TMPDIR=/elsewhere", _PY, "-c",
+            f"import os; open({str(seen)!r}, 'w').write(os.environ['TMPDIR']); print('ok')",
+        ]
+        run_post_merge_steps(
+            [{"cmd": [_PY, "-c", "pass"], "verify": verify, "on_failure": "fail"}],
+            clone,
+            base_env={**os.environ, "TMPDIR": str(merger_tmp)},
+            argv_prefix=_prefix(launcher_path),
+        )
+        verify_argv = _logged(log)[1]
+        assert seen.read_text(encoding="utf-8") == str(_private_dir_under(merger_tmp, verify_argv))
+
 
 class TestAbsentPrefixChangesNothing:
+    def test_an_inline_tmpdir_still_reaches_the_check_without_a_sandbox(self, tmp_path, monkeypatch):
+        seen: list[dict] = []
+        real_run = subprocess.run
+
+        def _spy(argv, **kwargs):
+            seen.append({"argv": list(argv), "env": kwargs.get("env")})
+            return real_run(argv, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", _spy)
+        base_env = {**os.environ, "TMPDIR": "/merger/tmp"}
+        run_post_merge_steps(
+            [{"cmd": ["TMPDIR=/step/tmp", _PY, "-c", "pass"], "on_failure": "fail"}],
+            tmp_path,
+            base_env=base_env,
+        )
+        assert seen == [{"argv": [_PY, "-c", "pass"], "env": {**base_env, "TMPDIR": "/step/tmp"}}]
+
     def test_argv_env_and_cwd_are_exactly_what_they_were(self, tmp_path, monkeypatch):
         seen: list[dict] = []
         real_run = subprocess.run
@@ -260,7 +384,9 @@ class TestTheMergeVerb:
         assert run_gate_merge(repo, calls) == verb.EXIT_OK
 
         [argv] = _logged(log)
-        assert argv[0] == "--clone" and argv[2:5] == ["--tmp", str(scratch_tmp), "--"]
+        assert argv[0] == "--clone" and argv[2] == "--tmp" and argv[4] == "--"
+        assert Path(argv[3]).parent == scratch_tmp and Path(argv[3]).name.startswith("pre-check-")
+        assert not Path(argv[3]).exists()
         assert Path(argv[1]).name == "tree" and Path(argv[1]).parent.parent == scratch_tmp
         assert argv[5:] == [_PY, "-c", f"open({str(marker)!r}, 'w').write('ran')"]
         assert marker.read_text(encoding="utf-8") == "ran"
@@ -349,6 +475,35 @@ class TestTheMergeVerb:
         repo = init_gate_repo(tmp_path / "shared", tracked_gate=gate)
         assert run_gate_merge(repo, []) == verb.EXIT_OK
         assert len(_logged(log)) == 1
+
+
+class TestOneIgnoredWarningText:
+    def test_both_repo_config_paths_emit_the_shared_text(self, tmp_path):
+        from clagentic_loadout.merge.pre_checks_sandbox import ignored_repo_sandbox_warnings
+        from clagentic_loadout.merge.repo_gate_runtime import gate_from_tracked_text
+
+        declared = {"merge": {"required_reviewer_roles": [], CONFIG_KEY_PRE_CHECKS_SANDBOX: ["/x"]}}
+        tracked = gate_from_tracked_text(yaml.safe_dump(declared), source="SRC")
+        assert ignored_sandbox_warning("SRC") in tracked.warnings
+        # An unloadable reviewer pair must not swallow the sandbox warning.
+        unloadable = gate_from_tracked_text(
+            yaml.safe_dump({"merge": {CONFIG_KEY_PRE_CHECKS_SANDBOX: ["/x"]}}), source="SRC"
+        )
+        assert ignored_sandbox_warning("SRC") in unloadable.warnings
+
+        config = tmp_path / "repo" / ".clagentic" / "loadout" / "config.yaml"
+        config.parent.mkdir(parents=True)
+        config.write_text(yaml.safe_dump({"merge": {CONFIG_KEY_PRE_CHECKS_SANDBOX: ["/x"]}}), encoding="utf-8")
+        [deployment] = ignored_repo_sandbox_warnings(tmp_path / "repo")
+        assert deployment == ignored_sandbox_warning(config)
+
+    def test_the_text_is_built_in_one_place(self):
+        hits = [
+            str(path.relative_to(_SRC))
+            for path in sorted(_SRC.rglob("*.py"))
+            if "is IGNORED -- the sandbox is" in path.read_text(encoding="utf-8")
+        ]
+        assert hits == ["merge/pre_checks_sandbox.py"]
 
 
 class TestOnlyPreChecksAreWrapped:
