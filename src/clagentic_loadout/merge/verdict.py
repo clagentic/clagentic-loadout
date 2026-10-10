@@ -124,6 +124,9 @@ from clagentic_loadout.merge.fence_state import (
     KEY_ENGINES,
     KEY_FINDINGS_OPEN,
     KEY_RANGE,
+    KEY_RESOLVED,
+    RESOLVED_BY_CALLER,
+    RESOLVED_BY_REVIEWER,
     SCANNER_FAILED,
     FindingsState,
     failure_sequences_of,
@@ -344,11 +347,15 @@ def build_findings_verdict_body(
         findings_state, head_sha=head_sha, review_status=review_status
     )
     dropped = evidence.get(KEY_DROPPED, [])
+    resolved_by_reviewer = [e for e in evidence.get(KEY_RESOLVED, []) if e["by"] == RESOLVED_BY_REVIEWER]
+    resolved_by_caller = [e for e in evidence.get(KEY_RESOLVED, []) if e["by"] == RESOLVED_BY_CALLER]
 
     status_label = "clean" if review_status == "clean" else "blocking"
     counts = f"{len(findings)} finding(s)"
     if dropped:
         counts += f", {len(dropped)} dropped"
+    if resolved_by_reviewer or resolved_by_caller:
+        counts += f", {len(resolved_by_reviewer) + len(resolved_by_caller)} resolved"
     lines = [f"{reviewer.upper()} — {status_label} ({counts})"]
     if KEY_RANGE in evidence:
         lines.append(render_range(evidence[KEY_RANGE]))
@@ -368,6 +375,21 @@ def build_findings_verdict_body(
         lines.append("")
         lines.append(f"Dropped candidates ({len(dropped)}):")
         for entry in dropped:
+            lines.append(
+                f"- {entry['file']}:{entry['line']} [{entry['rule_id']}] "
+                f"{entry['message']} (reason: {entry['reason']})"
+            )
+    if resolved_by_reviewer:
+        lines.append("")
+        lines.append(f"Resolved ({len(resolved_by_reviewer)}):")
+        for entry in resolved_by_reviewer:
+            lines.append(
+                f"- {entry['file']}:{entry['line']} [{entry['rule_id']}] {entry['message']}"
+            )
+    if resolved_by_caller:
+        lines.append("")
+        lines.append(f"Resolved by caller ({len(resolved_by_caller)}):")
+        for entry in resolved_by_caller:
             lines.append(
                 f"- {entry['file']}:{entry['line']} [{entry['rule_id']}] "
                 f"{entry['message']} (reason: {entry['reason']})"

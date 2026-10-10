@@ -629,10 +629,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "rendered inside the tool-built fence (fence_schema_version 2), "
         "never as body text, and a fence that lands without them fails "
         "the readback. The evidence fields 'failure_sequences', 'dropped', "
-        "'range' and 'engines' are accepted the same way; they are shown in "
+        "'resolved', 'range' and 'engines' are accepted the same way; they are shown in "
         "the body (a finding's own optional 'failure_sequence' under its "
-        "bullet, a 'Dropped candidates' section, 'range:' and 'engine:' "
-        "lines) and copied into the fence without raising its version.",
+        "bullet, a 'Dropped candidates' section, 'Resolved' and 'Resolved "
+        "by caller' sections, 'range:' and 'engine:' lines) and copied into the fence without raising its version.",
     )
     parser.add_argument(
         "--verdict-head-sha",

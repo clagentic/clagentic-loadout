@@ -28,6 +28,12 @@ the verdict prose shows:
   dropped           [{file, line, rule_id, message, reason}]
                                          candidates the reviewer examined and
                                          dropped, each with the reason
+  resolved          [{file, line, rule_id, message, by, reason, fingerprint}]
+                                         prior findings a delta review closed:
+                                         by "reviewer" (re-judged against the
+                                         new head) or "caller" (ruled resolved
+                                         by the caller, with the reason);
+                                         file/line is the prior location
   range             {basis, base|since, head}
                                          the commit range the review covered
   engines           [{engine, model, reason, chunks}]
@@ -71,18 +77,22 @@ STATE_KEYS = (KEY_FINDINGS_OPEN, KEY_SUPERSEDES, KEY_CLEARED_CLAIMS, KEY_SCANNER
 
 KEY_FAILURE_SEQUENCES = "failure_sequences"
 KEY_DROPPED = "dropped"
+KEY_RESOLVED = "resolved"
 KEY_RANGE = "range"
 KEY_ENGINES = "engines"
 
 #: The caller-suppliable evidence fields, in the order they render. Kept apart
 #: from STATE_KEYS on purpose: the gate's "does this fence assert state" logic
 #: reads STATE_KEYS only.
-EVIDENCE_KEYS = (KEY_FAILURE_SEQUENCES, KEY_DROPPED, KEY_RANGE, KEY_ENGINES)
+EVIDENCE_KEYS = (KEY_FAILURE_SEQUENCES, KEY_DROPPED, KEY_RESOLVED, KEY_RANGE, KEY_ENGINES)
 
 RANGE_BASIS_BASE_HEAD = "base..head"
 RANGE_BASIS_SINCE = "since"
 ENGINE_CARRIER = "carrier"
 ENGINE_FALLBACK = "fallback"
+RESOLVED_BY_REVIEWER = "reviewer"
+RESOLVED_BY_CALLER = "caller"
+RESOLVED_BY = (RESOLVED_BY_REVIEWER, RESOLVED_BY_CALLER)
 
 SCANNER_RAN = "ran"
 SCANNER_NOT_APPLICABLE = "not_applicable"
@@ -205,6 +215,33 @@ def _normalize_dropped(value: Any) -> list[dict[str, Any]]:
                 "reason": _text(entry.get("reason"), f"{where}.reason", single_line=False),
             }
         )
+    return rendered
+
+
+def _normalize_resolved(value: Any) -> list[dict[str, Any]]:
+    rendered = []
+    for index, entry in enumerate(_entries(value, KEY_RESOLVED)):
+        where = f"{KEY_RESOLVED}[{index}]"
+        _exact_keys(
+            entry, ("file", "line", "rule_id", "message", "by", "reason", "fingerprint"), where
+        )
+        by = entry.get("by")
+        if by not in RESOLVED_BY:
+            raise ValueError(f"{where}.by must be one of {list(RESOLVED_BY)}, got {by!r}")
+        item: dict[str, Any] = {
+            "file": _text(entry.get("file"), f"{where}.file"),
+            "line": _line_number(entry.get("line"), f"{where}.line"),
+            "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+            "message": _text(entry.get("message"), f"{where}.message", single_line=False),
+            "by": by,
+        }
+        if "reason" in entry:
+            item["reason"] = _text(entry["reason"], f"{where}.reason")
+        elif by == RESOLVED_BY_CALLER:
+            raise ValueError(f"{where}.reason is required when by is {RESOLVED_BY_CALLER!r}")
+        if "fingerprint" in entry:
+            item["fingerprint"] = _text(entry["fingerprint"], f"{where}.fingerprint")
+        rendered.append(item)
     return rendered
 
 
@@ -369,6 +406,8 @@ def normalize_findings_state(
         out[KEY_FAILURE_SEQUENCES] = _normalize_failure_sequences(raw[KEY_FAILURE_SEQUENCES])
     if KEY_DROPPED in raw:
         out[KEY_DROPPED] = _normalize_dropped(raw[KEY_DROPPED])
+    if KEY_RESOLVED in raw:
+        out[KEY_RESOLVED] = _normalize_resolved(raw[KEY_RESOLVED])
     if KEY_RANGE in raw:
         out[KEY_RANGE] = _normalize_range(raw[KEY_RANGE])
     if KEY_ENGINES in raw:
@@ -500,7 +539,10 @@ __all__ = [
     "KEY_DROPPED",
     "KEY_ENGINES",
     "KEY_FAILURE_SEQUENCES",
+    "KEY_RESOLVED",
     "KEY_RANGE",
+    "RESOLVED_BY_CALLER",
+    "RESOLVED_BY_REVIEWER",
     "RANGE_BASIS_BASE_HEAD",
     "RANGE_BASIS_SINCE",
     "failure_sequences_of",

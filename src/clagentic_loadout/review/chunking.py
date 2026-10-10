@@ -43,6 +43,28 @@ class HunkSpan:
 
 
 @dataclass(frozen=True)
+class HunkRow:
+    """One body line of a hunk: its text and its number on the old side
+    (None for an added line) and the new side (None for a removed line)."""
+
+    text: str
+    old_number: int | None
+    new_number: int | None
+
+
+@dataclass(frozen=True)
+class HunkRows:
+    """A hunk's header counts as written (``old_start``/``new_start`` name the
+    line before the hunk when the matching count is zero) and its body."""
+
+    old_start: int
+    old_count: int
+    new_start: int
+    new_count: int
+    rows: tuple[HunkRow, ...]
+
+
+@dataclass(frozen=True)
 class Chunk:
     """One reviewable slice of a diff. ``index`` is 1-based. ``hunks`` lists
     the hunks the chunk itself holds, which for a file split across chunks is
@@ -66,6 +88,16 @@ class Chunk:
         """The text of *line* of *file* in the NEW numbering, when this chunk
         shows that line (an added or context line); None for a deleted line, a
         line outside the chunk's hunks, or a file the chunk does not hold."""
+        for hunk in self.hunk_rows(file):
+            for row in hunk.rows:
+                if row.new_number == line:
+                    return row.text
+        return None
+
+    def hunk_rows(self, file: str) -> tuple[HunkRows, ...]:
+        """Every hunk of *file* this chunk holds, with each body line numbered
+        on the side(s) it belongs to."""
+        found: list[HunkRows] = []
         lines = self.text.split("\n")
         name = self.files[0] if self.files else ""
         position = 0
@@ -86,9 +118,17 @@ class Chunk:
                     # The header's counts say how many body lines follow, which
                     # is the only reliable end: a removed line that reads
                     # "-- x" looks exactly like a "--- " file header.
-                    old_left = int(match.group(2)) if match.group(2) is not None else 1
-                    new_left = int(match.group(4)) if match.group(4) is not None else 1
-                    number = int(match.group(3))
+                    old_count = int(match.group(2)) if match.group(2) is not None else 1
+                    new_count = int(match.group(4)) if match.group(4) is not None else 1
+                    old_left, new_left = old_count, new_count
+                    old_number = int(match.group(1))
+                    new_number = int(match.group(3))
+                    # A zero-length side names the line BEFORE the hunk.
+                    if old_count == 0:
+                        old_number += 1
+                    if new_count == 0:
+                        new_number += 1
+                    rows: list[HunkRow] = []
                     position += 1
                     while position < len(lines) and (old_left > 0 or new_left > 0):
                         body = lines[position]
@@ -97,18 +137,27 @@ class Chunk:
                             continue
                         if body.startswith("-"):
                             old_left -= 1
-                            continue
-                        if body.startswith("+"):
+                            rows.append(HunkRow(body[1:], old_number, None))
+                            old_number += 1
+                        elif body.startswith("+"):
                             new_left -= 1
+                            rows.append(HunkRow(body[1:], None, new_number))
+                            new_number += 1
                         else:
                             old_left -= 1
                             new_left -= 1
-                        if number == line:
-                            return body[1:]
-                        number += 1
+                            rows.append(HunkRow(body[1:], old_number, new_number))
+                            old_number += 1
+                            new_number += 1
+                    found.append(
+                        HunkRows(
+                            int(match.group(1)), old_count, int(match.group(3)), new_count,
+                            tuple(rows),
+                        )
+                    )
                     continue
             position += 1
-        return None
+        return tuple(found)
 
 
 @dataclass(frozen=True)

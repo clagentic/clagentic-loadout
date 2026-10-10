@@ -627,8 +627,10 @@ judges them, and types one command to post its judgement:
 ```
 loadout-review run  --caller <role> --repo <owner/repo> --pr <n> [--platform github|forgejo]
                     [--profile <name>] [--out <dir>] [--repo-path <dir>]
+                    [--prior-findings <path>] [--resolved-findings <path>]
 loadout-review post --caller <role> --repo <owner/repo> --pr <n> --findings <path>
                     --status clean|blocking [--head-sha <sha>] [--platform ...]
+                    [--resolved-findings <path>]
 ```
 
 `--caller` binds to the attested invoking identity before any I/O, exactly like
@@ -734,11 +736,50 @@ output, whose recorded head is used, or a bare array with `--prior-head-sha`);
 The range `<prior head>..<current head>` is read from the host API (GitHub's
 compare endpoint; on Forgejo the compare API for the relation and the web
 compare `.diff` route for the net diff). Each chunk is framed as an incremental
-review: report new defects only on lines the delta changes, and say whether each
-open finding (everything but praise) is resolved. An open finding on a file the
-delta does not touch cannot have been resolved, so it is carried into the merged
-findings (`chunk` 0, counted in `carried_count`) and a delta review never turns
-clean by not looking. The findings file records `mode` (`delta`|`full`) and
+review: report new defects only on lines the delta changes, and judge each
+open finding (everything but praise) against the new head. Every prior open
+finding ends the round as exactly one of three outcomes:
+
+- **carried** — its file is not in the delta at all (so its line is unchanged),
+  or it sits past the 50-finding listing cap and was never shown to the reviewer.
+  It is copied into the merged findings unchanged (`chunk` 0, counted in
+  `carried_count`), so a delta review never turns clean by not looking.
+- **re-judged** — its file is touched anywhere in the delta, whether or not a
+  changed hunk covers its old line. It goes to the reviewer model, in the prompt
+  of exactly one chunk: the lowest-index chunk whose hunks cover its prior line,
+  else the lowest-index chunk holding that file. It is shown with its **id**
+  (`<file>:<line>:<rule_id>`, the line as of the prior head), its prior
+  location, the line as it then read (when the delta shows it), where that line
+  now is in the new head (or the nearest position when the delta removed it),
+  and a bounded excerpt of the new head around there (about 20 lines either
+  side, at most 3000 characters; only lines the delta itself shows). The
+  reviewer's reply decides its outcome:
+  - reported again at a line of the new head: **kept**. The merged finding
+    carries `prior_line`, the line it had before. A reported finding is paired
+    with a prior one by file and `rule_id` (same message first, then closest
+    line; one reported finding per prior finding).
+  - its id named in the reply's `resolved` list: **resolved** (listed in
+    `resolved` with `by: "reviewer"`, never re-posted as open). Only the chunk
+    that was shown the finding can resolve it.
+  - neither: it **stays open**, counted in `kept_count`. It is posted as a
+    finding at the new head's line when the delta places the old line
+    unambiguously (outside every hunk, shifted by the hunks above it; or a
+    context line inside one), else at its prior line, with `prior_line` set.
+    Silence never resolves a finding, and a chunk that failed or ran out of
+    retries never resolves anything (the run does not account until every chunk
+    is ok).
+
+  A reported finding is never dropped for resembling a prior one; a duplicate is
+  visible instead (the only removal is the existing merge dedupe of identical
+  file, line, rule and message). The reply form is internal to the reviewer
+  prompt: a bare findings array (resolves nothing), or
+  `{"findings": [...], "resolved": ["<id>", ...]}`. An absent or malformed
+  `resolved` value (anything but a list of non-empty strings) resolves nothing.
+- **resolved by the caller** — the caller ruled it resolved or refuted with
+  `--resolved-findings` (below). It is neither shown to the reviewer nor carried.
+
+`prior_open_count` equals `carried_count + kept_count + resolved_count` in every
+delta `findings.json`. The findings file records `mode` (`delta`|`full`) and
 `since_head`; a delta run has its own run directory (`<head>-since-<prior>`).
 Delta mode works the same for every reviewer role and both platforms, each role
 keyed on its own last verdict. A range that includes merges from the base
@@ -885,6 +926,120 @@ review) and the engine that answered (`engine: carrier`, or
 `fallback_model` label), with machine-readable `range` and `engines` in the fence.
 These evidence fields never raise the fence schema version, and the merge gate does
 not read them. They are derived, so `--state-file` may not carry them.
+
+#### `--resolved-findings` — caller rulings on prior findings
+
+Optional on both `run` and `post`. A caller that knows a prior finding no longer
+applies (an orchestrator ruling) passes a file; absent, nothing changes beyond the
+re-judging above. The file is opaque caller input; nothing in it names a caller.
+
+**File schema.** Top level: a JSON array (anything else is refused, exit **32**).
+Each entry is one of:
+
+| entry | meaning |
+| --- | --- |
+| `"<ref>"` | shorthand for `{"id": "<ref>"}` |
+| `{"id": "<ref>", "reason": "<text>"}` | matches a finding by id **or** fingerprint |
+| `{"fingerprint": "<fp>", "reason": "<text>"}` | matches a finding by fingerprint only |
+
+An object has exactly one of `id` and `fingerprint`, plus optional `reason`; any
+other field is refused (exit **32**). `id`, `fingerprint` and `reason` are
+non-empty single-line strings without fence syntax; a `fingerprint` must be a
+well-formed `fp2:<16 hex>` value. `reason` defaults to `resolved by the caller`.
+
+**Matching rule.** Exact string equality. A finding's *id* is its locator,
+`<file>:<line>:<rule_id>`, with `line` as the finding was reported (for `run`, its
+prior location). A finding's *fingerprint* is its optional `fingerprint` field. An
+`id` entry matches either; a `fingerprint` entry matches the fingerprint only.
+A fingerprint is a link hint, so one entry resolves every finding that shares it.
+When several entries name one finding, the first supplies the `reason` and none of
+them is reported unknown.
+
+**Where it applies.** `run` matches against the prior open findings
+(`--prior-findings`); a matching finding is not shown to the reviewer, not carried,
+and recorded in `resolved` with `by: "caller"`. `post` matches against the
+findings in `--findings`: a match is removed from the posted findings (so
+`--status clean` is allowed when only it was blocking) and added to `resolved`.
+An entry that `run` already applied is not reported unknown by `post`.
+
+**Unknown entries.** An entry that matches no finding is warned about on stderr
+(`loadout-review: warning: resolved-findings entry '<ref>' matches no prior
+finding; ignored`) and ignored; the exit code is unchanged. `run` also lists the
+refs in its stdout result as `unknown_resolved_findings`. A full-diff review has no
+prior findings, so every entry is unknown there.
+
+#### Fields added by re-judging and caller rulings (additive only)
+
+No field was removed, renamed or retyped, and no exit code changed.
+
+`findings.json` (the file `run` writes). This verb writes no `judged.json`; a
+caller's judged file that copies `findings[]` into a bare array keeps any
+`prior_line`, which `post` ignores, and loses the document-level `resolved` list
+unless the caller passes it on (`post` reads `resolved` only from a `run`
+output). The
+four count/list fields below are present only when `mode` is `delta` (a full
+review's file is exactly as before); `prior_line` appears only on a kept finding:
+
+| field | type | meaning |
+| --- | --- | --- |
+| `prior_open_count` | integer | prior open findings (non-praise) this run answered for |
+| `kept_count` | integer | re-judged findings still open: restated by the reviewer, or neither restated nor resolved |
+| `resolved_count` | integer | length of `resolved` (reviewer plus caller) |
+| `resolved` | array of resolved entry | the prior findings closed this round; `[]` when none |
+| `findings[].prior_line` | integer, optional | on a kept finding only (restated or left open): the line the prior finding had at the prior head. A finding left open carries `chunk` 0 |
+
+The existing `carried_count` keeps its meaning. A resolved entry (also the item of
+the fence's `resolved` list):
+
+| field | type | allowed values |
+| --- | --- | --- |
+| `file` | string | path of the prior finding |
+| `line` | integer >= 1 | its prior location (line at the prior head) |
+| `rule_id` | string | rule it was raised under |
+| `message` | string | what it claimed |
+| `by` | string | `reviewer` (re-judged; its id was named in the reply's `resolved` list) or `caller` (ruled by `--resolved-findings`) |
+| `reason` | string | the caller's reason; required when `by` is `caller`, omitted for `reviewer` |
+| `fingerprint` | string, optional | the prior finding's fingerprint, when it had one |
+
+```json
+{"prior_open_count": 3, "carried_count": 1, "kept_count": 1, "resolved_count": 1,
+ "resolved": [
+   {"file": "src/sync.py", "line": 86, "rule_id": "R1",
+    "message": "unguarded write", "by": "reviewer"}],
+ "findings": [
+   {"file": "src/a.py", "line": 40, "rule_id": "R2", "severity": "blocking",
+    "message": "still wrong", "chunk": 1, "prior_line": 31}]}
+```
+
+`run`'s stdout result gains, in a delta run, the same `prior_open_count`,
+`kept_count`, `resolved_count` and `resolved`; and, whenever `--resolved-findings`
+was given (delta or not), `unknown_resolved_findings` (array of string, `[]` when
+every entry matched).
+
+The `review-result` fence (and the machine fields of `loadout-review-post`'s staged
+body) gains one optional evidence field, `resolved`: the array of resolved entries
+above, validated like `dropped` (unknown fields refused). It never raises
+`fence_schema_version`, holds no finding open and the merge gate does not read it.
+The posted body shows them in the header count (`blocking (1 finding(s), 2 resolved)`)
+and in two sections after the bullets:
+
+```
+Resolved (1):
+- src/sync.py:86 [R1] unguarded write
+
+Resolved by caller (1):
+- src/b.py:12 [R3] stale note (reason: refuted by the owner)
+```
+
+```json
+"resolved": [
+  {"file": "src/sync.py", "line": 86, "rule_id": "R1", "message": "unguarded write", "by": "reviewer"},
+  {"file": "src/b.py", "line": 12, "rule_id": "R3", "message": "stale note",
+   "by": "caller", "reason": "refuted by the owner"}]
+```
+
+`resolved` is derived by `post` from the run record and `--resolved-findings`, so
+`--state-file` may not carry it.
 
 **Failure diagnostics.** When no engine can answer a chunk, the blocked result carries
 each engine's saved stderr path (`carrier_stderr_file`, `fallback_stderr_file`;

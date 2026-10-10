@@ -210,14 +210,16 @@ def test_an_attempt_never_reuses_a_work_dir_even_when_the_old_one_cannot_be_remo
 def test_in_a_delta_merge_a_carried_finding_and_a_fresh_one_on_identical_lines_both_survive(
     tmp_path,
 ):
-    # The delta adds m.py with `return eval(a)` on line 2; the prior review had
-    # an open finding for an identical line (same file, same rule, same text)
-    # at line 90 that no chunk covers, so it is carried forward untouched.
-    diff = _diff("m.py", "x = 1\nreturn eval(a)\n", 1)
+    # The delta adds m.py with the same `return eval(a)` on lines 2 and 3, and the
+    # prior review had an open finding on an identical line (same file, same
+    # rule, same text) at line 90 of the file as it was. The file is in the
+    # delta, so the reviewer re-judges that finding and reports it again at
+    # line 3 beside a fresh one at line 2: two findings with one fingerprint.
+    diff = _diff("m.py", "x = 1\nreturn eval(a)\nreturn eval(a)\n", 1)
     shared = compute_fingerprint("m.py", "R1", "return eval(a)")
-    carried = {**_finding(line=90, message="old"), KEY_FINGERPRINT: shared}
-    context = DeltaContext(since_head="c" * 40, open_findings=(carried,))
-    array = json.dumps([_finding(line=2, message="new")])
+    prior = {**_finding(line=90, message="old"), KEY_FINGERPRINT: shared}
+    context = DeltaContext(since_head="c" * 40, open_findings=(prior,))
+    array = json.dumps([_finding(line=2, message="new"), _finding(line=3, message="old")])
     run_dir = tmp_path / "run"
     run_dir.mkdir()
 
@@ -230,9 +232,9 @@ def test_in_a_delta_merge_a_carried_finding_and_a_fresh_one_on_identical_lines_b
 
     by_message = {f["message"]: f for f in document["findings"]}
     assert sorted(by_message) == ["new", "old"]
-    assert by_message["old"] == {**carried, "chunk": 0}
-    assert by_message["new"][KEY_FINGERPRINT] == shared
-    assert document["carried_count"] == 1
+    assert by_message["old"]["line"] == 3 and by_message["old"]["prior_line"] == 90
+    assert by_message["new"][KEY_FINGERPRINT] == by_message["old"][KEY_FINGERPRINT] == shared
+    assert (document["carried_count"], document["kept_count"], document["resolved_count"]) == (0, 1, 0)
 
 
 def test_a_chunk_workdir_failure_is_persisted_like_any_other_attempt_outcome(

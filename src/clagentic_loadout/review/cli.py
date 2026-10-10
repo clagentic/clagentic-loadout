@@ -47,6 +47,7 @@ from clagentic_loadout.merge.fence_state import (
     EVIDENCE_KEYS,
     KEY_DROPPED,
     KEY_FAILURE_SEQUENCES,
+    KEY_RESOLVED,
     failure_sequences_of,
     normalize_findings_state,
 )
@@ -58,6 +59,14 @@ from clagentic_loadout.review.findings_contract import (
     validate_finding,
 )
 from clagentic_loadout.review.pr_record import write_pr_record
+from clagentic_loadout.review.resolutions import (
+    BY_CALLER,
+    Resolution,
+    ResolutionsError,
+    load_resolutions,
+    resolved_entry,
+    split_resolved,
+)
 from clagentic_loadout.review.run_evidence import evidence_from_document
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
@@ -117,6 +126,14 @@ EXIT_FINDINGS_INVALID = 32
 _GIT_PROBE_TIMEOUT_SECONDS = 10
 RUN_ROOT_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT"
 _STATUSES = ("clean", "blocking")
+_RESOLVED_HELP = (
+    "JSON file listing findings the caller has ruled resolved or refuted: an "
+    "array whose entries are a finding id string, or an object with exactly "
+    "one of 'id' (file:line:rule_id, or a fingerprint) and 'fingerprint', plus "
+    "an optional one-line 'reason'. Matching findings are neither carried nor "
+    "re-posted; the posted body lists them under 'Resolved by caller' with the "
+    "reason. An entry that matches no finding is warned about and ignored."
+)
 _FINDING_KEYS = ("file", "line", "rule_id", "message")
 #: Carried to the posted body only when the finding has them.
 _OPTIONAL_FINDING_KEYS = (KEY_FAILURE_SEQUENCE,)
@@ -236,6 +253,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "for. Required when --prior-findings is a bare array; may be given "
         "alone to review a delta with no open findings to answer for.",
     )
+    run.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
 
     post = subparsers.add_parser(
         "post",
@@ -283,6 +301,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "header, and copied into the fence. Dropped candidates are never "
         "findings and do not change the verdict.",
     )
+    post.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
     return parser
 
 
@@ -435,6 +454,7 @@ def _run_command(
         _fail(str(exc), EXIT_PROFILE_INVALID)
 
     since_head, prior_findings = _load_prior_review(args, owner=owner, repo=repo)
+    resolutions = _load_resolutions(args.resolved_findings)
 
     backend = _build_acquire_backend(
         args, owner=owner, repo=repo, caller=caller, platform=platform,
@@ -450,10 +470,12 @@ def _run_command(
 
     delta = None
     delta_stage = None
+    unknown_resolutions = tuple(r.ref for r in resolutions)
     if since_head is not None:
-        resolution = resolve_delta(backend, acquired, since_head, prior_findings)
+        resolution = resolve_delta(backend, acquired, since_head, prior_findings, resolutions)
         acquired, delta = resolution.acquired, resolution.context
         delta_stage = resolution.stage_fields()
+        unknown_resolutions = resolution.unknown_resolutions
         if delta is None:
             print(
                 f"loadout-review: delta review not used ({resolution.reason}): "
@@ -483,9 +505,11 @@ def _run_command(
     except OSError as exc:
         _fail(f"cannot write the PR record in {str(run_dir)!r}: {exc}", EXIT_RUN_BLOCKED)
 
+    _warn_unknown_resolutions(unknown_resolutions)
     kwargs = {"runner": runner} if runner is not None else {}
     outcome = run_review(
         acquired, profile, run_dir, emit=_emit_stage, delta=delta, delta_stage=delta_stage,
+        unknown_resolutions=unknown_resolutions if args.resolved_findings is not None else None,
         **kwargs,
     )
     return _report_outcome(outcome)
@@ -544,6 +568,9 @@ def _load_findings(
                 EXIT_FINDINGS_INVALID,
             )
         evidence = evidence_from_document(data)
+        resolved = data.get(KEY_RESOLVED)
+        if resolved:
+            evidence[KEY_RESOLVED] = resolved
     else:
         head_sha = head_sha_arg
         findings = data
@@ -587,6 +614,49 @@ def _load_dropped(path: str) -> list[dict[str, Any]]:
             EXIT_FINDINGS_INVALID,
         )
     return data
+
+
+def _load_resolutions(path: str | None) -> list[Resolution]:
+    if path is None:
+        return []
+    try:
+        return load_resolutions(path)
+    except ResolutionsError as exc:
+        _fail(str(exc), EXIT_FINDINGS_INVALID)
+
+
+def _apply_caller_resolutions(
+    findings: list[dict[str, Any]],
+    evidence: dict[str, Any],
+    resolutions: list[Resolution],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Take the findings the caller ruled resolved out of what is posted and
+    list them, with the caller's reason, beside the resolved entries the run
+    already recorded. A ruling the run already applied is not unknown."""
+    if not resolutions:
+        return findings, evidence
+    remaining, ruled, unknown = split_resolved(findings, resolutions)
+    recorded = evidence.get(KEY_RESOLVED, [])
+    if not isinstance(recorded, list):
+        # Left as is: the evidence validation that follows refuses it.
+        return findings, evidence
+    if unknown:
+        pending = [r for r in resolutions if r.ref in unknown]
+        _, _, unknown = split_resolved([e for e in recorded if isinstance(e, dict)], pending)
+    _warn_unknown_resolutions(unknown)
+    entries = [resolved_entry(f, BY_CALLER, r.reason) for f, r in ruled]
+    if entries:
+        evidence = {**evidence, KEY_RESOLVED: [*recorded, *entries]}
+    return remaining, evidence
+
+
+def _warn_unknown_resolutions(refs) -> None:
+    for ref in refs:
+        print(
+            f"loadout-review: warning: resolved-findings entry {ref!r} matches no prior "
+            "finding; ignored",
+            file=sys.stderr,
+        )
 
 
 def _load_prior_review(
@@ -649,6 +719,9 @@ def _post_command(
         dropped = _load_dropped(args.dropped)
         if dropped:
             evidence = {**evidence, KEY_DROPPED: dropped}
+    findings, evidence = _apply_caller_resolutions(
+        findings, evidence, _load_resolutions(args.resolved_findings)
+    )
     if args.status == "clean" and any(f["severity"] == "blocking" for f in findings):
         _fail(
             "--status clean contradicts the findings file, which carries a blocking finding; "

@@ -42,8 +42,9 @@ from clagentic_loadout.review.engine_breaker import EngineBreaker
 from clagentic_loadout.review.findings_contract import (
     FORMAT_REPROMPT,
     OUTPUT_CONTRACT,
+    RESOLVED_REPLY_ADDENDUM,
     InvalidReplyError,
-    parse_chunk_reply,
+    parse_chunk_output,
 )
 from clagentic_loadout.review.profile_config import ReviewProfile
 
@@ -77,6 +78,8 @@ def build_prompt(chunk: Chunk, total: int, rulebook_text: str, delta_note: str =
     if delta_note.strip():
         parts.append(delta_note.strip() + "\n\n")
     parts.append(f"## Diff chunk {chunk.index} of {total}\n\n" + chunk.text + "\n")
+    if delta_note.strip():
+        parts.append(RESOLVED_REPLY_ADDENDUM)
     parts.append(OUTPUT_CONTRACT)
     return "".join(parts)
 
@@ -192,7 +195,7 @@ def _run_one_engine(
         )
 
     try:
-        findings = parse_chunk_reply(result.text)
+        parsed = parse_chunk_output(result.text)
         reply_result = result
     except InvalidReplyError as first_error:
         retry = run_engine_with_retry(argv, prompt + FORMAT_REPROMPT, timeout, **call)
@@ -206,7 +209,7 @@ def _run_one_engine(
                 record, engine, _transient_reason(retry), retry, retriable=not retry.deterministic
             )
         try:
-            findings = parse_chunk_reply(retry.text)
+            parsed = parse_chunk_output(retry.text)
             reply_result = retry
         except InvalidReplyError as second_error:
             failed = EngineResult(
@@ -236,7 +239,8 @@ def _run_one_engine(
         engine=engine,
         exit_code=reply_result.exit_code,
         stderr_excerpt=reply_result.stderr_excerpt,
-        findings=findings,
+        findings=parsed.findings,
+        resolved_ids=parsed.resolved,
     )
     return record
 
