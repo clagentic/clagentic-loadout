@@ -433,6 +433,81 @@ review:
   hard failure) rather than raising, mirroring
   `transport.github_app_config`'s own per-caller `slugs` map contract.
 
+### Pre-check sandbox (`merge.pre_checks_sandbox`, `~/.config/clagentic/loadout/config.yaml`)
+
+A `pre_checks` command is code from the PR under review, run before the merge as
+the merger's user. What loadout does by itself, and what it does not:
+
+- The environment scrub removes identity, attestation and credential-shaped
+  variables from the environment the check is handed. It does not stop the check
+  reading the merger's `/proc/<pid>/environ` or credential files under `HOME`.
+- The private merge-result clone keeps the check away from the shared repository
+  and working tree. It does not stop the check writing elsewhere by absolute path
+  or leaving daemons running after it exits.
+
+Closing those needs process isolation, which loadout does not ship. The optional
+`merge.pre_checks_sandbox` key lets a deployment supply it: an argv list prepended
+to every `pre_checks` command.
+
+```yaml
+merge:
+  pre_checks_sandbox:
+    - /usr/bin/bwrap
+    - --ro-bind
+    - /
+    - /
+    - --dev
+    - /dev
+    - --proc
+    - /proc
+    - --tmpfs
+    - /root
+    - --bind
+    - "{clone}"
+    - "{clone}"
+    - --bind
+    - "{tmpdir}"
+    - "{tmpdir}"
+    - --unshare-pid
+    - --die-with-parent
+    - --chdir
+    - "{clone}"
+    - --
+```
+
+That is an example of the shape only, using a generic bubblewrap argv; loadout
+ships no sandbox and requires none, and the right argv depends on the host (which
+path holds the credentials to hide, whether the check needs the network).
+
+- **User-level only.** The key is read from the user-level config file and never
+  from a repo's `.clagentic/loadout/config.yaml` or tracked `gate.yaml`, so a PR
+  can never change or remove its own sandbox. A repo file carrying the key has it
+  ignored, and the merge log says so.
+- **Placeholders.** `{clone}` (the private merge-result clone the check runs in)
+  and `{tmpdir}` are substituted per check. Both are paths loadout creates:
+  `{tmpdir}` is a private mode-0700 directory made for each check under the
+  merger's own `TMPDIR` (resolved before any step or deployment override) and
+  removed after the check. The check's `TMPDIR` is set to that same directory, so
+  the bind and the environment agree. While a sandbox is configured, a step's
+  inline `TMPDIR=` (or a deployment env override) does not change it; a repo
+  therefore cannot choose the read-write path the sandbox binds. Nothing else is
+  expanded and no shell is involved.
+- **Where it applies.** The prefix is the outermost argv of every `pre_checks`
+  command, its `verify` command and its `liveness_probe`, applied after a step's
+  inline `VAR=VALUE` prefix is split off, so those variables still reach the
+  launched process. It never applies to `post_merge_steps`.
+- **Recommended shape.** A read-only view of the host; read-write access only to
+  `{clone}` and `{tmpdir}`; a PID namespace so daemons die with the check; no
+  credential paths visible.
+- **Fail closed.** The value must be a non-empty list of non-empty strings whose
+  first element is an absolute path to an existing executable. Anything else, an
+  explicit null included, refuses the merge with `EXIT_PRE_CHECKS_FAILED` naming
+  the key, before any check runs. A broken sandbox configuration never degrades
+  into running unsandboxed.
+- **Absent key.** Behaviour is unchanged: same argv, environment, working
+  directory, exit codes and output. `loadout-doctor` reports whether a sandbox is
+  configured and its resolved `argv0`; not configured is `OK` with an advisory.
+
 ### `github_app:` section — deployment-tier, GitHub App slug (`~/.config/clagentic/loadout/config.yaml`)
 
 `design call #4` above already names this seam by reference

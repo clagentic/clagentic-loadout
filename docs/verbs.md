@@ -1673,7 +1673,15 @@ trailing newline in a name, or a git selector refuses). The list is honoured
 only from an untracked file, since it widens what unmerged PR code can read: a
 config file tracked by git in `--repo-path` has its key ignored and the merge
 log names the file and the reason; `loadout-doctor` warns when the config file
-holding the key is tracked by git. The check gates the merge itself:
+holding the key is tracked by git. The environment scrub and the private clone
+narrow what a check can reach but are not isolation: the check still runs as the
+merger's user, so it can read that user's files (including credential files under
+`HOME`) and the merger's own `/proc/<pid>/environ`, write outside the clone by
+absolute path, and leave daemons running. A deployment that needs those closed
+configures the optional, user-level `merge.pre_checks_sandbox` argv prefix
+(see [docs/provisioning.md](provisioning.md), "Pre-check sandbox", including
+how its `{clone}` and `{tmpdir}` placeholders are fixed by loadout, never by a
+step); without it the checks run exactly as described here. The check gates the merge itself:
 an `on_failure: fail` pre_check that exits non-zero (or times out, or a
 `detaches: true` step's `liveness_probe` never confirms) refuses the merge
 (`EXIT_PRE_CHECKS_FAILED`) BEFORE `merge_pr` is ever called. `pre_checks_config`
@@ -2247,6 +2255,12 @@ define, always reporting RESOLVED values rather than a guess:
    a no-op pass. See [docs/provisioning.md](provisioning.md)'s "Merge-gate
    config homes" section for the full schema and the repo-tier vs.
    deployment-tier design calls.
+5. **`merge.pre_checks_sandbox`** (user-level config, always runs) — reports
+   whether a pre_checks sandbox is configured and, when it is, the resolved
+   `argv0`. Not configured is an `OK` result carrying an advisory (the sandbox is
+   opt-in and loadout requires none); a configured value `loadout-merge` would
+   refuse is a failure. See [docs/provisioning.md](provisioning.md), "Pre-check
+   sandbox".
 
 Exits `2` (`EXIT_CHECKS_FAILED`) if any check's outcome is a failure, `0`
 if every check passes. `--repo-root` opts into the schema check and the

@@ -531,6 +531,12 @@ from clagentic_loadout.merge.merge_result_clone import (
 )
 from clagentic_loadout.merge.pre_check_env import pre_check_env
 from clagentic_loadout.merge.pre_checks_config import decide_pre_checks_env_passthrough
+from clagentic_loadout.merge.pre_checks_sandbox import (
+    CONFIG_KEY_PRE_CHECKS_SANDBOX,
+    PreChecksSandboxConfigError,
+    ignored_repo_sandbox_warnings,
+    resolve_pre_checks_sandbox,
+)
 from clagentic_loadout.merge.repo_gate_runtime import (
     load_repo_gate_at_base,
     resolve_gate_git_tree,
@@ -1693,6 +1699,19 @@ def _run(
                 f"{str(passthrough.ignored_file)!r} is ignored: {passthrough.reason}",
                 file=sys.stderr,
             )
+        # The sandbox is a refusal-on-error key: a configured value that is not a
+        # usable argv must stop the merge before any check runs, never fall back
+        # to running the checks unsandboxed.
+        try:
+            sandbox = resolve_pre_checks_sandbox()
+        except PreChecksSandboxConfigError as exc:
+            _fail(
+                f"pre_checks gate could not use {CONFIG_KEY_PRE_CHECKS_SANDBOX} -- {exc} -- "
+                f"refusing to merge PR #{args.pr_number} in {owner}/{repo}.",
+                code=EXIT_PRE_CHECKS_FAILED,
+            )
+        for warning in ignored_repo_sandbox_warnings(args.repo_path):
+            print(f"merge: WARNING -- {warning}", file=sys.stderr)
         try:
             # The checks get a private clone of the merge result (its own .git),
             # so nothing they write there reaches the shared repository. The
@@ -1717,7 +1736,15 @@ def _run(
                     f"checks",
                     file=sys.stderr,
                 )
-                run_post_merge_steps(pre_checks, check_tree, base_env=check_env)
+                if sandbox:
+                    print(
+                        f"merge: pre_checks gate -- every check runs under the configured "
+                        f"sandbox {sandbox[0]!r}",
+                        file=sys.stderr,
+                    )
+                run_post_merge_steps(
+                    pre_checks, check_tree, base_env=check_env, argv_prefix=sandbox
+                )
         except MergeResultCloneError as exc:
             _fail(
                 f"pre_checks gate could not build the merge result -- {exc} -- "

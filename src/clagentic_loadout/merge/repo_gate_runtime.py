@@ -109,6 +109,10 @@ from clagentic_loadout.merge.gate_config import (
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import resolve_git_working_tree
 from clagentic_loadout.merge.pre_checks_config import CONFIG_KEY_PRE_CHECKS, pre_checks_from_section
+from clagentic_loadout.merge.pre_checks_sandbox import (
+    CONFIG_KEY_PRE_CHECKS_SANDBOX,
+    ignored_sandbox_warning,
+)
 from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     renamed_declared_role,
@@ -204,12 +208,14 @@ def gate_from_tracked_text(
         return _nothing_readable(ignored_warnings, str(exc))
 
     warnings = ignored_warnings
+    if CONFIG_KEY_PRE_CHECKS_SANDBOX in merge_section:
+        warnings = (*warnings, ignored_sandbox_warning(source))
     roles: tuple[str, ...] = ()
     scanners: dict[str, tuple[str, ...]] | None = None
     try:
         roles, scanners = reviewer_gate_from_section(source, merge_section, section_present)
     except InvalidMergeGateConfigError as exc:
-        warnings = _reviewer_pair_warnings(ignored_warnings, str(exc))
+        warnings = _reviewer_pair_warnings(warnings, str(exc))
 
     pre_checks: tuple[dict, ...] = ()
     pre_checks_error = ""
