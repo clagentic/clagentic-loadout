@@ -92,7 +92,8 @@ def _entry(item: Any, position: int) -> Resolution:
     if (KEY_ID in item) == (KEY_FINGERPRINT in item):
         raise ResolutionsError(f"{where} must carry exactly one of {KEY_ID!r} and {KEY_FINGERPRINT!r}")
     fingerprint_only = KEY_FINGERPRINT in item
-    ref = _one_line(item[KEY_FINGERPRINT if fingerprint_only else KEY_ID], f"{where}.{KEY_ID}")
+    key = KEY_FINGERPRINT if fingerprint_only else KEY_ID
+    ref = _one_line(item[key], f"{where}.{key}")
     if fingerprint_only and not is_fingerprint(ref):
         raise ResolutionsError(f"{where}.{KEY_FINGERPRINT} is not a well-formed fingerprint: {ref!r}")
     reason = _one_line(item[KEY_REASON], f"{where}.{KEY_REASON}") if KEY_REASON in item else DEFAULT_REASON

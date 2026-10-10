@@ -746,15 +746,19 @@ finding ends the round as exactly one of three outcomes:
   `carried_count`), so a delta review never turns clean by not looking.
 - **re-judged** — its file is touched anywhere in the delta, whether or not a
   changed hunk covers its old line. It goes to the reviewer model, in the prompt
-  of every chunk that holds that file (the existing prior-findings path, not a
-  mechanical re-anchor), shown at its **prior location** (`file:line` as of the
+  of exactly one chunk: the lowest-index chunk whose hunks cover its prior line,
+  else the lowest-index chunk holding that file (the existing prior-findings
+  path, not a mechanical re-anchor). A fix landing in another chunk of a split
+  file therefore leaves it kept, never a duplicate. It is shown at its **prior location** (`file:line` as of the
   prior head). The reviewer either reports it again at a line of the new head
   (**kept**: the merged finding carries `prior_line`, the line it had before), or
   says nothing about it (**resolved**: it is listed in `resolved` with
   `by: "reviewer"` and never re-posted as open). A fix made at a different line
   of the same file (a new helper, a `setUp`, a refactor) therefore resolves it.
   A reviewer finding is paired with a prior one by file and `rule_id` (closest
-  message, then closest line, one reviewer finding per prior finding).
+  message, then closest line, one reviewer finding per prior finding); another
+  reviewer finding with the same file, `rule_id` and message as a kept prior
+  finding only restates it and is not posted as a separate open finding.
 - **resolved by the caller** — the caller ruled it resolved or refuted with
   `--resolved-findings` (below). It is neither shown to the reviewer nor carried.
 

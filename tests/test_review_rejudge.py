@@ -264,6 +264,17 @@ def test_resolutions_match_by_id_or_fingerprint(tmp_path):
         parse_resolutions("nope")
 
 
+@pytest.mark.parametrize(
+    ("entry", "label"),
+    [({"fingerprint": "fp2:zz"}, "entry 1.fingerprint"), ({"id": ""}, "entry 1.id")],
+)
+def test_a_malformed_ref_is_reported_under_the_key_it_was_read_from(entry, label):
+    with pytest.raises(ResolutionsError) as raised:
+        parse_resolutions([entry])
+
+    assert label in str(raised.value)
+
+
 def test_account_for_prior_pairs_by_file_and_rule_with_the_closest_line():
     prior = (_finding(line=10), _finding(line=50), _finding(file="z.py", line=1))
     context = DeltaContext("1" * 40, prior)

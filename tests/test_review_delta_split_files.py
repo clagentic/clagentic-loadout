@@ -1,6 +1,7 @@
-"""Delta review of a file whose diff is split across chunks: each chunk is
-asked only about the open findings its own hunks cover, and a finding no
-chunk covers is carried forward as still open."""
+"""Delta review of a file whose diff is split across chunks: each prior
+finding is listed in exactly one chunk (the one whose hunks cover its line,
+else the lowest chunk holding the file), and one on an untouched file is
+carried forward as still open."""
 
 from __future__ import annotations
 
@@ -11,6 +12,7 @@ from clagentic_loadout.acquire.contract import AcquiredPr
 from clagentic_loadout.review.chunking import plan_chunks
 from clagentic_loadout.review.delta import (
     DeltaContext,
+    account_for_prior,
     carried_findings,
     findings_for_chunk,
     render_delta_note,
@@ -85,21 +87,56 @@ def test_a_split_hunk_gets_a_span_per_piece():
     assert {(s.old_first, s.old_last) for s in spans} == {(1, 1)}
 
 
-def test_a_finding_on_a_split_file_is_listed_in_every_chunk_of_that_file():
+def test_a_finding_on_a_split_file_is_listed_in_exactly_one_chunk_the_one_covering_its_line():
     chunks = _split_chunks()
     context = _context(_finding("big.py", 1), _finding("big.py", 50), _finding("big.py", 101))
 
-    listed = [[f["line"] for f in findings_for_chunk(context, c)] for c in chunks]
+    listed = [[f["line"] for f in findings_for_chunk(context, c, chunks)] for c in chunks]
 
-    # A fix may sit in any chunk of the file, not only the one covering the old line.
-    assert listed == [[1, 50, 101]] * 3
+    assert listed == [[1], [50], [101]]
+
+
+def test_an_uncovered_finding_on_a_split_file_is_listed_in_the_lowest_chunk_holding_the_file():
+    chunks = plan_chunks(_diff("other.py", [1]) + _diff("big.py", [1, 50, 100]), 8)
+    holders = [c.index for c in chunks if "big.py" in c.files]
+    assert len(holders) > 1
+    context = _context(_finding("big.py", 75))
+
+    listed = [c.index for c in chunks if findings_for_chunk(context, c, chunks)]
+
+    assert listed == [holders[0]]
+    assert carried_findings(context, {"big.py", "other.py"}) == []
+
+
+def test_both_chunks_of_a_split_file_restating_a_prior_finding_yield_one_open_finding():
+    chunks = _split_chunks()
+    prior = _finding("big.py", 50)
+    context = _context(prior)
+    owner_report = {**prior, "line": 51}
+    other_report = {**prior, "line": 101}
+
+    accounting = account_for_prior(context, {"big.py"}, [owner_report, other_report])
+
+    assert [(p["line"], r["line"]) for p, r in accounting.kept] == [(50, 51)]
+    assert accounting.restatements == [other_report]
+    assert accounting.resolved == [] and accounting.carried == []
+    assert [c.index for c in chunks if findings_for_chunk(context, c, chunks)] == [2]
+
+
+def test_every_prior_finding_on_a_split_file_is_accounted_for_exactly_once():
+    context = _context(_finding("big.py", 1), _finding("big.py", 75), _finding("big.py", 101, "R2"))
+
+    accounting = account_for_prior(context, {"big.py"}, [_finding("big.py", 3), _finding("big.py", 60)])
+
+    assert len(accounting.carried) + len(accounting.kept) + len(accounting.resolved) == 3
+    assert len(accounting.kept) == 2 and [e["line"] for e in accounting.resolved] == [101]
 
 
 def test_a_finding_on_a_file_held_whole_is_listed_only_in_the_chunk_holding_it():
     chunks = plan_chunks(_diff("big.py", [1, 50, 100]) + _diff("small.py", [1]), 8)
     context = _context(_finding("small.py", 1), _finding("untouched.py", 3))
 
-    listed = [[f["file"] for f in findings_for_chunk(context, c)] for c in chunks]
+    listed = [[f["file"] for f in findings_for_chunk(context, c, chunks)] for c in chunks]
 
     holders = [i for i, c in enumerate(chunks) if "small.py" in c.files]
     assert len(holders) == 1
@@ -148,7 +185,7 @@ def test_an_insertion_above_a_finding_shifts_head_numbering_but_the_finding_is_s
     finding = _finding("s.py", 10)
     context = _context(finding)
 
-    assert findings_for_chunk(context, chunk) == (finding,)
+    assert findings_for_chunk(context, chunk, [chunk]) == (finding,)
     assert carried_findings(context, {"s.py"}) == []
 
 
@@ -159,7 +196,7 @@ def test_a_finding_the_old_side_does_not_cover_is_rejudged_not_carried():
     context = _context(elsewhere)
 
     # The file is in the delta, so the reviewer judges it wherever the fix is.
-    assert findings_for_chunk(context, chunk) == (elsewhere,)
+    assert findings_for_chunk(context, chunk, [chunk]) == (elsewhere,)
     assert carried_findings(context, {"s.py"}) == []
 
 
@@ -176,7 +213,7 @@ def _diff_with_hunks(name: str, hunk_lines: list[str]) -> str:
     return "\n".join(header + hunk_lines) + "\n"
 
 
-def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_rejudged():
+def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_rejudged_once():
     def hunk(old: int, new: int) -> list[str]:
         return [f"@@ -{old},2 +{new},2 @@", " context", "-old line", "+new line"]
 
@@ -191,7 +228,7 @@ def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_rejudged(
     gap = _finding("s.py", 350)
     context = _context(gap)
 
-    assert [findings_for_chunk(context, c) for c in chunks] == [(gap,), (gap,)]
+    assert [findings_for_chunk(context, c, chunks) for c in chunks] == [(gap,), ()]
     assert carried_findings(context, {"s.py"}) == []
 
 
@@ -202,7 +239,7 @@ def test_a_finding_outside_the_hunks_of_an_unsplit_touched_file_is_listed_not_ca
     inside = _finding("small.py", 1, rule="R2")
     context = _context(outside, inside)
 
-    assert findings_for_chunk(context, chunks[0]) == (outside, inside)
+    assert findings_for_chunk(context, chunks[0], chunks) == (outside, inside)
     assert carried_findings(context, {"small.py"}) == []
 
 
@@ -212,7 +249,7 @@ def test_the_listing_cap_still_counts_by_position_in_the_whole_list():
     context = _context(*many, _finding("big.py", 1))
     first = next(c for c in chunks if "other.py" in c.files)
 
-    listed = findings_for_chunk(context, first)
+    listed = findings_for_chunk(context, first, chunks)
 
     # big.py:1 sits at position 59, past the cap of 50: never shown, so carried.
     assert all(f["file"] == "other.py" for f in listed) and len(listed) == 50
@@ -260,7 +297,8 @@ def test_each_chunk_prompt_of_a_delta_run_lists_the_findings_on_its_file(tmp_pat
     assert outcome.result == RESULT_COMPLETE
     assert len(prompts) == 3
     judged = [[line for line in ("big.py:1 ", "big.py:50 ", "big.py:70 ") if line in p] for p in prompts]
-    assert judged == [["big.py:1 ", "big.py:50 ", "big.py:70 "]] * 3
+    # Line 70 is covered by no hunk, so the lowest chunk holding the file owns it.
+    assert judged == [["big.py:1 ", "big.py:70 "], ["big.py:50 "], []]
     document = json.loads((run_dir / "findings.json").read_text(encoding="utf-8"))
     # The reviewer answered [] for every chunk: all three are resolved, none
     # silently carried, and each is accounted for exactly once.

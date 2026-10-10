@@ -294,15 +294,19 @@ def _engine_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def _finding_key(finding: dict[str, Any]) -> tuple[Any, ...]:
+    return (finding["file"], finding["line"], finding["rule_id"], finding["message"])
+
+
 def _mark_prior_locations(
     findings: list[dict[str, Any]], kept: list[tuple[dict[str, Any], dict[str, Any]]]
 ) -> None:
     """Record on each merged finding that re-anchors a prior one the line the
     prior finding had, as `prior_line`."""
     for prior, reported in kept:
-        key = (reported["file"], reported["line"], reported["rule_id"], reported["message"])
+        key = _finding_key(reported)
         for finding in findings:
-            if (finding["file"], finding["line"], finding["rule_id"], finding["message"]) == key:
+            if _finding_key(finding) == key:
                 finding[KEY_PRIOR_LINE] = prior["line"]
                 break
 
@@ -392,7 +396,7 @@ def run_review(
     delta_notes: dict[int, str] = {}
     if delta is not None:
         delta_notes = {
-            chunk.index: render_delta_note(delta, findings_for_chunk(delta, chunk))
+            chunk.index: render_delta_note(delta, findings_for_chunk(delta, chunk, chunks))
             for chunk in chunks
         }
     resume_note = "\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else ""
@@ -546,6 +550,11 @@ def run_review(
         accounting = account_for_prior(delta, touched, merge_findings(per_chunk))
         carried, kept, resolved = accounting.carried, accounting.kept, accounting.resolved
         prior_open = delta.prior_open_count
+        restated = {_finding_key(f) for f in accounting.restatements}
+        per_chunk = [
+            (index, [f for f in found if _finding_key(f) not in restated])
+            for index, found in per_chunk
+        ]
         per_chunk.append((0, carried))
     findings = merge_findings(per_chunk)
     _mark_prior_locations(findings, kept)

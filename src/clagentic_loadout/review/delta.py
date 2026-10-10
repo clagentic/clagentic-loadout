@@ -170,14 +170,36 @@ def resolve_delta(
     )
 
 
-def findings_for_chunk(context: DeltaContext, chunk: Chunk) -> tuple[dict[str, Any], ...]:
+def owner_chunk_index(finding: dict[str, Any], chunks: Sequence[Chunk]) -> int | None:
+    """The one chunk that judges *finding*: the lowest-index chunk whose hunks
+    cover its prior line, else the lowest-index chunk holding its file; None
+    when no chunk holds the file. One owner keeps a file split across chunks
+    from judging, and so reporting, the same finding twice."""
+    ordered = sorted(chunks, key=lambda chunk: chunk.index)
+    for chunk in ordered:
+        if chunk.covers_prior_line(finding["file"], finding["line"]):
+            return chunk.index
+    for chunk in ordered:
+        if finding["file"] in chunk.files:
+            return chunk.index
+    return None
+
+
+def findings_for_chunk(
+    context: DeltaContext, chunk: Chunk, chunks: Sequence[Chunk]
+) -> tuple[dict[str, Any], ...]:
     """The open findings this chunk's prompt lists for re-judgment.
 
-    A finding is listed in every chunk that holds its file. Its line is in the
-    numbering of the last reviewed head, so it says nothing about where the
-    fix would be: the reviewer judges it against the file as the chunk shows
-    it. The listing cap applies, by position in the whole list."""
-    return tuple(finding for finding in _listed(context) if finding["file"] in chunk.files)
+    Each finding is listed in exactly one chunk, its owner (see
+    owner_chunk_index). Its line is in the numbering of the last reviewed head,
+    so a fix that lands in another chunk of the same file is not seen by the
+    owner; the finding then stays reported (kept), which fails safe. The
+    listing cap applies, by position in the whole list."""
+    return tuple(
+        finding
+        for finding in _listed(context)
+        if owner_chunk_index(finding, chunks) == chunk.index
+    )
 
 
 def render_delta_note(
@@ -254,6 +276,10 @@ class PriorAccounting:
     kept: list[tuple[dict[str, Any], dict[str, Any]]]
     #: `resolved` entries: those the reviewer resolved, then those the caller did.
     resolved: list[dict[str, Any]]
+    #: Reported findings that only restate a kept prior finding (same file,
+    #: rule_id and message, another line), e.g. from a chunk that was not asked
+    #: about it. They are not new defects and must not be posted open.
+    restatements: list[dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
 def _pair_reports(
@@ -304,4 +330,15 @@ def account_for_prior(
         resolved_entry(prior, BY_REVIEWER) for position, prior in rejudged if position not in paired
     ]
     resolved.extend(context.caller_resolved)
-    return PriorAccounting(carried, kept, resolved)
+    claimed = {id(report) for _prior, report in kept}
+    restatements = [
+        report
+        for report in reported
+        if id(report) not in claimed
+        and any(
+            (report["file"], report["rule_id"], report["message"])
+            == (prior["file"], prior["rule_id"], prior["message"])
+            for prior, _anchor in kept
+        )
+    ]
+    return PriorAccounting(carried, kept, resolved, restatements)
