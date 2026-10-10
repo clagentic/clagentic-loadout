@@ -1164,6 +1164,7 @@ def read_caller_body_bytes(
     expect_head_sha: str | None = None,
     expect_verdict_route: bool | None = None,
     env: dict[str, str] | None = None,
+    consume: bool = True,
 ) -> bytes:
     """Read the PER-CALLER staged body (`resolve_caller_body_path`), verify
     its identity stamp, consume both files, and return the body's raw bytes
@@ -1231,6 +1232,10 @@ def read_caller_body_bytes(
     the same `BodyEnvError` "no body staged" shape `read_body_bytes` always
     raised for a missing file -- never a silent read of some OTHER
     caller's content.
+
+    *consume* (default True, behavior unchanged): pass False to run every
+    check above and return the bytes while leaving both staged files in
+    place; the caller then owes a later `consume_caller_body` call.
 
     ABANDONED-PAIR SWEEP (lr-4c1646): before doing anything else, this
     function opportunistically sweeps stale siblings out of the staging
@@ -1387,6 +1392,9 @@ def read_caller_body_bytes(
 
     body_bytes = _read_staged_bytes(path)
 
+    if not consume:
+        return body_bytes
+
     # Consume ONLY after both the stamp check and the body read succeeded --
     # a read that raised above (missing/unreadable body) leaves the stamp in
     # place too, so a subsequent retry with a corrected body write still
@@ -1397,12 +1405,45 @@ def read_caller_body_bytes(
     return body_bytes
 
 
+def consume_caller_body(
+    *,
+    caller: str,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Delete the PER-CALLER staged body and its identity stamp.
+
+    The second half of a validate-then-consume read: a caller that read
+    with `read_caller_body_bytes(..., consume=False)` calls this exactly
+    once, immediately before its first remote-mutating operation, so a
+    refusal that happens before any remote write leaves the staged pair in
+    place for a corrected retry while single-use is still enforced once a
+    write is attempted.
+
+    The body unlink is the arbiter between concurrent consumers: it is not
+    `missing_ok`, so of two invocations that both validated the same staged
+    pair only the one whose unlink succeeds proceeds; the other gets a
+    `BodyEnvError` and must not write.
+    """
+    path = resolve_caller_body_path(caller=caller, env=env)
+    stamp_path = _resolve_caller_stamp_path(caller=caller, env=env)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        raise BodyEnvError(
+            f"--body-env: the staged body for caller {caller!r} was already "
+            f"consumed by another invocation -- a staged body is "
+            f"single-use. Re-stage via loadout-stage-body before retrying."
+        ) from None
+    stamp_path.unlink(missing_ok=True)
+
+
 __all__ = [
     "BODY_ENV_NOT_EPHEMERAL_NOTE",
     "BODY_STDIN_CONTRACT_GUIDANCE",
     "BodyEnvError",
     "VerdictIntentMismatchError",
     "augment_body_contract_error",
+    "consume_caller_body",
     "read_body_bytes",
     "read_caller_body_bytes",
     "resolve_body_path",

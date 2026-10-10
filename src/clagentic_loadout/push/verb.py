@@ -322,6 +322,7 @@ from clagentic_loadout.transport.attestation import (
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
+    consume_caller_body,
     read_caller_body_bytes,
 )
 from clagentic_loadout.transport.caller_binding import (
@@ -1022,11 +1023,41 @@ def _read_body_env(
     """
     try:
         raw = read_caller_body_bytes(
-            caller=caller, expect_create_branch=create_branch, expect_target_pr=target_pr
+            caller=caller, expect_create_branch=create_branch, expect_target_pr=target_pr,
+            consume=False,
         )
     except BodyEnvError as exc:
         _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
     return _unwrap_body_json(raw, source_label="--body-env")
+
+
+class _StagedBody:
+    """Tracks whether this invocation still holds an unconsumed --body-env
+    staged pair, so the pair is deleted exactly once, immediately before the
+    first remote-mutating operation, and left untouched by any refusal that
+    happens earlier (a retry with a corrected invocation then needs no
+    re-stage). Single-use is preserved: once `consume` has been called the
+    pair is gone whatever the remote outcome."""
+
+    def __init__(self) -> None:
+        self.caller: str | None = None
+        self.pending = False
+
+    def mark_staged(self, caller: str) -> None:
+        self.caller = caller
+        self.pending = True
+
+    def consume(self) -> None:
+        """No-op when no --body-env pair is pending (--body-stdin, no body, or
+        already consumed). Marks the pair spent before deleting so a failure
+        inside the delete is never mistaken for a still-retryable stage."""
+        if not self.pending or self.caller is None:
+            return
+        self.pending = False
+        try:
+            consume_caller_body(caller=self.caller)
+        except BodyEnvError as exc:
+            _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
 
 
 def _check_title_gate(
@@ -1764,6 +1795,7 @@ def main(
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
 
+    staged = _StagedBody()
     try:
         return _run(
             args,
@@ -1772,6 +1804,7 @@ def main(
             builder_identity_config_root=builder_identity_config_root,
             identity_provider=identity_provider,
             host_config_root=host_config_root,
+            staged=staged,
         )
     except PushVerbError as exc:
         print(f"push: {exc}", file=sys.stderr)
@@ -1815,6 +1848,14 @@ def main(
     except InvalidVerifyConfigError as exc:
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_VERIFY_CONFIG_INVALID
+    finally:
+        if staged.pending:
+            print(
+                "push: nothing was consumed -- the staged --body-env content "
+                "is untouched and does not need to be re-staged; correct the "
+                "invocation and retry.",
+                file=sys.stderr,
+            )
 
 
 def _run(
@@ -1825,7 +1866,11 @@ def _run(
     builder_identity_config_root: str | Path | None = None,
     identity_provider=None,
     host_config_root: str | Path | None = None,
+    staged: _StagedBody | None = None,
 ) -> int:
+    if staged is None:
+        staged = _StagedBody()
+
     # 1. Argument-shape validation, before any I/O.
     if args.body_env and args.body_stdin:
         raise PushUsageError(
@@ -1922,6 +1967,7 @@ def _run(
     if args.body_env:
         if args.update_pr:
             body = _read_body_env(caller=caller, target_pr=args.pr_number)
+            staged.mark_staged(caller)
         else:
             current_branch = git_coords.current_branch(project_root)
             if current_branch in git_coords.PROTECTED_BRANCHES:
@@ -1934,6 +1980,7 @@ def _run(
                     code=EXIT_PUSH_FAILED,
                 )
             body = _read_body_env(caller=caller, create_branch=current_branch)
+            staged.mark_staged(caller)
     elif args.body_stdin:
         body = _read_body_stdin()
     elif not args.update_pr:
@@ -2009,6 +2056,7 @@ def _run(
             allowed_namespaces=allowed_namespaces, allowed_hosts=allowed_hosts,
             host_config_is_set=host_config_is_set,
             token_provider=token_provider, opener=opener,
+            staged=staged,
         )
 
     return _run_create_pr(
@@ -2017,6 +2065,7 @@ def _run(
         host_config_is_set=host_config_is_set,
         token_provider=token_provider, opener=opener,
         builder_identity_config_root=builder_identity_config_root,
+        staged=staged,
     )
 
 
@@ -2152,6 +2201,7 @@ def _run_update_pr(
     host_config_is_set: bool,
     token_provider: TokenProvider | None,
     opener,
+    staged: _StagedBody,
 ) -> int:
     try:
         owner, repo, api_base = _resolve_owner_repo_for_update(args, project_root)
@@ -2272,6 +2322,9 @@ def _run_update_pr(
             current_body, body, separator=_APPEND_BODY_SEPARATOR
         )
 
+    # Every read and refusal is behind us: the PATCH is the first remote
+    # write, so the staged pair is spent here and on every path after.
+    staged.consume()
     try:
         if args.platform == PLATFORM_GITHUB:
             github_backend.update_pr(owner, repo, args.pr_number, token=token, title=args.title, body=effective_body, opener=opener)
@@ -2319,6 +2372,7 @@ def _run_create_pr(
     token_provider: TokenProvider | None,
     opener,
     builder_identity_config_root: str | Path | None = None,
+    staged: _StagedBody,
 ) -> int:
     branch = git_coords.current_branch(project_root)
     if branch in git_coords.PROTECTED_BRANCHES:
@@ -2556,6 +2610,10 @@ def _run_create_pr(
         print(f"push: WARNING -- {lease.fetch_warning}", file=sys.stderr)
 
     other_platform_label = PLATFORM_FORGEJO if args.platform == PLATFORM_GITHUB else PLATFORM_GITHUB
+    # The push is the first remote write: spend the staged pair here and on
+    # every path after. A dry run writes nothing, so it keeps the pair.
+    if not args.dry_run:
+        staged.consume()
     try:
         git_push_with_token(
             remote_name, branch, token, project_root,

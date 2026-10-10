@@ -269,6 +269,15 @@ a stale leftover body silently re-posted under a later invocation's
 identity, proved unsafe). A read whose target PR/SHA does not match the
 staged stamp fails closed without consuming anything.
 
+`loadout-push` is the exception to consume-on-read: it validates the staged
+body and stamp when it reads them but deletes them only immediately before
+its first remote write (the git push on the create path, the PR update on
+`--update-pr`). Any refusal before that point (missing `--repo`, platform,
+namespace or host guard, title or task-id gate, verification failure, token
+failure) leaves the pair in place and says so, so the corrected invocation
+needs no re-stage. Once a remote write has been attempted the pair is gone
+whatever the outcome, and two invocations cannot both use one staged body.
+
 **Abandonment:** the consume-on-read guarantee above only covers a stage
 that is later actually read. A stage followed by a crash/kill/guard-denial
 before the matching read, or a stamp-mismatch read that correctly left
