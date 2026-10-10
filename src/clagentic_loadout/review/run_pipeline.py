@@ -26,7 +26,7 @@ import re
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,7 +48,7 @@ from clagentic_loadout.review.delta import (
     STATUS_DELTA,
     STATUS_FALLBACK,
     DeltaContext,
-    carried_findings,
+    account_for_prior,
     findings_for_chunk,
     render_delta_note,
 )
@@ -75,7 +75,11 @@ CHUNK_WORKDIR_PREFIX = "loadout-chunk-"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
-PIPELINE_VERSION = "4"
+PIPELINE_VERSION = "5"
+
+#: Optional key on a merged finding that re-anchors a prior one: the line the
+#: prior finding had in the last reviewed head.
+KEY_PRIOR_LINE = "prior_line"
 
 REASON_ACQUIRE_INVALID = "ACQUIRE_INVALID"
 REASON_DIFF_EMPTY = "DIFF_EMPTY"
@@ -290,6 +294,35 @@ def _engine_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def _mark_prior_locations(
+    findings: list[dict[str, Any]], kept: list[tuple[dict[str, Any], dict[str, Any]]]
+) -> None:
+    """Record on each merged finding that re-anchors a prior one the line the
+    prior finding had, as `prior_line`."""
+    for prior, reported in kept:
+        key = (reported["file"], reported["line"], reported["rule_id"], reported["message"])
+        for finding in findings:
+            if (finding["file"], finding["line"], finding["rule_id"], finding["message"]) == key:
+                finding[KEY_PRIOR_LINE] = prior["line"]
+                break
+
+
+def _accounting_fields(
+    prior_open: int,
+    kept: list[tuple[dict[str, Any], dict[str, Any]]],
+    resolved: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """How the prior open findings were accounted for: prior_open_count equals
+    carried_count + kept_count + resolved_count (carried_count is reported
+    beside these)."""
+    return {
+        "prior_open_count": prior_open,
+        "kept_count": len(kept),
+        "resolved_count": len(resolved),
+        "resolved": resolved,
+    }
+
+
 def _blocked(stage: str, reason: str, detail: str, stages: list[dict[str, Any]], **extra: Any) -> RunOutcome:
     payload = {"result": RESULT_BLOCKED, "stage": stage, "reason": reason, "detail": detail}
     payload.update({k: v for k, v in extra.items() if v not in (None, "")})
@@ -321,11 +354,14 @@ def run_review(
     runner: Runner = run_in_process_group,
     delta: DeltaContext | None = None,
     delta_stage: dict[str, str] | None = None,
+    unknown_resolutions: Sequence[str] | None = None,
 ) -> RunOutcome:
     """Drive one invocation of the review pipeline for *acquired*. With
     *delta*, *acquired* already holds the delta diff and each chunk is framed
     by review.delta; *delta_stage* is the decision between delta and full,
-    reported once right after "acquired"."""
+    reported once right after "acquired". *unknown_resolutions*, given only
+    when the caller supplied rulings, lists those that matched no prior
+    finding; it is reported in the result."""
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, status: str, **fields: Any) -> None:
@@ -502,11 +538,17 @@ def run_review(
         for index, record in sorted(records.items())
     ]
     carried: list[dict[str, Any]] = []
+    kept: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    resolved: list[dict[str, Any]] = []
+    prior_open = 0
     if delta is not None:
         touched = {name for chunk in chunks for name in chunk.files}
-        carried = carried_findings(delta, touched, chunks)
+        accounting = account_for_prior(delta, touched, merge_findings(per_chunk))
+        carried, kept, resolved = accounting.carried, accounting.kept, accounting.resolved
+        prior_open = delta.prior_open_count
         per_chunk.append((0, carried))
     findings = merge_findings(per_chunk)
+    _mark_prior_locations(findings, kept)
     findings_path = run_dir / FINDINGS_FILENAME
     document = {
         "schema": FINDINGS_SCHEMA,
@@ -518,6 +560,7 @@ def run_review(
         "mode": MODE_DELTA if delta is not None else MODE_FULL,
         "since_head": delta.since_head if delta is not None else None,
         "carried_count": len(carried),
+        **(_accounting_fields(prior_open, kept, resolved) if delta is not None else {}),
         "chunk_count": len(chunks),
         "chunks": [
             {
@@ -550,6 +593,12 @@ def run_review(
             "chunk_count": len(chunks),
             "finding_count": len(findings),
             "carried_count": len(carried),
+            **(_accounting_fields(prior_open, kept, resolved) if delta is not None else {}),
+            **(
+                {"unknown_resolved_findings": list(unknown_resolutions)}
+                if unknown_resolutions is not None
+                else {}
+            ),
             **_engine_summary({i: records[i] for i in (c.index for c in chunks)}),
         },
         stages,

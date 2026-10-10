@@ -121,7 +121,9 @@ def test_a_finding_on_a_file_the_delta_touches_is_left_to_the_reviewer_not_carri
     assert document["findings"] == []
 
 
-def test_a_finding_outside_the_hunks_of_a_touched_file_is_carried(env, tmp_path, capsys):
+def test_a_finding_outside_the_hunks_of_a_touched_file_is_rejudged_not_carried(
+    env, tmp_path, capsys
+):
     env.configure(carrier_mode="empty")
     prior = _prior(tmp_path / "prior.json", [_BLOCKING])
     compare = _ahead(make_diff({"a.py": 2}))
@@ -129,9 +131,12 @@ def test_a_finding_outside_the_hunks_of_a_touched_file_is_carried(env, tmp_path,
     _, payload = env.run("--prior-findings", prior, capsys=capsys, compare=compare)
 
     document = _document(payload)
-    assert document["carried_count"] == 1
-    assert [(f["file"], f["line"]) for f in document["findings"]] == [("a.py", 3)]
-    assert "- a.py:3 [R1]" not in prompts(env.stubs, "carrier")[0]
+    assert document["carried_count"] == 0
+    assert document["findings"] == []
+    assert [(e["file"], e["line"], e["by"]) for e in document["resolved"]] == [
+        ("a.py", 3, "reviewer")
+    ]
+    assert "- a.py:3 [R1] (blocking) bad (prior location: line 3)" in prompts(env.stubs, "carrier")[0]
 
 
 def test_a_delta_run_has_its_own_run_directory_beside_the_full_one(env, tmp_path, capsys):

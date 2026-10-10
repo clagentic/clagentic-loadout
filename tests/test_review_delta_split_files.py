@@ -85,13 +85,14 @@ def test_a_split_hunk_gets_a_span_per_piece():
     assert {(s.old_first, s.old_last) for s in spans} == {(1, 1)}
 
 
-def test_a_finding_on_a_split_file_is_listed_only_in_the_chunk_whose_hunks_cover_it():
+def test_a_finding_on_a_split_file_is_listed_in_every_chunk_of_that_file():
     chunks = _split_chunks()
     context = _context(_finding("big.py", 1), _finding("big.py", 50), _finding("big.py", 101))
 
     listed = [[f["line"] for f in findings_for_chunk(context, c)] for c in chunks]
 
-    assert listed == [[1], [50], [101]]
+    # A fix may sit in any chunk of the file, not only the one covering the old line.
+    assert listed == [[1, 50, 101]] * 3
 
 
 def test_a_finding_on_a_file_held_whole_is_listed_only_in_the_chunk_holding_it():
@@ -105,16 +106,9 @@ def test_a_finding_on_a_file_held_whole_is_listed_only_in_the_chunk_holding_it()
     for index, files in enumerate(listed):
         assert files == (["small.py"] if index in holders else [])
     # The finding on a file the diff does not hold is carried, never dropped.
-    assert [f["file"] for f in carried_findings(context, {"big.py", "small.py"}, chunks)] == [
+    assert [f["file"] for f in carried_findings(context, {"big.py", "small.py"})] == [
         "untouched.py"
     ]
-
-
-def test_a_finding_on_a_file_no_chunk_holds_is_carried_even_when_reported_touched():
-    chunks = plan_chunks(_diff("a.py", [1]), 600)
-    context = _context(_finding("ghost.py", 4))
-
-    assert [f["file"] for f in carried_findings(context, {"ghost.py"}, chunks)] == ["ghost.py"]
 
 
 def test_a_span_keeps_each_side_of_its_hunk_apart_never_an_old_new_union():
@@ -155,17 +149,18 @@ def test_an_insertion_above_a_finding_shifts_head_numbering_but_the_finding_is_s
     context = _context(finding)
 
     assert findings_for_chunk(context, chunk) == (finding,)
-    assert carried_findings(context, {"s.py"}, [chunk]) == []
+    assert carried_findings(context, {"s.py"}) == []
 
 
-def test_a_finding_the_old_side_does_not_cover_is_carried_even_if_its_number_is_a_new_side_line():
+def test_a_finding_the_old_side_does_not_cover_is_rejudged_not_carried():
     diff = _diff_with_hunks("s.py", ["@@ -10,2 +15,2 @@", " context", "-old line", "+new line"])
     chunk = plan_chunks(diff, 600)[0]
-    shifted_number = _finding("s.py", 15)
-    context = _context(shifted_number)
+    elsewhere = _finding("s.py", 15)
+    context = _context(elsewhere)
 
-    assert findings_for_chunk(context, chunk) == ()
-    assert carried_findings(context, {"s.py"}, [chunk]) == [shifted_number]
+    # The file is in the delta, so the reviewer judges it wherever the fix is.
+    assert findings_for_chunk(context, chunk) == (elsewhere,)
+    assert carried_findings(context, {"s.py"}) == []
 
 
 def test_a_pure_addition_is_anchored_at_the_old_line_it_follows():
@@ -181,7 +176,7 @@ def _diff_with_hunks(name: str, hunk_lines: list[str]) -> str:
     return "\n".join(header + hunk_lines) + "\n"
 
 
-def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_carried():
+def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_rejudged():
     def hunk(old: int, new: int) -> list[str]:
         return [f"@@ -{old},2 +{new},2 @@", " context", "-old line", "+new line"]
 
@@ -196,19 +191,19 @@ def test_a_split_file_finding_in_the_gap_between_old_and_new_starts_is_carried()
     gap = _finding("s.py", 350)
     context = _context(gap)
 
-    assert [findings_for_chunk(context, c) for c in chunks] == [(), ()]
-    assert carried_findings(context, {"s.py"}, chunks) == [gap]
+    assert [findings_for_chunk(context, c) for c in chunks] == [(gap,), (gap,)]
+    assert carried_findings(context, {"s.py"}) == []
 
 
-def test_a_finding_outside_the_hunks_of_an_unsplit_touched_file_is_not_listed_and_is_carried():
+def test_a_finding_outside_the_hunks_of_an_unsplit_touched_file_is_listed_not_carried():
     chunks = plan_chunks(_diff("small.py", [1]), 600)
     assert len(chunks) == 1
     outside = _finding("small.py", 99)
     inside = _finding("small.py", 1, rule="R2")
     context = _context(outside, inside)
 
-    assert findings_for_chunk(context, chunks[0]) == (inside,)
-    assert carried_findings(context, {"small.py"}, chunks) == [outside]
+    assert findings_for_chunk(context, chunks[0]) == (outside, inside)
+    assert carried_findings(context, {"small.py"}) == []
 
 
 def test_the_listing_cap_still_counts_by_position_in_the_whole_list():
@@ -221,23 +216,11 @@ def test_the_listing_cap_still_counts_by_position_in_the_whole_list():
 
     # big.py:1 sits at position 59, past the cap of 50: never shown, so carried.
     assert all(f["file"] == "other.py" for f in listed) and len(listed) == 50
-    assert [f["line"] for f in carried_findings(context, {"big.py"}, chunks) if f["file"] == "big.py"] == [1]
+    assert [f["line"] for f in carried_findings(context, {"big.py"}) if f["file"] == "big.py"] == [1]
 
 
-def test_a_finding_no_chunk_covers_is_carried_not_dropped():
-    chunks = _split_chunks()
-    covered = _finding("big.py", 50)
-    uncovered = _finding("big.py", 70)
-    untouched = _finding("other.py", 5)
-    context = _context(covered, uncovered, untouched)
-
-    carried = carried_findings(context, {"big.py"}, chunks)
-
-    assert [(f["file"], f["line"]) for f in carried] == [("big.py", 70), ("other.py", 5)]
-
-
-def test_without_chunks_carrying_is_decided_by_touched_files_alone():
-    context = _context(_finding("big.py", 70), _finding("other.py", 5))
+def test_carrying_is_decided_by_touched_files_alone():
+    context = _context(_finding("big.py", 70), _finding("big.py", 50), _finding("other.py", 5))
 
     carried = carried_findings(context, {"big.py"})
 
@@ -254,7 +237,7 @@ def test_the_note_lists_exactly_the_findings_it_is_given():
     assert render_delta_note(context).count("\n- ") == 2
 
 
-def test_each_chunk_prompt_of_a_delta_run_lists_only_the_findings_it_can_judge(tmp_path):
+def test_each_chunk_prompt_of_a_delta_run_lists_the_findings_on_its_file(tmp_path):
     prompts: list[str] = []
 
     def runner(argv, *, input, capture_output, timeout, cwd):
@@ -277,7 +260,11 @@ def test_each_chunk_prompt_of_a_delta_run_lists_only_the_findings_it_can_judge(t
     assert outcome.result == RESULT_COMPLETE
     assert len(prompts) == 3
     judged = [[line for line in ("big.py:1 ", "big.py:50 ", "big.py:70 ") if line in p] for p in prompts]
-    assert judged == [["big.py:1 "], ["big.py:50 "], []]
-    merged = json.loads((run_dir / "findings.json").read_text(encoding="utf-8"))["findings"]
-    # The uncovered finding stays open in the merged result.
-    assert ("big.py", 70) in {(f["file"], f["line"]) for f in merged}
+    assert judged == [["big.py:1 ", "big.py:50 ", "big.py:70 "]] * 3
+    document = json.loads((run_dir / "findings.json").read_text(encoding="utf-8"))
+    # The reviewer answered [] for every chunk: all three are resolved, none
+    # silently carried, and each is accounted for exactly once.
+    assert document["findings"] == []
+    assert document["carried_count"] == 0
+    assert sorted(e["line"] for e in document["resolved"]) == [1, 50, 70]
+    assert document["prior_open_count"] == 3 and document["resolved_count"] == 3

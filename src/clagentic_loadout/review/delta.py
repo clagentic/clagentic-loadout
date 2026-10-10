@@ -20,10 +20,21 @@ range, or a transport that cannot answer the question) falls back to the full
 diff, naming the reason, because reviewing less than the whole PR is only
 sound when the narrower question is well defined.
 
-An open finding on a file the delta does not touch, or one too far down the
-listing cap to be shown to the reviewer, stays open by construction:
-`carried_findings` returns it so the merged result still describes the whole
-PR, and a delta review can never turn "clean" by simply not looking.
+Every prior open finding ends a delta review as exactly one of:
+
+  * carried: its file is not in the delta at all (the file is unchanged, so
+    its line is unchanged), or it was too far down the listing cap to be
+    shown to the reviewer. `carried_findings` returns it, so a delta review
+    can never turn "clean" by simply not looking;
+  * re-judged: its file is touched anywhere in the delta. The reviewer gets it
+    with that file's chunk, shown at its prior location, and either reports it
+    again at a line of the new head (kept) or says nothing (resolved). A fix
+    made elsewhere in the file (a new helper, a setUp, a refactor) is a
+    resolution, which a hunk-coverage test on the old line could not see;
+  * resolved by the caller: the caller ruled it resolved or refuted (see
+    review.resolutions). It is neither shown to the reviewer nor carried.
+
+`account_for_prior` computes that outcome once the reviewer has answered.
 """
 
 from __future__ import annotations
@@ -36,6 +47,13 @@ from typing import Any
 from clagentic_loadout.acquire.contract import AcquiredPr, RangeDiffBackend
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.review.chunking import Chunk
+from clagentic_loadout.review.resolutions import (
+    BY_CALLER,
+    BY_REVIEWER,
+    Resolution,
+    resolved_entry,
+    split_resolved,
+)
 
 STATUS_DELTA = "ok"
 STATUS_FALLBACK = "fallback"
@@ -62,6 +80,13 @@ class DeltaContext:
     since_head: str
     #: Findings of the last verdict that are still open: everything but praise.
     open_findings: tuple[dict[str, Any], ...]
+    #: Open findings the caller ruled resolved, as `resolved` entries (see
+    #: review.resolutions.resolved_entry). They are not in open_findings.
+    caller_resolved: tuple[dict[str, Any], ...] = ()
+
+    @property
+    def prior_open_count(self) -> int:
+        return len(self.open_findings) + len(self.caller_resolved)
 
 
 @dataclass(frozen=True)
@@ -74,6 +99,9 @@ class DeltaResolution:
     context: DeltaContext | None
     reason: str = ""
     detail: str = ""
+    #: Refs of caller rulings that matched no prior finding (every ruling when
+    #: the review is a full one, which has no prior findings to rule on).
+    unknown_resolutions: tuple[str, ...] = ()
 
     @property
     def mode(self) -> str:
@@ -95,12 +123,18 @@ def resolve_delta(
     acquired: AcquiredPr,
     since_head: str,
     prior_findings: list[dict[str, Any]],
+    resolutions: Sequence[Resolution] = (),
 ) -> DeltaResolution:
     """Decide whether *acquired* (the PR at its current head) is reviewed as a
-    delta since *since_head*, and build what to review accordingly."""
+    delta since *since_head*, and build what to review accordingly. The
+    caller's *resolutions* take the open findings they match out of the
+    review."""
 
     def full(reason: str, detail: str = "") -> DeltaResolution:
-        return DeltaResolution(acquired, None, reason=reason, detail=detail)
+        return DeltaResolution(
+            acquired, None, reason=reason, detail=detail,
+            unknown_resolutions=tuple(r.ref for r in resolutions),
+        )
 
     if since_head == acquired.head_sha:
         return full(REASON_SAME_HEAD, "the PR head has not moved since the last review")
@@ -122,25 +156,28 @@ def resolve_delta(
         )
     if not span.diff_text.strip():
         return full(REASON_DELTA_EMPTY, "the range holds no reviewable change")
+    remaining, ruled, unknown = split_resolved(open_findings_of(prior_findings), resolutions)
     return DeltaResolution(
         dataclasses.replace(acquired, base_sha=since_head, diff_text=span.diff_text),
-        DeltaContext(since_head=since_head, open_findings=open_findings_of(prior_findings)),
+        DeltaContext(
+            since_head=since_head,
+            open_findings=tuple(remaining),
+            caller_resolved=tuple(
+                resolved_entry(finding, BY_CALLER, ruling.reason) for finding, ruling in ruled
+            ),
+        ),
+        unknown_resolutions=tuple(unknown),
     )
 
 
 def findings_for_chunk(context: DeltaContext, chunk: Chunk) -> tuple[dict[str, Any], ...]:
-    """The open findings this chunk's prompt lists for judgment.
+    """The open findings this chunk's prompt lists for re-judgment.
 
-    A finding carries its line in the numbering of the head it was reported
-    against, which is the old side of the delta diff, so it is matched there.
-    It is listed only in a chunk whose own hunks cover its line: a chunk
-    without the file cannot see the code, and a chunk holding the file but not
-    that part of it cannot either, so neither can resolve it. This holds for an
-    unsplit file as much as a split one. The listing cap still applies, by
-    position in the whole list."""
-    return tuple(
-        finding for finding in _listed(context) if chunk.covers_prior_line(finding["file"], finding["line"])
-    )
+    A finding is listed in every chunk that holds its file. Its line is in the
+    numbering of the last reviewed head, so it says nothing about where the
+    fix would be: the reviewer judges it against the file as the chunk shows
+    it. The listing cap applies, by position in the whole list."""
+    return tuple(finding for finding in _listed(context) if finding["file"] in chunk.files)
 
 
 def render_delta_note(
@@ -157,11 +194,15 @@ def render_delta_note(
         "",
         "1. Report a new defect only when a line this diff adds or changes "
         "introduces it. Do not report problems on lines this diff does not touch.",
-        "2. Each open finding listed below comes from the last review. When this "
-        "diff changes the file a finding names, decide whether the change "
-        "resolves it. If it does not, report it again, keeping its file and "
-        "rule_id and the severity given. If it does, say nothing about it. "
-        "When this diff does not change that file, say nothing about the finding.",
+        "2. Each open finding listed below comes from the last review and names "
+        "a file this diff changes. Its file:line is its prior location, numbered "
+        "as of the last reviewed head; the code may have moved, and a fix may "
+        "sit anywhere in the file (a new helper, a setUp or tearDown, a "
+        "refactor), not only on that line. Decide against the code as it now "
+        "stands whether the finding still applies. If it does, report it again "
+        "at the line of the new code where it now is, keeping its file and "
+        "rule_id and the severity given. If it no longer applies, say nothing "
+        "about it; it is then recorded as resolved.",
         "",
         "Open findings from the last review:",
     ]
@@ -171,7 +212,8 @@ def render_delta_note(
     for finding in shown:
         lines.append(
             f"- {finding['file']}:{finding['line']} [{finding['rule_id']}] "
-            f"({finding['severity']}) {finding['message']}"
+            f"({finding['severity']}) {finding['message']} "
+            f"(prior location: line {finding['line']})"
         )
     omitted = len(context.open_findings) - len(_listed(context))
     if omitted > 0:
@@ -186,25 +228,80 @@ def _listed(context: DeltaContext) -> tuple[dict[str, Any], ...]:
     return context.open_findings[:MAX_LISTED_FINDINGS]
 
 
-def carried_findings(
-    context: DeltaContext,
-    touched_files: set[str],
-    chunks: Sequence[Chunk] = (),
-) -> list[dict[str, Any]]:
+def carried_findings(context: DeltaContext, touched_files: set[str]) -> list[dict[str, Any]]:
     """Open findings the delta review is not asked to re-judge, so they stay
-    open: those on files the delta did not touch (it cannot have resolved what
-    it never changed), and every finding past the listing cap regardless of
-    file (the reviewer never saw it, so it cannot have resolved it). With
-    *chunks*, also every finding that no chunk's hunks cover, on any file: no
-    chunk was asked about it, so none can have resolved it. An open finding is
-    never dropped."""
+    open unchanged: those on files the delta did not touch (the file is
+    unchanged, so the finding's line still names the same code), and every
+    finding past the listing cap regardless of file (the reviewer never saw
+    it, so it cannot have resolved it). An open finding is never dropped."""
     return [
         dict(f)
         for position, f in enumerate(context.open_findings)
-        if position >= MAX_LISTED_FINDINGS
-        or f["file"] not in touched_files
-        or (
-            bool(chunks)
-            and not any(chunk.covers_prior_line(f["file"], f["line"]) for chunk in chunks)
-        )
+        if _is_carried(position, f, touched_files)
     ]
+
+
+def _is_carried(position: int, finding: dict[str, Any], touched_files: set[str]) -> bool:
+    return position >= MAX_LISTED_FINDINGS or finding["file"] not in touched_files
+
+
+@dataclass(frozen=True)
+class PriorAccounting:
+    """How a delta review accounted for each prior open finding."""
+
+    carried: list[dict[str, Any]]
+    #: (prior finding, the reviewer's finding that re-anchors it at the new head)
+    kept: list[tuple[dict[str, Any], dict[str, Any]]]
+    #: `resolved` entries: those the reviewer resolved, then those the caller did.
+    resolved: list[dict[str, Any]]
+
+
+def _pair_reports(
+    priors: Sequence[tuple[int, dict[str, Any]]], reported: Sequence[dict[str, Any]]
+) -> dict[int, int]:
+    """Map the position of each prior finding the reviewer kept to the index of
+    the reported finding that re-anchors it. A pair shares file and rule_id;
+    the same message, then the closest line, is paired first, and each
+    reported finding re-anchors at most one prior finding."""
+    candidates = sorted(
+        (
+            (reported[index]["message"] != prior["message"],
+             abs(reported[index]["line"] - prior["line"]), position, index)
+            for position, prior in priors
+            for index in range(len(reported))
+            if reported[index]["file"] == prior["file"]
+            and reported[index]["rule_id"] == prior["rule_id"]
+        )
+    )
+    paired: dict[int, int] = {}
+    claimed: set[int] = set()
+    for _differs, _distance, position, index in candidates:
+        if position not in paired and index not in claimed:
+            paired[position] = index
+            claimed.add(index)
+    return paired
+
+
+def account_for_prior(
+    context: DeltaContext, touched_files: set[str], reported: Sequence[dict[str, Any]]
+) -> PriorAccounting:
+    """Place every prior open finding in exactly one outcome.
+
+    *reported* is what the reviewer reported for the delta. A re-judged
+    finding (one that is neither carried nor ruled on by the caller) is kept
+    when the reviewer reported a finding with its file and rule_id, pairing
+    the closest unclaimed one; otherwise the reviewer said nothing about it
+    and it is resolved."""
+    carried = carried_findings(context, touched_files)
+    rejudged = [
+        (position, prior)
+        for position, prior in enumerate(context.open_findings)
+        if not _is_carried(position, prior, touched_files)
+    ]
+    paired = _pair_reports(rejudged, reported)
+    kept = [(prior, reported[paired[position]]) for position, prior in rejudged if position in paired]
+    resolved = [
+        resolved_entry(prior, BY_REVIEWER) for position, prior in rejudged if position not in paired
+    ]
+    resolved.extend(context.caller_resolved)
+    return PriorAccounting(carried, kept, resolved)

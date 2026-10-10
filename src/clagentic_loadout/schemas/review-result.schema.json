@@ -115,6 +115,24 @@
         }
       }
     },
+    "resolved": {
+      "type": "array",
+      "description": "OPTIONAL evidence. Prior findings a delta review closed this round, each at its prior location: resolved by the reviewer after re-judging it against the new head, or ruled resolved by the caller. Informational: a resolved finding is not open and is not re-posted.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "rule_id", "message", "by"],
+        "properties": {
+          "file": {"type": "string", "minLength": 1, "description": "Path the finding was raised on."},
+          "line": {"type": "integer", "minimum": 1, "description": "Prior location: the line in the numbering of the head the finding was raised against."},
+          "rule_id": {"type": "string", "minLength": 1, "description": "Rule the finding was raised under."},
+          "message": {"type": "string", "minLength": 1, "description": "What the finding claimed."},
+          "by": {"type": "string", "enum": ["reviewer", "caller"], "description": "Who resolved it."},
+          "reason": {"type": "string", "minLength": 1, "description": "The caller's one-line reason. Required when by is caller."},
+          "fingerprint": {"type": "string", "minLength": 1, "description": "The finding's fingerprint, when it had one."}
+        }
+      }
+    },
     "range": {
       "type": "object",
       "description": "OPTIONAL evidence. The commit range the review covered: base..head for a full review, or since a previously reviewed head for a delta review.",
