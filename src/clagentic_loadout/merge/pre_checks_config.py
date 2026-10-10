@@ -1,6 +1,6 @@
 """merge.pre_checks_config — repo-local `pre_checks` config surface (lr-0a03c3).
 
-GAP THIS CLOSES: a repo migrating off a `.crew`-shaped deployment onto
+GAP THIS CLOSES: a repo migrating off a harness-specific deployment layout onto
 loadout-native config had no home for its pre-merge validation commands (the
 functional-inventory reference calls this `pre_checks` — ordered read-only
 commands a merge gate runs BEFORE authorizing a merge, e.g. a lint pass with

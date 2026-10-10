@@ -2,18 +2,18 @@
 refuses a write when another unit of work is already in flight in the same
 checkout (lr-78a584).
 
-WHY THIS EXISTS, AND WHY IT LOOKS THE WAY IT DOES: a prior crew-side
+WHY THIS EXISTS, AND WHY IT LOOKS THE WAY IT DOES: a prior
 deployment shipped a STATEFUL advisory lock for the identical problem
 (lr-edc731, PR #534) and it failed in production within a day, in three
 documented ways. This module is shaped explicitly to avoid each one:
 
-  1. NO STATE (crew-side failure: acquire-on-one-hook / release-on-another,
+  1. NO STATE (predecessor failure: acquire-on-one-hook / release-on-another,
      the release never fired, and the NORMAL successful-dispatch path
      self-blocked until a 2h TTL expired). This module holds nothing between
      invocations — no lock file, no TTL, no release step, no janitor, no
      orphan class. `check_working_tree_contention` computes its verdict
      FRESH, from live git state, on every call.
-  2. AN OVERRIDE FLAG IS MANDATORY (crew-side failure: no operator-reachable
+  2. AN OVERRIDE FLAG IS MANDATORY (predecessor failure: no operator-reachable
      escape hatch existed at all — an entire follow-up task (lr-1edad5)
      failed to invent one, because the only clearing mechanism needed a
      lead-staged params file the build agent could not reach: a circular
@@ -23,11 +23,11 @@ documented ways. This module is shaped explicitly to avoid each one:
      that flag's own `--help` text, which documents it ALONGSIDE the enable
      switch so an operator can find it WHILE BLOCKED, not only after reading
      source.
-  3. IT MUST SEE EVERY CALLER (crew-side failure: enforcement lived in a
-     PreToolUse/Agent dispatch hook, which only ever fires for crew-dispatched
-     work — direct operator use and any non-crew caller were invisible to
+  3. IT MUST SEE EVERY CALLER (predecessor failure: enforcement lived in a
+     PreToolUse/Agent dispatch hook, which only ever fires for agent-dispatched
+     work — direct operator use and any non-agent caller were invisible to
      it). This check is wired into `push.verb` itself, the verb every caller
-     — crew-dispatched or direct operator invocation — goes through to
+     — agent-dispatched or direct operator invocation — goes through to
      mutate a checkout. There is no second, hook-level copy of this logic
      anywhere.
 

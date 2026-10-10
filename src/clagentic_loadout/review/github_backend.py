@@ -720,7 +720,7 @@ def delete_own_comment(
     ADMISSIBLE OPERATION (operator-agreed): delete a comment IFF (author
     login == the caller's OWN bot identity, resolved via resolve_own_login)
     AND (comment body contains NO fenced ```review-result``` block, via
-    merge.verdict.parse_verdict_block). No crew agent may delete another
+    merge.verdict.parse_verdict_block). No agent may delete another
     author's comment (cross-author delete is an audit-tampering/censorship
     surface, refused unconditionally — human-comment removal stays an
     operator action outside this tool entirely). Even a self-authored

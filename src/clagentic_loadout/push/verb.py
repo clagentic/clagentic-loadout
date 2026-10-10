@@ -1121,7 +1121,7 @@ def _run_contention_check(
     stderr rather than proceeding silently -- an override that leaves no
     trace of having fired is not meaningfully different from no override
     existing at all (see push.contention_check's own module docstring,
-    defect (2) of the crew-side predecessor this check replaces).
+    defect (2) of the predecessor this check replaces).
     """
     config = load_contention_config(project_root)
     try:

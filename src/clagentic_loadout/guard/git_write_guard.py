@@ -1,5 +1,5 @@
 """guard.git_write_guard — git/PR write-operation hard-deny for a non-agent
-session (lr-59dd37, port of the reference deployment's crew-git-guard.py;
+session (lr-59dd37, port of the reference deployment's git-guard hook;
 lr-5a8d epic Wave C).
 
 PORT PATTERN — mirrors `guard.write_scope`'s established convention:
@@ -181,7 +181,7 @@ class GitWriteGuardConfig:
         effect.
     sanctioned_verb_patterns: verb patterns NEVER classified as a write
         operation regardless of session — the caller's own attested-identity
-        landing surface (reference: `crew_push.py`, `loadout-merge`,
+        landing surface (reference: the deployment's push script, `loadout-merge`,
         `loadout-close-pr`). Checked FIRST, before any classification regex,
         mirroring the reference's own `_classify_command` order.
     """
@@ -264,7 +264,7 @@ def classify_git_write_command(
     still checked first against the RAW command (never masked — the
     sanctioned-tool escape hatch is a literal-name match on the caller's own
     attested landing tool, not narrative data a masking pass could ever
-    legitimately need to hide), so `crew_push.py`'s own internal `git push`
+    legitimately need to hide), so the reference push script's own internal `git push`
     still self-exempts correctly even under ambiguity. Once past that check,
     ANY command whose quoting could not be confidently normalized AND which
     contains an ANSI-C ($'...'/$"...") opener anywhere at all

@@ -8,7 +8,7 @@ version for this module:
 
 1. NO ROLE GATING AT ALL. Unlike guard-scope.py, the reference
    guard-credentials.py applies the SAME check to every one of its six
-   managed agent names (`_CREW_AGENTS` there) — it has no per-agent branch.
+   managed agent names (a fixed tuple there) — it has no per-agent branch.
    This module therefore takes no `WriteRole`-style parameter: credential-
    path denial is a role-independent property of a Read/Glob/Bash call. A
    caller wires this into whichever of its roles can invoke Read/Glob/Bash

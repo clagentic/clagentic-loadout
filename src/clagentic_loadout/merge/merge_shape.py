@@ -61,7 +61,7 @@ STRICT here without a way to opt back out:
      hardening this without an escape hatch turns "the flag now finally
      works" into "the flag now finally works, or your merge starts
      refusing," in the very release that fixes the flag.
-  2. A shipped tool with users beyond one crew (this repo's own CLAUDE.md,
+  2. A shipped tool with users beyond one deployment (this repo's own CLAUDE.md,
      "Loadout is a SHIPPED TOOL with EXTERNAL USERS") must not unilaterally
      add a new refusal path a caller cannot see coming.
 The default is therefore WARN (log to stderr, never touch the exit code) --

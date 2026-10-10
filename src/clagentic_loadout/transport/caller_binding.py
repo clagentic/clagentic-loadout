@@ -10,7 +10,7 @@ wired into exactly ONE call site, transport.git_host_api.bind_caller. Every
 OTHER mutating verb (push, merge, close-pr, post-merge, review, acquire)
 took --caller/--role straight from argv to transport.credential_provider.
 resolve_token / merge.authority.check_authority with nothing in between: an
-unattested process could act as any crew identity by typing its name on the
+unattested process could act as any agent identity by typing its name on the
 command line. lr-c75c9a is the fix -- ONE binding implementation, called
 from every verb that mints a credential or checks merge authority against a
 --caller/--role value, not a second reimplementation per verb.
@@ -153,11 +153,11 @@ an attested identity, full stop -- see `transport.attestation.
 resolve_bound_identity`'s own docstring for the replacement rule (never the
 built-in fallback; a discriminator-selected sidecar source, or a terminal
 refusal naming what was expected). lr-c75c9a's original concern -- that
-refusing the fallback would outage every crew agent in a deployment with no
+refusing the fallback would outage every agent in a deployment with no
 attestation config wired yet -- is answered differently now: the fix is to
 land the deployed-config sidecar adapter(s) (host state, tracked
 separately, NOT this module's job), not to keep trusting a host uid as a
-crew identity. A deployment that still wants the OLD (fallback-permitted)
+agent identity. A deployment that still wants the OLD (fallback-permitted)
 behavior can inject the general `resolve_identity` chain via
 `identity_provider=` at any call site -- that seam was never removed, only
 the DEFAULT changed.

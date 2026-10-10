@@ -107,7 +107,7 @@ caller on a given TMPDIR root. That is exactly right for a single caller
 across retries -- and exactly wrong the moment two DIFFERENT callers
 (e.g. two concurrently-dispatched reviewer subagents) share one TMPDIR
 (lr-b3a7bf's TMPDIR=/tmp precondition for the console daemon and every
-Agent()-spawned crew agent makes this the common case, not an edge case).
+Agent()-spawned agent makes this the common case, not an edge case).
 Root cause, verified via a structured diagnosis on a real incident
 (lr-f00c6f): caller A stages its body at the fixed path, caller B's
 staging OVERWRITES the same physical file before caller A's own verb
@@ -404,7 +404,7 @@ class VerdictIntentMismatchError(BodyEnvError):
 #: hand-authored copies.
 #:
 #: WHY THIS TEXT EXISTS: a real incident (this task's own evidence) had two
-#: separate crew agents misdiagnose a stamp/target mismatch as "the
+#: separate agents misdiagnose a stamp/target mismatch as "the
 #: architecture requires staging and posting in the same shell to preserve
 #: ephemeral env vars, and the guard's ban on compound expressions breaks
 #: that." Both diagnoses were false -- staging is a plain local filesystem

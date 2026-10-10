@@ -49,7 +49,7 @@ it, per lr-5a8d comment #8):
    own harness supports (session sidecar, dispatch metadata, etc.) — this
    module has no opinion on that detection mechanism.
 
-4. UNKNOWN ROLE FAILS CLOSED. The reference's "unhandled crew agent" branch
+4. UNKNOWN ROLE FAILS CLOSED. The reference's "unhandled managed agent" branch
    distinguished "teams context" (deny) from "relay context" (warn+allow) —
    the relay is retired (lr-221a) and the reference file itself documents
    that only the deny path is reachable in practice. This module has no
@@ -120,7 +120,7 @@ class WriteRole(Enum):
 class WriteScopeConfig:
     """The per-project scope declaration a SCOPED role's Write/Edit calls
     are checked against — the loadout-native equivalent of a
-    `.crew/<role>.yaml` `scope:` section (reference: `scope.allow_all` /
+    per-role harness config file's `scope:` section (reference: `scope.allow_all` /
     `scope.allowed_paths` / `scope.blocked_paths`).
 
     `allow_all=True` grants unrestricted write access within the project

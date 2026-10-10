@@ -66,9 +66,6 @@ through to the config-file resolution below, UNCHANGED from before this
 task -- a deployment with no such provider integration sees zero behavior
 change. See `resolve_agent_bot_identity`'s own docstring for the exact
 precedence.
-
-RENAMED from `push.crew_identity`; that module remains as a deprecated
-re-export alias for one release.
 """
 
 from __future__ import annotations

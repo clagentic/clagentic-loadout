@@ -1052,16 +1052,11 @@ def test_commit_subject_guard_degrades_gracefully_when_merge_base_unresolvable(
 # names arrive via config.
 #
 # Scope: code IDENTIFIERS (names, attributes, parameters, keyword names,
-# imports, module file names) and non-docstring STRING CONSTANTS across
-# src/**, plus the public docs. Comments and docstrings of src/ are, as for
-# every other guard in this file, contributor-facing provenance and not
-# walked; a string constant is walked because a CLI user reads it.
-#
-# The one allowance is the deprecated alias module below, which has to name
-# the old identifiers to re-export them, and which is deleted in the release
-# after the one that introduced `push.agent_identity`. CLAUDE.md is exempt
-# for the same reason this test file is: the rule it states has to name the
-# terms it forbids.
+# imports, module file names), STRING CONSTANTS, COMMENTS (tokenize) and
+# DOCSTRINGS (AST) across src/**, plus the public docs. The repo is public,
+# so contributor-facing text counts as much as a string a CLI user reads.
+# CLAUDE.md is the only exemption: the rule it states has to name the terms
+# it forbids.
 # ---------------------------------------------------------------------------
 
 DEPLOYMENT_VOCABULARY_PATTERNS: dict[str, re.Pattern[str]] = {
@@ -1086,11 +1081,6 @@ DEPLOYMENT_VOCABULARY_PATTERNS: dict[str, re.Pattern[str]] = {
         r"(?<![A-Za-z0-9_])\.lore(?![A-Za-z0-9])", re.IGNORECASE
     ),
 }
-
-#: src/-relative paths allowed to carry the vocabulary. Delete with the alias.
-DEPLOYMENT_VOCABULARY_EXEMPT_SRC: frozenset[str] = frozenset(
-    {"src/clagentic_loadout/push/crew_identity.py"}
-)
 
 #: Public docs that define the rule itself.
 DEPLOYMENT_VOCABULARY_EXEMPT_DOCS: frozenset[str] = frozenset({"CLAUDE.md"})
@@ -1123,10 +1113,31 @@ def _identifier_names(tree: ast.AST) -> list[tuple[int, str]]:
     return found
 
 
+def _comment_tokens(text: str) -> list[tuple[int, str]]:
+    """Every (lineno, comment text) in *text*, via the tokenizer so a `#`
+    inside a string literal is not mistaken for a comment."""
+    import io
+    import tokenize
+
+    return [
+        (tok.start[0], tok.string)
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline)
+        if tok.type == tokenize.COMMENT
+    ]
+
+
+def _docstring_nodes(tree: ast.AST) -> list[ast.Constant]:
+    """Every docstring Constant node, as identified by
+    `_docstring_constant_ids`."""
+    ids = _docstring_constant_ids(tree)
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Constant) and id(n) in ids]
+
+
 def _check_deployment_vocabulary_py(path: Path, display: str) -> list[str]:
-    """Violations for one Python source file: its file name, its identifiers
-    and its non-docstring string constants."""
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    """Violations for one Python source file: its file name, identifiers,
+    string constants, comments and docstrings."""
+    text = path.read_text(encoding="utf-8")
+    tree = ast.parse(text, filename=str(path))
     violations: list[str] = []
 
     def _scan(kind: str, lineno: int, text: str) -> None:
@@ -1140,15 +1151,16 @@ def _check_deployment_vocabulary_py(path: Path, display: str) -> list[str]:
         _scan("identifier", lineno, name)
     for const in _walk_user_facing_strings(tree):
         _scan("string constant", const.lineno, const.value)
+    for const in _docstring_nodes(tree):
+        for offset, line in enumerate(const.value.splitlines()):
+            _scan("docstring", const.lineno + offset, line)
+    for lineno, comment in _comment_tokens(text):
+        _scan("comment", lineno, comment)
     return violations
 
 
 def _src_python_files_under_vocabulary_guard() -> list[Path]:
-    return [
-        p
-        for p in _tracked_files("src", suffixes=(".py",))
-        if str(p.relative_to(REPO_ROOT)) not in DEPLOYMENT_VOCABULARY_EXEMPT_SRC
-    ]
+    return _tracked_files("src", suffixes=(".py",))
 
 
 def _docs_under_vocabulary_guard() -> list[Path]:
@@ -1177,13 +1189,6 @@ def test_src_identifiers_and_strings_carry_no_deployment_vocabulary(path: Path) 
 def test_public_docs_carry_no_deployment_vocabulary(path: Path) -> None:
     violations = _check_patterns(path, DEPLOYMENT_VOCABULARY_PATTERNS)
     assert not violations, "\n" + "\n".join(violations)
-
-
-def test_deployment_vocabulary_allowance_is_exactly_the_deprecated_alias() -> None:
-    """The exemption list must not grow into a general escape hatch, and the
-    alias it names must still exist (delete both together)."""
-    assert DEPLOYMENT_VOCABULARY_EXEMPT_SRC == {"src/clagentic_loadout/push/crew_identity.py"}
-    assert (REPO_ROOT / "src/clagentic_loadout/push/crew_identity.py").is_file()
 
 
 @pytest.mark.parametrize(
@@ -1226,18 +1231,35 @@ def test_deployment_vocabulary_guard_flags_a_crew_named_module_file(tmp_path: Pa
     assert _check_deployment_vocabulary_py(bad_file, bad_file.name)
 
 
-def test_deployment_vocabulary_guard_ignores_docstrings_comments_and_longer_words(
+def test_deployment_vocabulary_guard_ignores_longer_words_and_string_hashes(
     tmp_path: Path,
 ) -> None:
     clean_file = tmp_path / "synthetic_vocab_ok.py"
     clean_file.write_text(
-        '"""Module docstring mentioning the crew and .crew/ directory."""\n'
-        "# a comment about the crew\n"
+        '"""Module docstring about an agent."""\n'
+        "# a comment about the harness\n"
         "def f():\n"
-        '    """Function docstring: crew, .lore/."""\n'
-        '    return "screw driver"\n'
+        '    return "screw driver # not a comment"\n'
     )
     assert _check_deployment_vocabulary_py(clean_file, clean_file.name) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        '"""Module docstring mentioning the crew."""\n',
+        'def f():\n    """Function docstring: .lore/ dir."""\n',
+        "class C:\n    '''Line one.\n\n    Config in .crew/x.yaml\n    '''\n",
+        "x = 1  # a trailing comment about the crew\n",
+        "# .crew/ directory comment\n",
+    ],
+)
+def test_deployment_vocabulary_guard_catches_comments_and_docstrings(
+    source: str, tmp_path: Path
+) -> None:
+    bad_file = tmp_path / "synthetic_vocab_comment_bad.py"
+    bad_file.write_text(source)
+    assert _check_deployment_vocabulary_py(bad_file, bad_file.name), source
 
 
 @pytest.mark.parametrize(

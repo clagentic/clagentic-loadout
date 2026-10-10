@@ -86,11 +86,11 @@ Sub-slice SE2 (lr-a64227) adds five more ``BashRole`` members to the SAME
 ``role_allowlist`` module: ``REVIEWER``, ``SECURITY``, ``ANALYSIS``,
 ``RESEARCH``, ``PLANNING_READER`` — ports of the reference's read-only
 PR/commit-reviewer, pre-merge security-audit-gate, troubleshooting-
-detective, platform-observer, crew-researcher, and build-planning-agent
+detective, platform-observer, researcher, and build-planning-agent
 per-identity checkers. See ``role_allowlist``'s module docstring COLLAPSE
 RATIONALE section for why the troubleshooting-detective and
 platform-observer checkers collapse into one ``ANALYSIS`` role while the
-crew-researcher and build-planning-agent checkers each keep their own role.
+researcher and build-planning-agent checkers each keep their own role.
 
 Remaining sub-slices (SE3 director/lead checkers, SE4 infra role) add their
 own ``BashRole`` members and checkers to the same module, mirroring this
@@ -103,8 +103,8 @@ SE4 above):
   - ``task_dispatch``: Task/Agent-dispatch admission. ``check_task_dispatch``
     reuses ``role_allowlist.BashRole`` (the same role vocabulary, not a
     parallel enum); ``check_lead_agent_dispatch`` is the reference's
-    independent second path (a non-crew-role session denied from
-    dispatching a caller-named "crew role" directly via the Agent tool).
+    independent second path (a session without a managed role denied from
+    dispatching a caller-named managed role directly via the Agent tool).
   - ``dispatch_discipline``: a warn-only in-session-edit advisory — the
     reference's only guard hook that never denies. Returns ``str | None``,
     never a deny-shaped tuple.

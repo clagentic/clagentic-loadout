@@ -3244,7 +3244,7 @@ class TestCrewCallerDerivedIdentity:
         including this very PR's own) into a hard, unfixable push failure.
 
         Forgejo has no GitHub App-bot-slug concept in this contract at all
-        (see push.crew_identity's own module docstring) -- there is nothing
+        (see push.agent_identity's own module docstring) -- there is nothing
         to derive and nothing to mis-attribute, so the original bug (an
         operator's PERSONAL GITHUB ACCOUNT landing on public GitHub
         commits) cannot even occur here. The CORRECT behavior for a

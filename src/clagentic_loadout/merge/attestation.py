@@ -13,7 +13,7 @@ CONTENT IS PURE GIT-HOST/PRODUCT DATA: tool identity + version, the gated HEAD
 SHA and the SHA that actually landed, the required-reviewer logins whose
 clean verdicts gated the merge, and the CI-status disposition already
 computed by the gate chain. Zero lore references, zero LORE_* env vars, zero
-crew vocabulary -- roles (reviewer logins), never agent names. This module's
+deployment vocabulary -- roles (reviewer logins), never agent names. This module's
 own conformance is part of the package-wide "passes with no lore present, a
 synthetic registry, invented agent names" gate (CLAUDE.md rule 6a) -- it has
 no import of, or dependency on, any lore task-tracking client.
@@ -137,7 +137,7 @@ def build_attestation_body(
 ) -> str:
     """Build the merge-completion attestation comment body.
 
-    Pure function -- no I/O, no lore, no crew vocabulary. Every field here is
+    Pure function -- no I/O, no lore, no deployment vocabulary. Every field here is
     git-host/product data already in hand by the time merge.verb reaches the
     post-merge step (see that module's `_run`, step 9):
 
