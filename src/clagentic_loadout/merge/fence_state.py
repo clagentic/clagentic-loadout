@@ -90,7 +90,7 @@ SCANNER_NOT_INVOKED = "not_invoked"
 SCANNER_FAILED = "failed"
 SCANNER_STATUSES = (SCANNER_RAN, SCANNER_NOT_APPLICABLE, SCANNER_NOT_INVOKED, SCANNER_FAILED)
 
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
+_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 
 
 @dataclass(frozen=True)

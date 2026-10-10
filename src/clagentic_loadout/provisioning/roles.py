@@ -104,7 +104,7 @@ DEFAULT_ROLE_VERBS: dict[str, tuple[str, ...]] = {
 #: that seam) — this module's role/verb names are never substituted into an
 #: exec'd argv, so that stricter concern does not apply here, but a bare,
 #: readable-token shape is still enforced for clear error reporting.
-_TOKEN_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+_TOKEN_RE = re.compile(r"\A[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\Z")
 
 
 class InvalidRoleConfigError(ValueError):

@@ -230,6 +230,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--prior-head-sha",
+        type=str.strip,
         default=None,
         help="Delta mode: the head SHA the last posted verdict was stamped "
         "for. Required when --prior-findings is a bare array; may be given "
@@ -257,6 +258,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     post.add_argument(
         "--head-sha",
+        type=str.strip,
         default=None,
         help="Head SHA the findings were produced for. Required only when "
         "--findings is a bare array.",
