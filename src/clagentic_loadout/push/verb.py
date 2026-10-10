@@ -1291,7 +1291,6 @@ def _run_task_id_guard_commit_check(
 #: Values of the `verification` field in the success envelope: what the verb
 #: did about the repo's declared `push.verify` checks on this invocation.
 VERIFICATION_RAN = "ran"
-VERIFICATION_RAN_DIRTY_TREE = "ran_dirty_tree"
 VERIFICATION_SKIPPED_DIRTY_TREE = "skipped_dirty_tree"
 VERIFICATION_SKIPPED_NOT_PR_HEAD = "skipped_not_pr_head"
 VERIFICATION_SKIPPED_NO_NEW_COMMITS = "skipped_no_new_commits"
@@ -1350,8 +1349,9 @@ def _run_verification_outcome(
     *project_root* and return (body, outcome, tested sha): *body* with a
     `## Verification` section appended recording the outcome, one of the
     VERIFICATION_* values, and *tested_sha* when the checks actually ran.
-    *tested_sha* defaults to the checkout's HEAD, which is what the commands
-    run against.
+    *tested_sha* is stamped into the section only when the caller has
+    confirmed it is the commit under test (the `--update-pr` path); otherwise
+    the section carries no stamp.
 
     With nothing configured, returns *body* unchanged -- byte-identical to a
     build without this feature, including when *skip* is set (there is
@@ -1381,21 +1381,14 @@ def _run_verification_outcome(
             VERIFICATION_SKIPPED_FLAG,
             None,
         )
-    if tested_sha is None:
-        tested_sha = _checkout_head_sha(project_root)
-    # Uncommitted changes mean the checks describe the commit plus local
-    # edits, which the PR does not contain; the record must say so.
-    dirty_paths = _dirty_path_count(project_root) or 0
     print(
         f"push: running {len(entries)} verification check(s) in {project_root}",
         file=sys.stderr,
     )
     results = run_verifications(entries, project_root)
     return (
-        _with_section(
-            body, render_verification_section(results, tested_sha, dirty_paths=dirty_paths)
-        ),
-        VERIFICATION_RAN_DIRTY_TREE if dirty_paths else VERIFICATION_RAN,
+        _with_section(body, render_verification_section(results, tested_sha)),
+        VERIFICATION_RAN,
         tested_sha,
     )
 
@@ -2247,7 +2240,8 @@ def _run_update_pr(
                     )
         if run_checks:
             body, verification, verification_sha = _run_verification_outcome(
-                project_root, body=body, skip=args.skip_verify
+                project_root, body=body, skip=args.skip_verify,
+                tested_sha=_checkout_head_sha(project_root),
             )
             force_append = body is not None and not body_supplied
     elif load_verify_entries(project_root):
@@ -2512,12 +2506,8 @@ def _run_create_pr(
     # (bot-identity re-authoring above has already settled it), before any
     # ref moves or PR exists. A dry run pushes nothing and opens no PR, so it
     # does not spend a verification run.
-    verification = VERIFICATION_NONE
-    verification_sha: str | None = None
     if not args.dry_run:
-        body, verification, verification_sha = _run_verification_outcome(
-            project_root, body=body, skip=args.skip_verify
-        )
+        body = _run_verification(project_root, body=body, skip=args.skip_verify)
 
     # LEASE CONTROL (lr-f57f13, D5 DECIDED): never derive force_with_lease
     # silently from history_rewritten alone -- resolve_lease applies the
@@ -2701,9 +2691,6 @@ def _run_create_pr(
         "pr_number": pr_number, "pr_url": pr_url, "owner": owner, "repo": repo,
     }
     envelope.update(remote_readback_envelope)
-    envelope["verification"] = verification
-    if verification_sha:
-        envelope["verification_sha"] = verification_sha
 
     print(f"push: PR #{pr_number} opened: {pr_url}")
     print(json.dumps(envelope))

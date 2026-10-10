@@ -785,27 +785,6 @@ class TestDirtyTreeAndShaFormats:
         assert code == verb.EXIT_OK
         assert self._result(capsys)["verification"] == "ran"
 
-    def test_create_with_dirty_tree_still_verifies_and_says_so(
-        self, repo_with_remote, monkeypatch, capsys
-    ):
-        repo, _remote = repo_with_remote
-        _write_verify(repo, [_py("unit", "print('fine')")])
-        (repo / "scratch.txt").write_text("new\n")
-        (repo / "feature.txt").write_text("edited\n")
-        sent: list = []
-        code = _run_main(
-            _create_argv(repo),
-            token_provider=_RecordingTokenProvider(),
-            opener=_capturing_create_opener(sent),
-            stdin_text=json.dumps({"body": "some body"}),
-            monkeypatch=monkeypatch,
-        )
-        assert code == verb.EXIT_OK
-        assert f"Tested commit: {_head(repo)} plus uncommitted changes in 2 path(s)" in (
-            sent[0]["body"]
-        )
-        assert self._result(capsys)["verification"] == "ran_dirty_tree"
-
     def test_create_with_dirty_tree_and_failing_check_still_blocks(
         self, repo_with_remote, monkeypatch
     ):
@@ -821,22 +800,6 @@ class TestDirtyTreeAndShaFormats:
         )
         assert code == verb.EXIT_VERIFY_FAILED
         assert not _remote_has_branch(remote)
-
-    def test_clean_tree_section_has_no_uncommitted_wording(
-        self, repo_with_remote, monkeypatch
-    ):
-        repo, _remote = repo_with_remote
-        _write_verify(repo, [_py("unit", "print('fine')")])
-        sent: list = []
-        _run_main(
-            _create_argv(repo),
-            token_provider=_RecordingTokenProvider(),
-            opener=_capturing_create_opener(sent),
-            stdin_text=json.dumps({"body": "some body"}),
-            monkeypatch=monkeypatch,
-        )
-        assert f"Tested commit: {_head(repo)}\n" in sent[0]["body"]
-        assert "uncommitted" not in sent[0]["body"]
 
     def test_sha256_length_head_is_accepted(self, tmp_path, monkeypatch):
         sha64 = "c" * 64
@@ -856,40 +819,6 @@ class TestDirtyTreeAndShaFormats:
 
         monkeypatch.setattr("subprocess.run", lambda *a, **k: _Probe())
         assert verb._checkout_head_sha(tmp_path) is None
-
-
-class TestCreatePathStampsTestedCommit:
-    def test_section_and_envelope_carry_the_tested_sha(
-        self, repo_with_remote, monkeypatch, capsys
-    ):
-        repo, _remote = repo_with_remote
-        _write_verify(repo, [_py("unit", "print('all green')")])
-        sent: list = []
-        code = _run_main(
-            _create_argv(repo),
-            token_provider=_RecordingTokenProvider(),
-            opener=_capturing_create_opener(sent),
-            stdin_text=json.dumps({"body": "some body"}),
-            monkeypatch=monkeypatch,
-        )
-        assert code == verb.EXIT_OK
-        assert f"Tested commit: {_head(repo)}" in sent[0]["body"]
-        result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-        assert result["verification"] == "ran"
-        assert result["verification_sha"] == _head(repo)
-
-    def test_unconfigured_envelope_reports_none(self, repo_with_remote, monkeypatch, capsys):
-        repo, _remote = repo_with_remote
-        code = _run_main(
-            _create_argv(repo),
-            token_provider=_RecordingTokenProvider(),
-            opener=_capturing_create_opener([]),
-            stdin_text=json.dumps({"body": "some body"}),
-            monkeypatch=monkeypatch,
-        )
-        assert code == verb.EXIT_OK
-        result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
-        assert result["verification"] == "none" and "verification_sha" not in result
 
 
 class TestRunVerificationWithoutBody:

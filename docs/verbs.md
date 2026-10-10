@@ -1333,27 +1333,33 @@ read, verification is skipped the same way (never run against an unconfirmed SHA
 SHAs may be 40-hex (SHA-1) or 64-hex (SHA-256 object format). On `--update-pr` a checkout
 with uncommitted changes (tracked, staged or unstaged, or untracked non-ignored files) is
 treated the same way: nothing runs, no section is appended, and one stderr line names the
-number of dirty paths. On the create path a dirty tree still verifies (a failing check
-still blocks the push) but the section reads `Tested commit: <sha> plus uncommitted
-changes in N path(s)`. With no
+number of dirty paths. The create path is unchanged by this gate. With no
 body supplied, the `## Verification` section (or the skip notice) is still written: it is
 appended to the PR's existing body, never replacing it, whatever body-mode flag was given.
 A metadata-only update provably without new commits skips, and it says so on stderr.
 `--dry-run` pushes nothing and does not run it.
 
-**What it records.** On success a `## Verification` section is appended to the PR body:
-a `Tested commit: <sha>` line naming the commit the checks ran against, then each check's
-name, exit status, and the bounded tail (last 2000 characters) of its stdout and stderr,
-passed through the same redaction as other push output. The section sits in a marked
-block, so a later `--update-pr` replaces it in place instead of adding a second one.
+Known limitations of the `--update-pr` gate:
 
-**Result field.** The JSON result (create and `--update-pr`) carries an additive
-`verification` field: `ran`, `ran_dirty_tree` (create only: ran with uncommitted changes
-present), `skipped_not_pr_head` (update only: the checkout is not the PR head, or the PR
-head was unreadable), `skipped_dirty_tree` (update only: the checkout has uncommitted
-changes), `skipped_no_new_commits`, `skipped_flag` (`--skip-verify`), or `none` (nothing
-configured, or `--dry-run`). When it is `ran` or `ran_dirty_tree`, `verification_sha` holds
-the commit the checks ran against.
+- HEAD and tree state are read once before the run, so a change to a shared checkout
+  during the run is not detected (the write-verb contention check covers concurrent work).
+- Git-ignored files do not count as dirty.
+- A repo whose per-repo config is untracked and not ignored reads as dirty and always
+  skips (a safe skip, stated on stderr).
+
+**What it records.** On success a `## Verification` section is appended to the PR body:
+each check's name, exit status, and the bounded tail (last 2000 characters) of its stdout
+and stderr, passed through the same redaction as other push output. On `--update-pr` the
+section also starts with a `Tested commit: <sha>` line naming the commit the checks ran
+against. The section sits in a marked block, so a later `--update-pr` replaces it in place
+instead of adding a second one.
+
+**Result field.** The `--update-pr` JSON result carries an additive `verification` field:
+`ran`, `skipped_not_pr_head` (the checkout is not the PR head, or the PR head was
+unreadable), `skipped_dirty_tree` (the checkout has uncommitted changes),
+`skipped_no_new_commits`, `skipped_flag` (`--skip-verify`), or `none` (nothing
+configured). When it is `ran`, `verification_sha` holds the commit the checks ran against.
+The create-path result is unchanged.
 
 **Failure.** A non-zero exit, a timeout, or a command that cannot start refuses the
 push, exit `EXIT_VERIFY_FAILED` (38), naming the check and printing its output tail. The
