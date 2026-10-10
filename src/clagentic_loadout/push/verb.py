@@ -322,7 +322,8 @@ from clagentic_loadout.transport.attestation import (
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
-    read_caller_body_bytes,
+    ClaimedBody,
+    claim_caller_body,
 )
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
@@ -991,7 +992,7 @@ def _read_body_stdin() -> str:
 
 
 def _read_body_env(
-    *, caller: str, create_branch: str | None = None, target_pr: int | None = None
+    *, staged: "_StagedBody", caller: str, create_branch: str | None = None, target_pr: int | None = None
 ) -> str:
     """Read + validate --body-env content (lr-e1e2fb): a body a caller's
     harness already staged via `loadout-stage-body`, using the SAME
@@ -1021,12 +1022,42 @@ def _read_body_env(
     either way).
     """
     try:
-        raw = read_caller_body_bytes(
-            caller=caller, expect_create_branch=create_branch, expect_target_pr=target_pr
+        claim = claim_caller_body(
+            caller=caller, expect_create_branch=create_branch, expect_target_pr=target_pr,
         )
     except BodyEnvError as exc:
         _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
-    return _unwrap_body_json(raw, source_label="--body-env")
+    staged.claim = claim
+    return _unwrap_body_json(claim.data, source_label="--body-env")
+
+
+class _StagedBody:
+    """Holds the --body-env pair this invocation claimed (renamed to a
+    private name, so a re-stage at the public path is never touched). The
+    claimed pair is deleted exactly once, immediately before the first
+    remote-mutating operation; a refusal earlier than that releases it back
+    to the public path (only if still empty) so a corrected retry needs no
+    re-stage."""
+
+    def __init__(self) -> None:
+        self.claim: ClaimedBody | None = None
+
+    @property
+    def pending(self) -> bool:
+        return self.claim is not None
+
+    def consume(self) -> None:
+        """No-op when nothing is claimed (--body-stdin, no body, or already
+        consumed)."""
+        claim, self.claim = self.claim, None
+        if claim is not None:
+            claim.consume()
+
+    def release(self) -> str | None:
+        """Give back an unconsumed claim; returns `restored`/`discarded`, or
+        None when nothing was claimed."""
+        claim, self.claim = self.claim, None
+        return claim.release() if claim is not None else None
 
 
 def _check_title_gate(
@@ -1764,15 +1795,20 @@ def main(
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
 
+    staged = _StagedBody()
+    completed = False
     try:
-        return _run(
+        code = _run(
             args,
             token_provider=token_provider,
             opener=opener,
             builder_identity_config_root=builder_identity_config_root,
             identity_provider=identity_provider,
             host_config_root=host_config_root,
+            staged=staged,
         )
+        completed = True
+        return code
     except PushVerbError as exc:
         print(f"push: {exc}", file=sys.stderr)
         if exc.envelope is not None:
@@ -1815,6 +1851,30 @@ def main(
     except InvalidVerifyConfigError as exc:
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_VERIFY_CONFIG_INVALID
+    finally:
+        # A claim still held here means no remote write was attempted (a
+        # successful --dry-run included): give the pair back.
+        try:
+            outcome = staged.release()
+        except OSError as exc:
+            outcome = None
+            print(f"push: could not return the staged --body-env content: {exc}", file=sys.stderr)
+        if outcome is not None and not completed:
+            if outcome == "restored":
+                print(
+                    "push: nothing was consumed -- the staged --body-env content "
+                    "is untouched and does not need to be re-staged; correct the "
+                    "invocation and retry.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "push: nothing was consumed -- a newer --body-env stage "
+                    "already exists and was left untouched; the older content "
+                    "this invocation had claimed was discarded. Correct the "
+                    "invocation and retry with the newer stage.",
+                    file=sys.stderr,
+                )
 
 
 def _run(
@@ -1825,7 +1885,11 @@ def _run(
     builder_identity_config_root: str | Path | None = None,
     identity_provider=None,
     host_config_root: str | Path | None = None,
+    staged: _StagedBody | None = None,
 ) -> int:
+    if staged is None:
+        staged = _StagedBody()
+
     # 1. Argument-shape validation, before any I/O.
     if args.body_env and args.body_stdin:
         raise PushUsageError(
@@ -1921,7 +1985,7 @@ def _run(
     body: str | None = None
     if args.body_env:
         if args.update_pr:
-            body = _read_body_env(caller=caller, target_pr=args.pr_number)
+            body = _read_body_env(staged=staged, caller=caller, target_pr=args.pr_number)
         else:
             current_branch = git_coords.current_branch(project_root)
             if current_branch in git_coords.PROTECTED_BRANCHES:
@@ -1933,7 +1997,7 @@ def _run(
                     f"real branch.",
                     code=EXIT_PUSH_FAILED,
                 )
-            body = _read_body_env(caller=caller, create_branch=current_branch)
+            body = _read_body_env(staged=staged, caller=caller, create_branch=current_branch)
     elif args.body_stdin:
         body = _read_body_stdin()
     elif not args.update_pr:
@@ -2009,6 +2073,7 @@ def _run(
             allowed_namespaces=allowed_namespaces, allowed_hosts=allowed_hosts,
             host_config_is_set=host_config_is_set,
             token_provider=token_provider, opener=opener,
+            staged=staged,
         )
 
     return _run_create_pr(
@@ -2017,6 +2082,7 @@ def _run(
         host_config_is_set=host_config_is_set,
         token_provider=token_provider, opener=opener,
         builder_identity_config_root=builder_identity_config_root,
+        staged=staged,
     )
 
 
@@ -2152,6 +2218,7 @@ def _run_update_pr(
     host_config_is_set: bool,
     token_provider: TokenProvider | None,
     opener,
+    staged: _StagedBody,
 ) -> int:
     try:
         owner, repo, api_base = _resolve_owner_repo_for_update(args, project_root)
@@ -2272,6 +2339,9 @@ def _run_update_pr(
             current_body, body, separator=_APPEND_BODY_SEPARATOR
         )
 
+    # Every read and refusal is behind us: the PATCH is the first remote
+    # write, so the staged pair is spent here and on every path after.
+    staged.consume()
     try:
         if args.platform == PLATFORM_GITHUB:
             github_backend.update_pr(owner, repo, args.pr_number, token=token, title=args.title, body=effective_body, opener=opener)
@@ -2319,6 +2389,7 @@ def _run_create_pr(
     token_provider: TokenProvider | None,
     opener,
     builder_identity_config_root: str | Path | None = None,
+    staged: _StagedBody,
 ) -> int:
     branch = git_coords.current_branch(project_root)
     if branch in git_coords.PROTECTED_BRANCHES:
@@ -2556,6 +2627,10 @@ def _run_create_pr(
         print(f"push: WARNING -- {lease.fetch_warning}", file=sys.stderr)
 
     other_platform_label = PLATFORM_FORGEJO if args.platform == PLATFORM_GITHUB else PLATFORM_GITHUB
+    # The push is the first remote write: spend the staged pair here and on
+    # every path after. A dry run writes nothing, so it keeps the pair.
+    if not args.dry_run:
+        staged.consume()
     try:
         git_push_with_token(
             remote_name, branch, token, project_root,
