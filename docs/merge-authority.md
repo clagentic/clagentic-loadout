@@ -165,8 +165,9 @@ merge:
 
 #### Where the gate is read from
 
-The three **gate keys** (`merge.required_reviewer_roles`,
-`merge.required_scanners`, `merge.pre_checks`) are read from a **tracked** file,
+The **gate keys** (`merge.required_reviewer_roles`,
+`merge.required_scanners`, `merge.pre_checks`, `merge.required_ci_checks`,
+`merge.ci_strict`) are read from a **tracked** file,
 `.clagentic/loadout/gate.yaml` (same `merge:` section shape), exactly as it
 exists at the **PR's base commit** (`git show <base_sha>:<path>`, with the base
 SHA taken from the PR payload the merge already reads). They are never read
@@ -177,8 +178,36 @@ change to the gate goes through review like any other change.
 
 | Key | Source |
 | --- | --- |
-| `merge.required_reviewer_roles`, `merge.required_scanners`, `merge.pre_checks` | tracked `.clagentic/loadout/gate.yaml` at the PR base commit |
+| `merge.required_reviewer_roles`, `merge.required_scanners`, `merge.pre_checks`, `merge.required_ci_checks`, `merge.ci_strict` | tracked `.clagentic/loadout/gate.yaml` at the PR base commit |
 | `merge.post_merge_steps`, `merge.sync_tree_after_merge`, `merge.git_working_tree`, `merge.enforce_*`, `merge.require_model_attestation`, host paths, `push:` keys | per-deployment `.clagentic/loadout/config.yaml` (typically gitignored) |
+
+**CI gate.** `loadout-merge` reads CI evidence for the PR head from both
+sources: commit statuses (Forgejo Actions publishes its job results there, as
+do legacy GitHub status posters) and, on GitHub, check-runs (GitHub Actions
+posts only these, so the legacy status endpoint is empty for such a repo).
+
+- With no `merge.required_ci_checks`, every check name present at the head
+  gates. For one name, all of its runs are considered: any run not yet
+  completed refuses as pending; any run of the latest check suite that did not
+  succeed refuses (a `skipped` or `neutral` run is not a failure); and at least
+  one run must have succeeded. A re-run inside the same suite replaces the
+  earlier attempt.
+- `merge.required_ci_checks` (a list of check-run names or commit-status
+  contexts, read from the base commit) narrows the gate to those names. A
+  listed name must have actually run and succeeded (a skip does not satisfy
+  it) and a listed name that was never reported refuses. Use it when a repo has
+  runs that must not gate, such as a duplicate run that fails whenever a job
+  is skipped. `--required-ci-check` (repeatable) adds names for one invocation.
+- A head with no check-runs and no commit statuses passes and is reported as
+  "no CI found at head", so repos without a CI runner still merge.
+  `merge.ci_strict: true` (or `--ci-strict`) refuses such a head instead.
+- A refusal names each failing check, its conclusion and the head SHA. The
+  merge result JSON carries `ci_source` (`check-runs`, `statuses`,
+  `check-runs+statuses` or `none`).
+- A malformed `required_ci_checks` / `ci_strict` declaration at base falls
+  back to the default CI gate (every check-run at the head must be green) with
+  a warning, so the merge that lands the corrected file is never blocked by the
+  broken one.
 
 A gate key found in the deployment file is **ignored**, with a warning that
 names the tracked location, so a deployment that has not migrated is told

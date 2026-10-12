@@ -182,6 +182,15 @@ CONFIG_KEY_AUTHORIZED_ROLES = "authorized_roles"
 #: deployment vocabulary; none is built in.
 CONFIG_KEY_REQUIRED_SCANNERS = "required_scanners"
 
+#: Key within the `merge:` section listing the CI check names that gate a
+#: merge (check-run names, or commit-status contexts). Absent: every check-run
+#: at the head gates. Read from the tracked gate file at the PR base commit.
+CONFIG_KEY_REQUIRED_CI_CHECKS = "required_ci_checks"
+
+#: Key within the `merge:` section: when true, a head with no check-runs and no
+#: commit statuses refuses ("no CI found") instead of passing.
+CONFIG_KEY_CI_STRICT = "ci_strict"
+
 
 class InvalidMergeGateConfigError(ValueError):
     """Raised when a repo's `merge:` gate-declaration keys
@@ -322,10 +331,12 @@ def _read_merge_section(
     return config_path, merge_section
 
 
-def _validate_role_list(value: object, *, key: str, config_path: Path) -> tuple[str, ...]:
+def _validate_role_list(
+    value: object, *, key: str, config_path: Path, noun: str = "role"
+) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise InvalidMergeGateConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE}.{key} must be a list of role "
+            f"{config_path}: {CONFIG_SECTION_MERGE}.{key} must be a list of {noun} "
             f"names, got {type(value).__name__}."
         )
     roles: list[str] = []
@@ -333,7 +344,7 @@ def _validate_role_list(value: object, *, key: str, config_path: Path) -> tuple[
         if not isinstance(entry, str) or not entry.strip():
             raise InvalidMergeGateConfigError(
                 f"{config_path}: {CONFIG_SECTION_MERGE}.{key} entries must be "
-                f"non-empty role-name strings, got {entry!r}."
+                f"non-empty {noun}-name strings, got {entry!r}."
             )
         # One normalization rule for every role and scanner name read here:
         # surrounding whitespace is stripped at load, so a padded entry can
@@ -555,6 +566,36 @@ def load_repo_gate_declarations(
     )
 
 
+def ci_gate_from_section(source: str, merge_section: dict) -> tuple[tuple[str, ...], bool]:
+    """Validate `required_ci_checks` and `ci_strict` of an already parsed
+    `merge:` section. Both keys are optional: absent means every check at the
+    head gates and a head with no CI passes.
+
+    Raises:
+        InvalidMergeGateConfigError: `required_ci_checks` is not a list of
+            non-empty strings, or `ci_strict` is not a boolean (an explicit
+            null included).
+    """
+    config_path = Path(source)
+    checks: tuple[str, ...] = ()
+    if CONFIG_KEY_REQUIRED_CI_CHECKS in merge_section:
+        checks = _validate_role_list(
+            merge_section[CONFIG_KEY_REQUIRED_CI_CHECKS],
+            key=CONFIG_KEY_REQUIRED_CI_CHECKS,
+            config_path=config_path,
+            noun="check",
+        )
+    strict = False
+    if CONFIG_KEY_CI_STRICT in merge_section:
+        strict = merge_section[CONFIG_KEY_CI_STRICT]
+        if not isinstance(strict, bool):
+            raise InvalidMergeGateConfigError(
+                f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_CI_STRICT} must be a "
+                f"boolean, got {strict!r}."
+            )
+    return checks, strict
+
+
 def _required_scanners_from_section(
     config_path: Path, merge_section: dict
 ) -> dict[str, tuple[str, ...]]:
@@ -593,6 +634,8 @@ def _required_scanners_from_section(
 
 __all__ = [
     "CONFIG_KEY_AUTHORIZED_ROLES",
+    "CONFIG_KEY_CI_STRICT",
+    "CONFIG_KEY_REQUIRED_CI_CHECKS",
     "CONFIG_KEY_MERGE_REQUIREMENTS",
     "CONFIG_KEY_REQUIRED_REVIEWER_ROLES",
     "CONFIG_KEY_REQUIRED_SCANNERS",
@@ -603,6 +646,7 @@ __all__ = [
     "REQUIREMENT_KEY_TESTS_PASS",
     "InvalidMergeGateConfigError",
     "RequiredReviewerRolesNotDeclaredError",
+    "ci_gate_from_section",
     "load_authorized_roles",
     "load_merge_requirements",
     "load_required_reviewer_roles",

@@ -55,7 +55,7 @@ import json
 import re
 from typing import Any
 
-from clagentic_loadout.merge.ci_status import CiStatusResult
+from clagentic_loadout.merge.ci_status import CiStatusResult, StatusEntry
 from clagentic_loadout.merge.errors import (
     GateFactUnavailableError,
     MergeExecutionError,
@@ -228,6 +228,11 @@ def fetch_ci_status(
     for the combined commit-status state — the ONLY HEAD-scoped,
     CI-meaningful signal Forgejo exposes for a PR's head commit).
 
+    Forgejo Actions publishes each job result as a commit status, so this
+    endpoint IS the Actions evidence (unlike GitHub, where Actions posts
+    check-runs only); each status's context is kept so a required check name
+    can be matched against it.
+
     lr-2d2293: this fetcher NO LONGER calls GET .../actions/tasks. That
     endpoint is repo-global (it counts mirror-sync tasks and ALL historical
     Actions tasks for the whole repo), not scoped to this PR's HEAD. Keying
@@ -297,11 +302,18 @@ def fetch_ci_status(
         (s.get("state", "") for s in raw_statuses if isinstance(s, dict))
     ) if isinstance(raw_statuses, list) else ()
 
+    statuses = tuple(
+        StatusEntry(context=str(s.get("context", "")), state=str(s.get("state", "")).lower())
+        for s in raw_statuses
+        if isinstance(s, dict)
+    ) if isinstance(raw_statuses, list) else ()
+
     return CiStatusResult(
         combined_state=combined_state,
         status_count=status_count,
         run_count=0,
         raw_states=raw_states,
+        statuses=statuses,
     )
 
 
