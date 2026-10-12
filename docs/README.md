@@ -51,3 +51,4 @@ reference lives.
 | [integration.md](integration.md) | The runtime contract a harness spawning a loadout-driven agent must satisfy: env vars, config-file tiers, precedence. |
 | [push-failure-reporting.md](push-failure-reporting.md) | The `loadout-push` failure-reporting contract: transcript guarantee, `sub_cause` labels, redaction. |
 | [push-hermeticity.md](push-hermeticity.md) | The credentialed push/fetch hermeticity guarantee: ambient credential neutralization, the repo-local-config fail-closed check, and the minimum git version. |
+| [review-evaluator.md](review-evaluator.md) | `loadout-review evaluate`: the facts vocabulary, the severity rubric, stakes and dispositions files read from the base revision, and the CLEAN / BLOCKED / DEGRADED / STALE outcomes. |

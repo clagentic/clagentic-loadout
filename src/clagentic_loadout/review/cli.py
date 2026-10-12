@@ -53,6 +53,7 @@ from clagentic_loadout.merge.fence_state import (
 )
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.delta import resolve_delta
+from clagentic_loadout.review.evaluate_verb import add_evaluate_parser, run_evaluate
 from clagentic_loadout.review.findings_contract import (
     KEY_FAILURE_SEQUENCE,
     InvalidReplyError,
@@ -171,7 +172,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "    --pr 42 --findings /path/to/findings.json --status clean\n"
             "\n"
             "`run` exit codes: 0 complete, 10 resume (run the identical command "
-            "again), 20 blocked."
+            "again), 20 blocked.\n"
+            "\n"
+            "`evaluate` computes a verdict from a findings file offline; see "
+            "`loadout-review evaluate --help`."
         ),
     )
     parser.add_argument(
@@ -302,6 +306,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "findings and do not change the verdict.",
     )
     post.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
+
+    add_evaluate_parser(subparsers)
     return parser
 
 
@@ -939,6 +945,10 @@ def main(
         if exc.code in (0, None):
             return EXIT_OK
         return EXIT_USAGE
+
+    if args.command == "evaluate":
+        # Offline: no host call, no posting, so no caller identity to bind.
+        return run_evaluate(args, config_root=config_root)
 
     try:
         owner, repo = _parse_owner_repo(args.repo)
