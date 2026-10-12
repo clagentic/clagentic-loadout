@@ -37,7 +37,13 @@ import base64
 import urllib.parse
 from typing import Any
 
-from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile, RangeDiff, pr_text
+from clagentic_loadout.acquire.contract import (
+    AcquiredPr,
+    ChangedFile,
+    RangeDiff,
+    pr_text,
+    repository_visibility,
+)
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport import git_host_api
 
@@ -312,6 +318,7 @@ def fetch_pr_content(
         changed_files=tuple(changed_files),
         title=pr_text(pr_info, "title"),
         body=pr_text(pr_info, "body"),
+        repo_visibility=repository_visibility(pr_info),
     )
 
 

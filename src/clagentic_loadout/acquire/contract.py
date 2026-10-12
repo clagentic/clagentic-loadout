@@ -112,6 +112,11 @@ class AcquiredPr:
     #: read that produced head_sha; "" when the host sent none.
     title: str = ""
     body: str = ""
+    #: Visibility of the repository the PR merges into, as the host's repository
+    #: record in the same metadata read reports it (VISIBILITY_*). None when the
+    #: record is absent, unreadable or says something this module does not
+    #: recognise: callers treat None as the worst case, never as private.
+    repo_visibility: str | None = None
 
     @property
     def changed_filenames(self) -> list[str]:
@@ -127,6 +132,41 @@ def pr_text(pr_info: dict, key: str) -> str:
     absent or non-string host value is ``""``."""
     value = pr_info.get(key)
     return value if isinstance(value, str) else ""
+
+
+VISIBILITY_PUBLIC = "public"
+VISIBILITY_PRIVATE = "private"
+VISIBILITY_INTERNAL = "internal"
+_NON_PUBLIC = (VISIBILITY_PRIVATE, VISIBILITY_INTERNAL)
+
+
+def repository_visibility(pr_info: dict) -> str | None:
+    """Visibility of the repository the PR merges into, from the repository
+    record under ``base.repo`` in the PR metadata (GitHub reports ``visibility``
+    and ``private``; Forgejo/Gitea report ``private`` and ``internal``).
+
+    Non-public is a claim that can lower a verdict, so it is returned only when
+    every signal the record carries says non-public and at least one is present.
+    Any signal that says public wins, and a record with no recognisable signal,
+    or no record at all, returns None."""
+    base = pr_info.get("base")
+    repo = base.get("repo") if isinstance(base, dict) else None
+    if not isinstance(repo, dict):
+        return None
+    signals: list[str] = []
+    named = repo.get("visibility")
+    if isinstance(named, str) and named in (VISIBILITY_PUBLIC, *_NON_PUBLIC):
+        signals.append(named)
+    private = repo.get("private")
+    if private is True:
+        signals.append(VISIBILITY_INTERNAL if repo.get("internal") is True else VISIBILITY_PRIVATE)
+    elif private is False:
+        signals.append(VISIBILITY_PUBLIC)
+    if not signals:
+        return None
+    if VISIBILITY_PUBLIC in signals:
+        return VISIBILITY_PUBLIC
+    return VISIBILITY_INTERNAL if VISIBILITY_INTERNAL in signals else VISIBILITY_PRIVATE
 
 
 @runtime_checkable
@@ -201,10 +241,14 @@ class RangeDiffBackend(Protocol):
 
 
 __all__ = [
+    "VISIBILITY_INTERNAL",
+    "VISIBILITY_PRIVATE",
+    "VISIBILITY_PUBLIC",
     "AcquireBackend",
     "AcquiredPr",
     "ChangedFile",
     "RangeDiff",
     "RangeDiffBackend",
     "pr_text",
+    "repository_visibility",
 ]
