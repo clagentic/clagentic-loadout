@@ -55,7 +55,8 @@ import json
 import re
 from typing import Any
 
-from clagentic_loadout.merge.ci_status import CiStatusResult, StatusEntry
+from clagentic_loadout.merge.ci_payload import parse_status_entries
+from clagentic_loadout.merge.ci_status import CiStatusResult
 from clagentic_loadout.merge.errors import (
     GateFactUnavailableError,
     MergeExecutionError,
@@ -294,25 +295,23 @@ def fetch_ci_status(
             f"cannot read CI status for {head_sha!r} in {owner}/{repo}: HTTP {status}"
         )
     status_body = git_host_api.parse_json_body(raw)
-    combined_state = (status_body.get("state") or "").lower()
-    raw_statuses = status_body.get("statuses")
-    status_count = len(raw_statuses) if isinstance(raw_statuses, list) else 0
-
-    raw_states = tuple(
-        (s.get("state", "") for s in raw_statuses if isinstance(s, dict))
-    ) if isinstance(raw_statuses, list) else ()
-
-    statuses = tuple(
-        StatusEntry(context=str(s.get("context", "")), state=str(s.get("state", "")).lower())
-        for s in raw_statuses
-        if isinstance(s, dict)
-    ) if isinstance(raw_statuses, list) else ()
+    where = f"{owner}/{repo}"
+    if not isinstance(status_body, dict):
+        raise GateFactUnavailableError(
+            f"cannot read CI status for {head_sha!r} in {where}: the response is not an object"
+        )
+    combined_raw = status_body.get("state") or ""
+    if not isinstance(combined_raw, str):
+        raise GateFactUnavailableError(
+            f"cannot read CI status for {head_sha!r} in {where}: combined state is not a string"
+        )
+    statuses = parse_status_entries(status_body.get("statuses"), where=where, head_sha=head_sha)
 
     return CiStatusResult(
-        combined_state=combined_state,
-        status_count=status_count,
+        combined_state=combined_raw.lower(),
+        status_count=len(statuses),
         run_count=0,
-        raw_states=raw_states,
+        raw_states=tuple(s.state for s in statuses),
         statuses=statuses,
     )
 

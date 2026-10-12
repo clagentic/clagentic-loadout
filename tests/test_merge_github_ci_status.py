@@ -25,6 +25,7 @@ import pytest
 
 from clagentic_loadout.merge import github_backend
 from clagentic_loadout.merge.errors import GateFactUnavailableError
+from tests._support.ci_gate import check_run
 
 _OWNER = "some-owner"
 _REPO = "some-repo"
@@ -97,7 +98,7 @@ class TestFetchCiStatusNonEmpty:
                 200,
                 {"state": "success", "statuses": [{"state": "success", "context": "ci"}]},
             ),
-            _json_resp(200, {"total_count": 1}),
+            _json_resp(200, {"total_count": 1, "check_runs": [check_run("ci", run_id=1, suite_id=2)]}),
         )
         result = github_backend.fetch_ci_status(
             _OWNER, _REPO, _HEAD_SHA, token="tok", opener=opener
@@ -110,7 +111,7 @@ class TestFetchCiStatusNonEmpty:
     def test_failure_state_reported_verbatim_lowercased(self):
         opener = _opener_for(
             _json_resp(200, {"state": "FAILURE", "statuses": [{"state": "failure"}]}),
-            _json_resp(200, {"total_count": 1}),
+            _json_resp(200, {"total_count": 1, "check_runs": [check_run("ci", run_id=1, suite_id=2)]}),
         )
         result = github_backend.fetch_ci_status(
             _OWNER, _REPO, _HEAD_SHA, token="tok", opener=opener
