@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clagentic.ai/schemas/loadout/review-facts.json",
+  "title": "review finding facts",
+  "description": "The facts a reviewer states about one finding. The reviewer supplies facts only; severity and blocking are computed from them by the evaluator. Every value is drawn from a closed list, and a missing, invalid or unknown value is resolved to the worst case for its dimension, so leaving a fact out never makes a finding look milder.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["category", "reachable", "attacker_precondition", "impact", "durability"],
+  "properties": {
+    "category": {
+      "type": "string",
+      "enum": [
+        "injection", "authn_authz", "secrets_exposure", "crypto", "deserialization",
+        "ssrf", "path_traversal", "input_validation", "supply_chain", "ci_workflow",
+        "data_exposure", "resource_exhaustion", "concurrency", "error_handling",
+        "correctness", "api_contract", "performance", "maintainability", "test_gap",
+        "other"
+      ],
+      "description": "The rulebook rule family the finding belongs to."
+    },
+    "cwe": {
+      "type": "string",
+      "pattern": "^CWE-[0-9]{1,5}$",
+      "description": "OPTIONAL weakness identifier, for example CWE-79."
+    },
+    "reachable": {
+      "type": "string",
+      "enum": ["yes", "no", "unknown"],
+      "description": "Whether the defective code can be reached with attacker-influenced input."
+    },
+    "attacker_precondition": {
+      "type": "string",
+      "enum": ["none", "can_open_pr", "can_merge", "has_host_access", "unknown"],
+      "description": "What the attacker must already be able to do to trigger the defect."
+    },
+    "impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["confidentiality", "integrity", "availability"],
+      "properties": {
+        "confidentiality": {"type": "string", "enum": ["none", "partial", "full", "unknown"], "description": "Loss of confidentiality."},
+        "integrity": {"type": "string", "enum": ["none", "partial", "full", "unknown"], "description": "Loss of integrity."},
+        "availability": {"type": "string", "enum": ["none", "partial", "full", "unknown"], "description": "Loss of availability."}
+      },
+      "description": "What the defect costs, per dimension."
+    },
+    "durability": {
+      "type": "string",
+      "enum": ["durable", "ephemeral", "unknown"],
+      "description": "Whether the damage persists (durable) or ends when the triggering condition does (ephemeral)."
+    },
+    "evidence": {
+      "type": "string",
+      "maxLength": 300,
+      "description": "OPTIONAL short statement of what the reviewer observed that supports these facts."
+    }
+  }
+}

@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from clagentic_loadout.review.facts import KEY_FACTS
 from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
 
 SEVERITIES = ("blocking", "nit", "praise")
@@ -84,6 +85,7 @@ def validate_finding(
     lenient_severity: bool = False,
     truncate_message: bool = True,
     carry_fingerprint: bool = False,
+    carry_facts: bool = False,
 ) -> dict[str, Any]:
     """Validate one finding object and return it in canonical shape.
 
@@ -106,6 +108,13 @@ def validate_finding(
     findings file; a model reply never sets it, so a fingerprint in a reply is
     dropped like any unknown key. A malformed one is dropped, not refused: the
     finding keeps its position-only identity.
+
+    ``facts`` (see review.facts) is optional and additive: it is carried through
+    only with ``carry_facts``, exactly as the reader found it, because judging it
+    is the evaluator's job (a malformed value there resolves to the worst case
+    and is reported, rather than refusing the whole file). Without the flag it is
+    dropped like any unknown key, so every existing caller sees the shape it
+    always did.
     """
     if not isinstance(item, dict):
         raise InvalidReplyError(f"finding {position} is not an object")
@@ -150,6 +159,8 @@ def validate_finding(
         validated[KEY_FAILURE_SEQUENCE] = sequence
     if carry_fingerprint and is_fingerprint(item.get(KEY_FINGERPRINT)):
         validated[KEY_FINGERPRINT] = item[KEY_FINGERPRINT]
+    if carry_facts and item.get(KEY_FACTS) is not None:
+        validated[KEY_FACTS] = item[KEY_FACTS]
     return validated
 
 
