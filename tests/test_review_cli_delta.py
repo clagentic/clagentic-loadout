@@ -306,7 +306,7 @@ def test_a_delta_findings_file_posts_with_its_carried_findings(env, tmp_path, ca
     assert code == 0
     assert payload["result"] == "posted"
     assert payload["finding_count"] == 1
-    assert "a.py:3 [R1] (blocking) bad" in env.opener_state["posted_body"]
+    assert "a.py:3 [R1] bad" in env.opener_state["posted_body"]
 
 
 def test_a_fingerprint_in_the_findings_file_is_never_posted(env, tmp_path, capsys):
@@ -318,6 +318,6 @@ def test_a_fingerprint_in_the_findings_file_is_never_posted(env, tmp_path, capsy
 
     assert code == 0
     assert payload["result"] == "posted"
-    assert "a.py:3 [R1] (blocking) bad" in env.opener_state["posted_body"]
+    assert "a.py:3 [R1] bad" in env.opener_state["posted_body"]
     assert "fingerprint" not in env.opener_state["posted_body"]
     assert "fp2:" not in env.opener_state["posted_body"]

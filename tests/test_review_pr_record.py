@@ -186,5 +186,6 @@ def test_findings_json_does_not_depend_on_pr_text_and_carries_no_pr_fields(
     assert _normalised_findings(without) == with_text_findings
     assert set(json.loads(with_text_findings)) == {
         "schema", "owner", "repo", "pr_number", "head_sha", "base_sha", "mode", "since_head",
-        "carried_count", "chunk_count", "chunks", "findings",
+        "carried_count", "chunk_count", "chunks", "findings", "verdict_outcome",
+        "verdict_reasons", "evaluator_version", "policy_base_sha", "repository_visibility",
     }

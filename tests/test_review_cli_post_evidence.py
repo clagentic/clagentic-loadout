@@ -11,7 +11,7 @@ import pytest
 from clagentic_loadout.merge.verdict import parse_verdict_block
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.transport import provider_config
-from tests._review_cli_support import BASE_SHA, HEAD_SHA, Env
+from tests._review_cli_support import HEAD_SHA, Env
 
 SEQUENCE = "1. Caller passes a path with a NUL byte. 2. The open() call raises. 3. The worker dies and the queue stalls."
 
@@ -36,9 +36,10 @@ def _findings(tmp_path, findings):
 
 
 def _post(env, tmp_path, capsys, findings, *extra, status="blocking"):
+    # A bare array records no base revision, so policy is read from the one named here.
     return env.post(
         "--findings", str(_findings(tmp_path, findings)), "--head-sha", HEAD_SHA,
-        "--status", status, *extra, capsys=capsys,
+        "--base-sha", env.base_sha, "--status", status, *extra, capsys=capsys,
     )
 
 
@@ -65,8 +66,9 @@ def test_failure_sequence_is_posted_under_its_bullet_and_in_the_fence(env, tmp_p
     assert fence["failure_sequences"] == [
         {"file": "a.py", "line": 3, "rule_id": "R1", "failure_sequence": SEQUENCE}
     ]
-    # Evidence is not findings state: the fence keeps its version.
-    assert "fence_schema_version" not in fence
+    # Evidence is not findings state, so it raises no version by itself; the
+    # computed verdict every post records does.
+    assert fence["fence_schema_version"] == 3
 
 
 def test_a_multi_line_failure_sequence_stays_under_its_bullet(env, tmp_path, capsys):
@@ -79,18 +81,26 @@ def test_a_multi_line_failure_sequence_stays_under_its_bullet(env, tmp_path, cap
     assert fence["failure_sequences"][0]["failure_sequence"] == sequence
 
 
-def test_a_findings_file_without_the_field_posts_exactly_as_before(env, tmp_path, capsys):
+def test_a_findings_file_without_the_field_posts_the_computed_verdict(env, tmp_path, capsys):
+    # Neither finding states facts, so both resolve to the worst case whatever
+    # severity the file asserts: the second one's "nit" lowers nothing.
     code, _ = _post(env, tmp_path, capsys, [_blocking(), {**_blocking(), "line": 4, "severity": "nit"}])
 
     assert code == 0
     body = env.opener_state["posted_body"]
-    assert _prose(env) == (
-        "REVIEWER — blocking (2 finding(s))\n"
-        "- a.py:3 [R1] (blocking) unchecked path\n"
-        "- a.py:4 [R1] (nit) unchecked path\n\n"
-    )
+    lines = _prose(env).splitlines()
+    assert lines[:2] == ["REVIEWER — blocking (2 finding(s))", "verdict: DEGRADED"]
+    assert "Blocking findings (2):" in lines
+    assert "- a.py:3 [R1] unchecked path" in lines
+    assert "- a.py:4 [R1] unchecked path" in lines
+    assert "Advisory findings (2):" not in lines
     fence = parse_verdict_block(body)
-    assert set(fence) == {"reviewer", "review_status", "head_sha", "pr_number"}
+    assert set(fence) == {
+        "reviewer", "review_status", "head_sha", "pr_number", "fence_schema_version",
+        "verdict_outcome", "verdict_reasons", "evaluator_version", "policy_base_sha",
+    }
+    assert fence["verdict_outcome"] == "DEGRADED"
+    assert fence["policy_base_sha"] == env.base_sha
 
 
 def test_an_empty_failure_sequence_is_treated_as_absent(env, tmp_path, capsys):
@@ -203,10 +213,11 @@ def test_a_carrier_run_states_its_range_and_engine(env, capsys):
     body = _run_and_post(env, capsys)
 
     prose = body.split("```review-result")[0].splitlines()
-    assert prose[1] == f"range: {BASE_SHA[:12]}..{HEAD_SHA[:12]}"
-    assert prose[2] == "engine: carrier"
+    assert prose[1] == "verdict: CLEAN"
+    assert prose[2] == f"range: {env.base_sha[:12]}..{HEAD_SHA[:12]}"
+    assert prose[3] == "engine: carrier"
     fence = parse_verdict_block(body)
-    assert fence["range"] == {"basis": "base..head", "base": BASE_SHA, "head": HEAD_SHA}
+    assert fence["range"] == {"basis": "base..head", "base": env.base_sha, "head": HEAD_SHA}
     assert fence["engines"] == [{"engine": "carrier", "chunks": 1}]
 
 

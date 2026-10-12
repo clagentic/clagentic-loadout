@@ -271,8 +271,8 @@ def test_post_clean_is_allowed_when_the_caller_resolved_the_only_blocker(env, tm
     ruling = _write(tmp_path / "resolved.json", ["a.py:3:R1"])
 
     code, _ = env.post(
-        "--findings", findings, "--head-sha", HEAD_SHA, "--status", "clean",
-        "--resolved-findings", ruling, capsys=capsys,
+        "--findings", findings, "--head-sha", HEAD_SHA, "--base-sha", env.base_sha,
+        "--status", "clean", "--resolved-findings", ruling, capsys=capsys,
     )
 
     assert code == 0

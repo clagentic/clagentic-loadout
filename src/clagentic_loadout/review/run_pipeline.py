@@ -53,7 +53,14 @@ from clagentic_loadout.review.delta import (
     render_delta_note,
     reviewer_resolved_positions,
 )
+from clagentic_loadout.merge.fence_state import KEY_VERDICT_OUTCOME, KEY_VERDICT_REASONS
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
+from clagentic_loadout.review.evaluation import (
+    EvaluationContext,
+    annotate_findings,
+    evaluate_findings,
+    verdict_document_fields,
+)
 from clagentic_loadout.review.finding_identity import with_fingerprints
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
@@ -76,7 +83,7 @@ CHUNK_WORKDIR_PREFIX = "loadout-chunk-"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
-PIPELINE_VERSION = "6"
+PIPELINE_VERSION = "7"
 
 #: Optional key on a merged finding that re-anchors a prior one: the line the
 #: prior finding had in the last reviewed head.
@@ -303,13 +310,27 @@ def _mark_prior_locations(
     findings: list[dict[str, Any]], kept: list[tuple[dict[str, Any], dict[str, Any]]]
 ) -> None:
     """Record on each merged finding that re-anchors a prior one the line the
-    prior finding had, as `prior_line`."""
+    prior finding had, as `prior_line`. Every copy of the finding is marked:
+    copies that state different facts are all kept until the evaluator decides
+    which one stands."""
     for prior, reported in kept:
         key = _finding_key(reported)
         for finding in findings:
             if _finding_key(finding) == key:
                 finding[KEY_PRIOR_LINE] = prior["line"]
-                break
+
+
+def _notice_ignored_severity(records: dict[int, dict[str, Any]]) -> None:
+    """Say on stderr, once per chunk, that a reply carried a severity that was
+    discarded. An older rulebook still asks for one; the run is not affected."""
+    for index, record in sorted(records.items()):
+        ignored = record.get("ignored_severity")
+        if isinstance(ignored, int) and not isinstance(ignored, bool) and ignored > 0:
+            print(
+                f"loadout-review: notice: chunk {index}: {ignored} finding(s) carried a "
+                "severity that is ignored; severity is computed from the stated facts",
+                file=sys.stderr,
+            )
 
 
 def _resolved_ids_of(record: dict[str, Any]) -> list[str]:
@@ -369,13 +390,16 @@ def run_review(
     delta: DeltaContext | None = None,
     delta_stage: dict[str, str] | None = None,
     unknown_resolutions: Sequence[str] | None = None,
+    evaluation: EvaluationContext | None = None,
 ) -> RunOutcome:
     """Drive one invocation of the review pipeline for *acquired*. With
     *delta*, *acquired* already holds the delta diff and each chunk is framed
     by review.delta; *delta_stage* is the decision between delta and full,
     reported once right after "acquired". *unknown_resolutions*, given only
     when the caller supplied rulings, lists those that matched no prior
-    finding; it is reported in the result."""
+    finding; it is reported in the result. *evaluation* carries what the
+    verdict depends on besides the findings (see review.evaluation); without
+    it the verdict is computed with no policy base, which is DEGRADED."""
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, status: str, **fields: Any) -> None:
@@ -546,6 +570,7 @@ def run_review(
             stages,
         )
 
+    _notice_ignored_severity(records)
     by_index = {chunk.index: chunk for chunk in chunks}
     per_chunk = [
         (index, with_fingerprints(record.get("findings", []), by_index[index]))
@@ -572,8 +597,14 @@ def run_review(
         left_open = accounting.left_open
         prior_open = delta.prior_open_count
         per_chunk.append((0, carried + left_open))
-    findings = merge_findings(per_chunk)
-    _mark_prior_locations(findings, kept)
+    merged_findings = merge_findings(per_chunk)
+    _mark_prior_locations(merged_findings, kept)
+    # Severity and blocking are computed here, after the merge and the accounting
+    # of prior findings, so a kept prior finding is judged again under the policy
+    # of this run's base revision rather than carried with its old standing.
+    context = evaluation if evaluation is not None else EvaluationContext()
+    verdict = evaluate_findings(merged_findings, acquired.head_sha, context)
+    findings = annotate_findings(merged_findings, verdict)
     findings_path = run_dir / FINDINGS_FILENAME
     document = {
         "schema": FINDINGS_SCHEMA,
@@ -601,6 +632,7 @@ def run_review(
             }
             for chunk in chunks
         ],
+        **verdict_document_fields(verdict, context),
         "findings": findings,
     }
     try:
@@ -621,6 +653,9 @@ def run_review(
             "mode": MODE_DELTA if delta is not None else MODE_FULL,
             "chunk_count": len(chunks),
             "finding_count": len(findings),
+            "blocking_count": len(verdict.blocking),
+            KEY_VERDICT_OUTCOME: verdict.outcome,
+            KEY_VERDICT_REASONS: document[KEY_VERDICT_REASONS],
             "carried_count": len(carried),
             **(
                 _accounting_fields(prior_open, len(kept) + len(left_open), resolved)
