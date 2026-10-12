@@ -125,6 +125,8 @@ from clagentic_loadout.merge.fence_state import (
     KEY_FINDINGS_OPEN,
     KEY_RANGE,
     KEY_RESOLVED,
+    KEY_VERDICT_OUTCOME,
+    KEY_VERDICT_REASONS,
     RESOLVED_BY_CALLER,
     RESOLVED_BY_REVIEWER,
     SCANNER_FAILED,
@@ -243,6 +245,60 @@ def build_verdict_block(
     return f"\n```{VERDICT_FENCE}\n{payload}\n```\n"
 
 
+def _validate_notes(finding: Mapping[str, Any], index: int) -> None:
+    """A finding may carry ``notes`` (lines the tool rendered under its bullet)
+    and ``blocking`` (whether the computed verdict blocks on it). Notes are
+    plain single lines with no fence syntax, like every other caller field."""
+    notes = finding.get("notes")
+    if notes is not None:
+        if not isinstance(notes, list):
+            raise ValueError(f"findings[{index}]['notes'] must be a list of strings")
+        for note in notes:
+            if not isinstance(note, str) or "\n" in note or "\r" in note:
+                raise ValueError(f"findings[{index}]['notes'] must hold single-line strings")
+            _reject_fence_delimiters(note, index, "notes")
+    blocking = finding.get("blocking")
+    if blocking is not None and not isinstance(blocking, bool):
+        raise ValueError(f"findings[{index}]['blocking'] must be a boolean when present")
+
+
+def _finding_bullet(finding: Mapping[str, Any]) -> list[str]:
+    """The bullet for one finding, then its failure sequence and notes."""
+    lines = [
+        f"- {finding['file']}:{finding['line']} [{finding['rule_id']}] {finding['message']}"
+    ]
+    sequence = finding.get("failure_sequence")
+    if isinstance(sequence, str) and sequence.strip():
+        first, *rest = sequence.strip().splitlines()
+        lines.append(f"  failure sequence: {first}")
+        lines.extend(f"    {line}" for line in rest)
+    lines.extend(f"  {note}" for note in finding.get("notes") or ())
+    return lines
+
+
+def _render_evaluated_findings(
+    findings: list[dict[str, Any]], reasons: list[str]
+) -> list[str]:
+    """The body of an evaluated verdict: the reasons the outcome is not CLEAN,
+    then the blocking findings, then the advisory ones. A finding that does not
+    say it is advisory is listed as blocking."""
+    lines: list[str] = []
+    if reasons:
+        lines.append("")
+        lines.append(f"Verdict reasons ({len(reasons)}):")
+        lines.extend(f"- {reason}" for reason in reasons)
+    blocking = [f for f in findings if f.get("blocking") is not False]
+    advisory = [f for f in findings if f.get("blocking") is False]
+    for title, group in (("Blocking findings", blocking), ("Advisory findings", advisory)):
+        if not group:
+            continue
+        lines.append("")
+        lines.append(f"{title} ({len(group)}):")
+        for finding in group:
+            lines.extend(_finding_bullet(finding))
+    return lines
+
+
 def build_findings_verdict_body(
     reviewer: str,
     review_status: str,
@@ -293,6 +349,13 @@ def build_findings_verdict_body(
                      the fence's copy of it comes from the caller's
                      findings_state ('failure_sequences').
 
+    When findings_state carries the evaluation fields (see merge.fence_state),
+    the body is rendered from the computed verdict instead: a "verdict:" line,
+    the reasons the outcome is not CLEAN, then the blocking findings and the
+    advisory ones as separate sections. Each finding may carry ``blocking``
+    (bool; absent means blocking) and ``notes`` (single lines rendered under
+    its bullet).
+
     Returns the constructed body string: a header line, one bullet per
     finding (in the order given), then build_verdict_block's fence.
 
@@ -336,6 +399,9 @@ def build_findings_verdict_body(
             )
         _reject_fence_delimiters(sequence, idx, "failure_sequence")
 
+    for idx, finding in enumerate(findings):
+        _validate_notes(finding, idx)
+
     # The fence's copy of each failure sequence is always derived from the
     # findings, replacing any staged copy, so the fence cannot contradict the
     # bullets it sits under.
@@ -357,20 +423,18 @@ def build_findings_verdict_body(
     if resolved_by_reviewer or resolved_by_caller:
         counts += f", {len(resolved_by_reviewer) + len(resolved_by_caller)} resolved"
     lines = [f"{reviewer.upper()} — {status_label} ({counts})"]
+    evaluated = KEY_VERDICT_OUTCOME in evidence
+    if evaluated:
+        lines.append(f"verdict: {evidence[KEY_VERDICT_OUTCOME]}")
     if KEY_RANGE in evidence:
         lines.append(render_range(evidence[KEY_RANGE]))
     if KEY_ENGINES in evidence:
         lines.append(render_engines(evidence[KEY_ENGINES]))
-    for finding in findings:
-        lines.append(
-            f"- {finding['file']}:{finding['line']} [{finding['rule_id']}] "
-            f"{finding['message']}"
-        )
-        sequence = finding.get("failure_sequence")
-        if isinstance(sequence, str) and sequence.strip():
-            first, *rest = sequence.strip().splitlines()
-            lines.append(f"  failure sequence: {first}")
-            lines.extend(f"    {line}" for line in rest)
+    if evaluated:
+        lines.extend(_render_evaluated_findings(findings, evidence[KEY_VERDICT_REASONS]))
+    else:
+        for finding in findings:
+            lines.extend(_finding_bullet(finding))
     if dropped:
         lines.append("")
         lines.append(f"Dropped candidates ({len(dropped)}):")
