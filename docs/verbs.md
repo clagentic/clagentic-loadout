@@ -629,15 +629,17 @@ loadout-review run  --caller <role> --repo <owner/repo> --pr <n> [--platform git
                     [--profile <name>] [--out <dir>] [--repo-path <dir>]
                     [--prior-findings <path>] [--resolved-findings <path>]
 loadout-review post --caller <role> --repo <owner/repo> --pr <n> --findings <path>
-                    --status clean|blocking [--head-sha <sha>] [--platform ...]
-                    [--resolved-findings <path>]
+                    [--status clean|blocking] [--head-sha <sha>] [--base-sha <sha>]
+                    [--platform ...] [--repo-path <dir>] [--resolved-findings <path>]
 ```
 
 `--caller` binds to the attested invoking identity before any I/O, exactly like
 every other verb, and is accepted before or after the subcommand. `--platform`
 is detected from the origin remote of `--repo-path` (default: the current
-directory) when omitted; that directory is used only for config and platform
-detection, never for the diff.
+directory) when omitted. That directory is never used for the diff; it is used
+for config, platform detection, and, since the verdict is computed, to read
+policy from the PR's base revision, so the base commit must be present in it
+(see [Computed verdict](#computed-verdict)).
 
 **`run`** does everything between "a PR exists" and "findings are in hand":
 
@@ -704,15 +706,27 @@ detection, never for the diff.
    configured fallback the chunk blocks as `CARRIER_FAILED` with the stderr
    tail.
 4. **Validate.** Each reply must be one JSON array of findings (`file`, `line`
-   of 1 or greater, `rule_id`, `severity` of `blocking|nit|praise`, `message`
-   of at most 200 characters; a longer message is truncated). Prose is never
+   of 1 or greater, `rule_id`, `message` of at most 200 characters, where a
+   longer message is truncated, and a `facts` object drawn from the closed
+   vocabulary in [review-evaluator.md](review-evaluator.md)). The reviewer states
+   facts and never a severity: a `severity` key in a reply is accepted, its
+   value is discarded, and a notice on stderr says so (an older rulebook may
+   still ask for one). A finding with no `facts`, or with facts outside the
+   vocabulary, is accepted and resolved to the worst case by the evaluator;
+   nothing in `run` relaxes that. Prose is never
    treated as "no findings". Reason codes are distinct: `OUTPUT_INVALID`
    (an engine, carrier or fallback, answered badly twice; the reply excerpt is
    kept), `MODEL_UNAVAILABLE`
    (no engine could run), `CHUNK_TIMEOUT` (stalled), `CARRIER_FAILED` (non-zero
    exit).
-5. **Merge.** Findings are concatenated in chunk order, deduplicated (the most
-   severe copy wins), and written to `findings.json` in the run directory with
+5. **Merge.** Findings are concatenated in chunk order. A duplicate (same file,
+   line, rule and message) that states the same facts is dropped; one that
+   states different facts is kept until the evaluator decides which copy
+   stands, so a milder copy never hides a blocking one.
+6. **Evaluate.** After the merge (and, in delta mode, the accounting of prior
+   findings), the evaluator computes each finding's severity and blocking
+   status and the verdict outcome; see [Computed verdict](#computed-verdict).
+   The merged findings are written to `findings.json` in the run directory with
    per-chunk evidence: engine, nonce, attempts, exit code, files.
 
 Machine status goes to stderr, one line per stage
@@ -721,6 +735,66 @@ JSON result goes to stdout. Exit codes: **0** complete, **10** resume, **20**
 blocked with the stage and reason named. `1` usage (including any argument
 parsing error), `2` token, `3` profile invalid, `4` wrong platform, `5` acquire
 failed, `7` caller/attested-identity mismatch.
+
+#### Computed verdict
+
+Severity, blocking and the verdict outcome are computed by the evaluator
+(`loadout-review evaluate`, [review-evaluator.md](review-evaluator.md)); no
+model-asserted severity or status reaches a posted verdict. Governing rule:
+anything that can lower a verdict (a severity, a precondition, a blocking
+status) must be positively established from trusted input, and any absent,
+unknown, unrecognised or unverifiable value resolves to the worst case.
+
+`run` and `post` assemble the evaluator's inputs the same way:
+
+- **Facts** come from the findings. A finding with none, or with facts outside
+  the vocabulary, is worst case: it blocks, and the verdict is DEGRADED naming it.
+- **Policy** (dispositions, stakes) is read with `git show <base>:<path>` from the
+  PR's base revision in the repository at `--repo-path`, never from the working
+  tree or the head. In a delta run the base is still the PR's own base, not the
+  last reviewed head. A base revision that is not in that repository, or a policy
+  file that cannot be read, is DEGRADED with the reason named.
+- **Repository visibility** is read from the repository record the host returns
+  with the PR metadata, under the same reader credential. It replaces the
+  evaluator's `--visibility` input on this path. A record that is absent,
+  unreadable or states something unrecognised counts as public (every path
+  exposed) and makes the outcome DEGRADED, saying so.
+- **Evaluator settings** (`block_at`, `required_scanners`) come from the
+  user-level configuration only. At `run` no scanner has reported, so a required
+  scanner leaves the run's outcome DEGRADED; at `post`, `scanners_run` from
+  `--state-file` is what the evaluation sees.
+
+`run` writes, per finding in `findings.json` (additive fields): `computed_severity`
+(`none|low|medium|high|critical`), `blocking`, `facts_state`, `disposition` (the
+base-revision entry that cleared it, else null), `disposition_refused` and
+`possible_duplicates`. The legacy `severity` field is derived from the result
+(`blocking` when it blocks, otherwise `nit`), never from the reply. Identical
+findings are merged into the strongest copy; a finding a disposition clears stays
+in the file as advisory, and a possible duplicate is annotated and kept. The
+file also records, at the top level, `verdict_outcome`, `verdict_reasons`,
+`evaluator_version`, `policy_base_sha` and `repository_visibility`, and the result
+printed on stdout carries `verdict_outcome`, `verdict_reasons` and `blocking_count`.
+`run` still exits **0** when it completes: the outcome is data for the caller.
+
+`post` recomputes the verdict from the facts in `--findings` and the host's and
+the base revision's own records; it does not trust the `verdict_outcome` the file
+records. The base revision comes from the file's `policy_base_sha`, or `--base-sha`
+for a bare array (a `--base-sha` that disagrees with the recorded one is refused);
+with neither, no policy is read and the outcome is DEGRADED. `--status` is
+optional and kept for compatibility: `clean` over a computed outcome other than
+CLEAN is refused naming both, `blocking` over a computed CLEAN is honoured (it can
+only be stricter), and when omitted the computed status is posted. The posted
+comment is rendered from the outcome: a `verdict:` line, the reasons the outcome is
+not CLEAN, then the blocking findings (each with its computed severity and, for
+BLOCKED, the exact `dispositions.yaml` entry that would clear it, or the note that
+the security floor forbids clearing it as `by_design`), then the advisory findings
+(each naming the disposition that cleared it). The Resolved and Dropped sections
+and the `range:` and `engine:` lines are unchanged. The fence's `review_status` is
+`clean` only for a computed CLEAN, and it gains `verdict_outcome`,
+`verdict_reasons`, `evaluator_version` and `policy_base_sha` at
+`fence_schema_version` 3. The fence's `findings_open` stays caller-supplied
+(`--state-file`); a consumer deriving it from `findings.json` should list only
+findings whose `blocking` is true.
 
 **Delta mode.** A re-review of a PR that already has a verdict from this role
 need not re-read unchanged lines. Pass the role's own last verdict to `run`:
@@ -742,8 +816,11 @@ finding ends the round as exactly one of three outcomes:
 
 - **carried** — its file is not in the delta at all (so its line is unchanged),
   or it sits past the 50-finding listing cap and was never shown to the reviewer.
-  It is copied into the merged findings unchanged (`chunk` 0, counted in
-  `carried_count`), so a delta review never turns clean by not looking.
+  It is carried into the merged findings (`chunk` 0, counted in `carried_count`)
+  with its facts, so a delta review never turns clean by not looking. A kept or
+  carried finding is judged again by the evaluator under this run's base
+  revision and annotated; it is never dropped, and a standing computed in an
+  earlier round is not carried over.
 - **re-judged** — its file is touched anywhere in the delta, whether or not a
   changed hunk covers its old line. It goes to the reviewer model, in the prompt
   of exactly one chunk: the lowest-index chunk whose hunks cover its prior line,
@@ -883,10 +960,13 @@ is the file `run` wrote (or a bare JSON array of findings plus `--head-sha`); th
 agent may edit it to drop findings it judged wrong. `post` refuses before
 posting when the PR head is no longer the head the findings were produced for
 (exit **31**; the live head is read once up front and again immediately before
-the post, on both platforms), when `--status clean` contradicts a blocking finding (severity is
-matched case-insensitively and ignoring surrounding whitespace; a severity
-outside `blocking|nit|praise` is refused), or when the file is for another PR or
-malformed or not UTF-8 (exit **32**). After the post, the landed comment is read back and its
+the post, on both platforms), when `--status clean` contradicts the computed outcome
+(a clean status over a computed BLOCKED, DEGRADED or STALE outcome is refused, naming
+both; exit **32**), or when the file is for another PR or malformed or not UTF-8
+(exit **32**; a severity outside `blocking|nit|praise` in a hand-edited file is
+refused). The verdict that is posted is the computed one, not `--status` and not
+anything the findings file says about its own outcome: see
+[Computed verdict](#computed-verdict). After the post, the landed comment is read back and its
 fence re-parsed field for field; the JSON result carries `verified_by_login` and
 `verdict_block_verified`. A failed post exits **30**: the result is reported as
 `posted` only when the read-back returned a comment id and
@@ -1779,6 +1859,19 @@ of three or more backticks anywhere, or a line starting with a run of three or
 more tildes. The plain word `review-result` is ordinary text, so a path such as
 `schemas/review-result.schema.json` posts normally. A verdict at a stale head never authorizes a merge; when the same
 reviewer commented afterwards without posting a verdict, the refusal says so.
+
+**Computed verdict in the fence (`fence_schema_version` 3).** A fence posted by
+`loadout-review post` also records the verdict the evaluator computed:
+`verdict_outcome` (`CLEAN`, `BLOCKED`, `DEGRADED` or `STALE`), `verdict_reasons`
+(one line per reason the outcome is not CLEAN), `evaluator_version` and, when it
+was known, `policy_base_sha`. They are present together (the base revision
+aside), validated, never typed by the reviewer, and a `--state-file` may not
+carry them. They raise the version to 3 and nothing else about findings state:
+a version 3 fence is stateful only if it carries a state key. A fence below
+version 3, or one without these fields, reads as **not evaluated**
+(`FindingsState.evaluated` is false), never as clean; its `review_status` was
+asserted by whoever posted it. The merge gate does not act on `verdict_outcome`
+in this version.
 
 **Repo-config homes for the gate DECLARATION (see
 [docs/provisioning.md](provisioning.md)'s "Merge-gate config homes"
