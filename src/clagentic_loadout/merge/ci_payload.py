@@ -1,96 +1,159 @@
-"""merge.ci_payload — strict parsing of the CI entries a host returns for a head.
+"""merge.ci_payload — the only place host CI JSON is interpreted.
 
-The CI gate decides from the entries it parsed, so an entry it cannot read must
-never be counted toward "the list is complete" and then dropped: an unreadable
-failing run would turn into an empty pass. Every parser here either returns a
-fully-read entry or raises GateFactUnavailableError naming the head SHA, so the
-caller refuses the merge instead of judging a partial list.
+One strict parser per endpoint: the GitHub combined status, a GitHub check-runs
+page and the Forgejo combined status. Each returns fully validated data or raises
+GateFactUnavailableError naming the head SHA, so the caller refuses the merge
+instead of judging evidence it could not read. Every field the gate reads is
+required and type-checked; nothing is defaulted, so an unreadable response can
+never turn into an empty pass. Backends do transport and pagination only and
+never index these payloads themselves.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.merge.ci_status import CheckRun, StatusEntry
 from clagentic_loadout.merge.errors import GateFactUnavailableError
 
+_COMPLETED = "completed"
 
-def _unreadable(kind: str, where: str, head_sha: str, why: str) -> GateFactUnavailableError:
+
+@dataclass(frozen=True)
+class CombinedStatus:
+    """A combined-status response: the platform's rollup `state` (lowercased,
+    possibly empty) and every status entry behind it."""
+
+    state: str
+    statuses: tuple[StatusEntry, ...]
+
+
+@dataclass(frozen=True)
+class CheckRunsPage:
+    """One page of a check-runs response and the total the host reports."""
+
+    total_count: int
+    check_runs: tuple[CheckRun, ...]
+
+
+def _unreadable(endpoint: str, where: str, head_sha: str, why: str) -> GateFactUnavailableError:
     return GateFactUnavailableError(
-        f"cannot read {kind} for {head_sha!r} in {where}: malformed entry ({why}); "
-        f"refusing to judge CI from a list with an unreadable entry"
+        f"cannot read {endpoint} for {head_sha!r} in {where}: {why}; "
+        f"refusing to judge CI from evidence that cannot be read"
     )
 
 
-def _required_str(raw: dict, key: str) -> str | None:
-    value = raw.get(key)
-    return value if isinstance(value, str) else None
+def _field(raw: dict, key: str, kind: type, label: str, fail) -> Any:
+    """A required key of *raw* holding *kind* (a bool is never an int)."""
+    if key not in raw:
+        raise fail(f"{label} is missing")
+    value = raw[key]
+    wrong_type = not isinstance(value, kind) or (kind is int and isinstance(value, bool))
+    if wrong_type:
+        raise fail(f"{label} must be {kind.__name__}, got {type(value).__name__}")
+    return value
 
 
-def _required_int(raw: dict, key: str) -> int | None:
-    value = raw.get(key)
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-
-def parse_check_run(raw: Any, *, where: str, head_sha: str) -> CheckRun:
-    """One check-run entry. The gate reads `name`, `status`, `id`,
-    `check_suite.id` and, once the run completed, `conclusion`."""
+def _status_entry(raw: Any, state_keys: tuple[str, ...], index: int, fail) -> StatusEntry:
+    label = f"statuses[{index}]"
     if not isinstance(raw, dict):
-        raise _unreadable("check-runs", where, head_sha, f"expected an object, got {type(raw).__name__}")
-    name = _required_str(raw, "name")
-    status = _required_str(raw, "status")
-    run_id = _required_int(raw, "id")
-    suite = raw.get("check_suite")
-    suite_id = _required_int(suite, "id") if isinstance(suite, dict) else None
+        raise fail(f"{label} must be an object, got {type(raw).__name__}")
+    present = [key for key in state_keys if key in raw]
+    if not present:
+        raise fail(f"{label} has none of {list(state_keys)!r}")
+    state = _field(raw, present[0], str, f"{label}.{present[0]}", fail)
+    context = _field(raw, "context", str, f"{label}.context", fail)
+    return StatusEntry(context=context, state=state.lower())
+
+
+def _combined_status(
+    body: Any, *, state_keys: tuple[str, ...], endpoint: str, where: str, head_sha: str
+) -> CombinedStatus:
+    def fail(why: str) -> GateFactUnavailableError:
+        return _unreadable(endpoint, where, head_sha, why)
+
+    if not isinstance(body, dict):
+        raise fail(f"the response must be an object, got {type(body).__name__}")
+    state = _field(body, "state", str, "state", fail)
+    entries = _field(body, "statuses", list, "statuses", fail)
+    return CombinedStatus(
+        state=state.lower(),
+        statuses=tuple(_status_entry(e, state_keys, i, fail) for i, e in enumerate(entries)),
+    )
+
+
+def parse_github_combined_status(body: Any, *, where: str, head_sha: str) -> CombinedStatus:
+    """GitHub `GET /commits/{sha}/status`."""
+    return _combined_status(
+        body, state_keys=("state",), endpoint="commit statuses", where=where, head_sha=head_sha
+    )
+
+
+def parse_forgejo_combined_status(body: Any, *, where: str, head_sha: str) -> CombinedStatus:
+    """Forgejo `GET /commits/{sha}/status`. An entry spells its result `state`
+    or `status`; whichever key is present must hold a string."""
+    return _combined_status(
+        body,
+        state_keys=("state", "status"),
+        endpoint="commit statuses",
+        where=where,
+        head_sha=head_sha,
+    )
+
+
+def _check_run(raw: Any, index: int, fail) -> CheckRun:
+    label = f"check_runs[{index}]"
+    if not isinstance(raw, dict):
+        raise fail(f"{label} must be an object, got {type(raw).__name__}")
+    name = _field(raw, "name", str, f"{label}.name", fail)
     if not name:
-        raise _unreadable("check-runs", where, head_sha, "missing name")
-    if not status:
-        raise _unreadable("check-runs", where, head_sha, f"{name!r} has no status")
-    if run_id is None:
-        raise _unreadable("check-runs", where, head_sha, f"{name!r} has no integer id")
-    if suite_id is None:
-        raise _unreadable("check-runs", where, head_sha, f"{name!r} has no check_suite id")
-    conclusion = raw.get("conclusion")
+        raise fail(f"{label}.name is empty")
+    status = _field(raw, "status", str, f"{label}.status", fail).lower()
+    run_id = _field(raw, "id", int, f"{label}.id", fail)
+    suite = _field(raw, "check_suite", dict, f"{label}.check_suite", fail)
+    suite_id = _field(suite, "id", int, f"{label}.check_suite.id", fail)
+    if "conclusion" not in raw:
+        raise fail(f"{label}.conclusion is missing")
+    conclusion = raw["conclusion"]
     if conclusion is not None and not isinstance(conclusion, str):
-        raise _unreadable("check-runs", where, head_sha, f"{name!r} has a non-string conclusion")
-    if status.lower() == "completed" and not conclusion:
-        raise _unreadable("check-runs", where, head_sha, f"{name!r} completed with no conclusion")
+        raise fail(f"{label}.conclusion must be str or null, got {type(conclusion).__name__}")
+    if status == _COMPLETED and not conclusion:
+        raise fail(f"{label} ({name!r}) completed with no conclusion")
     return CheckRun(
         name=name,
-        status=status.lower(),
+        status=status,
         conclusion=(conclusion or "").lower(),
         suite_id=suite_id,
         run_id=run_id,
     )
 
 
-def parse_status_entry(raw: Any, *, where: str, head_sha: str) -> StatusEntry:
-    """One commit-status entry. The gate reads `state` (Forgejo also spells it
-    `status`); `context` is read only to match a required check name, so an entry
-    without one still gates the combined state but can satisfy no required name."""
-    if not isinstance(raw, dict):
-        raise _unreadable("commit statuses", where, head_sha, f"expected an object, got {type(raw).__name__}")
-    state = _required_str(raw, "state")
-    if state is None:
-        state = _required_str(raw, "status")
-    if state is None:
-        raise _unreadable("commit statuses", where, head_sha, "missing state")
-    context = raw.get("context", "")
-    if context is None:
-        context = ""
-    if not isinstance(context, str):
-        raise _unreadable("commit statuses", where, head_sha, "non-string context")
-    return StatusEntry(context=context, state=state.lower())
+def parse_github_check_runs_page(body: Any, *, where: str, head_sha: str) -> CheckRunsPage:
+    """GitHub `GET /commits/{sha}/check-runs`. A page reporting `total_count`
+    0 has an empty `check_runs` list; the list itself is always required."""
+
+    def fail(why: str) -> GateFactUnavailableError:
+        return _unreadable("check-runs", where, head_sha, why)
+
+    if not isinstance(body, dict):
+        raise fail(f"the response must be an object, got {type(body).__name__}")
+    total = _field(body, "total_count", int, "total_count", fail)
+    if total < 0:
+        raise fail(f"total_count must not be negative, got {total}")
+    entries = _field(body, "check_runs", list, "check_runs", fail)
+    if total == 0 and entries:
+        raise fail("total_count is 0 but check_runs is not empty")
+    return CheckRunsPage(
+        total_count=total,
+        check_runs=tuple(_check_run(e, i, fail) for i, e in enumerate(entries)),
+    )
 
 
-def parse_status_entries(raw: Any, *, where: str, head_sha: str) -> tuple[StatusEntry, ...]:
-    """Every entry of a combined-status `statuses` field. An absent or null
-    field is an empty list; any other non-list value is unreadable."""
-    if raw is None:
-        return ()
-    if not isinstance(raw, list):
-        raise _unreadable("commit statuses", where, head_sha, f"statuses is a {type(raw).__name__}, not a list")
-    return tuple(parse_status_entry(entry, where=where, head_sha=head_sha) for entry in raw)
-
-
-__all__ = ["parse_check_run", "parse_status_entries", "parse_status_entry"]
+__all__ = [
+    "CheckRunsPage",
+    "CombinedStatus",
+    "parse_forgejo_combined_status",
+    "parse_github_check_runs_page",
+    "parse_github_combined_status",
+]

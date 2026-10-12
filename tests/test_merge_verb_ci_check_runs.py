@@ -24,22 +24,7 @@ from tests._support.ci_gate import (
     github_ci_opener,
     status_entry,
 )
-from tests._support.merge_verb import AllowingAuthorityProvider, RecordingTokenProvider, base_args
-
-
-def _run(opener, *, platform="github", extra=(), repo=None) -> int:
-    overrides = {"--platform": platform}
-    if repo is not None:
-        overrides["--repo-path"] = str(repo.path)
-    argv = base_args(**overrides) + list(extra)
-    if repo is not None:
-        argv.append("--skip-post-merge")
-    return verb.main(
-        argv,
-        token_provider=RecordingTokenProvider(),
-        authority_provider=AllowingAuthorityProvider(),
-        opener=opener,
-    )
+from tests._support.ci_gate import run_merge as _run
 
 
 def _result_line(out: str) -> dict:

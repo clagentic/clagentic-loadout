@@ -61,7 +61,11 @@ from __future__ import annotations
 import urllib.error
 from typing import Any
 
-from clagentic_loadout.merge.ci_payload import parse_check_run, parse_status_entries
+from clagentic_loadout.merge.ci_payload import (
+    CheckRunsPage,
+    parse_github_check_runs_page,
+    parse_github_combined_status,
+)
 from clagentic_loadout.merge.ci_status import CheckRun, CiStatusResult
 from clagentic_loadout.merge.errors import (
     GateFactUnavailableError,
@@ -335,8 +339,8 @@ def fetch_ci_status(
     check-runs (name, status, conclusion, suite) are returned in full and
     judged by merge.ci_status: GitHub Actions posts ONLY check-runs, so the
     legacy combined status is empty for such a repo and cannot stand in for
-    them. run_count stays diagnostic-only and never feeds emptiness. Runs are
-    read page by page; a list that cannot be read completely raises rather
+    them. Every response is interpreted by merge.ci_payload's strict parsers;
+    this function only fetches and pages. Runs are read page by page; a list that cannot be read completely raises rather
     than being judged truncated.
 
     *head_sha* is validated as a full 40-char hex SHA BEFORE it is
@@ -368,17 +372,7 @@ def fetch_ci_status(
             f"cannot read CI status for {head_sha!r} in {owner}/{repo}: HTTP {status_code}"
         )
     where = f"{owner}/{repo}"
-    if not isinstance(status_body, dict):
-        raise GateFactUnavailableError(
-            f"cannot read CI status for {head_sha!r} in {where}: the response is not an object"
-        )
-    combined_raw = status_body.get("state") or ""
-    if not isinstance(combined_raw, str):
-        raise GateFactUnavailableError(
-            f"cannot read CI status for {head_sha!r} in {where}: combined state is not a string"
-        )
-    combined_state = combined_raw.lower()
-    statuses = parse_status_entries(status_body.get("statuses"), where=where, head_sha=head_sha)
+    combined = parse_github_combined_status(status_body, where=where, head_sha=head_sha)
 
     check_runs_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
     try:
@@ -391,23 +385,15 @@ def fetch_ci_status(
         raise GateFactUnavailableError(
             f"cannot read check-runs for {head_sha!r} in {owner}/{repo}: HTTP {runs_code}"
         )
-    run_count = runs_body.get("total_count") if isinstance(runs_body, dict) else None
-    if not isinstance(run_count, int) or isinstance(run_count, bool):
-        raise GateFactUnavailableError(
-            f"cannot read check-runs for {head_sha!r} in {where}: the response has no "
-            f"integer total_count"
-        )
+    first_page = parse_github_check_runs_page(runs_body, where=where, head_sha=head_sha)
     check_runs = _read_check_runs(
-        runs_body, run_count, check_runs_url, owner, repo, head_sha, token=token, opener=opener
+        first_page, check_runs_url, owner, repo, head_sha, token=token, opener=opener
     )
 
     return CiStatusResult(
-        combined_state=combined_state,
-        status_count=len(statuses),
-        run_count=run_count,
-        raw_states=tuple(s.state for s in statuses),
+        combined_state=combined.state,
+        statuses=combined.statuses,
         check_runs=check_runs,
-        statuses=statuses,
     )
 
 
@@ -421,8 +407,7 @@ _CHECK_RUNS_MAX_PAGES = 50
 
 
 def _read_check_runs(
-    first_page: Any,
-    total_count: int,
+    first_page: CheckRunsPage,
     check_runs_url: str,
     owner: str,
     repo: str,
@@ -436,25 +421,12 @@ def _read_check_runs(
     stops advancing before the total is reached, raises
     GateFactUnavailableError: a truncated list must never be judged."""
     where = f"{owner}/{repo}"
-
-    def parse(entries: list) -> list[CheckRun]:
-        return [parse_check_run(entry, where=where, head_sha=head_sha) for entry in entries]
-
-    raw_runs = first_page.get("check_runs") if isinstance(first_page, dict) else None
-    if raw_runs is None and total_count == 0 and isinstance(first_page, dict):
-        # A host that reports zero runs may omit the empty list; it is the only
-        # case where an absent list is readable, because nothing was counted.
-        return ()
-    if not isinstance(raw_runs, list):
-        raise GateFactUnavailableError(
-            f"check-runs for {head_sha!r} in {where} has no run list"
-        )
-    # Every entry is parsed as it arrives, so an unreadable one refuses before
-    # it can be counted toward the reported total.
-    collected = parse(raw_runs)
+    total_count = first_page.total_count
+    collected = list(first_page.check_runs)
     seen_ids = {run.run_id for run in collected}
+    latest = first_page.check_runs
     page = 1
-    while raw_runs and len(collected) < total_count:
+    while latest and len(collected) < total_count:
         page += 1
         if page > _CHECK_RUNS_MAX_PAGES:
             raise GateFactUnavailableError(
@@ -472,14 +444,9 @@ def _read_check_runs(
             raise GateFactUnavailableError(
                 f"cannot read check-runs page {page} for {head_sha!r} in {owner}/{repo}: HTTP {code}"
             )
-        raw_runs = body.get("check_runs") if isinstance(body, dict) else None
-        if not isinstance(raw_runs, list):
-            raise GateFactUnavailableError(
-                f"check-runs page {page} for {head_sha!r} in {owner}/{repo} has no run list"
-            )
-        parsed = parse(raw_runs)
-        fresh = [run for run in parsed if run.run_id not in seen_ids]
-        if raw_runs and not fresh:
+        latest = parse_github_check_runs_page(body, where=where, head_sha=head_sha).check_runs
+        fresh = [run for run in latest if run.run_id not in seen_ids]
+        if latest and not fresh:
             raise GateFactUnavailableError(
                 f"check-runs pagination stalled at page {page} for {head_sha!r} in "
                 f"{owner}/{repo}; refusing to judge a truncated list"

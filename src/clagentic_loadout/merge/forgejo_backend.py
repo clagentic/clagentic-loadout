@@ -55,7 +55,7 @@ import json
 import re
 from typing import Any
 
-from clagentic_loadout.merge.ci_payload import parse_status_entries
+from clagentic_loadout.merge.ci_payload import parse_forgejo_combined_status
 from clagentic_loadout.merge.ci_status import CiStatusResult
 from clagentic_loadout.merge.errors import (
     GateFactUnavailableError,
@@ -242,11 +242,9 @@ def fetch_ci_status(
     (correctly "no CI ran") but a non-zero repo-global task count made the
     result look non-empty, so the gate fell through to a genuinely-blank
     combined_state and refused a legitimately-mergeable PR — see session
-    d5aee241. merge.ci_status.CiStatusResult.run_count stays 0 from this
-    backend (no HEAD-scoped runs signal exists on Forgejo); it is present on
-    CiStatusResult purely for cross-platform parity with
-    github_backend.fetch_ci_status (whose check-runs endpoint IS
-    HEAD-scoped and legitimately populates it).
+    d5aee241. No HEAD-scoped runs signal exists on Forgejo, so the result
+    carries no check-runs. The response is interpreted by merge.ci_payload's
+    strict parser; this function only fetches.
 
     Raises merge.errors.GateFactUnavailableError on a network failure or a
     non-200 response — mirrors every other gate-fact fetcher in this
@@ -294,25 +292,11 @@ def fetch_ci_status(
         raise GateFactUnavailableError(
             f"cannot read CI status for {head_sha!r} in {owner}/{repo}: HTTP {status}"
         )
-    status_body = git_host_api.parse_json_body(raw)
-    where = f"{owner}/{repo}"
-    if not isinstance(status_body, dict):
-        raise GateFactUnavailableError(
-            f"cannot read CI status for {head_sha!r} in {where}: the response is not an object"
-        )
-    combined_raw = status_body.get("state") or ""
-    if not isinstance(combined_raw, str):
-        raise GateFactUnavailableError(
-            f"cannot read CI status for {head_sha!r} in {where}: combined state is not a string"
-        )
-    statuses = parse_status_entries(status_body.get("statuses"), where=where, head_sha=head_sha)
-
+    combined = parse_forgejo_combined_status(
+        git_host_api.parse_json_body(raw), where=f"{owner}/{repo}", head_sha=head_sha
+    )
     return CiStatusResult(
-        combined_state=combined_raw.lower(),
-        status_count=len(statuses),
-        run_count=0,
-        raw_states=tuple(s.state for s in statuses),
-        statuses=statuses,
+        combined_state=combined.state, statuses=combined.statuses, check_runs=()
     )
 
 

@@ -12,7 +12,9 @@ import json
 import urllib.parse
 from datetime import datetime, timezone
 
+from clagentic_loadout.merge import verb
 from tests._support.fakes import FakeResponse, json_resp, paged
+from tests._support.merge_verb import AllowingAuthorityProvider, RecordingTokenProvider, base_args
 
 __all__ = [
     "HEAD_SHA",
@@ -21,6 +23,7 @@ __all__ = [
     "combined_status",
     "forgejo_ci_opener",
     "github_ci_opener",
+    "run_merge",
     "status_entry",
 ]
 
@@ -71,6 +74,24 @@ def status_entry(context: str, state: str) -> dict:
 
 def combined_status(state: str, entries: list[dict]) -> dict:
     return {"state": state, "statuses": entries, "sha": HEAD_SHA, "total_count": len(entries)}
+
+
+def run_merge(opener, *, platform="github", extra=(), repo=None) -> int:
+    """Run the merge verb against *opener* with permissive providers and return
+    its exit code. *repo* is a gate-repo fixture whose path becomes
+    `--repo-path`."""
+    overrides = {"--platform": platform}
+    if repo is not None:
+        overrides["--repo-path"] = str(repo.path)
+    argv = base_args(**overrides) + list(extra)
+    if repo is not None:
+        argv.append("--skip-post-merge")
+    return verb.main(
+        argv,
+        token_provider=RecordingTokenProvider(),
+        authority_provider=AllowingAuthorityProvider(),
+        opener=opener,
+    )
 
 
 def _merge_json(url: str, pr_info: dict, landed: list[bool]) -> FakeResponse:

@@ -32,21 +32,28 @@ def _decide(result, **kwargs):
     check_ci_status(result, 7, "owner", "repo", head_sha=HEAD_SHA, **kwargs)
 
 
+def _ci(combined_state="", statuses=(), check_runs=()) -> CiStatusResult:
+    return CiStatusResult(combined_state=combined_state, statuses=statuses, check_runs=check_runs)
+
+
+_STATUS = StatusEntry("ci/build", "success")
+
+
 class TestSource:
     def test_source_labels(self):
-        assert CiStatusResult().source == "none"
-        assert CiStatusResult(status_count=1).source == "statuses"
-        assert CiStatusResult(check_runs=(_run("t"),)).source == "check-runs"
-        assert CiStatusResult(status_count=1, check_runs=(_run("t"),)).source == "check-runs+statuses"
+        assert _ci().source == "none"
+        assert _ci(statuses=(_STATUS,)).source == "statuses"
+        assert _ci(check_runs=(_run("t"),)).source == "check-runs"
+        assert _ci(statuses=(_STATUS,), check_runs=(_run("t"),)).source == "check-runs+statuses"
 
-    def test_check_runs_make_the_result_non_empty_but_run_count_alone_does_not(self):
-        assert CiStatusResult(check_runs=(_run("t"),)).is_empty is False
-        assert CiStatusResult(run_count=9).is_empty is True
+    def test_check_runs_make_the_result_non_empty(self):
+        assert _ci(check_runs=(_run("t"),)).is_empty is False
+        assert _ci().is_empty is True
 
 
 class TestDecision:
     def test_refusal_names_check_conclusion_head_and_source(self):
-        result = CiStatusResult(check_runs=(_run("test", "failure"),))
+        result = _ci(check_runs=(_run("test", "failure"),))
         with pytest.raises(CiStatusFailedError) as exc:
             _decide(result)
         message = str(exc.value)
@@ -56,11 +63,11 @@ class TestDecision:
         assert "PR #7 in owner/repo" in message
 
     def test_neutral_and_skipped_runs_do_not_fail_the_default_mode(self):
-        result = CiStatusResult(check_runs=(_run("a", "neutral"), _run("b", "skipped")))
+        result = _ci(check_runs=(_run("a", "neutral"), _run("b", "skipped")))
         _decide(result)
 
     def test_unfinished_run_in_an_older_suite_still_counts_as_pending(self):
-        result = CiStatusResult(
+        result = _ci(
             check_runs=(
                 _run("test", "success", suite=2, run=2),
                 _run("test", "", status="in_progress", suite=1, run=1),
@@ -70,18 +77,20 @@ class TestDecision:
             _decide(result)
 
     def test_failing_status_beside_green_check_runs_refuses(self):
-        result = CiStatusResult(
-            combined_state="failure", status_count=1, check_runs=(_run("test"),)
+        result = _ci(
+            combined_state="failure",
+            statuses=(StatusEntry("ci/build", "failure"),),
+            check_runs=(_run("test"),),
         )
         with pytest.raises(CiStatusFailedError, match="combined commit-status state='failure'"):
             _decide(result)
 
     def test_required_list_ignores_unlisted_failing_checks(self):
-        result = CiStatusResult(check_runs=(_run("test"), _run("flaky", "failure")))
+        result = _ci(check_runs=(_run("test"), _run("flaky", "failure")))
         _decide(result, required_checks=("test",))
 
     def test_required_list_reports_every_problem_at_once(self):
-        result = CiStatusResult(check_runs=(_run("a", "failure"),))
+        result = _ci(check_runs=(_run("a", "failure"),))
         with pytest.raises(CiStatusFailedError) as exc:
             _decide(result, required_checks=("a", "b"))
         message = str(exc.value)
@@ -89,20 +98,18 @@ class TestDecision:
         assert "required check 'b' was not reported at head" in message
 
     def test_required_name_satisfied_by_a_status_context(self):
-        result = CiStatusResult(
-            combined_state="success", status_count=1, statuses=(StatusEntry("ci/build", "success"),)
-        )
+        result = _ci(combined_state="success", statuses=(_STATUS,))
         _decide(result, required_checks=("ci/build",))
 
     def test_strict_with_evidence_present_passes(self):
-        _decide(CiStatusResult(check_runs=(_run("test"),)), strict=True)
+        _decide(_ci(check_runs=(_run("test"),)), strict=True)
 
     def test_strict_on_empty_refuses(self):
         with pytest.raises(CiStatusFailedError, match="no CI found at head"):
-            _decide(CiStatusResult(), strict=True)
+            _decide(_ci(), strict=True)
 
     def test_empty_without_strict_passes(self):
-        _decide(CiStatusResult())
+        _decide(_ci())
 
 
 class TestGithubCheckRunReading:
@@ -117,7 +124,6 @@ class TestGithubCheckRunReading:
         assert result.check_runs == (
             CheckRun(name="test", status="completed", conclusion="failure", suite_id=22, run_id=11),
         )
-        assert result.run_count == 1
 
     def test_walks_every_page(self):
         runs = [check_run(f"job-{i}", run_id=i + 1, suite_id=1) for i in range(65)]

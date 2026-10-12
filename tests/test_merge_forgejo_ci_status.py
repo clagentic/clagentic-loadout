@@ -15,8 +15,8 @@ Coverage:
   - GET .../actions/tasks is NEVER called (lr-2d2293: that endpoint is
     repo-global, not HEAD-scoped, and produced a false refusal on
     mirror-runner repos when its total_count fed is_empty — see session
-    d5aee241). run_count on the returned CiStatusResult is always 0 from
-    this backend.
+    d5aee241). The returned CiStatusResult carries no check-runs.
+  - A response the strict parser cannot read is unavailable, never empty.
 """
 
 from __future__ import annotations
@@ -77,14 +77,14 @@ class TestFetchCiStatusEmpty:
         assert result.is_empty is True
         assert result.combined_state == ""
         assert result.status_count == 0
-        assert result.run_count == 0
+        assert result.check_runs == ()
 
-    def test_missing_state_field_defaults_empty(self):
+    def test_an_empty_object_is_unreadable_not_empty(self):
         opener = _opener_for(_json_resp(200, {}))
-        result = forgejo_backend.fetch_ci_status(
-            _API_BASE, "owner", "repo", _HEAD_SHA, token="tok", opener=opener
-        )
-        assert result.is_empty is True
+        with pytest.raises(GateFactUnavailableError, match=_HEAD_SHA):
+            forgejo_backend.fetch_ci_status(
+                _API_BASE, "owner", "repo", _HEAD_SHA, token="tok", opener=opener
+            )
 
     def test_actions_tasks_endpoint_is_never_called(self):
         # lr-2d2293 regression: the mirror-runner false-refusal originated
@@ -96,7 +96,7 @@ class TestFetchCiStatusEmpty:
             _API_BASE, "clagentic", "clagentic-loadout", _HEAD_SHA, token="tok", opener=opener
         )
         assert result.is_empty is True
-        assert result.run_count == 0
+        assert result.check_runs == ()
 
 
 class TestFetchCiStatusNonEmpty:
@@ -116,11 +116,11 @@ class TestFetchCiStatusNonEmpty:
         assert result.is_empty is False
         assert result.combined_state == "success"
         assert result.status_count == 1
-        assert result.run_count == 0
+        assert result.check_runs == ()
 
     def test_failure_state_reported_verbatim_lowercased(self):
         opener = _opener_for(
-            _json_resp(200, {"state": "FAILURE", "statuses": [{"state": "failure"}]}),
+            _json_resp(200, {"state": "FAILURE", "statuses": [{"state": "failure", "context": "build"}]}),
         )
         result = forgejo_backend.fetch_ci_status(
             _API_BASE, "owner", "repo", _HEAD_SHA, token="tok", opener=opener

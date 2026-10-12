@@ -16,14 +16,12 @@ TWO EVIDENCE SOURCES, BOTH HEAD-SCOPED:
     alone passed a head whose every check-run had failed. Check-runs are
     therefore evaluated in their own right, not kept as a diagnostic count.
 
-HEAD-SCOPING: emptiness is determined ONLY from HEAD-scoped evidence
-(`status_count` and the `check_runs` list, both read for the exact commit). A
+HEAD-SCOPING: emptiness is determined ONLY from HEAD-scoped evidence (the
+`statuses` and `check_runs` lists, both read for the exact commit). A
 repo-global signal such as Forgejo's `/actions/tasks` total_count is NOT
 HEAD-scoped — it counts mirror-sync tasks and all historical Actions tasks for
 the whole repo, and keying emptiness off it produced a false refusal on a
-mirror-runner repo with no CI runner. The `run_count` field is kept on
-CiStatusResult as diagnostic-only metadata (a fetcher may still populate it for
-logging) but it MUST NOT feed is_empty.
+mirror-runner repo with no CI runner, so no such count is carried here.
 
 THE GATE DECISION (explicit, not an accidental fall-through):
   - No statuses AND no check-runs at HEAD => PASS, reported as "no CI found at
@@ -60,7 +58,7 @@ fetch_ci_status / merge.github_backend.fetch_ci_status.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from clagentic_loadout.merge.errors import CiStatusFailedError
 
@@ -117,40 +115,40 @@ class StatusEntry:
 class CiStatusResult:
     """Platform-agnostic CI gate fact for one PR HEAD SHA.
 
+    Every field is required, with no default: a "no CI" fact exists only when a
+    parser positively read zero statuses and zero check-runs, never because a
+    field was left out. The payload parsers in merge.ci_payload are the only
+    producers.
+
     `combined_state` is the platform's own combined/rollup status string
-    (Forgejo and GitHub both expose one under this name), lowercased by the
-    fetcher before construction; empty string when the platform reported no
-    combined state at all (distinct from a real state value).
-
-    `status_count` is the HEAD-scoped commit-status count. `check_runs` holds
-    the HEAD-scoped check-runs (GitHub only). `statuses` carries each commit
-    status's context so a required name can be matched against it.
-
-    `run_count` is diagnostic-only metadata (e.g. the check-runs total the
-    platform reported, or a repo-global Actions-task count) and MUST NOT feed
-    is_empty.
+    (Forgejo and GitHub both expose one under this name), lowercased; empty
+    string when the platform reported an empty rollup (distinct from a real
+    state value). `statuses` carries each HEAD-scoped commit status with its
+    context so a required name can be matched against it. `check_runs` holds
+    the HEAD-scoped check-runs (empty on Forgejo).
     """
 
-    combined_state: str = ""
-    status_count: int = 0
-    run_count: int = 0
-    raw_states: tuple[str, ...] = field(default_factory=tuple)
-    check_runs: tuple[CheckRun, ...] = field(default_factory=tuple)
-    statuses: tuple[StatusEntry, ...] = field(default_factory=tuple)
+    combined_state: str
+    statuses: tuple[StatusEntry, ...]
+    check_runs: tuple[CheckRun, ...]
+
+    @property
+    def status_count(self) -> int:
+        """The HEAD-scoped commit-status count."""
+        return len(self.statuses)
 
     @property
     def is_empty(self) -> bool:
         """True iff there is NO HEAD-scoped CI evidence: no commit-status
-        entries and no check-runs. A non-zero run_count (diagnostic-only,
-        possibly repo-global) never overrides this."""
-        return self.status_count == 0 and not self.check_runs
+        entries and no check-runs."""
+        return not self.statuses and not self.check_runs
 
     @property
     def source(self) -> str:
         """Which evidence source(s) answered: check-runs, statuses, both, or
         none."""
         has_runs = bool(self.check_runs)
-        has_statuses = self.status_count > 0
+        has_statuses = bool(self.statuses)
         if has_runs and has_statuses:
             return SOURCE_BOTH
         if has_runs:
@@ -282,7 +280,7 @@ def check_ci_status(
     raise CiStatusFailedError(
         f"CI-STATUS GATE FAILED — {where}, CI source: {result.source}, "
         f"{result.status_count} commit-status entr{'y' if result.status_count == 1 else 'ies'} "
-        f"and {len(result.check_runs) or result.run_count} check/workflow run(s) at HEAD. "
+        f"and {len(result.check_runs)} check/workflow run(s) at HEAD. "
         f"{'; '.join(problems)}. Refusing: only conclusive success on every "
         f"{'required ' if required else ''}check authorizes a merge. Re-run or fix the "
         f"failing check(s), then retry once CI reports success."

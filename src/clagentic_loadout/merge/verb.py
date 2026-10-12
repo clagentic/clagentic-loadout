@@ -1162,7 +1162,7 @@ def _describe_ci_disposition(ci_result: ci_status.CiStatusResult) -> str:
     return (
         f"combined_state={ci_result.combined_state!r} "
         f"({ci_result.status_count} status(es), "
-        f"{len(ci_result.check_runs) or ci_result.run_count} run(s); "
+        f"{len(ci_result.check_runs)} run(s); "
         f"source={ci_result.source})"
     )
 
