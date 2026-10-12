@@ -21,7 +21,8 @@ the pull request can change could lower its own verdict)::
     review:
       evaluator:
         block_at: high            # low | medium | high | critical
-        required_scanners: [name] # a missing, failed or not-invoked one is DEGRADED
+        required_scanners: [name] # satisfied only by status ran, or not_applicable
+                                  # with a reason; anything else is DEGRADED
 """
 
 from __future__ import annotations

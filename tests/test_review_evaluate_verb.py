@@ -281,6 +281,73 @@ def test_required_scanner_failure_in_the_findings_file_is_degraded(tmp_path, cap
     assert "secret-scan" in parsed(out)["degraded"][0]
 
 
+def test_required_scanner_with_status_timeout_is_degraded_naming_it(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    cfg = _config(tmp_path, "review:\n  evaluator:\n    required_scanners: [secret-scan]\n")
+    items = write_findings(
+        tmp_path / "f.json", [], scanners_run=[{"scanner": "secret-scan", "status": "timeout"}]
+    )
+    code, out, _ = call(tmp_path, repo, items, base, capsys=capsys, config_root=cfg)
+    assert code == verb.EXIT_DEGRADED
+    assert "secret-scan" in parsed(out)["degraded"][0] and "timeout" in parsed(out)["degraded"][0]
+
+
+def test_codeowners_covering_a_path_without_a_profile_claim_is_the_worst_case_precondition(
+    tmp_path, capsys
+):
+    repo = make_repo(tmp_path)
+    profile = "profile: svc\nprofiles:\n  svc:\n    exposure: internal\n    data_class: internal\n"
+    base = commit_files(
+        repo, {STAKES_PATH: profile, ".github/CODEOWNERS": "* @org/team\n", "src/a.py": "x\n"}
+    )
+    stated = facts(integrity="full", precondition="can_merge")
+    items = write_findings(tmp_path / "f.json", [finding(fact=stated)])
+    code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
+    only = (parsed(out)["blocking"] + parsed(out)["advisory"])[0]
+    assert only["stakes"]["merge_control"] == "uncontrolled"
+    assert only["score"]["effective_precondition_rank"] == 1
+    assert code == verb.EXIT_BLOCKED
+
+
+def test_praise_duplicate_beside_an_equal_scored_blocking_finding_is_blocked(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE, "src/a.py": "x\n"})
+    items = write_findings(
+        tmp_path / "f.json",
+        [finding(fact=serious(), severity="praise"), finding(fact=serious())],
+    )
+    code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
+    assert code == verb.EXIT_BLOCKED
+    assert parsed(out)["outcome"] == "BLOCKED"
+
+
+def test_nested_paths_key_in_a_stakes_path_entry_is_degraded_naming_the_key_path(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    doc = (
+        "profile: svc\nprofiles:\n  svc:\n    exposure: internal\n    paths:\n"
+        "      'src/**':\n        paths: {}\n"
+    )
+    base = commit_files(repo, {STAKES_PATH: doc, "src/a.py": "x\n"})
+    items = write_findings(tmp_path / "f.json", [finding(fact=facts())])
+    code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
+    assert code == verb.EXIT_DEGRADED
+    assert any("profiles.svc.paths.src/**.paths" in r for r in parsed(out)["degraded"])
+
+
+def test_repo_whose_only_marker_is_pyproject_has_no_exposed_path(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    base = commit_files(
+        repo, {STAKES_PATH: INTERNAL_PROFILE, "pyproject.toml": "[project]\n", "src/a.py": "x\n"}
+    )
+    floor = facts(category="injection", integrity="partial", precondition="has_host_access")
+    items = write_findings(tmp_path / "f.json", [finding(fact=floor)])
+    code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
+    body = parsed(out)
+    assert code == 0 and body["outcome"] == "CLEAN"
+    assert body["advisory"][0]["stakes"]["exposure"] == "internal"
+
+
 def test_evaluate_help_and_version_exit_ok(capsys):
     assert review_cli.main(["evaluate", "--help"]) == 0
     assert "--expected-head" in capsys.readouterr().out

@@ -32,7 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from clagentic_loadout.review.facts import Facts
-from clagentic_loadout.review.stakes import EXPOSED, UNCONTROLLED, PathStakes
+from clagentic_loadout.review.stakes import CONTROLLED, INTERNAL, PathStakes
 
 SEVERITIES = ("none", "low", "medium", "high", "critical")
 DEFAULT_BLOCK_AT = "high"
@@ -78,11 +78,19 @@ class Score:
         }
 
 
+#: A value the tables do not name resolves to their worst entry, never to a KeyError
+#: that a caller might swallow and never to a milder default.
+_WORST_IMPACT_POINTS = IMPACT_POINTS["unknown"]
+_WORST_DATA_CLASS_SHIFT = DATA_CLASS_SHIFT["regulated"]
+_WORST_PRECONDITION_RANK = PRECONDITION_RANK["unknown"]
+
+
 def impact_points(facts: Facts, stakes: PathStakes) -> int:
-    base = sum(IMPACT_POINTS[level] for level in facts.impact)
+    base = sum(IMPACT_POINTS.get(level, _WORST_IMPACT_POINTS) for level in facts.impact)
     if base == 0:
         return 0
-    return max(1, base + DATA_CLASS_SHIFT[stakes.data_class])
+    shift = DATA_CLASS_SHIFT.get(stakes.data_class, _WORST_DATA_CLASS_SHIFT)
+    return max(1, base + shift)
 
 
 def impact_tier(points: int) -> str:
@@ -93,10 +101,10 @@ def impact_tier(points: int) -> str:
 
 
 def effective_precondition_rank(facts: Facts, stakes: PathStakes) -> int:
-    rank = PRECONDITION_RANK[facts.attacker_precondition]
-    if stakes.exposure == EXPOSED:
+    rank = PRECONDITION_RANK.get(facts.attacker_precondition, _WORST_PRECONDITION_RANK)
+    if stakes.exposure != INTERNAL:
         rank = max(0, rank - 1)
-    if stakes.merge_control == UNCONTROLLED and rank == _CAN_MERGE_RANK:
+    if stakes.merge_control != CONTROLLED and rank == _CAN_MERGE_RANK:
         rank = _CAN_OPEN_PR_RANK
     return rank
 
@@ -105,7 +113,7 @@ def score(facts: Facts, stakes: PathStakes) -> Score:
     """The computed severity of a finding with *facts* on a path with *stakes*."""
     points = impact_points(facts, stakes)
     tier = impact_tier(points)
-    raw_rank = PRECONDITION_RANK[facts.attacker_precondition]
+    raw_rank = PRECONDITION_RANK.get(facts.attacker_precondition, _WORST_PRECONDITION_RANK)
     rank = effective_precondition_rank(facts, stakes)
     level = severity_rank(SEVERITY_TABLE[tier][rank])
     if facts.durability == "ephemeral" and level > 0:

@@ -97,7 +97,7 @@ Determinism: the same findings, policy and date always produce the same verdict.
 
 Stakes are resolved per path from three sources:
 
-- **The base tree.** Exposure markers and CODEOWNERS.
+- **The base tree.** Exposure markers; CODEOWNERS is recorded as context only.
 - **The host.** Repository visibility only, passed with `--visibility`. `public` marks every
   path exposed. Branch protection and rulesets are not read.
 - **A profile** in `stakes.yaml`, selected with `--profile` or the file's own `profile` key.
@@ -108,8 +108,13 @@ Rules:
   `internal`. A profile can raise stakes, never hide them.
 - Anything not stated resolves to the worst case: `exposed`, data class `regulated`, merge
   control `uncontrolled`.
-- `merge_control` is `controlled` when CODEOWNERS covers the path with at least one owner
-  (the last matching rule wins) or the profile says so.
+- `merge_control` is `controlled` **only** when the profile committed at the base revision
+  declares it. A CODEOWNERS match proves nothing about whether review is enforced (the
+  file can be unenforced, stale, or name a principal that cannot approve), so it never
+  changes a rank. Without a profile claim the path is `uncontrolled`.
+- A value that is not positively established from the base tree, the host or the base
+  profile is the worst case. Policy that can lower a verdict is an allowlist: only a
+  recognised value lowers anything, never "anything not on a deny list".
 
 Exposure markers. A file matching one of these globs anywhere in the base tree marks the
 directory that holds it, and everything below, as exposed (a marker at the repository root
@@ -119,12 +124,15 @@ exposes the whole repository):
   `**/*-ingress.yml`, `**/ingress/**`
 - listener configs: `**/nginx.conf`, `**/Caddyfile`, `**/haproxy.cfg`, `**/traefik*.yaml`,
   `**/traefik*.yml`, `**/*listener*.yaml`, `**/*listener*.yml`, `**/*listener*.conf`
-- published packaging files: `**/pyproject.toml`, `**/setup.py`, `**/setup.cfg`,
-  `**/package.json`, `**/Cargo.toml`, `**/*.gemspec`, `**/pom.xml`, `**/*.nuspec`,
-  `**/Chart.yaml`
+
+Packaging files (`pyproject.toml`, `package.json` and the like) are not markers: publishing
+is a supply-chain property, not an attack vector, so a repository whose only marker is a
+packaging file has no path marked exposed by the tree.
 
 CODEOWNERS is looked up at `.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`, then
-`.forgejo/CODEOWNERS`; the first that exists is used.
+`.forgejo/CODEOWNERS`; the first that exists is used. Each finding's stakes record whether
+an owner (`@user`, `@org/team` or an email address) covers its path, as informational
+context only.
 
 ### `stakes.yaml`
 
@@ -143,6 +151,11 @@ profiles:
 ```
 
 Globs: `*` and `?` stay inside one path segment, `**` spans segments.
+
+The schema is strict. `paths` is allowed only directly inside a profile; any other unknown,
+misplaced or nested key (for example a `paths` key inside a path entry) makes the whole file
+malformed. No policy from a malformed file applies, and the verdict is DEGRADED naming the
+key path, such as `profiles.service.paths.deploy/**.paths`.
 
 ## Dispositions
 
@@ -167,7 +180,8 @@ dispositions:
 - A security-floor finding cannot be cleared by `by_design`. The entry is reported as
   refused and the finding keeps blocking.
 - An expired entry does not apply and is listed in the verdict.
-- A malformed file applies nothing and makes the verdict DEGRADED.
+- The schema is strict: an unknown, misplaced or nested key makes the file malformed. A
+  malformed file applies nothing and makes the verdict DEGRADED, naming the key path.
 - **Because the file is read from the base revision, an entry that exists only in the
   change under review does not apply to that change.** Land the entry first.
 
@@ -177,7 +191,7 @@ dispositions:
 |---|---|---|
 | CLEAN | 0 | Nothing blocks. Advisory findings are listed. |
 | BLOCKED | 40 | At least one open finding blocks. Each is listed with the exact dispositions entry that would clear it, or with the note that the floor forbids clearing it as `by_design`. |
-| DEGRADED | 41 | A required input is missing: facts absent or invalid on a blocking finding, a required scanner reported `failed` or `not_invoked` (or did not report), or a policy file or the base revision could not be read. The verdict cannot clear the change. |
+| DEGRADED | 41 | A required input is missing: facts absent or invalid on a blocking finding, a required scanner did not report or reported any status other than `ran` or `not_applicable` with a non-empty reason, or a policy file or the base revision could not be read. The verdict cannot clear the change. |
 | STALE | 42 | The head the findings are for is not the expected head. |
 
 Precedence: STALE, then DEGRADED, then BLOCKED, then CLEAN. Other exit codes: `1` a SHA
@@ -187,8 +201,15 @@ findings file is unreadable or invalid.
 A finding with no facts resolves to the worst case, which blocks, and its missing facts make
 the verdict DEGRADED; the reason names the finding.
 
-Deduplication: findings with identical file, line, rule and message are merged (the most
-severe copy is kept). Findings on the same file and rule at different lines or with
+Required scanners are an allowlist: a scanner is satisfied only by status `ran`, or
+`not_applicable` with a non-empty reason. Every other value, including an unrecognised
+string such as `timeout`, is DEGRADED and names the scanner and its status. A scanner that
+reports more than once is satisfied only if every report is.
+
+Deduplication: findings with identical file, line, rule and message are merged. The copy
+kept is the strongest: a non-praise copy always beats a praise or advisory one, then a
+blocking copy beats a non-blocking one, then the most severe wins. A blocking finding is
+never suppressed by a merge. Findings on the same file and rule at different lines or with
 different messages are both kept and annotated `possible_duplicates`.
 
 ## Configuration

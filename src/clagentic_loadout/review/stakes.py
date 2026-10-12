@@ -3,8 +3,9 @@
 Three inputs, in decreasing order of trust for the question they answer:
 
   * the TREE at the trusted base revision: exposure markers (public ingress
-    manifests, listener configs, published packaging files, see
-    EXPOSURE_MARKER_GLOBS) and CODEOWNERS presence and coverage;
+    manifests and listener configs only, see EXPOSURE_MARKER_GLOBS; a packaging
+    file is a supply-chain property, not an attack vector, so it marks nothing)
+    and CODEOWNERS presence and coverage, recorded as context only;
   * the HOST: repository visibility, a single field the caller passes in;
   * the PROFILE: a deployment's own claim in ``stakes.yaml``.
 
@@ -14,8 +15,9 @@ Rules that make the result safe to gate on:
     profile claim of INTERNAL. A profile can raise stakes, never hide them.
   * Anything not stated resolves to the worst case: exposed, regulated data,
     uncontrolled merges.
-  * ``merge_control`` is ``controlled`` when CODEOWNERS covers the path with an
-    owner, or the profile says so; otherwise ``uncontrolled``. Branch
+  * ``merge_control`` is ``controlled`` ONLY when the base-committed profile
+    declares it; otherwise ``uncontrolled``. CODEOWNERS never changes it: a
+    file that names owners does not prove review is enforced. Branch
     protection is not read (its API is admin-only on one host).
 
 Pure functions over explicit inputs; reading the base revision is
@@ -44,11 +46,16 @@ MERGE_CONTROLS = (CONTROLLED, UNCONTROLLED)
 VISIBILITY_PUBLIC = "public"
 VISIBILITIES = ("public", "private", "internal")
 
+_VOCABULARY = {"exposure": EXPOSURES, "data_class": DATA_CLASSES, "merge_control": MERGE_CONTROLS}
+
 SOURCE_TREE = "tree marker"
 SOURCE_VISIBILITY = "public repository"
 SOURCE_PROFILE = "profile"
 SOURCE_UNSTATED = "unstated (worst case)"
-SOURCE_CODEOWNERS = "CODEOWNERS"
+
+CODEOWNERS_ABSENT = "no CODEOWNERS file"
+CODEOWNERS_COVERED = "covered by an owner"
+CODEOWNERS_UNCOVERED = "not covered by an owner"
 
 #: Files whose presence at the base revision marks the directory holding them
 #: (and everything under it) as internet-exposed. Matched against every path in
@@ -69,16 +76,6 @@ EXPOSURE_MARKER_GLOBS = (
     "**/*listener*.yaml",
     "**/*listener*.yml",
     "**/*listener*.conf",
-    # published packaging files
-    "**/pyproject.toml",
-    "**/setup.py",
-    "**/setup.cfg",
-    "**/package.json",
-    "**/Cargo.toml",
-    "**/*.gemspec",
-    "**/pom.xml",
-    "**/*.nuspec",
-    "**/Chart.yaml",
 )
 
 #: Where CODEOWNERS may live, first existing wins (the order the major hosts use).
@@ -100,6 +97,7 @@ class PathStakes:
     data_class_source: str
     merge_control: str
     merge_control_source: str
+    codeowners: str = CODEOWNERS_ABSENT
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -109,6 +107,7 @@ class PathStakes:
             "data_class_source": self.data_class_source,
             "merge_control": self.merge_control,
             "merge_control_source": self.merge_control_source,
+            "codeowners": self.codeowners,
         }
 
 
@@ -122,6 +121,11 @@ class StakesProfile:
     data_class: str | None = None
     merge_control: str | None = None
     paths: tuple[tuple[str, dict[str, str]], ...] = ()
+
+
+#: A host principal: ``@user``, ``@org/team`` or an email address. Any other
+#: token after the pattern is not an owner.
+_OWNER_RE = re.compile(r"^(?:@[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)?|[^@\s]+@[^@\s]+\.[^@\s]+)\Z")
 
 
 @dataclass(frozen=True)
@@ -152,17 +156,25 @@ class Stakes:
         data_class, data_class_source = self._profile_value(path, "data_class", WORST_DATA_CLASS)
         merge_control, merge_source = self._merge_control(path)
         return PathStakes(
-            exposure, exposure_source, data_class, data_class_source, merge_control, merge_source
+            exposure,
+            exposure_source,
+            data_class,
+            data_class_source,
+            merge_control,
+            merge_source,
+            self._codeowners_context(path),
         )
 
     def _profile_value(self, path: str, key: str, default: str) -> tuple[str, str]:
+        """The profile's claim for *key* on *path*, or *default* (the worst case)
+        when it makes none. A claim outside the key's vocabulary is no claim."""
         if self.profile is None:
             return default, SOURCE_UNSTATED
         value: str | None = getattr(self.profile, key)
         for pattern, override in self.profile.paths:
             if key in override and path_matches(pattern, path):
                 value = override[key]
-        if value is None:
+        if value is None or value not in _VOCABULARY[key]:
             return default, SOURCE_UNSTATED
         return value, SOURCE_PROFILE
 
@@ -174,17 +186,18 @@ class Stakes:
         return self._profile_value(path, "exposure", EXPOSED)
 
     def _merge_control(self, path: str) -> tuple[str, str]:
-        if self.tree.codeowners is not None:
-            owned = None
-            for rule in self.tree.codeowners:
-                if codeowners_pattern_matches(rule.pattern, path):
-                    owned = rule.has_owner
-            if owned:
-                return CONTROLLED, SOURCE_CODEOWNERS
-        claimed, _ = self._profile_value(path, "merge_control", UNCONTROLLED)
-        if claimed == CONTROLLED:
-            return CONTROLLED, SOURCE_PROFILE
-        return UNCONTROLLED, SOURCE_UNSTATED if self.profile is None else SOURCE_PROFILE
+        return self._profile_value(path, "merge_control", UNCONTROLLED)
+
+    def _codeowners_context(self, path: str) -> str:
+        """Whether CODEOWNERS names an owner for *path*. Context only: it feeds
+        no rank, because naming an owner does not prove review is enforced."""
+        if self.tree.codeowners is None:
+            return CODEOWNERS_ABSENT
+        owned = False
+        for rule in self.tree.codeowners:
+            if codeowners_pattern_matches(rule.pattern, path):
+                owned = rule.has_owner
+        return CODEOWNERS_COVERED if owned else CODEOWNERS_UNCOVERED
 
 
 def _under(directory: str, path: str) -> bool:
@@ -223,7 +236,11 @@ def parse_codeowners(text: str) -> tuple[CodeownersRule, ...]:
         if not line or line.startswith("["):
             continue
         parts = line.split()
-        rules.append(CodeownersRule(pattern=parts[0], has_owner=len(parts) > 1))
+        rules.append(
+            CodeownersRule(
+                pattern=parts[0], has_owner=any(_OWNER_RE.fullmatch(token) for token in parts[1:])
+            )
+        )
     return tuple(rules)
 
 
@@ -239,12 +256,19 @@ def _checked(value: Any, allowed: tuple[str, ...], where: str) -> str | None:
     raise StakesFormatError(f"{where} must be one of {', '.join(allowed)}, got {value!r}")
 
 
-def _fields(block: Any, where: str) -> dict[str, str]:
+_STAKE_KEYS = ("exposure", "data_class", "merge_control")
+
+
+def _fields(block: Any, where: str, *, allow_paths: bool = False) -> dict[str, str]:
+    """The stake claims in *block*. Only a profile may carry ``paths``; a
+    ``paths`` key anywhere else is rejected by its full key path, never ignored."""
     if not isinstance(block, dict):
         raise StakesFormatError(f"{where} must be a mapping")
-    unknown = sorted(str(k) for k in block if k not in ("exposure", "data_class", "merge_control", "paths"))
+    allowed = (*_STAKE_KEYS, "paths") if allow_paths else _STAKE_KEYS
+    unknown = sorted(str(k) for k in block if k not in allowed)
     if unknown:
-        raise StakesFormatError(f"{where} has unknown keys: {', '.join(unknown)}")
+        paths = ", ".join(f"{where}.{key}" for key in unknown)
+        raise StakesFormatError(f"unknown or misplaced key: {paths}")
     out: dict[str, str] = {}
     for key, allowed in (
         ("exposure", EXPOSURES),
@@ -267,7 +291,7 @@ def parse_stakes_document(doc: Any) -> tuple[dict[str, StakesProfile], str | Non
         raise StakesFormatError("stakes file must be a mapping")
     unknown = sorted(str(k) for k in doc if k not in ("profile", "profiles"))
     if unknown:
-        raise StakesFormatError(f"stakes file has unknown keys: {', '.join(unknown)}")
+        raise StakesFormatError(f"unknown or misplaced key: {', '.join(unknown)}")
     default = doc.get("profile")
     if default is not None and not isinstance(default, str):
         raise StakesFormatError("profile must be a profile name")
@@ -277,7 +301,7 @@ def parse_stakes_document(doc: Any) -> tuple[dict[str, StakesProfile], str | Non
     profiles: dict[str, StakesProfile] = {}
     for name, block in raw_profiles.items():
         where = f"profiles.{name}"
-        base = _fields(block, where)
+        base = _fields(block, where, allow_paths=True)
         raw_paths = block.get("paths", {})
         if not isinstance(raw_paths, dict):
             raise StakesFormatError(f"{where}.paths must be a mapping of path glob to stakes")

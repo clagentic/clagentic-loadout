@@ -43,15 +43,15 @@ from clagentic_loadout.review.rubric import (
     score,
     severity_rank,
 )
-from clagentic_loadout.review.stakes import EXPOSED, PathStakes, Stakes
+from clagentic_loadout.review.stakes import INTERNAL, PathStakes, Stakes
 
 OUTCOME_CLEAN = "CLEAN"
 OUTCOME_BLOCKED = "BLOCKED"
 OUTCOME_DEGRADED = "DEGRADED"
 OUTCOME_STALE = "STALE"
 
-#: Scanner statuses that mean a required scanner gave no usable answer.
-_SCANNER_UNUSABLE = ("failed", "not_invoked")
+_SCANNER_RAN = "ran"
+_SCANNER_NOT_APPLICABLE = "not_applicable"
 
 _PRAISE = "praise"
 
@@ -163,19 +163,39 @@ def _assess(finding: Mapping[str, Any], stakes: Stakes) -> _Assessed:
     )
 
 
-def _merge_identical(assessed: Iterable[_Assessed]) -> list[_Assessed]:
-    """Findings with the same (file, line, rule_id, message) are one finding;
-    the most severe copy survives in the first copy's position, so a merge
-    never hides a blocking finding behind a milder duplicate."""
+def _blocks_before_dispositions(item: _Assessed, threshold: int) -> bool:
+    """Whether *item* would block if no disposition applied. The one definition
+    of blocking, shared by the merge below and the verdict loop."""
+    if item.praise:
+        return False
+    return severity_rank(item.score.severity) >= threshold or (
+        item.floor_category and item.stakes.exposure != INTERNAL
+    )
+
+
+def _merge_identical(assessed: Iterable[_Assessed], threshold: int) -> list[_Assessed]:
+    """Findings with the same (file, line, rule_id, message) are one finding.
+    The surviving copy is the strongest: a non-praise copy over a praise one,
+    then a blocking one over a non-blocking one, then the most severe. It sits
+    in the first copy's position, so a merge never hides a blocking finding
+    behind a milder or praise duplicate."""
     merged: list[_Assessed] = []
     position: dict[tuple[Any, ...], int] = {}
+
+    def strength(item: _Assessed) -> tuple[bool, bool, int]:
+        return (
+            not item.praise,
+            _blocks_before_dispositions(item, threshold),
+            severity_rank(item.score.severity),
+        )
+
     for item in assessed:
         f = item.finding
         key = (f["file"], f["line"], f["rule_id"], f["message"])
         if key not in position:
             position[key] = len(merged)
             merged.append(item)
-        elif severity_rank(item.score.severity) > severity_rank(merged[position[key]].score.severity):
+        elif strength(item) > strength(merged[position[key]]):
             merged[position[key]] = item
     return merged
 
@@ -189,8 +209,10 @@ def _apply_dispositions(
     applied: disp.Disposition | None = None
     refused: str | None = None
     for entry in entries:
-        if entry.is_expired(today) or not entry.matches(
-            f["file"], f["rule_id"], f.get("fingerprint")
+        if (
+            entry.kind not in disp.KINDS
+            or entry.is_expired(today)
+            or not entry.matches(f["file"], f["rule_id"], f.get("fingerprint"))
         ):
             continue
         if entry.kind == disp.BY_DESIGN and item.floor_category:
@@ -204,20 +226,36 @@ def _apply_dispositions(
     return applied, refused
 
 
+def _scanner_satisfied(entry: Mapping[str, Any]) -> bool:
+    """Allowlist: a scanner counts only when it ran, or declared itself not
+    applicable and said why. Every other status, including one never heard of,
+    is a scanner that gave no usable answer."""
+    status = entry.get("status")
+    if status == _SCANNER_RAN:
+        return True
+    reason = entry.get("reason")
+    return status == _SCANNER_NOT_APPLICABLE and isinstance(reason, str) and bool(reason.strip())
+
+
 def _scanner_problems(
     scanners_run: Sequence[Mapping[str, Any]] | None, required: Sequence[str]
 ) -> list[str]:
-    reported = {
-        str(entry.get("scanner")): entry for entry in (scanners_run or []) if isinstance(entry, Mapping)
-    }
+    reported: dict[str, list[Mapping[str, Any]]] = {}
+    for entry in scanners_run or []:
+        if isinstance(entry, Mapping):
+            reported.setdefault(str(entry.get("scanner")), []).append(entry)
     problems = []
     for name in required:
-        entry = reported.get(name)
-        if entry is None:
+        entries = reported.get(name)
+        if not entries:
             problems.append(f"required scanner {name!r} did not report a result")
-        elif entry.get("status") in _SCANNER_UNUSABLE:
-            reason = f": {entry['reason']}" if entry.get("reason") else ""
-            problems.append(f"required scanner {name!r} {entry['status']}{reason}")
+            continue
+        # A scanner that reported twice is satisfied only if every report is.
+        for entry in entries:
+            if not _scanner_satisfied(entry):
+                reason = entry.get("reason")
+                detail = f": {reason}" if isinstance(reason, str) and reason.strip() else ""
+                problems.append(f"required scanner {name!r} status {entry.get('status')!r}{detail}")
     return problems
 
 
@@ -246,7 +284,7 @@ def evaluate(
     day = today if today is not None else dt.date.today()
     threshold = severity_rank(block_at)
 
-    merged = _merge_identical(_assess(f, stakes) for f in findings)
+    merged = _merge_identical((_assess(f, stakes) for f in findings), threshold)
     expired = tuple(e.as_dict() for e in dispositions if e.is_expired(day))
     by_file_rule: dict[tuple[str, str], list[int]] = {}
     for position, item in enumerate(merged, start=1):
@@ -256,10 +294,7 @@ def evaluate(
     degraded = list(degraded_reasons)
     for position, item in enumerate(merged, start=1):
         f = item.finding
-        floor_hit = item.floor_category and item.stakes.exposure == EXPOSED
-        blocking = (
-            not item.praise and (severity_rank(item.score.severity) >= threshold or floor_hit)
-        )
+        blocking = _blocks_before_dispositions(item, threshold)
         applied: disp.Disposition | None = None
         refused: str | None = None
         if not item.praise:

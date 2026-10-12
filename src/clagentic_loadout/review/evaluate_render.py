@@ -36,7 +36,8 @@ def _stakes_line(finding: EvaluatedFinding) -> str:
     s = finding.stakes
     return (
         f"stakes: exposure={s.exposure} ({s.exposure_source}), data_class={s.data_class} "
-        f"({s.data_class_source}), merge_control={s.merge_control} ({s.merge_control_source})"
+        f"({s.data_class_source}), merge_control={s.merge_control} ({s.merge_control_source}), "
+        f"CODEOWNERS: {s.codeowners} (context only)"
     )
 
 

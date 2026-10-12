@@ -305,6 +305,88 @@ def test_required_scanner_failure_or_absence_is_degraded():
     assert run(clean, required_scanners=["s"], scanners_run=not_applicable).outcome == ev.OUTCOME_CLEAN
 
 
+@pytest.mark.parametrize("status", ["timeout", "failed", "not_invoked", "RAN", "", None, 7])
+def test_a_required_scanner_with_any_status_outside_the_allowlist_is_degraded_naming_it(status):
+    clean = [finding(fact=facts())]
+    verdict = run(
+        clean, required_scanners=["secret-scan"], scanners_run=[{"scanner": "secret-scan", "status": status}]
+    )
+    assert verdict.outcome == ev.OUTCOME_DEGRADED
+    assert "secret-scan" in verdict.degraded[0] and repr(status) in verdict.degraded[0]
+
+
+@pytest.mark.parametrize("reason", [None, "", "   ", 3])
+def test_not_applicable_without_a_real_reason_does_not_satisfy_a_required_scanner(reason):
+    entry = {"scanner": "s", "status": "not_applicable"}
+    if reason is not None:
+        entry["reason"] = reason
+    verdict = run([finding(fact=facts())], required_scanners=["s"], scanners_run=[entry])
+    assert verdict.outcome == ev.OUTCOME_DEGRADED
+
+
+def test_a_scanner_reported_twice_is_satisfied_only_if_every_report_is():
+    reports = [{"scanner": "s", "status": "failed"}, {"scanner": "s", "status": "ran"}]
+    verdict = run([finding(fact=facts())], required_scanners=["s"], scanners_run=reports)
+    assert verdict.outcome == ev.OUTCOME_DEGRADED
+
+
+@pytest.mark.parametrize("praise_first", [True, False])
+def test_a_praise_duplicate_never_hides_an_equal_scored_blocking_finding(praise_first):
+    blocking = finding(fact=serious_open())
+    praise = finding(fact=serious_open(), severity="praise")
+    items = [praise, blocking] if praise_first else [blocking, praise]
+    verdict = run(items)
+    assert len(verdict.findings) == 1
+    assert verdict.findings[0].blocking and not verdict.findings[0].praise
+    assert verdict.outcome == ev.OUTCOME_BLOCKED
+
+
+def test_a_blocking_floor_finding_beats_a_more_severe_non_blocking_duplicate():
+    exposed = stk.Stakes(tree=stk.TreeStakes(exposed_dirs=("",)))
+    floor_but_milder = finding(
+        fact=facts(category="injection", integrity="partial", precondition="has_host_access")
+    )
+    # Same file, line, rule and message; only the stated facts differ.
+    severe_not_floor = finding(
+        fact=facts(category="correctness", integrity="full", precondition="has_host_access")
+    )
+    for items in ([severe_not_floor, floor_but_milder], [floor_but_milder, severe_not_floor]):
+        verdict = run(items, stakes=exposed, block_at="critical")
+        assert len(verdict.findings) == 1
+        assert verdict.findings[0].blocking
+        assert verdict.findings[0].floor_category
+
+
+def test_codeowners_never_lowers_the_precondition_rank():
+    stated = facts(integrity="full", precondition="can_merge")
+    owned = stk.Stakes(
+        profile=stk.StakesProfile(name="p", exposure=stk.INTERNAL, data_class="internal"),
+        tree=stk.TreeStakes(codeowners=(stk.CodeownersRule(pattern="*", has_owner=True),)),
+    )
+    verdict = run([finding(fact=stated)], stakes=owned)
+    only = verdict.findings[0]
+    assert only.stakes.merge_control == stk.UNCONTROLLED
+    assert only.stakes.codeowners == stk.CODEOWNERS_COVERED
+    assert only.score.effective_precondition_rank == 1
+
+
+def test_an_unrecognised_stake_value_resolves_to_the_worst_case():
+    profile = stk.StakesProfile(
+        name="p", exposure="sealed", data_class="nothing", merge_control="locked-down"
+    )
+    resolved = stk.Stakes(profile=profile).for_path("src/a.py")
+    assert (resolved.exposure, resolved.data_class, resolved.merge_control) == (
+        stk.EXPOSED,
+        "regulated",
+        stk.UNCONTROLLED,
+    )
+
+
+def test_a_disposition_of_an_unrecognised_kind_clears_nothing():
+    verdict = run([finding(fact=serious_open())], dispositions=[disposition(kind="waived")])
+    assert verdict.findings[0].blocking
+
+
 def test_policy_degraded_reasons_surface_in_the_verdict():
     verdict = run([finding(fact=facts())], degraded_reasons=["dispositions ignored: bad"])
     assert verdict.outcome == ev.OUTCOME_DEGRADED

@@ -122,8 +122,11 @@ def parse_dispositions(doc: Any) -> tuple[Disposition, ...]:
     verdicts, so a half-understood file applies nothing."""
     if doc is None:
         return ()
-    if not isinstance(doc, dict) or set(doc) - {"dispositions"}:
+    if not isinstance(doc, dict):
         raise DispositionsFormatError("dispositions file must be a mapping with a 'dispositions' list")
+    stray = sorted(str(k) for k in doc if k != "dispositions")
+    if stray:
+        raise DispositionsFormatError(f"unknown or misplaced key: {', '.join(stray)}")
     entries = doc.get("dispositions", [])
     if entries is None:
         return ()
@@ -136,7 +139,8 @@ def parse_dispositions(doc: Any) -> tuple[Disposition, ...]:
             raise DispositionsFormatError(f"{where} must be a mapping")
         unknown = sorted(str(k) for k in entry if k not in _ENTRY_KEYS)
         if unknown:
-            raise DispositionsFormatError(f"{where} has unknown keys: {', '.join(unknown)}")
+            keys = ", ".join(f"{where}.{key}" for key in unknown)
+            raise DispositionsFormatError(f"unknown or misplaced key: {keys}")
         missing = [k for k in _REQUIRED_KEYS if k not in entry]
         if missing:
             raise DispositionsFormatError(f"{where} is missing: {', '.join(missing)}")
