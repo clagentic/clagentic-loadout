@@ -286,7 +286,7 @@ class TestRequiredChecksComeFromTheBaseCommit:
         assert _run(opener, repo=repo) == verb.EXIT_OK
 
         err = capsys.readouterr().err
-        assert "merge.required_ci_checks and merge.ci_strict NOT ENFORCED" in err
+        assert "merge.required_ci_checks NOT ENFORCED" in err
         assert "required_ci_checks must be a list of check names" in err
         assert len(merge_calls) == 1
 
@@ -301,6 +301,25 @@ class TestRequiredChecksComeFromTheBaseCommit:
 
         assert _run(opener, repo=repo) == verb.EXIT_CI_STATUS_FAILED
         assert merge_calls == []
+
+    def test_a_malformed_base_ci_strict_runs_strict_and_warns(self, tmp_path, capsys):
+        repo = _gate_repo(tmp_path, {"ci_strict": "yes"})
+        merge_calls: list = []
+        opener = github_ci_opener(pr_info=repo.pr_info(), merge_calls=merge_calls)
+
+        assert _run(opener, repo=repo) == verb.EXIT_CI_STATUS_FAILED
+
+        err = capsys.readouterr().err
+        assert "merge.ci_strict is malformed, so strict CI applies" in err
+        assert "no CI found at head" in err
+        assert merge_calls == []
+
+    def test_a_malformed_base_ci_strict_still_merges_a_green_head(self, tmp_path):
+        repo = _gate_repo(tmp_path, {"ci_strict": "yes"})
+        opener = github_ci_opener(
+            pr_info=repo.pr_info(), check_runs=[check_run("test", run_id=1, suite_id=10)]
+        )
+        assert _run(opener, repo=repo) == verb.EXIT_OK
 
     def test_no_ci_keys_at_base_keeps_the_default_behaviour(self, tmp_path):
         repo = _gate_repo(tmp_path, {})

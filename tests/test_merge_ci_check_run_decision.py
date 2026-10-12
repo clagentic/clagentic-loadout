@@ -189,11 +189,32 @@ class TestGateKeys:
         assert gate.ci_strict is True
         assert gate.warnings == ()
 
-    def test_tracked_text_with_a_bad_ci_key_warns_and_keeps_the_defaults(self):
+    def test_a_malformed_ci_strict_reads_as_strict_and_keeps_a_valid_check_list(self):
         text = "merge:\n  required_reviewer_roles: []\n  required_ci_checks: [test]\n  ci_strict: 3\n"
         gate = gate_from_tracked_text(text, source="gate.yaml")
-        assert gate.required_ci_checks == ()
-        assert gate.ci_strict is False
+        assert gate.required_ci_checks == ("test",)
+        assert gate.ci_strict is True
         assert len(gate.warnings) == 1
         assert "ci_strict must be a boolean" in gate.warnings[0]
         assert gate.pre_checks_error == ""
+
+    @pytest.mark.parametrize("value", ['"yes"', "null", "3", "[true]"])
+    def test_every_malformed_ci_strict_reads_as_strict(self, value):
+        text = f"merge:\n  required_reviewer_roles: []\n  ci_strict: {value}\n"
+        gate = gate_from_tracked_text(text, source="gate.yaml")
+        assert gate.ci_strict is True
+        assert "ci_strict" in gate.warnings[0]
+
+    def test_a_malformed_check_list_falls_back_to_the_default_gate_and_keeps_strict(self):
+        text = "merge:\n  required_reviewer_roles: []\n  required_ci_checks: test\n  ci_strict: true\n"
+        gate = gate_from_tracked_text(text, source="gate.yaml")
+        assert gate.required_ci_checks == ()
+        assert gate.ci_strict is True
+        assert len(gate.warnings) == 1
+        assert "required_ci_checks NOT ENFORCED" in gate.warnings[0]
+
+    def test_a_malformed_check_list_does_not_make_the_gate_strict(self):
+        text = "merge:\n  required_reviewer_roles: []\n  required_ci_checks: [3]\n"
+        gate = gate_from_tracked_text(text, source="gate.yaml")
+        assert gate.required_ci_checks == ()
+        assert gate.ci_strict is False

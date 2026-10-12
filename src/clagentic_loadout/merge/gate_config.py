@@ -576,24 +576,46 @@ def ci_gate_from_section(source: str, merge_section: dict) -> tuple[tuple[str, .
             non-empty strings, or `ci_strict` is not a boolean (an explicit
             null included).
     """
-    config_path = Path(source)
-    checks: tuple[str, ...] = ()
-    if CONFIG_KEY_REQUIRED_CI_CHECKS in merge_section:
-        checks = _validate_role_list(
-            merge_section[CONFIG_KEY_REQUIRED_CI_CHECKS],
-            key=CONFIG_KEY_REQUIRED_CI_CHECKS,
-            config_path=config_path,
-            noun="check",
+    return (
+        required_ci_checks_from_section(source, merge_section),
+        ci_strict_from_section(source, merge_section),
+    )
+
+
+def required_ci_checks_from_section(source: str, merge_section: dict) -> tuple[str, ...]:
+    """Validate `required_ci_checks` of an already parsed `merge:` section.
+    Absent means every check at the head gates.
+
+    Raises:
+        InvalidMergeGateConfigError: not a list of non-empty strings (an explicit
+            null included).
+    """
+    if CONFIG_KEY_REQUIRED_CI_CHECKS not in merge_section:
+        return ()
+    return _validate_role_list(
+        merge_section[CONFIG_KEY_REQUIRED_CI_CHECKS],
+        key=CONFIG_KEY_REQUIRED_CI_CHECKS,
+        config_path=Path(source),
+        noun="check",
+    )
+
+
+def ci_strict_from_section(source: str, merge_section: dict) -> bool:
+    """Validate `ci_strict` of an already parsed `merge:` section. Absent means
+    a head with no CI passes.
+
+    Raises:
+        InvalidMergeGateConfigError: not a boolean (an explicit null included).
+    """
+    if CONFIG_KEY_CI_STRICT not in merge_section:
+        return False
+    strict = merge_section[CONFIG_KEY_CI_STRICT]
+    if not isinstance(strict, bool):
+        raise InvalidMergeGateConfigError(
+            f"{Path(source)}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_CI_STRICT} must be a "
+            f"boolean, got {strict!r}."
         )
-    strict = False
-    if CONFIG_KEY_CI_STRICT in merge_section:
-        strict = merge_section[CONFIG_KEY_CI_STRICT]
-        if not isinstance(strict, bool):
-            raise InvalidMergeGateConfigError(
-                f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_CI_STRICT} must be a "
-                f"boolean, got {strict!r}."
-            )
-    return checks, strict
+    return strict
 
 
 def _required_scanners_from_section(
@@ -647,6 +669,7 @@ __all__ = [
     "InvalidMergeGateConfigError",
     "RequiredReviewerRolesNotDeclaredError",
     "ci_gate_from_section",
+    "ci_strict_from_section",
     "load_authorized_roles",
     "load_merge_requirements",
     "load_required_reviewer_roles",
@@ -654,5 +677,6 @@ __all__ = [
     "load_required_scanners",
     "parse_tracked_merge_section",
     "read_merge_section",
+    "required_ci_checks_from_section",
     "reviewer_gate_from_section",
 ]

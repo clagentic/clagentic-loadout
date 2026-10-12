@@ -18,10 +18,12 @@ or drop its pre_checks. The base commit is not something the PR controls.
     from that role must record, and must not report as failed.
   - `pre_checks` are the commands run against the merge result before merging.
   - `required_ci_checks` names the CI checks that gate the merge and `ci_strict`
-    refuses a head with no CI evidence (see merge.ci_status). A declaration that
-    cannot be validated falls back to the default CI gate (every check-run at
-    the head must be green) with a warning, so the merge that lands the fix is
-    never blocked by the broken file.
+    refuses a head with no CI evidence (see merge.ci_status). The two keys fail
+    independently, each with a warning: a `required_ci_checks` that cannot be
+    validated falls back to the default CI gate (every check-run at the head
+    must be green), so the merge that lands the fix is never blocked by the
+    broken file; a `ci_strict` that cannot be validated is read as strict, so a
+    broken file never relaxes the gate.
 
 Keys that are machine-local (`post_merge_steps`, host paths, the sync knobs)
 stay in the gitignored deployment file. A gate key found in that file while the
@@ -109,9 +111,10 @@ from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
     CONFIG_KEY_REQUIRED_SCANNERS,
     InvalidMergeGateConfigError,
-    ci_gate_from_section,
+    ci_strict_from_section,
     parse_tracked_merge_section,
     read_merge_section,
+    required_ci_checks_from_section,
     reviewer_gate_from_section,
 )
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
@@ -240,16 +243,27 @@ def gate_from_tracked_text(
     ci_checks: tuple[str, ...] = ()
     ci_strict = False
     try:
-        ci_checks, ci_strict = ci_gate_from_section(source, merge_section)
+        ci_checks = required_ci_checks_from_section(source, merge_section)
     except InvalidMergeGateConfigError as exc:
         # Falls back to the default CI gate (every check-run at the head must be
-        # green, a head with no CI passes) so the merge that lands the corrected
-        # file is never blocked by the broken one.
+        # green) so the merge that lands the corrected file is never blocked by
+        # the broken one.
         warnings = (
             *warnings,
-            f"merge.required_ci_checks and merge.ci_strict NOT ENFORCED -- the repo gate "
-            f"config could not be loaded, so the default CI gate applies (every check-run "
-            f"at the head must be green): {exc}",
+            f"merge.required_ci_checks NOT ENFORCED -- the repo gate config could not "
+            f"be loaded, so the default CI gate applies (every check-run at the head "
+            f"must be green): {exc}",
+        )
+    try:
+        ci_strict = ci_strict_from_section(source, merge_section)
+    except InvalidMergeGateConfigError as exc:
+        # A value that cannot be read must never relax the gate, so a broken
+        # ci_strict means strict: a head with no CI evidence refuses.
+        ci_strict = True
+        warnings = (
+            *warnings,
+            f"merge.ci_strict is malformed, so strict CI applies (a head with no CI "
+            f"evidence refuses): {exc}",
         )
     return RepoGate(
         reviewer_roles=roles,

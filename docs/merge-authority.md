@@ -204,10 +204,16 @@ posts only these, so the legacy status endpoint is empty for such a repo).
 - A refusal names each failing check, its conclusion and the head SHA. The
   merge result JSON carries `ci_source` (`check-runs`, `statuses`,
   `check-runs+statuses` or `none`).
-- A malformed `required_ci_checks` / `ci_strict` declaration at base falls
-  back to the default CI gate (every check-run at the head must be green) with
-  a warning, so the merge that lands the corrected file is never blocked by the
-  broken one.
+- The two keys fail independently, each with a warning. A malformed
+  `required_ci_checks` at base falls back to the default CI gate (every
+  check-run at the head must be green), so the merge that lands the corrected
+  file is never blocked by the broken one. A malformed `ci_strict` is read as
+  strict, so a broken file never relaxes the gate.
+- A check-run or commit-status entry the gate cannot read (null, not an object,
+  or missing a field the gate reads such as a name, status, id, check suite or
+  state), or a response whose run total or list cannot be read, refuses the
+  merge as an unavailable gate fact naming the head SHA. An unreadable entry is
+  never skipped.
 
 A gate key found in the deployment file is **ignored**, with a warning that
 names the tracked location, so a deployment that has not migrated is told
