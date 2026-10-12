@@ -758,7 +758,9 @@ unknown, unrecognised or unverifiable value resolves to the worst case.
   with the PR metadata, under the same reader credential. It replaces the
   evaluator's `--visibility` input on this path. A record that is absent,
   unreadable or states something unrecognised counts as public (every path
-  exposed) and makes the outcome DEGRADED, saying so.
+  exposed) and makes the outcome DEGRADED, saying so. One unrecognised signal
+  (an unknown `visibility` value, or a `private`/`internal` field that is not
+  a Boolean) voids the whole record, whatever its other fields say.
 - **Evaluator settings** (`block_at`, `required_scanners`) come from the
   user-level configuration only. At `run` no scanner has reported, so a required
   scanner leaves the run's outcome DEGRADED; at `post`, `scanners_run` from

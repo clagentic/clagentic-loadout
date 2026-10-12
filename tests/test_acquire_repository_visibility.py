@@ -67,6 +67,24 @@ def test_an_absent_or_unrecognised_record_states_nothing(pr):
     assert repository_visibility(pr) is None
 
 
+@pytest.mark.parametrize(
+    "repo",
+    [
+        {"private": True, "visibility": "secret"},
+        {"private": False, "visibility": "secret"},
+        {"visibility": "public", "private": "yes"},
+        {"visibility": "private", "private": 1},
+        {"visibility": None, "private": True},
+        {"visibility": "internal", "internal": "true", "private": True},
+        {"private": True, "internal": "yes"},
+        {"private": False, "internal": None},
+    ],
+    ids=str,
+)
+def test_an_unrecognised_signal_voids_the_record_whatever_the_others_say(repo):
+    assert repository_visibility(_pr(repo)) is None
+
+
 def test_the_vocabulary_matches_the_stakes_vocabulary():
     from clagentic_loadout.acquire import contract
 

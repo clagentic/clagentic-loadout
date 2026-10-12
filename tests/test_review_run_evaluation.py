@@ -126,12 +126,60 @@ def test_an_unstated_repository_visibility_is_worst_case_and_the_outcome_says_so
     assert any("visibility" in reason for reason in document["verdict_reasons"])
 
 
-def test_a_public_repository_marks_every_path_exposed(env, capsys):
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"private": True, "visibility": "secret"},
+        {"private": "true"},
+        {"private": True, "internal": "yes"},
+    ],
+    ids=str,
+)
+def test_an_unrecognised_visibility_signal_is_worst_case_even_beside_private_true(
+    env, capsys, record
+):
     env.configure(carrier_mode="facts_mild")
 
-    _, payload = env.run(capsys=capsys, repo_record={"private": False})
+    _, payload = env.run(capsys=capsys, repo_record=record)
 
-    assert _document(payload)["repository_visibility"] == "public"
+    document = _document(payload)
+    assert document["verdict_outcome"] == "DEGRADED"
+    assert any("visibility" in reason for reason in document["verdict_reasons"])
+
+
+def test_a_stated_private_repository_does_not_degrade_the_outcome(env, capsys):
+    env.configure(carrier_mode="facts_mild")
+
+    _, payload = env.run(capsys=capsys, repo_record={"private": True})
+
+    document = _document(payload)
+    assert document["repository_visibility"] == "private"
+    assert document["verdict_outcome"] == "CLEAN"
+
+
+def test_a_public_repository_marks_every_path_exposed(env, capsys):
+    env.configure(carrier_mode="facts_serious")
+
+    _, payload = env.run(capsys=capsys, repo_record={"private": False})
+    document = _document(payload)
+    assert document["repository_visibility"] == "public"
+    capsys.readouterr()
+
+    review_cli.main(
+        [
+            "evaluate", "--findings", payload["findings_file"], "--base", env.base_sha,
+            "--head", HEAD_SHA, "--visibility", document["repository_visibility"],
+            "--repo-path", str(env.repo),
+        ],
+        config_root=env.cfg,
+    )
+
+    verdict = json.loads(capsys.readouterr().out)
+    evaluated = verdict["blocking"] + verdict["advisory"]
+    assert len(evaluated) == len(document["findings"]) > 0
+    for finding in evaluated:
+        assert finding["stakes"]["exposure"] == "exposed"
+        assert finding["stakes"]["exposure_source"] == "public repository"
 
 
 def test_a_base_revision_that_cannot_be_read_is_degraded(env, capsys):

@@ -148,20 +148,32 @@ def repository_visibility(pr_info: dict) -> str | None:
     Non-public is a claim that can lower a verdict, so it is returned only when
     every signal the record carries says non-public and at least one is present.
     Any signal that says public wins, and a record with no recognisable signal,
-    or no record at all, returns None."""
+    or no record at all, returns None. A signal that is present but unrecognised
+    (an unknown ``visibility`` value, or a ``private``/``internal`` field that
+    is not a Boolean) makes the whole record untrustworthy: None, whatever the
+    other signals say."""
     base = pr_info.get("base")
     repo = base.get("repo") if isinstance(base, dict) else None
     if not isinstance(repo, dict):
         return None
     signals: list[str] = []
-    named = repo.get("visibility")
-    if isinstance(named, str) and named in (VISIBILITY_PUBLIC, *_NON_PUBLIC):
+    if "visibility" in repo:
+        named = repo["visibility"]
+        if not (isinstance(named, str) and named in (VISIBILITY_PUBLIC, *_NON_PUBLIC)):
+            return None
         signals.append(named)
-    private = repo.get("private")
-    if private is True:
-        signals.append(VISIBILITY_INTERNAL if repo.get("internal") is True else VISIBILITY_PRIVATE)
-    elif private is False:
-        signals.append(VISIBILITY_PUBLIC)
+    if "internal" in repo and not isinstance(repo["internal"], bool):
+        return None
+    if "private" in repo:
+        private = repo["private"]
+        if not isinstance(private, bool):
+            return None
+        if private:
+            signals.append(
+                VISIBILITY_INTERNAL if repo.get("internal") is True else VISIBILITY_PRIVATE
+            )
+        else:
+            signals.append(VISIBILITY_PUBLIC)
     if not signals:
         return None
     if VISIBILITY_PUBLIC in signals:

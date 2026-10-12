@@ -126,20 +126,26 @@ def test_an_outcome_stated_on_an_old_version_does_not_count_as_evaluated():
     assert state_from_fence(forged).evaluated is False
 
 
-def test_a_fence_carrying_an_unrecognised_outcome_is_not_evaluated():
-    fence = {
+def _valid_v3_fence(**overrides) -> dict:
+    return {
         "reviewer": "r", "review_status": "clean", "head_sha": HEAD, "pr_number": 5,
-        "fence_schema_version": 3, "verdict_outcome": "MAYBE",
+        "fence_schema_version": 3, **_evaluation(verdict_outcome="CLEAN", verdict_reasons=[]),
+        **overrides,
     }
+
+
+def test_the_otherwise_valid_version_three_fence_is_evaluated():
+    assert state_from_fence(_valid_v3_fence()).evaluated is True
+
+
+def test_a_fence_carrying_an_unrecognised_outcome_is_not_evaluated():
+    fence = _valid_v3_fence(verdict_outcome="MAYBE")
 
     assert state_from_fence(fence).evaluated is False
 
 
 def test_the_schema_refuses_an_outcome_outside_the_vocabulary():
-    raw = json.dumps(
-        {"reviewer": "r", "review_status": "clean", "head_sha": HEAD, "pr_number": 5,
-         "fence_schema_version": 3, "verdict_outcome": "MAYBE"}
-    )
+    raw = json.dumps(_valid_v3_fence(verdict_outcome="MAYBE"))
 
     with pytest.raises(VerdictMalformedError):
         parse_verdict_block(f"```review-result\n{raw}\n```")
