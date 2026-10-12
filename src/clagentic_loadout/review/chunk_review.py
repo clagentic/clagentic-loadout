@@ -3,7 +3,8 @@
 Policy, in one place:
 
   * The prompt carries the review-only preamble, the rulebook, the chunk, and
-    (LAST) the output contract.
+    (LAST) the output contract. The reply states facts per finding and never a
+    severity; a severity in a reply is discarded (see review.findings_contract).
   * The carrier runs first. An absent carrier (MODEL_UNAVAILABLE) hands THIS
     chunk to the configured fallback; every chunk gets that treatment, so a
     host without the carrier still reviews every chunk. A carrier that is up
@@ -241,6 +242,7 @@ def _run_one_engine(
         stderr_excerpt=reply_result.stderr_excerpt,
         findings=parsed.findings,
         resolved_ids=parsed.resolved,
+        ignored_severity=parsed.ignored_severity,
     )
     return record
 
