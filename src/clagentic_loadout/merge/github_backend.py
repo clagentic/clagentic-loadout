@@ -61,7 +61,12 @@ from __future__ import annotations
 import urllib.error
 from typing import Any
 
-from clagentic_loadout.merge.ci_status import CiStatusResult
+from clagentic_loadout.merge.ci_payload import (
+    CheckRunsPage,
+    parse_github_check_runs_page,
+    parse_github_combined_status,
+)
+from clagentic_loadout.merge.ci_status import CheckRun, CiStatusResult
 from clagentic_loadout.merge.errors import (
     GateFactUnavailableError,
     MergeExecutionError,
@@ -330,10 +335,13 @@ def fetch_ci_status(
     forgejo_backend.fetch_ci_status — see that function's docstring), this
     check-runs endpoint (`/commits/{sha}/check-runs`) IS already HEAD-scoped
     — it reports check runs for this exact commit, not the whole repo — so
-    no equivalent transport bug exists on the GitHub side. The gate-level
-    fix (merge.ci_status.CiStatusResult.is_empty keying only on
-    status_count, never run_count) still applies here for defense in depth:
-    run_count is treated as diagnostic-only regardless of platform.
+    no equivalent transport bug exists on the GitHub side. The parsed
+    check-runs (name, status, conclusion, suite) are returned in full and
+    judged by merge.ci_status: GitHub Actions posts ONLY check-runs, so the
+    legacy combined status is empty for such a repo and cannot stand in for
+    them. Every response is interpreted by merge.ci_payload's strict parsers;
+    this function only fetches and pages. Runs are read page by page; a list that cannot be read completely raises rather
+    than being judged truncated.
 
     *head_sha* is validated as a full 40-char hex SHA BEFORE it is
     interpolated into either request path (defense-in-depth: it is always
@@ -363,11 +371,8 @@ def fetch_ci_status(
         raise GateFactUnavailableError(
             f"cannot read CI status for {head_sha!r} in {owner}/{repo}: HTTP {status_code}"
         )
-    combined_state = (
-        (status_body.get("state") or "").lower() if isinstance(status_body, dict) else ""
-    )
-    raw_statuses = status_body.get("statuses") if isinstance(status_body, dict) else None
-    status_count = len(raw_statuses) if isinstance(raw_statuses, list) else 0
+    where = f"{owner}/{repo}"
+    combined = parse_github_combined_status(status_body, where=where, head_sha=head_sha)
 
     check_runs_url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
     try:
@@ -380,20 +385,80 @@ def fetch_ci_status(
         raise GateFactUnavailableError(
             f"cannot read check-runs for {head_sha!r} in {owner}/{repo}: HTTP {runs_code}"
         )
-    run_count = runs_body.get("total_count", 0) if isinstance(runs_body, dict) else 0
-    if not isinstance(run_count, int):
-        run_count = 0
-
-    raw_states = tuple(
-        (s.get("state", "") for s in raw_statuses if isinstance(s, dict))
-    ) if isinstance(raw_statuses, list) else ()
+    first_page = parse_github_check_runs_page(runs_body, where=where, head_sha=head_sha)
+    check_runs = _read_check_runs(
+        first_page, check_runs_url, owner, repo, head_sha, token=token, opener=opener
+    )
 
     return CiStatusResult(
-        combined_state=combined_state,
-        status_count=status_count,
-        run_count=run_count,
-        raw_states=raw_states,
+        combined_state=combined.state,
+        statuses=combined.statuses,
+        check_runs=check_runs,
     )
+
+
+#: GitHub's default check-runs page size; later pages ask for it explicitly so
+#: the page boundaries match the first (unparameterized) request.
+_CHECK_RUNS_PAGE_SIZE = 30
+
+#: Upper bound on check-run pages walked for one commit; exceeding it fails
+#: closed rather than judging a truncated list.
+_CHECK_RUNS_MAX_PAGES = 50
+
+
+def _read_check_runs(
+    first_page: CheckRunsPage,
+    check_runs_url: str,
+    owner: str,
+    repo: str,
+    head_sha: str,
+    *,
+    token: str,
+    opener=None,
+) -> tuple[CheckRun, ...]:
+    """Every check-run at the head, walking further pages when the first page
+    holds fewer runs than the reported total. A page that fails, or a walk that
+    stops advancing before the total is reached, raises
+    GateFactUnavailableError: a truncated list must never be judged."""
+    where = f"{owner}/{repo}"
+    total_count = first_page.total_count
+    collected = list(first_page.check_runs)
+    seen_ids = {run.run_id for run in collected}
+    latest = first_page.check_runs
+    page = 1
+    while latest and len(collected) < total_count:
+        page += 1
+        if page > _CHECK_RUNS_MAX_PAGES:
+            raise GateFactUnavailableError(
+                f"check-runs for {head_sha!r} in {owner}/{repo} exceed "
+                f"{_CHECK_RUNS_MAX_PAGES} pages; refusing to judge a truncated list"
+            )
+        url = f"{check_runs_url}?per_page={_CHECK_RUNS_PAGE_SIZE}&page={page}"
+        try:
+            code, body = _github_request("GET", url, token, opener=opener)
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            raise GateFactUnavailableError(
+                f"cannot read check-runs page {page} for {head_sha!r} in {owner}/{repo}: {exc}"
+            ) from exc
+        if code != 200:
+            raise GateFactUnavailableError(
+                f"cannot read check-runs page {page} for {head_sha!r} in {owner}/{repo}: HTTP {code}"
+            )
+        latest = parse_github_check_runs_page(body, where=where, head_sha=head_sha).check_runs
+        fresh = [run for run in latest if run.run_id not in seen_ids]
+        if latest and not fresh:
+            raise GateFactUnavailableError(
+                f"check-runs pagination stalled at page {page} for {head_sha!r} in "
+                f"{owner}/{repo}; refusing to judge a truncated list"
+            )
+        seen_ids.update(run.run_id for run in fresh)
+        collected.extend(fresh)
+    if len(collected) < total_count:
+        raise GateFactUnavailableError(
+            f"check-runs for {head_sha!r} in {owner}/{repo}: read {len(collected)} of "
+            f"{total_count}; refusing to judge a truncated list"
+        )
+    return tuple(collected)
 
 
 def _first_line(message: str) -> str:

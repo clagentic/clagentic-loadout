@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.verdict import build_verdict_block
+from tests._support.ci_gate import check_run
 from tests._support.fakes import paged
 
 _FULL_SHA = "a" * 40
@@ -268,7 +269,8 @@ def _github_opener(
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": ci_state, "statuses": ci_statuses})
         if method == "GET" and url.endswith("/check-runs"):
-            return _json_resp(200, {"total_count": ci_run_total_count})
+            runs = [check_run(f"run-{i}", run_id=i + 1, suite_id=1) for i in range(ci_run_total_count)]
+            return _json_resp(200, {"total_count": ci_run_total_count, "check_runs": runs})
         if method == "GET" and "/compare/" in url:
             # lr-835c57: see _forgejo_opener's identical rationale above.
             return _json_resp(200, {"commits": [], "ahead_by": 0})

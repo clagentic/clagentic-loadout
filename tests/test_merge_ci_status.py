@@ -11,34 +11,45 @@ Coverage:
   - A non-empty result with NO combined_state string (evidence present but
     no rollup state reported) still refuses — never silently treated as a
     pass just because the state string itself is empty.
-  - is_empty is driven ONLY off status_count (lr-2d2293) — a non-zero
-    run_count (diagnostic-only, possibly repo-global e.g. Forgejo mirror-
-    sync/historical Actions tasks) never makes a HEAD with zero commit
-    statuses look non-empty. This is the mirror-runner negative control:
-    the exact false-refusal shape from session d5aee241 must PASS.
+  - is_empty is driven ONLY off the HEAD-scoped statuses and check-runs
+    (lr-2d2293); no repo-global count is carried, so the mirror-runner shape
+    (zero statuses at head) stays empty and passes.
+  - CiStatusResult has no defaults: a no-CI fact can only be built by naming
+    every field, so an omitted field is a TypeError, never an empty pass.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from clagentic_loadout.merge.ci_status import CiStatusResult, check_ci_status
+from clagentic_loadout.merge.ci_status import CiStatusResult, StatusEntry, check_ci_status
 from clagentic_loadout.merge.errors import CiStatusFailedError
+
+
+def _result(state: str = "", statuses: int = 0) -> CiStatusResult:
+    entries = tuple(StatusEntry(context=f"ci/{i}", state=state) for i in range(statuses))
+    return CiStatusResult(combined_state=state, statuses=entries, check_runs=())
 
 
 class TestIsEmpty:
     def test_zero_statuses_and_zero_runs_is_empty(self):
-        assert CiStatusResult(status_count=0, run_count=0).is_empty is True
+        assert _result().is_empty is True
 
-    def test_nonzero_status_count_is_not_empty(self):
-        assert CiStatusResult(status_count=1, run_count=0).is_empty is False
+    def test_a_status_entry_is_not_empty(self):
+        result = _result("success", statuses=1)
+        assert result.is_empty is False
+        assert result.status_count == 1
 
-    def test_nonzero_run_count_alone_is_still_empty(self):
-        # lr-2d2293: run_count is diagnostic-only (possibly repo-global,
-        # e.g. Forgejo mirror-sync/historical Actions tasks) and must NEVER
-        # override a zero HEAD-scoped status_count. This is the exact
-        # mirror-runner false-refusal shape from session d5aee241.
-        assert CiStatusResult(status_count=0, run_count=1).is_empty is True
+    def test_constructing_without_arguments_raises(self):
+        with pytest.raises(TypeError):
+            CiStatusResult()  # type: ignore[call-arg]
+
+    @pytest.mark.parametrize("missing", ["combined_state", "statuses", "check_runs"])
+    def test_every_gate_read_field_is_required(self, missing):
+        fields = {"combined_state": "", "statuses": (), "check_runs": ()}
+        del fields[missing]
+        with pytest.raises(TypeError, match=missing):
+            CiStatusResult(**fields)  # type: ignore[arg-type]
 
 
 class TestCheckCiStatusEmptyPasses:
@@ -47,30 +58,19 @@ class TestCheckCiStatusEmptyPasses:
     runners wired up by design, lr-368c)."""
 
     def test_empty_result_passes(self):
-        result = CiStatusResult(combined_state="", status_count=0, run_count=0)
-        check_ci_status(result, 49, "clagentic", "clagentic-loadout")  # no raise
+        check_ci_status(_result(), 49, "clagentic", "clagentic-loadout")  # no raise
 
-    def test_empty_combined_state_string_with_zero_counts_passes(self):
-        # Mirrors the real PR #49 @ 6a8fcbd observation: Forgejo's combined
-        # status endpoint returned an empty state, zero commit statuses.
-        result = CiStatusResult(combined_state="", status_count=0, run_count=0, raw_states=())
-        check_ci_status(result, 49, "clagentic", "clagentic-loadout")  # no raise
-
-    def test_mirror_runner_negative_control_zero_status_nonzero_repo_global_runs_passes(self):
+    def test_mirror_runner_negative_control_zero_status_passes(self):
         # lr-2d2293: a repo with a mirror runner but NO CI runner has zero
-        # commit statuses at HEAD (no CI ran -- correct) but a non-zero
-        # repo-global run_count (e.g. Forgejo /actions/tasks total_count
-        # counting mirror-sync + historical tasks for the whole repo, not
-        # this PR's HEAD). This must PASS, not refuse -- the live
-        # false-refusal this task fixes (session d5aee241).
-        result = CiStatusResult(combined_state="", status_count=0, run_count=7)
-        check_ci_status(result, 49, "clagentic", "clagentic-loadout")  # no raise
+        # commit statuses at HEAD. A repo-global task count (Forgejo
+        # /actions/tasks) is not carried at all, so it cannot make this look
+        # non-empty -- the live false-refusal shape from session d5aee241.
+        check_ci_status(_result(), 49, "clagentic", "clagentic-loadout")  # no raise
 
 
 class TestCheckCiStatusSuccessPasses:
     def test_success_state_passes(self):
-        result = CiStatusResult(combined_state="success", status_count=1, run_count=1)
-        check_ci_status(result, 1, "owner", "repo")  # no raise
+        check_ci_status(_result("success", statuses=1), 1, "owner", "repo")  # no raise
 
 
 class TestCheckCiStatusNonEmptyFailingRefuses:
@@ -79,31 +79,32 @@ class TestCheckCiStatusNonEmptyFailingRefuses:
 
     @pytest.mark.parametrize("state", ["failure", "error", "cancelled", "timed_out"])
     def test_failure_states_refuse(self, state):
-        result = CiStatusResult(combined_state=state, status_count=2, run_count=2)
         with pytest.raises(CiStatusFailedError) as exc_info:
-            check_ci_status(result, 7, "owner", "repo")
+            check_ci_status(_result(state, statuses=2), 7, "owner", "repo")
         assert state in str(exc_info.value)
         assert "PR #7" in str(exc_info.value)
 
     @pytest.mark.parametrize("state", ["pending", "in_progress", "queued", "waiting"])
     def test_non_terminal_states_refuse(self, state):
-        result = CiStatusResult(combined_state=state, status_count=1, run_count=1)
         with pytest.raises(CiStatusFailedError) as exc_info:
-            check_ci_status(result, 7, "owner", "repo")
+            check_ci_status(_result(state, statuses=1), 7, "owner", "repo")
         assert state in str(exc_info.value)
 
     def test_unrecognized_nonempty_state_refuses(self):
-        result = CiStatusResult(combined_state="something-weird", status_count=1, run_count=0)
         with pytest.raises(CiStatusFailedError) as exc_info:
-            check_ci_status(result, 7, "owner", "repo")
+            check_ci_status(_result("something-weird", statuses=1), 7, "owner", "repo")
         assert "something-weird" in str(exc_info.value)
 
     def test_nonempty_status_count_with_no_combined_state_string_refuses(self):
         # HEAD-scoped evidence exists (a real commit-status entry was seen)
         # but the combined state string itself is empty -- never silently
         # treated as a pass just because the label is blank. Distinct from
-        # the mirror-runner case (status_count=0) which must pass.
-        result = CiStatusResult(combined_state="", status_count=1, run_count=0)
+        # the mirror-runner case (zero statuses) which must pass.
+        result = CiStatusResult(
+            combined_state="",
+            statuses=(StatusEntry(context="ci/0", state="success"),),
+            check_runs=(),
+        )
         with pytest.raises(CiStatusFailedError):
             check_ci_status(result, 7, "owner", "repo")
 
@@ -112,19 +113,16 @@ class TestCheckCiStatusNonEmptyFailingRefuses:
         # (HEAD-scoped commit statuses present) and the check genuinely
         # failed must still refuse -- the HEAD-scoping fix must not weaken
         # the gate for repos that DO have CI.
-        result = CiStatusResult(combined_state="failure", status_count=1, run_count=1)
         with pytest.raises(CiStatusFailedError) as exc_info:
-            check_ci_status(result, 7, "owner", "repo")
+            check_ci_status(_result("failure", statuses=1), 7, "owner", "repo")
         assert "failure" in str(exc_info.value)
 
 
 class TestErrorMessageReportsResolvedValues:
     def test_message_names_counts_and_state(self):
-        result = CiStatusResult(combined_state="failure", status_count=3, run_count=2)
         with pytest.raises(CiStatusFailedError) as exc_info:
-            check_ci_status(result, 42, "some-owner", "some-repo")
+            check_ci_status(_result("failure", statuses=3), 42, "some-owner", "some-repo")
         msg = str(exc_info.value)
         assert "3" in msg
-        assert "2" in msg
         assert "failure" in msg
         assert "some-owner/some-repo" in msg

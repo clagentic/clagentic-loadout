@@ -17,6 +17,13 @@ or drop its pre_checks. The base commit is not something the PR controls.
   - `required_scanners` maps a reviewer role to scanner names a clean verdict
     from that role must record, and must not report as failed.
   - `pre_checks` are the commands run against the merge result before merging.
+  - `required_ci_checks` names the CI checks that gate the merge and `ci_strict`
+    refuses a head with no CI evidence (see merge.ci_status). The two keys fail
+    independently, each with a warning: a `required_ci_checks` that cannot be
+    validated falls back to the default CI gate (every check-run at the head
+    must be green), so the merge that lands the fix is never blocked by the
+    broken file; a `ci_strict` that cannot be validated is read as strict, so a
+    broken file never relaxes the gate.
 
 Keys that are machine-local (`post_merge_steps`, host paths, the sync knobs)
 stay in the gitignored deployment file. A gate key found in that file while the
@@ -99,11 +106,15 @@ from typing import Iterable
 
 from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
 from clagentic_loadout.merge.gate_config import (
+    CONFIG_KEY_CI_STRICT,
+    CONFIG_KEY_REQUIRED_CI_CHECKS,
     CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
     CONFIG_KEY_REQUIRED_SCANNERS,
     InvalidMergeGateConfigError,
+    ci_strict_from_section,
     parse_tracked_merge_section,
     read_merge_section,
+    required_ci_checks_from_section,
     reviewer_gate_from_section,
 )
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
@@ -117,7 +128,13 @@ from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, resolve_re
 
 #: Keys that belong to the tracked gate file and are never honoured from the
 #: per-deployment working-tree file.
-GATE_KEYS = (CONFIG_KEY_REQUIRED_REVIEWER_ROLES, CONFIG_KEY_REQUIRED_SCANNERS, CONFIG_KEY_PRE_CHECKS)
+GATE_KEYS = (
+    CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
+    CONFIG_KEY_REQUIRED_SCANNERS,
+    CONFIG_KEY_PRE_CHECKS,
+    CONFIG_KEY_REQUIRED_CI_CHECKS,
+    CONFIG_KEY_CI_STRICT,
+)
 
 
 @dataclass(frozen=True)
@@ -135,6 +152,11 @@ class RepoGate:
     #: be refused (unless pre_checks are explicitly skipped); it never means
     #: "no checks".
     pre_checks_error: str = ""
+    #: CI check names that gate the merge (see merge.ci_status). Empty: every
+    #: check-run at the head gates.
+    required_ci_checks: tuple[str, ...] = ()
+    #: A head with no CI evidence refuses instead of passing.
+    ci_strict: bool = False
 
     def scanners_for(self, reviewer_name: str) -> tuple[str, ...]:
         return (self.required_scanners or {}).get(reviewer_name, ())
@@ -217,12 +239,40 @@ def gate_from_tracked_text(
         pre_checks = tuple(pre_checks_from_section(merge_section))
     except PostMergeConfigError as exc:
         pre_checks_error = f"{source}: pre_checks: {exc}"
+
+    ci_checks: tuple[str, ...] = ()
+    ci_strict = False
+    try:
+        ci_checks = required_ci_checks_from_section(source, merge_section)
+    except InvalidMergeGateConfigError as exc:
+        # Falls back to the default CI gate (every check-run at the head must be
+        # green) so the merge that lands the corrected file is never blocked by
+        # the broken one.
+        warnings = (
+            *warnings,
+            f"merge.required_ci_checks NOT ENFORCED -- the repo gate config could not "
+            f"be loaded, so the default CI gate applies (every check-run at the head "
+            f"must be green): {exc}",
+        )
+    try:
+        ci_strict = ci_strict_from_section(source, merge_section)
+    except InvalidMergeGateConfigError as exc:
+        # A value that cannot be read must never relax the gate, so a broken
+        # ci_strict means strict: a head with no CI evidence refuses.
+        ci_strict = True
+        warnings = (
+            *warnings,
+            f"merge.ci_strict is malformed, so strict CI applies (a head with no CI "
+            f"evidence refuses): {exc}",
+        )
     return RepoGate(
         reviewer_roles=roles,
         required_scanners=scanners,
         pre_checks=pre_checks,
         warnings=warnings,
         pre_checks_error=pre_checks_error,
+        required_ci_checks=ci_checks,
+        ci_strict=ci_strict,
     )
 
 

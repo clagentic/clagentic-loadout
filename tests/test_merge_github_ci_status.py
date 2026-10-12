@@ -25,6 +25,7 @@ import pytest
 
 from clagentic_loadout.merge import github_backend
 from clagentic_loadout.merge.errors import GateFactUnavailableError
+from tests._support.ci_gate import check_run
 
 _OWNER = "some-owner"
 _REPO = "some-repo"
@@ -77,17 +78,15 @@ class TestFetchCiStatusEmpty:
         assert result.is_empty is True
         assert result.combined_state == ""
         assert result.status_count == 0
-        assert result.run_count == 0
+        assert result.check_runs == ()
 
-    def test_missing_state_field_defaults_empty(self):
+    def test_empty_objects_are_unreadable_not_empty(self):
         opener = _opener_for(
             _json_resp(200, {}),
             _json_resp(200, {"total_count": 0}),
         )
-        result = github_backend.fetch_ci_status(
-            _OWNER, _REPO, _HEAD_SHA, token="tok", opener=opener
-        )
-        assert result.is_empty is True
+        with pytest.raises(GateFactUnavailableError, match=_HEAD_SHA):
+            github_backend.fetch_ci_status(_OWNER, _REPO, _HEAD_SHA, token="tok", opener=opener)
 
 
 class TestFetchCiStatusNonEmpty:
@@ -97,7 +96,7 @@ class TestFetchCiStatusNonEmpty:
                 200,
                 {"state": "success", "statuses": [{"state": "success", "context": "ci"}]},
             ),
-            _json_resp(200, {"total_count": 1}),
+            _json_resp(200, {"total_count": 1, "check_runs": [check_run("ci", run_id=1, suite_id=2)]}),
         )
         result = github_backend.fetch_ci_status(
             _OWNER, _REPO, _HEAD_SHA, token="tok", opener=opener
@@ -105,12 +104,12 @@ class TestFetchCiStatusNonEmpty:
         assert result.is_empty is False
         assert result.combined_state == "success"
         assert result.status_count == 1
-        assert result.run_count == 1
+        assert len(result.check_runs) == 1
 
     def test_failure_state_reported_verbatim_lowercased(self):
         opener = _opener_for(
-            _json_resp(200, {"state": "FAILURE", "statuses": [{"state": "failure"}]}),
-            _json_resp(200, {"total_count": 1}),
+            _json_resp(200, {"state": "FAILURE", "statuses": [{"state": "failure", "context": "ci"}]}),
+            _json_resp(200, {"total_count": 1, "check_runs": [check_run("ci", run_id=1, suite_id=2)]}),
         )
         result = github_backend.fetch_ci_status(
             _OWNER, _REPO, _HEAD_SHA, token="tok", opener=opener

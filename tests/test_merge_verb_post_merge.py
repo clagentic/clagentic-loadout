@@ -318,7 +318,7 @@ def _make_github_opener(*, pr_info=None, files=None, comments=None, merged_sha=N
         if method == "GET" and url.endswith("/status"):
             return _json_resp(200, {"state": "", "statuses": []})
         if method == "GET" and url.endswith("/check-runs"):
-            return _json_resp(200, {"total_count": 0})
+            return _json_resp(200, {"total_count": 0, "check_runs": []})
         if method == "GET" and "/compare/" in url:
             return _json_resp(200, {"commits": [], "ahead_by": 0})
         if method == "GET" and url.endswith(f"/pulls/{1}"):

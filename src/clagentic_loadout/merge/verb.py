@@ -90,15 +90,22 @@ documented step ordering):
      --skip-commit-check bypass mirrors --skip-title-check exactly (logged
      when used). See that module's docstring for the full rationale.
   8. CI-status gate (merge.ci_status, lr-afba CI-status-gate slice) — reads
-     CI evidence at the PR's HEAD from the resolved backend. AN EMPTY
-     RESULT (zero commit-status entries AND zero check/workflow runs) IS AN
-     EXPLICIT PASS, not a fall-through: many repos (this one included, by
-     design — lr-368c, "runner explicitly out of scope") have no CI runner
-     wired up at all, and a gate that fails closed on "no CI data" would
-     falsely refuse every merge in such a repo. A NON-EMPTY result gates on
-     the real combined state: "success" passes; any other non-empty state
-     (failure, error, pending, or an unrecognized value) refuses, reporting
-     the actual state and evidence counts seen — never a collapsed guess.
+     CI evidence at the PR's HEAD from the resolved backend: commit statuses
+     AND, on GitHub, check-runs (GitHub Actions posts only check-runs, so a
+     statuses-only read passed a head whose every check-run had failed).
+     AN EMPTY RESULT (zero commit-status entries AND zero
+     check-runs) IS AN EXPLICIT PASS, reported as "no CI found at head", not
+     a fall-through: many repos (this one included, by design — lr-368c,
+     "runner explicitly out of scope") have no CI runner wired up at all, and
+     a gate that fails closed on "no CI data" would falsely refuse every
+     merge in such a repo. `merge: ci_strict: true` / --ci-strict turns that
+     pass into a refusal. A NON-EMPTY result gates on the real evidence:
+     statuses need a "success" combined state, and each check name needs a
+     green run (pending, failing or unrecognized refuses), reporting the
+     failing check, its conclusion and the head SHA — never a collapsed
+     guess. `merge: required_ci_checks` (tracked gate file at the PR base
+     commit) / --required-ci-check narrow which names gate. The merge result
+     records which source answered (`ci_source`).
      See merge.ci_status's module docstring for the full decision and
      merge.forgejo_backend.fetch_ci_status / merge.github_backend.
      fetch_ci_status for the fail-closed fetch contract (unreachable/non-200
@@ -966,6 +973,26 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "lift merge.pre_checks (use --skip-pre-checks).",
     )
     parser.add_argument(
+        "--required-ci-check",
+        action="append",
+        dest="required_ci_checks",
+        default=None,
+        help="A CI check name (check-run name or commit-status context) that "
+        "must have succeeded at the PR head (repeatable). Added to the repo's "
+        "merge.required_ci_checks from the tracked gate file at the PR base "
+        "commit. When no name is configured by either, every check-run at the "
+        "head must be green.",
+    )
+    parser.add_argument(
+        "--ci-strict",
+        action="store_true",
+        default=False,
+        dest="ci_strict",
+        help="Refuse when the PR head has no check-runs and no commit statuses "
+        "('no CI found at head'). Default: such a head passes, so repos with no "
+        "CI runner still merge. The repo's merge.ci_strict has the same effect.",
+    )
+    parser.add_argument(
         "--max-changed-files",
         type=int,
         default=diff_scope.DEFAULT_MAX_CHANGED_FILES,
@@ -1128,10 +1155,15 @@ def _describe_ci_disposition(ci_result: ci_status.CiStatusResult) -> str:
     drift apart from restating the same CiStatusResult two different ways.
     """
     if ci_result.is_empty:
-        return "no-runner-by-design (0 commit-status entries at HEAD)"
+        return (
+            "no CI found at head (no-runner-by-design: 0 commit-status entries, "
+            "0 check-runs; source=none)"
+        )
     return (
         f"combined_state={ci_result.combined_state!r} "
-        f"({ci_result.status_count} status(es), {ci_result.run_count} run(s))"
+        f"({ci_result.status_count} status(es), "
+        f"{len(ci_result.check_runs)} run(s); "
+        f"source={ci_result.source})"
     )
 
 
@@ -1626,16 +1658,27 @@ def _run(
     # mirror-sync/historical Actions tasks) is explicitly NOT CI evidence
     # and never overrides this (lr-2d2293). See merge.ci_status's module
     # docstring for the full decision.
+    #
+    # Check-runs (GitHub Actions) are judged alongside commit statuses. Which
+    # check names gate, and whether a head with no CI refuses, come from the
+    # tracked gate file at the PR BASE commit (repo_gate) plus the caller's own
+    # flags; nothing read from the PR head can relax them.
+    required_ci_checks = tuple(
+        dict.fromkeys((*repo_gate.required_ci_checks, *(args.required_ci_checks or ())))
+    )
+    ci_strict = repo_gate.ci_strict or args.ci_strict
     try:
         ci_result = backend.fetch_ci_status(owner, repo, current_head_sha)
     except GateFactUnavailableError as exc:
         _fail(str(exc), code=EXIT_GATE_FACT_UNAVAILABLE)
     ci_disposition = _describe_ci_disposition(ci_result)
+    ci_source = ci_result.source
     if ci_result.is_empty:
         print(
-            f"merge: CI-status gate -- no HEAD-scoped CI evidence for PR "
-            f"#{args.pr_number} in {owner}/{repo} (0 commit-status entries "
-            f"at HEAD); treating as PASS (no-runner-by-design).",
+            f"merge: CI-status gate -- no CI found at head {current_head_sha} for PR "
+            f"#{args.pr_number} in {owner}/{repo} (0 commit-status entries, 0 "
+            f"check-runs); "
+            + ("strict CI is enabled." if ci_strict else "treating as PASS (no-runner-by-design)."),
             file=sys.stderr,
         )
     else:
@@ -1645,7 +1688,12 @@ def _run(
             file=sys.stderr,
         )
     try:
-        ci_status.check_ci_status(ci_result, args.pr_number, owner, repo)
+        ci_status.check_ci_status(
+            ci_result, args.pr_number, owner, repo,
+            head_sha=current_head_sha,
+            required_checks=required_ci_checks,
+            strict=ci_strict,
+        )
     except CiStatusFailedError as exc:
         _fail(str(exc), code=EXIT_CI_STATUS_FAILED)
 
@@ -1868,6 +1916,7 @@ def _run(
     print(json.dumps({
         "pr_number": args.pr_number, "owner": owner, "repo": repo,
         READBACK_ENVELOPE_KEY: merge_readback.to_dict(),
+        "ci_source": ci_source,
         **({"repo_gate_ignored": list(repo_gate.reviewer_roles)} if args.ignore_repo_gate else {}),
     }))
 
