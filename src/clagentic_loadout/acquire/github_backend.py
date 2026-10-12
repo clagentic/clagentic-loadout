@@ -37,7 +37,13 @@ import json
 import urllib.error
 import urllib.parse
 
-from clagentic_loadout.acquire.contract import AcquiredPr, ChangedFile, RangeDiff, pr_text
+from clagentic_loadout.acquire.contract import (
+    AcquiredPr,
+    ChangedFile,
+    RangeDiff,
+    pr_text,
+    repository_visibility,
+)
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport.github_client import GITHUB_API_BASE, request_json
 from clagentic_loadout.transport.redirect_guard import no_redirect_opener
@@ -220,6 +226,7 @@ def fetch_pr_content(
         changed_files=tuple(changed_files),
         title=pr_text(pr_info, "title"),
         body=pr_text(pr_info, "body"),
+        repo_visibility=repository_visibility(pr_info),
     )
 
 

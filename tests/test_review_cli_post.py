@@ -55,7 +55,10 @@ def test_run_then_post_is_two_commands_and_lands_a_verified_fence(env, tmp_path,
     assert payload["verified_by_login"] == "reviewer"
     assert payload["verdict_block_verified"] is True
     posted = env.opener_state["posted_body"]
-    assert "a.py:1 [R1] (nit) stub finding" in posted
+    # The stub states no facts, so the finding resolves to the worst case: it
+    # blocks, and the verdict says which inputs are missing.
+    assert "- a.py:1 [R1] stub finding" in posted
+    assert "verdict: DEGRADED" in posted
     assert "```review-result" in posted
     assert f'"head_sha": "{HEAD_SHA}"' in posted
     assert '"reviewer": "reviewer"' in posted
@@ -127,7 +130,7 @@ def test_bare_findings_array_needs_a_head_sha(env, tmp_path, capsys):
 
 
 def test_a_failing_review_post_path_is_reported_as_post_failed(env, tmp_path, capsys, monkeypatch):
-    findings = _write_findings(tmp_path / "f.json", [])
+    findings = _write_findings(tmp_path / "f.json", [], policy_base_sha=env.base_sha)
     monkeypatch.setattr(review_cli.review_post_verb, "main", lambda argv, **kwargs: 9)
 
     code, payload = env.post("--findings", str(findings), "--status", "clean", capsys=capsys)
@@ -216,7 +219,7 @@ def test_a_padded_repo_argument_still_matches_the_findings_file(env, tmp_path, c
 def test_an_unverified_landing_is_post_failed_not_posted(
     env, tmp_path, capsys, monkeypatch, inner
 ):
-    findings = _write_findings(tmp_path / "f.json", [])
+    findings = _write_findings(tmp_path / "f.json", [], policy_base_sha=env.base_sha)
 
     def fake_main(argv, **kwargs):
         print(json.dumps(inner))
@@ -233,7 +236,7 @@ def test_an_unverified_landing_is_post_failed_not_posted(
 def test_unparseable_review_post_output_is_post_failed_not_posted(
     env, tmp_path, capsys, monkeypatch
 ):
-    findings = _write_findings(tmp_path / "f.json", [])
+    findings = _write_findings(tmp_path / "f.json", [], policy_base_sha=env.base_sha)
 
     def fake_main(argv, **kwargs):
         print("this is not json")
@@ -248,7 +251,7 @@ def test_unparseable_review_post_output_is_post_failed_not_posted(
 
 
 def test_failed_review_post_keeps_its_stdout_for_diagnosis(env, tmp_path, capsys, monkeypatch):
-    findings = _write_findings(tmp_path / "f.json", [])
+    findings = _write_findings(tmp_path / "f.json", [], policy_base_sha=env.base_sha)
 
     def fake_main(argv, **kwargs):
         print("inner-failure-detail")
@@ -266,7 +269,7 @@ def test_failed_review_post_keeps_its_stdout_for_diagnosis(env, tmp_path, capsys
 
 
 def test_post_passes_the_verdict_route_flags_to_review_post(env, tmp_path, capsys, monkeypatch):
-    findings = _write_findings(tmp_path / "f.json", [])
+    findings = _write_findings(tmp_path / "f.json", [], policy_base_sha=env.base_sha)
     seen: dict = {}
 
     def fake_main(argv, **kwargs):
@@ -417,7 +420,7 @@ def test_a_head_that_moves_before_the_post_is_refused_on_forgejo_too(
 def test_a_review_post_path_that_exits_directly_still_reports_post_failed(
     env, tmp_path, capsys, monkeypatch
 ):
-    findings = _write_findings(tmp_path / "f.json", [])
+    findings = _write_findings(tmp_path / "f.json", [], policy_base_sha=env.base_sha)
 
     def exiting_main(argv, **kwargs):
         print("inner-exit-detail")

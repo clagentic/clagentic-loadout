@@ -22,7 +22,7 @@ def env(tmp_path, monkeypatch) -> Env:
     return environment
 
 
-def _findings(tmp_path):
+def _findings(tmp_path, base_sha=None):
     path = tmp_path / "f.json"
     path.write_text(
         json.dumps(
@@ -31,6 +31,7 @@ def _findings(tmp_path):
                 "repo": "some-repo",
                 "pr_number": 42,
                 "head_sha": HEAD_SHA,
+                "policy_base_sha": base_sha,
                 "findings": [],
             }
         ),
@@ -51,7 +52,7 @@ def test_state_file_lands_inside_the_fence(env, tmp_path, capsys):
         "scanners_run": [{"scanner": "alpha", "status": "not_invoked", "reason": "judgment-only pass"}],
     }
     code, payload = env.post(
-        "--findings", str(_findings(tmp_path)), "--status", "clean",
+        "--findings", str(_findings(tmp_path, env.base_sha)), "--status", "clean",
         "--state-file", str(_state_file(tmp_path, state)), capsys=capsys,
     )
     assert code == 0
@@ -59,7 +60,9 @@ def test_state_file_lands_inside_the_fence(env, tmp_path, capsys):
     fence = parse_verdict_block(env.opener_state["posted_body"])
     assert fence["cleared_claims"] == state["cleared_claims"]
     assert fence["scanners_run"] == state["scanners_run"]
-    assert fence["fence_schema_version"] == 2
+    # The state fields need version 2; the computed verdict the post now always
+    # records raises the fence to the evaluated version.
+    assert fence["fence_schema_version"] == 3
     assert "guard added" not in env.opener_state["posted_body"].split("```review-result")[0]
 
 

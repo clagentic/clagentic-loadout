@@ -13,9 +13,11 @@ from pathlib import Path
 import yaml
 
 from clagentic_loadout.transport import attestation
+from tests._review_evaluate_support import commit_files, make_repo
 
 BASE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
+PRIVATE_REPO_RECORD = {"private": True}
 
 STUB_SCRIPT = textwrap.dedent(
     '''
@@ -37,8 +39,26 @@ STUB_SCRIPT = textwrap.dedent(
     array = json.dumps([{"file": path, "line": 1, "rule_id": "R1",
                          "severity": "nit", "message": "stub finding"}])
 
+    SERIOUS = {"category": "path_traversal", "reachable": "yes",
+               "attacker_precondition": "none",
+               "impact": {"confidentiality": "full", "integrity": "none", "availability": "none"},
+               "durability": "durable"}
+    MILD = {"category": "correctness", "reachable": "yes", "attacker_precondition": "none",
+            "impact": {"confidentiality": "none", "integrity": "none", "availability": "none"},
+            "durability": "durable"}
+
+    def with_facts(facts, **extra):
+        return json.dumps([{"file": path, "line": 1, "rule_id": "R1",
+                            "message": "stub finding", "facts": facts, **extra}])
+
     if mode == "array":
         print(array)
+    elif mode == "facts_serious":
+        print(with_facts(SERIOUS))
+    elif mode == "facts_mild":
+        print(with_facts(MILD))
+    elif mode == "facts_serious_with_severity":
+        print(with_facts(SERIOUS, severity="nit"))
     elif mode == "empty":
         print("[]")
     elif mode == "resolve_listed":
@@ -157,8 +177,10 @@ class Env:
         self.cfg = root / "cfg"
         self.stubs = root / "stubs"
         self.runs = root / "runs"
-        self.repo = root / "repo"
-        self.repo.mkdir()
+        # A real repository with one commit: policy is read from the PR's base
+        # revision, so the fake host reports that commit as the base.
+        self.repo = make_repo(root)
+        self.base_sha = commit_files(self.repo, {"README.md": "base\n"})
         self.diff = make_diff({"a.py": 4})
         self.token_provider = RecordingTokenProvider()
         self.opener_state: dict = {}
@@ -181,7 +203,11 @@ class Env:
                 "--pr", "42", "--platform", "github", "--repo-path", str(self.repo), *extra,
             ],
             token_provider=self.token_provider,
-            opener=github_opener(diff=self.diff, state=self.opener_state, **opener_kwargs),
+            opener=github_opener(
+                diff=self.diff,
+                state=self.opener_state,
+                **{"base_sha": self.base_sha, **opener_kwargs},
+            ),
             identity_provider=identity_provider(identity or "reviewer"),
             config_root=self.cfg,
             run_root=self.runs,
@@ -248,12 +274,15 @@ def github_opener(
     state: dict | None = None,
     compare: dict | None = None,
     pr_fields: dict | None = None,
+    repo_record: dict | None = PRIVATE_REPO_RECORD,
 ):
     """Serves the acquire reads and the review-post comment writes for one PR.
     `state` collects the posted body and every request URL. `compare`, when
     given, serves the commit-range endpoint: {"status": "ahead", "diff": "..."}
     (or "http_status" for a failing read); without it a compare request is an
-    unexpected call. `pr_fields` adds fields (title, body) to the PR metadata."""
+    unexpected call. `pr_fields` adds fields (title, body) to the PR metadata.
+    `repo_record` is the repository record under `base.repo` (None omits it, as
+    a host that does not state one)."""
     recorded = state if state is not None else {}
     recorded.setdefault("posted_body", None)
     recorded.setdefault("requests", [])
@@ -266,9 +295,10 @@ def github_opener(
         if method == "GET" and url.endswith(f"/pulls/{pr_number}"):
             if accept == "application/vnd.github.v3.diff":
                 return _Response(200, diff.encode("utf-8"), "text/plain")
-            return _json(
-                {"base": {"sha": base_sha}, "head": {"sha": head_sha}, **(pr_fields or {})}
-            )
+            base = {"sha": base_sha}
+            if repo_record is not None:
+                base["repo"] = repo_record
+            return _json({"base": base, "head": {"sha": head_sha}, **(pr_fields or {})})
         if method == "GET" and url.endswith(f"/pulls/{pr_number}/files"):
             return _json([])
         if method == "GET" and "/compare/" in url and compare is not None:

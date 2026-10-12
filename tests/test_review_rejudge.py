@@ -271,11 +271,28 @@ def test_post_clean_is_allowed_when_the_caller_resolved_the_only_blocker(env, tm
     ruling = _write(tmp_path / "resolved.json", ["a.py:3:R1"])
 
     code, _ = env.post(
-        "--findings", findings, "--head-sha", HEAD_SHA, "--status", "clean",
-        "--resolved-findings", ruling, capsys=capsys,
+        "--findings", findings, "--head-sha", HEAD_SHA, "--base-sha", env.base_sha,
+        "--status", "clean", "--resolved-findings", ruling, capsys=capsys,
     )
 
     assert code == 0
+
+
+def test_post_clean_without_a_base_is_refused_even_when_the_caller_resolved_the_blocker(
+    env, tmp_path, capsys
+):
+    env.configure(carrier_mode="empty")
+    findings = _write(tmp_path / "findings.json", [_finding()])
+    ruling = _write(tmp_path / "resolved.json", ["a.py:3:R1"])
+
+    code, _, err = env.invoke(
+        "post", "--findings", findings, "--head-sha", HEAD_SHA,
+        "--status", "clean", "--resolved-findings", ruling, capsys=capsys,
+    )
+
+    assert code != 0
+    assert "DEGRADED" in err
+    assert env.opener_state["posted_body"] is None
 
 
 @pytest.mark.parametrize(

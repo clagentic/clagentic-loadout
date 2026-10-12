@@ -9,14 +9,25 @@ import pytest
 from clagentic_loadout.review.findings_contract import (
     InvalidReplyError,
     merge_findings,
+    parse_chunk_output,
     parse_chunk_reply,
 )
 
 _FINDING = {"file": "a.py", "line": 3, "rule_id": "R1", "severity": "nit", "message": "m"}
+# A reply states facts and never a severity: the severity above is what an older
+# rulebook still sends, and it never survives parsing.
+_PARSED = {k: v for k, v in _FINDING.items() if k != "severity"}
+_FACTS = {
+    "category": "correctness",
+    "reachable": "yes",
+    "attacker_precondition": "none",
+    "impact": {"confidentiality": "none", "integrity": "partial", "availability": "none"},
+    "durability": "durable",
+}
 
 
 def test_bare_array_parses():
-    assert parse_chunk_reply(json.dumps([_FINDING])) == [_FINDING]
+    assert parse_chunk_reply(json.dumps([_FINDING])) == [_PARSED]
 
 
 def test_empty_array_is_a_clean_chunk():
@@ -24,7 +35,37 @@ def test_empty_array_is_a_clean_chunk():
 
 
 def test_single_markdown_fence_is_tolerated():
-    assert parse_chunk_reply("```json\n" + json.dumps([_FINDING]) + "\n```") == [_FINDING]
+    assert parse_chunk_reply("```json\n" + json.dumps([_FINDING]) + "\n```") == [_PARSED]
+
+
+@pytest.mark.parametrize("severity", ["nit", "critical", "praise", 3, None, ""])
+def test_a_severity_in_a_reply_is_discarded_whatever_it_holds(severity):
+    reply = parse_chunk_output(json.dumps([{**_PARSED, "severity": severity}]))
+
+    assert reply.findings == [_PARSED]
+    assert reply.ignored_severity == 1
+
+
+def test_a_reply_without_a_severity_reports_none_ignored():
+    assert parse_chunk_output(json.dumps([{**_PARSED, "facts": _FACTS}])).ignored_severity == 0
+
+
+def test_facts_are_carried_exactly_as_the_reply_wrote_them():
+    reply = parse_chunk_output(json.dumps([{**_PARSED, "facts": {**_FACTS, "category": "nonsense"}}]))
+
+    # Judging the facts is the evaluator's job; an out-of-vocabulary value is
+    # not repaired or refused here.
+    assert reply.findings[0]["facts"]["category"] == "nonsense"
+
+
+def test_a_finding_without_facts_is_accepted_and_carries_none():
+    assert "facts" not in parse_chunk_reply(json.dumps([_PARSED]))[0]
+
+
+def test_a_failure_sequence_is_kept_without_a_severity():
+    finding = {**_PARSED, "failure_sequence": "step then damage"}
+
+    assert parse_chunk_reply(json.dumps([finding]))[0]["failure_sequence"] == "step then damage"
 
 
 @pytest.mark.parametrize(
@@ -35,7 +76,6 @@ def test_single_markdown_fence_is_tolerated():
         "Here you go: []",
         '{"file": "a.py"}',
         "[not json",
-        json.dumps([{**_FINDING, "severity": "critical"}]),
         json.dumps([{**_FINDING, "line": "3"}]),
         json.dumps([{**_FINDING, "line": True}]),
         json.dumps([{**_FINDING, "message": ""}]),
@@ -76,3 +116,37 @@ def test_merge_dedupes_but_keeps_the_most_severe_copy():
 
     assert len(merged) == 1
     assert merged[0]["severity"] == "blocking"
+
+
+def test_merge_drops_a_copy_that_states_the_same_facts():
+    finding = {**_PARSED, "facts": _FACTS}
+
+    merged = merge_findings([(1, [finding]), (2, [dict(finding)])])
+
+    assert len(merged) == 1
+
+
+def test_merge_keeps_every_copy_that_states_different_facts():
+    # Which copy is stronger is the evaluator's call, from the computed severity;
+    # the merge must not pick one by position and hide a blocking copy.
+    mild = {**_PARSED, "facts": _FACTS}
+    harsh = {**_PARSED, "facts": {**_FACTS, "impact": {**_FACTS["impact"], "confidentiality": "full"}}}
+
+    merged = merge_findings([(1, [mild]), (2, [harsh])])
+
+    assert [f["facts"] for f in merged] == [mild["facts"], harsh["facts"]]
+
+
+def test_the_output_contract_offers_exactly_the_published_vocabulary():
+    from clagentic_loadout.review import facts as vocab
+    from clagentic_loadout.review.findings_contract import OUTPUT_CONTRACT
+
+    assert '"severity"' not in OUTPUT_CONTRACT.split("Do not state a severity")[0]
+    for values in (
+        vocab.CATEGORIES,
+        vocab.REACHABLE_VALUES,
+        vocab.PRECONDITIONS,
+        vocab.IMPACT_LEVELS,
+        vocab.DURABILITY_VALUES,
+    ):
+        assert " | ".join(values) in OUTPUT_CONTRACT

@@ -15,8 +15,9 @@ Design rules this follows:
   dimension, so omitting a fact never makes a finding look milder.
 
 The subcommand is offline and read-only: it reads a findings file and a local repository,
-makes no host call, posts nothing, and binds no caller identity. `run`, `post` and the
-merge gate are unchanged by it.
+makes no host call, posts nothing, and binds no caller identity. `run` and `post` use the
+same evaluator (see [Use in `run` and `post`](#use-in-run-and-post)); the merge gate does
+not yet act on its outcome.
 
 ## Facts vocabulary
 
@@ -59,6 +60,9 @@ invalid) is treated as a floor category, the worst case for that dimension.
 
 A finding whose own `severity` is `praise` is not a defect: it is listed as advisory and
 not scored. Every other finding is scored from its facts, whatever `severity` it states.
+This applies to a findings file handed to `evaluate` or `post`. A model reply in `run` is
+different: it never carries a severity (see below), so nothing a model writes can mark a
+finding as praise.
 
 ## Rubric
 
@@ -98,7 +102,8 @@ Determinism: the same findings, policy and date always produce the same verdict.
 Stakes are resolved per path from three sources:
 
 - **The base tree.** Exposure markers; CODEOWNERS is recorded as context only.
-- **The host.** Repository visibility only, passed with `--visibility`. `public` marks every
+- **The host.** Repository visibility only: passed with `--visibility` to `evaluate`, read
+  from the repository record in the PR metadata by `run` and `post`. `public` marks every
   path exposed. Branch protection and rulesets are not read.
 - **A profile** in `stakes.yaml`, selected with `--profile` or the file's own `profile` key.
 
@@ -236,6 +241,53 @@ loadout-review evaluate --findings findings.json \
 `--findings` is a `run` output or a bare JSON array. A `run` output may carry
 `scanners_run`. `--format json` (default) prints one JSON object with the verdict and the
 human rendering under `rendering`; `--format text` prints the rendering only.
+
+## Use in `run` and `post`
+
+`loadout-review run` and `post` are the same evaluator with its inputs assembled for
+them. The reviewer model is asked for facts only (the prompt is built from the vocabulary
+above), and the reply contract changes accordingly:
+
+- A reply states, per finding, `file`, `line`, `rule_id`, `message`, the `facts` object and
+  optionally `failure_sequence`. It states no severity and no verdict.
+- A reply that still carries a `severity` (an older rulebook asks for one) is accepted. The
+  value is discarded whatever it holds, and a notice on stderr says so. The computed
+  severity is used.
+- A finding with no `facts`, or facts outside the vocabulary, is accepted and resolves to
+  the worst case: it blocks, and the verdict is DEGRADED naming the finding. There is no
+  lenient path.
+
+`run` evaluates after the chunks are merged and, in delta mode, after prior findings are
+accounted for. Policy is read from the PR's base revision (not the last reviewed head) in the
+repository at `--repo-path`; repository visibility comes from the host's repository record
+under the same reader credential as the diff. A base revision that is missing from the
+repository, a policy file that cannot be read, or a visibility the host did not state each
+make the outcome DEGRADED with the reason named (an unstated visibility counts as public).
+
+Each finding in `findings.json` gains `computed_severity`, `blocking`, `facts_state`,
+`disposition`, `disposition_refused` and `possible_duplicates`; its legacy `severity` is
+derived from the result (`blocking` or `nit`). The document gains `verdict_outcome`,
+`verdict_reasons`, `evaluator_version`, `policy_base_sha` and `repository_visibility`.
+Identical findings (same file, line, rule and message) are merged into the strongest copy;
+a finding a base-revision disposition clears is kept as advisory with the disposition
+named; findings that may be the same defect are annotated and kept. In delta mode a kept
+or carried prior finding is evaluated again under the current base and annotated; a
+standing computed in an earlier round is not carried over.
+
+`post` recomputes the verdict itself from the facts in the findings file and the host's and
+the base revision's records. The outcome the file records is not trusted. The posted comment
+is rendered from the computed outcome: STALE says which head the findings are for;
+BLOCKED lists each blocking finding with the exact `dispositions.yaml` entry that would
+clear it (or the note that the security floor forbids clearing it as `by_design`); DEGRADED
+lists its reasons; CLEAN lists the advisory findings. `--status` is optional: `clean` over
+any other outcome is refused, naming both. The fence records `verdict_outcome`,
+`verdict_reasons`, `evaluator_version` and `policy_base_sha` at `fence_schema_version` 3;
+a fence without them reads as not evaluated.
+
+To reproduce a posted outcome offline, run `evaluate` on the same `findings.json` with the
+recorded `policy_base_sha` as `--base`, the head, and the visibility the run recorded as
+`repository_visibility` (`--visibility`). At `post`, `scanners_run` comes from `--state-file`;
+`evaluate` takes it from the findings file.
 
 ### Standalone reviewer example
 

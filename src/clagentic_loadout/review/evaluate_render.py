@@ -78,6 +78,50 @@ def _blocking_lines(finding: EvaluatedFinding) -> list[str]:
     return lines
 
 
+def _comment_safe(text: str) -> str:
+    """*text* on one line with no backtick run, so a note can sit under a
+    bullet of a tool-built comment whatever the finding or policy text held."""
+    return " ".join(text.replace("`", "'").split())
+
+
+def finding_notes(finding: EvaluatedFinding) -> list[str]:
+    """The lines a posted comment shows under a finding's bullet: its computed
+    severity and standing, any disposition that cleared it, and, for a blocking
+    finding, the exact entry that would clear it. Each line is one line of
+    plain text; the stanza rows keep their leading spaces."""
+    standing = "blocking" if finding.blocking else "advisory"
+    notes = [f"computed severity: {finding.severity}; {standing}"]
+    if finding.facts_state != "complete" and not finding.praise:
+        notes.append(f"facts {finding.facts_state}: {'; '.join(finding.facts_problems)}")
+    if finding.disposition is not None:
+        d = finding.disposition
+        notes.append(f"cleared by {d['kind']} disposition ({d['by']}, {d['at']}): {d['rationale']}")
+    if finding.disposition_refused:
+        notes.append(f"disposition refused: {finding.disposition_refused}")
+    if finding.possible_duplicates:
+        notes.append(f"possible duplicate of: {', '.join(finding.possible_duplicates)}")
+    if finding.blocking:
+        if finding.stakes is not None:
+            notes.append(_stakes_line(finding))
+        if finding.floor_forbids_clearing:
+            notes.append(
+                "The security floor forbids clearing this finding as by_design. It can be "
+                "ruled accepted_risk (expires, default 30 days), false_positive or mitigated."
+            )
+        if finding.clear_with:
+            notes.append(
+                f"To clear it, add this entry to {DISPOSITIONS_PATH} on the base branch "
+                "(an entry present only in the change under review does not apply):"
+            )
+            notes.extend(f"  {row}" for row in finding.clear_with.splitlines())
+    return [_comment_safe_keep_indent(line) for line in notes]
+
+
+def _comment_safe_keep_indent(line: str) -> str:
+    indent = line[: len(line) - len(line.lstrip(" "))]
+    return indent + _comment_safe(line)
+
+
 def render_text(verdict: Verdict) -> str:
     """The human rendering of *verdict*."""
     lines = [
@@ -110,4 +154,4 @@ def render_text(verdict: Verdict) -> str:
     return "\n".join(lines)
 
 
-__all__ = ["render_text"]
+__all__ = ["finding_notes", "render_text"]

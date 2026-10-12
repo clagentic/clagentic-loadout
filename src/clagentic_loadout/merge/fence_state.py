@@ -39,6 +39,20 @@ the verdict prose shows:
   engines           [{engine, model, reason, chunks}]
                                          which engine answered the run's chunks
 
+EVALUATION fields record the verdict the evaluator computed, and are what a
+fence_schema_version 3 fence adds:
+
+  verdict_outcome   CLEAN | BLOCKED | DEGRADED | STALE
+  verdict_reasons   [str]                one line per reason the outcome is not
+                                         CLEAN (empty for CLEAN)
+  evaluator_version str                  the rules the verdict was computed under
+  policy_base_sha   <sha>                the base revision policy was read from;
+                                         omitted when it was not known
+
+They are present together or not at all (policy_base_sha excepted). A fence at
+version 1 or 2 carries none of them and reads as NOT EVALUATED: its
+review_status was asserted by the poster, not computed.
+
 COMPATIBILITY. A version-1 fence (no state fields) stays valid and readable.
 It reads as "no findings asserted open at that fence", never as an error: an
 absent field is silence, not a malformed verdict.
@@ -66,6 +80,10 @@ from clagentic_loadout.sha import FULL_SHA_RE
 #: fence without the stamp is version 1.
 FENCE_SCHEMA_VERSION = 2
 
+#: Version stamped on a fence that carries the evaluation fields. It is a
+#: superset of version 2: it says nothing about findings state by itself.
+EVALUATED_FENCE_SCHEMA_VERSION = 3
+
 KEY_FENCE_SCHEMA_VERSION = "fence_schema_version"
 KEY_FINDINGS_OPEN = "findings_open"
 KEY_SUPERSEDES = "supersedes"
@@ -84,7 +102,31 @@ KEY_ENGINES = "engines"
 #: The caller-suppliable evidence fields, in the order they render. Kept apart
 #: from STATE_KEYS on purpose: the gate's "does this fence assert state" logic
 #: reads STATE_KEYS only.
-EVIDENCE_KEYS = (KEY_FAILURE_SEQUENCES, KEY_DROPPED, KEY_RESOLVED, KEY_RANGE, KEY_ENGINES)
+KEY_VERDICT_OUTCOME = "verdict_outcome"
+KEY_VERDICT_REASONS = "verdict_reasons"
+KEY_EVALUATOR_VERSION = "evaluator_version"
+KEY_POLICY_BASE_SHA = "policy_base_sha"
+
+#: The tool-supplied evaluation fields. Part of EVIDENCE_KEYS because they ride
+#: in the same tool-built fence, are derived rather than caller-typed, and hold
+#: no finding open; unlike the other evidence they raise the schema version.
+EVALUATION_KEYS = (
+    KEY_VERDICT_OUTCOME,
+    KEY_VERDICT_REASONS,
+    KEY_EVALUATOR_VERSION,
+    KEY_POLICY_BASE_SHA,
+)
+
+VERDICT_OUTCOMES = ("CLEAN", "BLOCKED", "DEGRADED", "STALE")
+
+EVIDENCE_KEYS = (
+    KEY_FAILURE_SEQUENCES,
+    KEY_DROPPED,
+    KEY_RESOLVED,
+    KEY_RANGE,
+    KEY_ENGINES,
+    *EVALUATION_KEYS,
+)
 
 RANGE_BASIS_BASE_HEAD = "base..head"
 RANGE_BASIS_SINCE = "since"
@@ -112,6 +154,21 @@ class FindingsState:
     supersedes: int | None = None
     cleared_claims: tuple[dict[str, Any], ...] = ()
     scanners_run: tuple[dict[str, Any], ...] = ()
+    #: The computed verdict the fence records; None for a fence that was never
+    #: evaluated (version 1 or 2, or any fence without verdict_outcome).
+    verdict_outcome: str | None = None
+    verdict_reasons: tuple[str, ...] = ()
+    evaluator_version: str | None = None
+    policy_base_sha: str | None = None
+
+    @property
+    def evaluated(self) -> bool:
+        """True only for a version 3 fence that states a recognised outcome. A
+        fence without these fields reads as not evaluated, never as clean."""
+        return (
+            self.fence_schema_version >= EVALUATED_FENCE_SCHEMA_VERSION
+            and self.verdict_outcome in VERDICT_OUTCOMES
+        )
 
 
 def _text(value: Any, where: str, *, single_line: bool = True) -> str:
@@ -412,7 +469,39 @@ def normalize_findings_state(
         out[KEY_RANGE] = _normalize_range(raw[KEY_RANGE])
     if KEY_ENGINES in raw:
         out[KEY_ENGINES] = _normalize_engines(raw[KEY_ENGINES])
+    if any(key in raw for key in EVALUATION_KEYS):
+        out.update(_normalize_evaluation(raw))
+        out[KEY_FENCE_SCHEMA_VERSION] = EVALUATED_FENCE_SCHEMA_VERSION
     return out
+
+
+def _normalize_evaluation(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the evaluation fields. They are all or nothing (the base
+    revision aside): an outcome without its reasons or the evaluator version
+    would be a verdict nobody can tell the provenance of."""
+    missing = [
+        key
+        for key in (KEY_VERDICT_OUTCOME, KEY_VERDICT_REASONS, KEY_EVALUATOR_VERSION)
+        if key not in raw
+    ]
+    if missing:
+        raise ValueError(f"evaluation fields must be given together, missing {missing}")
+    outcome = raw[KEY_VERDICT_OUTCOME]
+    if outcome not in VERDICT_OUTCOMES:
+        raise ValueError(f"{KEY_VERDICT_OUTCOME} must be one of {list(VERDICT_OUTCOMES)}, got {outcome!r}")
+    reasons = raw[KEY_VERDICT_REASONS]
+    if not isinstance(reasons, list):
+        raise ValueError(f"{KEY_VERDICT_REASONS} must be a JSON array, got {type(reasons).__name__}")
+    rendered: dict[str, Any] = {
+        KEY_VERDICT_OUTCOME: outcome,
+        KEY_VERDICT_REASONS: [
+            _text(reason, f"{KEY_VERDICT_REASONS}[{index}]") for index, reason in enumerate(reasons)
+        ],
+        KEY_EVALUATOR_VERSION: _text(raw[KEY_EVALUATOR_VERSION], KEY_EVALUATOR_VERSION),
+    }
+    if raw.get(KEY_POLICY_BASE_SHA) is not None:
+        rendered[KEY_POLICY_BASE_SHA] = _head(raw[KEY_POLICY_BASE_SHA], KEY_POLICY_BASE_SHA)
+    return rendered
 
 
 def has_findings_state(data: Mapping[str, Any]) -> bool:
@@ -424,7 +513,9 @@ def has_findings_state(data: Mapping[str, Any]) -> bool:
     )
 
 
-_RAW_VERSION_2_RE = re.compile(rf"{KEY_FENCE_SCHEMA_VERSION}\W+{FENCE_SCHEMA_VERSION}\b")
+_RAW_VERSION_2_RE = re.compile(
+    rf"{KEY_FENCE_SCHEMA_VERSION}\W+(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION})\b"
+)
 
 
 def raw_mentions_findings_state(raw: str) -> bool:
@@ -444,6 +535,10 @@ def state_from_fence(data: Mapping[str, Any]) -> FindingsState:
         supersedes=supersedes if isinstance(supersedes, int) else None,
         cleared_claims=tuple(data.get(KEY_CLEARED_CLAIMS) or ()),
         scanners_run=tuple(data.get(KEY_SCANNERS_RUN) or ()),
+        verdict_outcome=data.get(KEY_VERDICT_OUTCOME),
+        verdict_reasons=tuple(data.get(KEY_VERDICT_REASONS) or ()),
+        evaluator_version=data.get(KEY_EVALUATOR_VERSION),
+        policy_base_sha=data.get(KEY_POLICY_BASE_SHA),
     )
 
 
@@ -535,7 +630,14 @@ __all__ = [
     "with_derived_failure_sequences",
     "ENGINE_CARRIER",
     "ENGINE_FALLBACK",
+    "EVALUATED_FENCE_SCHEMA_VERSION",
+    "EVALUATION_KEYS",
     "EVIDENCE_KEYS",
+    "KEY_EVALUATOR_VERSION",
+    "KEY_POLICY_BASE_SHA",
+    "KEY_VERDICT_OUTCOME",
+    "KEY_VERDICT_REASONS",
+    "VERDICT_OUTCOMES",
     "KEY_DROPPED",
     "KEY_ENGINES",
     "KEY_FAILURE_SEQUENCES",

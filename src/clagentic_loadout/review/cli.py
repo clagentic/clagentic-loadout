@@ -13,7 +13,8 @@ one to post its judgement, and nothing else:
   post  stage and post the findings through the existing review-post path with
         the tool-constructed verdict fence, and verify the landed comment.
         The comment carries structured findings only; there is deliberately
-        no free-form body input.
+        no free-form body input. The verdict posted is the one the evaluator
+        computes (review.evaluation), never a status the caller asserts.
 
 Both bind --caller to the attested invoking identity before any I/O, exactly
 like every other verb. Profiles come from deployment config
@@ -25,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -47,13 +49,30 @@ from clagentic_loadout.merge.fence_state import (
     EVIDENCE_KEYS,
     KEY_DROPPED,
     KEY_FAILURE_SEQUENCES,
+    KEY_FINDINGS_OPEN,
     KEY_RESOLVED,
+    KEY_SCANNERS_RUN,
+    KEY_VERDICT_OUTCOME,
+    KEY_VERDICT_REASONS,
     failure_sequences_of,
     normalize_findings_state,
 )
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.delta import resolve_delta
-from clagentic_loadout.review.evaluate_verb import add_evaluate_parser, run_evaluate
+from clagentic_loadout.review.evaluate import OUTCOME_CLEAN, Verdict
+from clagentic_loadout.review.evaluate_render import finding_notes
+from clagentic_loadout.review.evaluate_verb import (
+    EvaluateError,
+    add_evaluate_parser,
+    run_evaluate,
+)
+from clagentic_loadout.review.evaluation import (
+    annotate_findings,
+    context_from_config,
+    evaluate_findings,
+    fence_evaluation_fields,
+    is_unsafe_status,
+)
 from clagentic_loadout.review.findings_contract import (
     KEY_FAILURE_SEQUENCE,
     InvalidReplyError,
@@ -209,9 +228,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         sub.add_argument(
             "--repo-path",
             default=None,
-            help="Directory used only to find repo-level config and the origin "
-            "remote for platform detection (default: the current directory). "
-            "The diff is never read from it.",
+            help="Local repository used to find repo-level config and the origin "
+            "remote for platform detection, and to read policy (dispositions, "
+            "stakes) from the PR's base revision, which must be present in it "
+            "(default: the current directory). The diff is never read from it.",
         )
         sub.add_argument(
             "--git-host-base-url",
@@ -274,9 +294,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     post.add_argument(
         "--status",
-        required=True,
+        default=None,
         choices=_STATUSES,
-        help="The verdict to post.",
+        help="Accepted for compatibility; the verdict posted is computed from the "
+        "findings' facts, the stakes and the policy at the base revision, never taken "
+        "from this flag. 'clean' is refused when the computed outcome is not CLEAN. "
+        "'blocking' is always honoured, since it can only make the verdict stricter.",
+    )
+    post.add_argument(
+        "--base-sha",
+        type=str.strip,
+        default=None,
+        help="Full SHA of the base revision policy is read from. Required only when "
+        "--findings is a bare array or a run output that did not record one; without "
+        "it no policy is read and the verdict is DEGRADED.",
     )
     post.add_argument(
         "--head-sha",
@@ -461,6 +492,11 @@ def _run_command(
 
     since_head, prior_findings = _load_prior_review(args, owner=owner, repo=repo)
     resolutions = _load_resolutions(args.resolved_findings)
+    # Read before any model is called, so a bad evaluator setting costs nothing.
+    try:
+        evaluation = context_from_config(config_root, repo_path=repo_path)
+    except EvaluateError as exc:
+        _fail(str(exc), EXIT_PROFILE_INVALID)
 
     backend = _build_acquire_backend(
         args, owner=owner, repo=repo, caller=caller, platform=platform,
@@ -473,6 +509,12 @@ def _run_command(
     refused = unusable_acquire_outcome(acquired, emit=_emit_stage)
     if refused is not None:
         return _report_outcome(refused)
+    # Policy is read at the revision the PR merges into. A delta review replaces
+    # the acquired base with the last reviewed head, which is not that revision,
+    # so the PR's own base and the host's repository record are taken here.
+    evaluation = dataclasses.replace(
+        evaluation, policy_base_sha=acquired.base_sha, visibility=acquired.repo_visibility
+    )
 
     delta = None
     delta_stage = None
@@ -516,6 +558,7 @@ def _run_command(
     outcome = run_review(
         acquired, profile, run_dir, emit=_emit_stage, delta=delta, delta_stage=delta_stage,
         unknown_resolutions=unknown_resolutions if args.resolved_findings is not None else None,
+        evaluation=evaluation,
         **kwargs,
     )
     return _report_outcome(outcome)
@@ -542,13 +585,16 @@ def _load_findings(
     pr_number: int,
     head_sha_arg: str | None,
     head_flag: str,
+    meta: dict[str, Any] | None = None,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Read a findings file (a `run` output or a bare array) for this PR and
     return its head SHA, its findings, and the run evidence (commit range and
     engines) a `run` output records, validated by the shared findings
     contract. Severity is optional and matched ignoring case, since a person
-    may have edited the file; messages are kept whole. A bare array has no
-    run record, so its evidence is empty."""
+    may have edited the file; messages are kept whole; each finding's facts are
+    carried for the evaluator. A bare array has no run record, so its evidence
+    is empty. When *meta* is given, the base revision the run read policy from
+    (``policy_base_sha``) is stored in it when the file records a valid one."""
     evidence: dict[str, Any] = {}
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -574,6 +620,9 @@ def _load_findings(
                 EXIT_FINDINGS_INVALID,
             )
         evidence = evidence_from_document(data)
+        recorded_base = data.get("policy_base_sha")
+        if meta is not None and isinstance(recorded_base, str) and FULL_SHA_RE.match(recorded_base):
+            meta["policy_base_sha"] = recorded_base
         resolved = data.get(KEY_RESOLVED)
         if resolved:
             evidence[KEY_RESOLVED] = resolved
@@ -594,7 +643,7 @@ def _load_findings(
             validated.append(
                 validate_finding(
                     item, position, lenient_severity=True, truncate_message=False,
-                    carry_fingerprint=True,
+                    carry_fingerprint=True, carry_facts=True,
                 )
             )
         except InvalidReplyError as exc:
@@ -694,16 +743,35 @@ def _load_prior_review(
     return head_sha, findings
 
 
-def _render_for_post(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Findings as the posted body carries them: the review-post contract has
-    no severity field, so a present severity leads the message."""
-    return [
-        {
-            **f,
-            "message": f"({f['severity']}) {f['message']}" if f["severity"] else f["message"],
-        }
-        for f in findings
-    ]
+def _policy_base_for_post(args: argparse.Namespace, recorded: str | None) -> str | None:
+    """The base revision policy is read from: the one the run recorded, else
+    --base-sha, else None (no policy is read and the verdict is DEGRADED). A
+    --base-sha that disagrees with the recorded one is refused, as --head-sha is."""
+    if args.base_sha is None:
+        return recorded
+    if not FULL_SHA_RE.match(args.base_sha):
+        _fail(
+            f"--base-sha must be 40 lowercase hex characters, got {args.base_sha!r}",
+            EXIT_USAGE,
+        )
+    if recorded is not None and recorded != args.base_sha:
+        _fail(
+            f"--base-sha {args.base_sha} conflicts with the base {recorded} recorded in the "
+            f"findings file {args.findings!r}; drop --base-sha or regenerate the findings",
+            EXIT_FINDINGS_INVALID,
+        )
+    return args.base_sha
+
+
+def _unsafe_status_message(status: str, verdict: Verdict, reasons: list[str]) -> str:
+    listed = "; ".join(reasons[:3]) + ("; ..." if len(reasons) > 3 else "")
+    return (
+        f"--status {status} contradicts the computed verdict {verdict.outcome}"
+        + (f" ({listed})" if listed else "")
+        + ". The verdict is computed from the findings' facts, the stakes and the policy at "
+        "the base revision; it cannot be posted as clean. Fix the findings, or rule on them "
+        "in the base branch's dispositions, then run the review again"
+    )
 
 
 def _post_command(
@@ -713,14 +781,22 @@ def _post_command(
     owner: str,
     repo: str,
     platform: str,
+    repo_path: Path,
     token_provider,
     opener,
     identity_provider,
+    config_root,
 ) -> int:
+    loaded_meta: dict[str, Any] = {}
     head_sha, findings, evidence = _load_findings(
         args.findings, owner=owner, repo=repo, pr_number=args.pr,
-        head_sha_arg=args.head_sha, head_flag="--head-sha",
+        head_sha_arg=args.head_sha, head_flag="--head-sha", meta=loaded_meta,
     )
+    policy_base = _policy_base_for_post(args, loaded_meta.get("policy_base_sha"))
+    try:
+        evaluation = context_from_config(config_root)
+    except EvaluateError as exc:
+        _fail(str(exc), EXIT_PROFILE_INVALID)
     if args.dropped:
         dropped = _load_dropped(args.dropped)
         if dropped:
@@ -728,12 +804,10 @@ def _post_command(
     findings, evidence = _apply_caller_resolutions(
         findings, evidence, _load_resolutions(args.resolved_findings)
     )
-    if args.status == "clean" and any(f["severity"] == "blocking" for f in findings):
-        _fail(
-            "--status clean contradicts the findings file, which carries a blocking finding; "
-            "post --status blocking, or remove the finding if you judged it wrong",
-            EXIT_FINDINGS_INVALID,
-        )
+    # The state and evidence below are checked as if the caller's status stood;
+    # the computed status can only be stricter, and is checked again when the
+    # fence is built.
+    claimed_status = args.status or "blocking"
 
     state: dict[str, Any] = {}
     if args.state_file:
@@ -757,7 +831,7 @@ def _post_command(
         # Validated here as well as when the fence is built, so a bad state
         # file fails before any I/O instead of after the head re-check.
         try:
-            normalize_findings_state(state, head_sha=head_sha, review_status=args.status)
+            normalize_findings_state(state, head_sha=head_sha, review_status=claimed_status)
         except ValueError as exc:
             _fail(f"state file {args.state_file!r}: {exc}", EXIT_FINDINGS_INVALID)
 
@@ -768,12 +842,12 @@ def _post_command(
         normalize_findings_state(
             {**evidence, **({KEY_FAILURE_SEQUENCES: sequences} if sequences else {})},
             head_sha=head_sha,
-            review_status=args.status,
+            review_status=claimed_status,
         )
     except ValueError as exc:
         _fail(f"findings evidence: {exc}", EXIT_FINDINGS_INVALID)
 
-    def assert_head_unmoved() -> None:
+    def assert_head_unmoved() -> AcquiredPr:
         live = _acquire(
             args, owner=owner, repo=repo, caller=caller, platform=platform,
             token_provider=token_provider, opener=opener,
@@ -784,17 +858,57 @@ def _post_command(
                 f"{live.head_sha}; run the review again before posting",
                 EXIT_STALE_HEAD,
             )
+        return live
 
-    assert_head_unmoved()
+    live_pr = assert_head_unmoved()
+
+    # The verdict is computed here, from the facts in the findings file and the
+    # host's and the base revision's own records, whatever an earlier `run`
+    # wrote into that file: the file is the reviewer's, the policy is not.
+    evaluation = dataclasses.replace(
+        evaluation,
+        repo_path=repo_path,
+        policy_base_sha=policy_base,
+        visibility=live_pr.repo_visibility,
+    )
+    scanners_run = state.get(KEY_SCANNERS_RUN)
+    verdict = evaluate_findings(
+        findings,
+        head_sha,
+        evaluation,
+        expected_head=live_pr.head_sha,
+        scanners_run=scanners_run if isinstance(scanners_run, list) else None,
+    )
+    fence_fields = fence_evaluation_fields(verdict, evaluation)
+    if args.status is not None and is_unsafe_status(args.status, verdict):
+        _fail(
+            _unsafe_status_message(args.status, verdict, fence_fields[KEY_VERDICT_REASONS]),
+            EXIT_FINDINGS_INVALID,
+        )
+    # A verdict that holds findings open is blocking, so state that lists some
+    # keeps a computed CLEAN from being posted as clean.
+    status = (
+        "clean"
+        if verdict.outcome == OUTCOME_CLEAN
+        and args.status != "blocking"
+        and not state.get(KEY_FINDINGS_OPEN)
+        else "blocking"
+    )
+    annotated = annotate_findings(findings, verdict)
 
     body = {
-        "review_status": args.status,
+        "review_status": status,
         "findings": [
-            {k: f[k] for k in (*_FINDING_KEYS, *_OPTIONAL_FINDING_KEYS) if k in f}
-            for f in _render_for_post(findings)
+            {
+                **{k: item[k] for k in (*_FINDING_KEYS, *_OPTIONAL_FINDING_KEYS) if k in item},
+                "blocking": evaluated.blocking,
+                "notes": finding_notes(evaluated),
+            }
+            for item, evaluated in zip(annotated, verdict.findings)
         ],
         **state,
         **evidence,
+        **fence_fields,
     }
     try:
         stage_caller_body(
@@ -873,10 +987,12 @@ def _post_command(
         return EXIT_POST_FAILED
     result = {
         "result": "posted",
-        "status": args.status,
+        "status": status,
+        KEY_VERDICT_OUTCOME: verdict.outcome,
         "head_sha": head_sha,
         "pr_number": args.pr,
-        "finding_count": len(findings),
+        "finding_count": len(annotated),
+        "blocking_count": len(verdict.blocking),
         "verified_id": posted.get("verified_id"),
         "verified_url": posted.get("verified_url"),
         "verified_by_login": posted.get("verified_by_login"),
@@ -969,8 +1085,9 @@ def main(
                 config_root=config_root, run_root=run_root, runner=runner,
             )
         return _post_command(
-            args, caller, owner=owner, repo=repo, platform=platform,
+            args, caller, owner=owner, repo=repo, platform=platform, repo_path=repo_path,
             token_provider=token_provider, opener=opener, identity_provider=identity_provider,
+            config_root=config_root,
         )
     except ReviewCliError as exc:
         print(f"loadout-review: {exc}", file=sys.stderr)

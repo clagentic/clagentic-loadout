@@ -34,8 +34,28 @@
     },
     "fence_schema_version": {
       "type": "integer",
-      "enum": [1, 2],
-      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). A version 1 fence stays valid and reads as asserting no open findings."
+      "enum": [1, 2, 3],
+      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha). A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated."
+    },
+    "verdict_outcome": {
+      "type": "string",
+      "enum": ["CLEAN", "BLOCKED", "DEGRADED", "STALE"],
+      "description": "OPTIONAL, version 3. The verdict the evaluator computed from the findings, the stakes and the policy at the base revision. Computed by the tool, never typed by the reviewer. Absent means the fence was not evaluated."
+    },
+    "verdict_reasons": {
+      "type": "array",
+      "description": "OPTIONAL, version 3. One line for each reason the outcome is not CLEAN: a stale head, a degraded input, a blocking finding. Empty for CLEAN.",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "evaluator_version": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OPTIONAL, version 3. Identifies the rules the verdict was computed under."
+    },
+    "policy_base_sha": {
+      "type": "string",
+      "minLength": 1,
+      "description": "OPTIONAL, version 3. The base revision the policy (dispositions and stakes) was read from. Omitted when the base revision was not known."
     },
     "findings_open": {
       "type": "array",

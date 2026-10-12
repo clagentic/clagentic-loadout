@@ -266,7 +266,8 @@ def render_delta_note(
         "not only on that line. Decide against the code as it now stands "
         "whether the finding still applies. If it does, report it again at the "
         "line of the new code where it now is, keeping its file and rule_id "
-        "and the severity given. Only if it no longer applies, name its id in "
+        "and stating its facts again; the standing shown beside it is computed "
+        "and is not yours to restate. Only if it no longer applies, name its id in "
         'the "resolved" list of your reply (see the incremental reply form '
         "before the output contract). A finding you neither report again nor "
         "name in that list stays open.",

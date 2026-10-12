@@ -93,6 +93,9 @@ def run_git(repo: Path, *args: str) -> str:
         "GIT_AUTHOR_EMAIL": "t@example.invalid",
         "GIT_COMMITTER_NAME": "t",
         "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        # Fixed so two fixtures built the same way get the same commit SHA.
+        "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+        "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
     }
     done = subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True, env=env

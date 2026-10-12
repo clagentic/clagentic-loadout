@@ -45,6 +45,11 @@ from clagentic_loadout.review.rubric import (
 )
 from clagentic_loadout.review.stakes import INTERNAL, PathStakes, Stakes
 
+#: Identifies the rules a verdict was computed under. Bump it with any change to
+#: the rubric, the blocking rule, the merge rule or the disposition rules, so a
+#: reader can tell two verdicts were not computed by the same logic.
+EVALUATOR_VERSION = "1"
+
 OUTCOME_CLEAN = "CLEAN"
 OUTCOME_BLOCKED = "BLOCKED"
 OUTCOME_DEGRADED = "DEGRADED"
@@ -77,6 +82,9 @@ class EvaluatedFinding:
     clear_with: str | None = None
     floor_forbids_clearing: bool = False
     praise: bool = False
+    #: Position, in the findings the evaluator was given, of the copy this
+    #: evaluation stands for (identical findings are merged into one).
+    source_index: int = 0
 
     @property
     def id(self) -> str:
@@ -146,20 +154,27 @@ class _Assessed:
     score: Score
     floor_category: bool
     praise: bool
+    source: int = 0
 
 
 def _finding_id(finding: Mapping[str, Any]) -> str:
     return f"{finding['file']}:{finding['line']}:{finding['rule_id']}"
 
 
-def _assess(finding: Mapping[str, Any], stakes: Stakes) -> _Assessed:
+def _assess(finding: Mapping[str, Any], stakes: Stakes, source: int = 0) -> _Assessed:
     parsed = parse_facts(finding.get(KEY_FACTS))
     path_stakes = stakes.for_path(finding["file"])
     computed = score(parsed.facts, path_stakes)
     category = parsed.facts.category
     floor_category = category is None or category in FLOOR_CATEGORIES
     return _Assessed(
-        finding, parsed, path_stakes, computed, floor_category, finding.get("severity") == _PRAISE
+        finding,
+        parsed,
+        path_stakes,
+        computed,
+        floor_category,
+        finding.get("severity") == _PRAISE,
+        source,
     )
 
 
@@ -284,7 +299,9 @@ def evaluate(
     day = today if today is not None else dt.date.today()
     threshold = severity_rank(block_at)
 
-    merged = _merge_identical((_assess(f, stakes) for f in findings), threshold)
+    merged = _merge_identical(
+        (_assess(f, stakes, position) for position, f in enumerate(findings)), threshold
+    )
     expired = tuple(e.as_dict() for e in dispositions if e.is_expired(day))
     by_file_rule: dict[tuple[str, str], list[int]] = {}
     for position, item in enumerate(merged, start=1):
@@ -334,6 +351,7 @@ def evaluate(
                 ),
                 floor_forbids_clearing=blocking and item.floor_category,
                 praise=item.praise,
+                source_index=item.source,
             )
         )
 
@@ -358,6 +376,7 @@ def evaluate(
 
 
 __all__ = [
+    "EVALUATOR_VERSION",
     "OUTCOME_BLOCKED",
     "OUTCOME_CLEAN",
     "OUTCOME_DEGRADED",
