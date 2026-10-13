@@ -24,10 +24,10 @@ from tests._support.ci_gate import (
 )
 from tests._support.fakes import json_resp
 
-#: Verbatim response of `GET /commits/{sha}/status` on a Forgejo repository
-#: without a CI runner, captured from the live host for the head 1c48c3db of a
-#: reviewed PR in a runner-less repository on 2026-10-13.
-CAPTURED_NO_CI_RESPONSE = {
+#: The combined-status body Forgejo documents for a commit with no commit
+#: statuses (a repository without a CI runner): an empty rollup state, a zero
+#: `total_count`, and `statuses: null` rather than an empty list. Synthetic.
+NO_CI_RESPONSE = {
     "state": "",
     "sha": "",
     "total_count": 0,
@@ -45,7 +45,7 @@ def _parse(body):
 
 
 def _with(**changes):
-    body = copy.deepcopy(CAPTURED_NO_CI_RESPONSE)
+    body = copy.deepcopy(NO_CI_RESPONSE)
     for key, value in changes.items():
         if value is _DROP:
             del body[key]
@@ -69,14 +69,14 @@ def _serving(body, merge_calls):
 
 
 class TestEstablishedEmpty:
-    def test_the_captured_response_parses_as_an_empty_status_set(self):
-        parsed = _parse(CAPTURED_NO_CI_RESPONSE)
+    def test_the_documented_response_parses_as_an_empty_status_set(self):
+        parsed = _parse(NO_CI_RESPONSE)
         assert parsed.state == ""
         assert parsed.statuses == ()
 
-    def test_the_captured_response_passes_the_gate_as_no_runner_by_design(self):
+    def test_the_documented_response_passes_the_gate_as_no_runner_by_design(self):
         merge_calls: list = []
-        opener = _serving(CAPTURED_NO_CI_RESPONSE, merge_calls)
+        opener = _serving(NO_CI_RESPONSE, merge_calls)
 
         assert run_merge(opener, platform="forgejo") == verb.EXIT_OK
         assert len(merge_calls) == 1
@@ -118,56 +118,48 @@ class TestNullStatusesStaysUnreadable:
         assert merge_calls == []
 
 
-#: Response of `GET /commits/{sha}/status` on GitHub for a commit with no commit
-#: statuses, captured from the live host for clagentic/clagentic-loadout main
-#: 52bbc457c5e45d447a93ddb01f8b10130c58526c on 2026-10-13. GitHub returns an
-#: empty list (not null) and a rollup state of "pending". The `repository`
-#: object is cut to its identifying fields; every other key is verbatim.
-CAPTURED_GITHUB_NO_STATUS_RESPONSE = {
+#: The combined-status body GitHub documents for a commit with no commit
+#: statuses: an empty list (not null) and a rollup state of "pending".
+#: Synthetic; the repository object is cut to its identifying fields.
+GITHUB_NO_STATUS_RESPONSE = {
     "state": "pending",
     "statuses": [],
-    "sha": "52bbc457c5e45d447a93ddb01f8b10130c58526c",
+    "sha": "b" * 40,
     "total_count": 0,
     "repository": {
-        "id": 1318404012,
-        "name": "clagentic-loadout",
-        "full_name": "clagentic/clagentic-loadout",
+        "id": 1,
+        "name": "some-repo",
+        "full_name": "some-owner/some-repo",
         "private": False,
         "fork": False,
     },
-    "commit_url": (
-        "https://api.github.com/repos/clagentic/clagentic-loadout/commits/"
-        "52bbc457c5e45d447a93ddb01f8b10130c58526c"
-    ),
-    "url": (
-        "https://api.github.com/repos/clagentic/clagentic-loadout/commits/"
-        "52bbc457c5e45d447a93ddb01f8b10130c58526c/status"
-    ),
+    "commit_url": f"https://api.github.com/repos/some-owner/some-repo/commits/{'b' * 40}",
+    "url": f"https://api.github.com/repos/some-owner/some-repo/commits/{'b' * 40}/status",
 }
 
 
 class TestGithubNoStatusUnchanged:
-    def test_the_captured_response_parses_as_an_empty_status_set(self):
+    def test_the_documented_response_parses_as_an_empty_status_set(self):
         parsed = parse_github_combined_status(
-            CAPTURED_GITHUB_NO_STATUS_RESPONSE, where=_WHERE, head_sha=HEAD_SHA
+            GITHUB_NO_STATUS_RESPONSE, where=_WHERE, head_sha=HEAD_SHA
         )
         assert parsed.statuses == ()
         assert parsed.state == "pending"
 
-    def test_the_captured_response_passes_the_gate_as_no_runner_by_design(self):
+    def test_the_documented_response_passes_the_gate_as_no_runner_by_design(self):
         merge_calls: list = []
         base = github_ci_opener(merge_calls=merge_calls)
 
         def opener(req, timeout=30):
             if req.get_method() == "GET" and req.full_url.split("?")[0].endswith("/status"):
-                return json_resp(200, CAPTURED_GITHUB_NO_STATUS_RESPONSE)
+                return json_resp(200, GITHUB_NO_STATUS_RESPONSE)
             return base(req, timeout=timeout)
 
         assert run_merge(opener, platform="github") == verb.EXIT_OK
         assert len(merge_calls) == 1
 
     def test_github_null_statuses_is_still_unreadable(self):
-        body = {**CAPTURED_GITHUB_NO_STATUS_RESPONSE, "state": "", "statuses": None}
+        body = {**GITHUB_NO_STATUS_RESPONSE, "state": "", "statuses": None}
         with pytest.raises(GateFactUnavailableError, match=HEAD_SHA):
             parse_github_combined_status(body, where=_WHERE, head_sha=HEAD_SHA)
 

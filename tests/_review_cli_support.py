@@ -16,6 +16,7 @@ import yaml
 
 from clagentic_loadout.transport import attestation
 from tests._review_evaluate_support import commit_files, make_repo
+from tests._support.host_fakes import forgejo_tree_page
 
 BASE_SHA = "a" * 40
 HEAD_SHA = "b" * 40
@@ -326,19 +327,12 @@ def github_opener(
             entries = [{"path": p, "type": "blob"} for p in base_files]
             query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
             if "per_page" in query and not tree_truncated:
-                # Forgejo-shaped paging: total_count on every page, truncated
-                # true on a non-final page, a page past the end is HTTP 200
-                # with tree null and truncated false.
-                per_page = int(query["per_page"][0])
-                page = int(query.get("page", ["1"])[0])
-                chunk = entries[(page - 1) * per_page : page * per_page]
                 return _json(
-                    {
-                        "tree": chunk or None,
-                        "truncated": page * per_page < len(entries),
-                        "page": page,
-                        "total_count": len(entries),
-                    }
+                    forgejo_tree_page(
+                        entries,
+                        per_page=int(query["per_page"][0]),
+                        page=int(query.get("page", ["1"])[0]),
+                    )
                 )
             return _json({"tree": entries, "truncated": tree_truncated})
         if method == "GET" and base_files is not None and "/contents/" in url:

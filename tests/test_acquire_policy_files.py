@@ -16,6 +16,7 @@ from clagentic_loadout.acquire.forgejo_backend import ForgejoAcquireBackend
 from clagentic_loadout.acquire.github_backend import GithubAcquireBackend
 from clagentic_loadout.review.policy_reader import HostPolicyReader, PolicyReadError
 from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH, read_policy_from
+from tests._support.host_fakes import forgejo_tree_opener
 
 _OWNER = "some-owner"
 _REPO = "some-repo"
@@ -157,27 +158,8 @@ def test_forgejo_follows_tree_pages_until_the_listing_is_complete():
 
 
 def _forgejo_paged_server(entries, *, per_page=1000, seen=None):
-    """Forgejo's documented git/trees paging: total_count on every page,
-    truncated true on a non-final page, and a page past the end answered as
-    HTTP 200 with tree null and truncated false."""
-
-    def opener(req, timeout=30):
-        if seen is not None:
-            seen.append(req.full_url)
-        query = urllib.parse.parse_qs(urllib.parse.urlparse(req.full_url).query)
-        page = int(query["page"][0])
-        chunk = entries[(page - 1) * per_page : page * per_page]
-        return _json(
-            {
-                "sha": _REF,
-                "tree": chunk or None,
-                "truncated": page * per_page < len(entries),
-                "page": page,
-                "total_count": len(entries),
-            }
-        )
-
-    return opener
+    """Forgejo's documented git/trees paging (tests/_support/host_fakes.py)."""
+    return forgejo_tree_opener(entries, max_per_page=per_page, seen=seen)
 
 
 def _synthetic_tree(count):
