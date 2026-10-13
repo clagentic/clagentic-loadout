@@ -203,11 +203,19 @@ _MAX_TREE_PAGES = 100
 def fetch_tree_paths(
     git_host_base: str, token: str, owner: str, repo: str, ref: str, *, opener=None
 ) -> list[str]:
-    """Every file path in the tree at *ref*, following the endpoint's pages
-    until it stops reporting the listing as truncated. A listing still
-    truncated after the page bound is a failure: policy markers read from a
-    partial tree could be silently missing."""
+    """Every file path in the tree at *ref*, following the endpoint's pages.
+
+    On this host `truncated: true` marks a non-final page, not an API cap, and
+    `total_count` is the number of entries (directories included) across all
+    pages; paging stops once the collected entries reach it. A page past the
+    end is HTTP 200 with `tree: null`, read as empty only when the entries
+    collected already equal `total_count`. A host that states no `total_count`
+    is paged by `truncated` alone. A listing still incomplete after the page
+    bound is a failure: policy markers read from a partial tree could be
+    silently missing."""
     paths: list[str] = []
+    collected = 0
+    expected_total: int | None = None
     what = f"the tree of {owner}/{repo} at {ref[:12]}"
     for page in range(1, _MAX_TREE_PAGES + 1):
         try:
@@ -226,10 +234,26 @@ def fetch_tree_paths(
         body = _parse_json(raw, dict, what)
         entries = body.get("tree")
         truncated = body.get("truncated")
+        total = body.get("total_count")
+        if isinstance(total, bool) or not isinstance(total, int):
+            total = None
+        # Once stated, the expected total holds for the whole listing: a later
+        # page that drops or changes it means the tree moved or the response is
+        # untrustworthy, and completeness can no longer be judged.
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise AcquireFetchError(f"{what} was not a complete listing")
+        if entries is None and total is not None and truncated is False and collected == total:
+            return paths
         if not isinstance(entries, list) or not isinstance(truncated, bool):
             raise AcquireFetchError(f"{what} was not a complete listing")
         paths.extend(tree_file_paths(entries, what))
-        if not truncated:
+        collected += len(entries)
+        if total is not None:
+            if collected >= total:
+                return paths
+        elif not truncated:
             return paths
         if not entries:
             break
