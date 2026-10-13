@@ -140,6 +140,7 @@ must never depend on it. `tests/test_doctor_checks.py` locks both properties.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -190,6 +191,14 @@ CONFIG_KEY_REQUIRED_CI_CHECKS = "required_ci_checks"
 #: Key within the `merge:` section: when true, a head with no check-runs and no
 #: commit statuses refuses ("no CI found") instead of passing.
 CONFIG_KEY_CI_STRICT = "ci_strict"
+
+#: Key within the `merge:` section holding the computed-verdict settings
+#: (`allow_degraded`, `require_evaluated`). Read from the tracked gate file at
+#: the PR base commit, like every other key that can change what a merge needs.
+CONFIG_KEY_EVALUATOR = "evaluator"
+EVALUATOR_KEY_ALLOW_DEGRADED = "allow_degraded"
+EVALUATOR_KEY_REQUIRE_EVALUATED = "require_evaluated"
+_EVALUATOR_KEYS = (EVALUATOR_KEY_ALLOW_DEGRADED, EVALUATOR_KEY_REQUIRE_EVALUATED)
 
 
 class InvalidMergeGateConfigError(ValueError):
@@ -618,6 +627,73 @@ def ci_strict_from_section(source: str, merge_section: dict) -> bool:
     return strict
 
 
+@dataclass(frozen=True)
+class EvaluatorGate:
+    """What the repo's gate says about computed verdicts (`merge.evaluator`).
+
+    Both settings are migration and relaxation knobs, so their defaults and
+    their failure value are the strict ones: a role is not allowed a DEGRADED
+    verdict unless it is named, and a fence is required to be evaluated
+    whenever the declaration cannot be read."""
+
+    #: Reviewer roles whose DEGRADED verdict does not refuse the merge.
+    allow_degraded: frozenset[str] = frozenset()
+    #: Refuse a fence that carries no computed verdict (below schema version 3)
+    #: instead of applying the status its poster asserted.
+    require_evaluated: bool = False
+
+
+#: The value used when `merge.evaluator` is present but cannot be read.
+STRICT_EVALUATOR_GATE = EvaluatorGate(allow_degraded=frozenset(), require_evaluated=True)
+
+
+def evaluator_gate_from_section(source: str, merge_section: dict) -> EvaluatorGate:
+    """Validate `merge.evaluator` of an already parsed `merge:` section. Absent
+    means the defaults (no role may merge on a DEGRADED verdict, evaluation not
+    yet required).
+
+    Raises:
+        InvalidMergeGateConfigError: not a mapping, an unknown key, `allow_degraded`
+            not a mapping of role name to boolean, or `require_evaluated` not a
+            boolean (an explicit null included).
+    """
+    if CONFIG_KEY_EVALUATOR not in merge_section:
+        return EvaluatorGate()
+    where = f"{Path(source)}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_EVALUATOR}"
+    block = merge_section[CONFIG_KEY_EVALUATOR]
+    if not isinstance(block, dict):
+        raise InvalidMergeGateConfigError(f"{where} must be a mapping, got {type(block).__name__}.")
+    unknown = sorted(str(key) for key in set(block) - set(_EVALUATOR_KEYS))
+    if unknown:
+        raise InvalidMergeGateConfigError(
+            f"{where} has unknown key(s) {unknown!r}. Known keys: {sorted(_EVALUATOR_KEYS)!r}."
+        )
+    allowed: set[str] = set()
+    if EVALUATOR_KEY_ALLOW_DEGRADED in block:
+        roles = block[EVALUATOR_KEY_ALLOW_DEGRADED]
+        if not isinstance(roles, dict):
+            raise InvalidMergeGateConfigError(
+                f"{where}.{EVALUATOR_KEY_ALLOW_DEGRADED} must be a mapping of reviewer role "
+                f"to a boolean, got {type(roles).__name__}."
+            )
+        for role, flag in roles.items():
+            if not isinstance(role, str) or not role.strip() or not isinstance(flag, bool):
+                raise InvalidMergeGateConfigError(
+                    f"{where}.{EVALUATOR_KEY_ALLOW_DEGRADED} entries must map a non-empty "
+                    f"role name to true or false, got {role!r}: {flag!r}."
+                )
+            if flag:
+                allowed.add(role.strip())
+    require = False
+    if EVALUATOR_KEY_REQUIRE_EVALUATED in block:
+        require = block[EVALUATOR_KEY_REQUIRE_EVALUATED]
+        if not isinstance(require, bool):
+            raise InvalidMergeGateConfigError(
+                f"{where}.{EVALUATOR_KEY_REQUIRE_EVALUATED} must be a boolean, got {require!r}."
+            )
+    return EvaluatorGate(allow_degraded=frozenset(allowed), require_evaluated=require)
+
+
 def _required_scanners_from_section(
     config_path: Path, merge_section: dict
 ) -> dict[str, tuple[str, ...]]:
@@ -657,6 +733,7 @@ def _required_scanners_from_section(
 __all__ = [
     "CONFIG_KEY_AUTHORIZED_ROLES",
     "CONFIG_KEY_CI_STRICT",
+    "CONFIG_KEY_EVALUATOR",
     "CONFIG_KEY_REQUIRED_CI_CHECKS",
     "CONFIG_KEY_MERGE_REQUIREMENTS",
     "CONFIG_KEY_REQUIRED_REVIEWER_ROLES",
@@ -666,8 +743,11 @@ __all__ = [
     "REQUIREMENT_KEY_CI_PASS",
     "REQUIREMENT_KEY_MAX_CHANGED_FILES",
     "REQUIREMENT_KEY_TESTS_PASS",
+    "STRICT_EVALUATOR_GATE",
+    "EvaluatorGate",
     "InvalidMergeGateConfigError",
     "RequiredReviewerRolesNotDeclaredError",
+    "evaluator_gate_from_section",
     "ci_gate_from_section",
     "ci_strict_from_section",
     "load_authorized_roles",

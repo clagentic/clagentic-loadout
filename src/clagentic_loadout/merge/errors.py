@@ -99,6 +99,27 @@ class VerdictBlockingError(Exception):
     route around."""
 
 
+class VerdictNotEvaluatedError(Exception):
+    """A required reviewer's newest fence carries no computed verdict (below
+    fence_schema_version 3) and the repo's gate requires one
+    (merge.evaluator.require_evaluated), or it claims one the gate cannot check
+    (an evaluated fence that does not carry its findings). The status such a
+    fence asserts was typed by its poster, not computed."""
+
+
+class VerdictDegradedError(Exception):
+    """A verdict is DEGRADED: a required input to it was missing, so it cannot
+    clear the change, and the repo's gate does not allow DEGRADED for that
+    reviewer role (merge.evaluator.allow_degraded)."""
+
+
+class VerdictGateDisagreementError(Exception):
+    """The merge gate computed a different outcome from the findings in a fence
+    than the fence records, and the difference is not one the gate may clear.
+    The gate can add refusals to a verdict; it never clears a block on its own
+    authority."""
+
+
 class VerdictRoleMismatchError(Exception):
     """Raised when a verdict comment's platform authorship (user.login) is
     correct for the required reviewer slot, but the fenced block's own
@@ -188,8 +209,11 @@ __all__ = [
     "StaleHeadShaError",
     "TitleInvalidError",
     "VerdictBlockingError",
+    "VerdictDegradedError",
+    "VerdictGateDisagreementError",
     "VerdictMalformedError",
     "VerdictMissingError",
+    "VerdictNotEvaluatedError",
     "VerdictPriorFindingsOpenError",
     "VerdictRoleMismatchError",
     "VerdictScannerFailedError",
