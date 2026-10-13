@@ -786,9 +786,14 @@ printed on stdout carries `verdict_outcome`, `verdict_reasons` and `blocking_cou
 
 `post` recomputes the verdict from the facts in `--findings` and the host's and
 the base revision's own records; it does not trust the `verdict_outcome` the file
-records. The base revision comes from the file's `policy_base_sha`, or `--base-sha`
-for a bare array (a `--base-sha` that disagrees with the recorded one is refused);
-with neither, no policy is read and the outcome is DEGRADED. `--status` is
+records. The policy base is the PR's live base, taken from the same host fetch that
+checks the head is unmoved, the rule the merge gate applies: the findings file is the
+reviewer's, the policy base is not. A bare array needs no `--base-sha`. A
+`policy_base_sha` recorded in the file, or a `--base-sha`, that differs from the live
+base is not used; `post` prints a notice on stderr naming both, and the fence records
+the live base as `policy_base_sha`. `--base-sha` stays accepted for compatibility (a
+malformed value is a usage error and exits 1). If the policy cannot be read at the live base the outcome is
+DEGRADED naming the cause; the recorded base is never a fallback. `--status` is
 optional and kept for compatibility: `clean` over a computed outcome other than
 CLEAN is refused naming both, `blocking` over a computed CLEAN is honoured (it can
 only be stricter), and when omitted the computed status is posted. The posted

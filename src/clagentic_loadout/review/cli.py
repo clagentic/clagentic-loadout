@@ -308,9 +308,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--base-sha",
         type=str.strip,
         default=None,
-        help="Full SHA of the base revision policy is read from. Required only when "
-        "--findings is a bare array or a run output that did not record one; without "
-        "it no policy is read and the verdict is DEGRADED.",
+        help="Accepted for compatibility; it is not a policy source. Policy is read at "
+        "the PR's live base revision, as the host reports it. A value that differs "
+        "from the live base is named on stderr and not used.",
     )
     post.add_argument(
         "--head-sha",
@@ -761,24 +761,38 @@ def _load_prior_review(
     return head_sha, findings
 
 
-def _policy_base_for_post(args: argparse.Namespace, recorded: str | None) -> str | None:
-    """The base revision policy is read from: the one the run recorded, else
-    --base-sha, else None (no policy is read and the verdict is DEGRADED). A
-    --base-sha that disagrees with the recorded one is refused, as --head-sha is."""
-    if args.base_sha is None:
-        return recorded
-    if not FULL_SHA_RE.match(args.base_sha):
+def _check_base_sha_flag(args: argparse.Namespace) -> None:
+    """--base-sha is accepted for compatibility; it is never a policy source,
+    but a malformed value is still a usage error."""
+    if args.base_sha is not None and not FULL_SHA_RE.match(args.base_sha):
         _fail(
             f"--base-sha must be 40 lowercase hex characters, got {args.base_sha!r}",
             EXIT_USAGE,
         )
-    if recorded is not None and recorded != args.base_sha:
-        _fail(
-            f"--base-sha {args.base_sha} conflicts with the base {recorded} recorded in the "
-            f"findings file {args.findings!r}; drop --base-sha or regenerate the findings",
-            EXIT_FINDINGS_INVALID,
-        )
-    return args.base_sha
+
+
+def _policy_base_for_post(
+    args: argparse.Namespace, recorded: str | None, live_base: str | None
+) -> str | None:
+    """The base revision policy is read from: the PR's live base as the host
+    reports it, the rule the merge gate applies. The findings file and
+    --base-sha are the caller's inputs and are never a policy source; one that
+    differs from the live base is named on stderr and not used. None (the host
+    gave no usable base) leaves the verdict DEGRADED."""
+    if live_base is None or not FULL_SHA_RE.match(live_base):
+        return None
+    for label, supplied in (
+        (f"the policy base recorded in the findings file {args.findings!r}", recorded),
+        ("--base-sha", args.base_sha),
+    ):
+        if supplied is not None and supplied != live_base:
+            print(
+                f"loadout-review: notice: {label} is {supplied}, but the live PR base is "
+                f"{live_base}; policy is read at the live base (the base moved since the "
+                "review ran, or the input is wrong)",
+                file=sys.stderr,
+            )
+    return live_base
 
 
 def _unsafe_status_message(status: str, verdict: Verdict, reasons: list[str]) -> str:
@@ -810,7 +824,7 @@ def _post_command(
         args.findings, owner=owner, repo=repo, pr_number=args.pr,
         head_sha_arg=args.head_sha, head_flag="--head-sha", meta=loaded_meta,
     )
-    policy_base = _policy_base_for_post(args, loaded_meta.get("policy_base_sha"))
+    _check_base_sha_flag(args)
     try:
         evaluation = context_from_config(config_root)
     except EvaluateError as exc:
@@ -879,6 +893,9 @@ def _post_command(
         return live
 
     live_pr = assert_head_unmoved()
+    policy_base = _policy_base_for_post(
+        args, loaded_meta.get("policy_base_sha"), live_pr.base_sha
+    )
 
     # The verdict is computed here, from the facts in the findings file and the
     # host's and the base revision's own records, whatever an earlier `run`
