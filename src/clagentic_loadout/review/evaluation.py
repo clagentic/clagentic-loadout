@@ -40,7 +40,8 @@ from clagentic_loadout.review.evaluate import (
     evaluate,
 )
 from clagentic_loadout.review.evaluate_verb import load_evaluator_config
-from clagentic_loadout.review.policy_source import PolicySource, read_policy
+from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader
+from clagentic_loadout.review.policy_source import PolicySource, read_policy_from
 from clagentic_loadout.review.rubric import DEFAULT_BLOCK_AT
 from clagentic_loadout.review.stakes import VISIBILITIES, VISIBILITY_PUBLIC, Stakes
 
@@ -74,11 +75,16 @@ class EvaluationContext:
     ``policy_base_sha`` is the revision the pull request merges into, which is
     where policy is read from; None means it is not known. ``visibility`` is the
     repository visibility the host reported, None when it did not state one.
-    ``repo_path`` is a local repository that holds the base revision."""
+
+    Policy is read through ``policy_reader`` (normally the host API), or from
+    the local repository at ``repo_path`` when that is named explicitly and no
+    reader is given. With neither there is no policy source and the verdict is
+    DEGRADED; the current directory is never assumed to be a repository."""
 
     block_at: str = DEFAULT_BLOCK_AT
     required_scanners: tuple[str, ...] = ()
     repo_path: Path | None = None
+    policy_reader: PolicyReader | None = None
     policy_base_sha: str | None = None
     visibility: str | None = None
     stakes_profile: str | None = None
@@ -104,9 +110,14 @@ def _policy(context: EvaluationContext) -> PolicySource:
     if context.policy_base_sha is None:
         reason = "the policy base revision is not known, so no policy was read"
         return PolicySource((), Stakes(visibility=visibility), (reason,))
-    repo_path = context.repo_path if context.repo_path is not None else Path.cwd()
-    return read_policy(
-        repo_path,
+    reader = context.policy_reader
+    if reader is None and context.repo_path is not None:
+        reader = GitPolicyReader(context.repo_path)
+    if reader is None:
+        reason = "no policy source is available, so no policy was read"
+        return PolicySource((), Stakes(visibility=visibility), (reason,))
+    return read_policy_from(
+        reader,
         context.policy_base_sha,
         profile=context.stakes_profile,
         visibility=visibility,

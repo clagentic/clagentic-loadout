@@ -28,6 +28,9 @@ Endpoint shapes (real, documented GitHub REST API):
         -> {"content": "<base64>", "encoding": "base64", ...} for a text
            file; used only when include_file_contents=True (scanner-staging
            path, lr-c17040 comment #1).
+  - GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1
+        -> {"tree": [{"path", "type"}, ...], "truncated": bool}; with the
+           contents endpoint above, the policy-file read of review.policy_reader.
 """
 
 from __future__ import annotations
@@ -149,6 +152,47 @@ def _get_file_content(
         return ""
 
 
+def fetch_tree_paths(owner: str, repo: str, ref: str, token: str, *, opener=None) -> list[str]:
+    """Every file path in the tree at *ref*, from the recursive git-trees
+    endpoint. A listing the host reports as truncated is a failure: policy
+    markers read from a partial tree could be silently missing."""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/trees/{urllib.parse.quote(ref, safe='')}?recursive=1"
+    status, body = _github_get(url, token, opener=opener)
+    if status != 200 or not isinstance(body, dict):
+        raise AcquireFetchError(f"the tree of {owner}/{repo} at {ref[:12]} returned HTTP {status}")
+    entries = body.get("tree")
+    if body.get("truncated") is not False or not isinstance(entries, list):
+        raise AcquireFetchError(
+            f"the tree of {owner}/{repo} at {ref[:12]} was truncated or not a complete listing"
+        )
+    return [
+        e["path"]
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("path"), str) and e.get("type") != "tree"
+    ]
+
+
+def fetch_file_bytes(
+    owner: str, repo: str, path: str, ref: str, token: str, *, opener=None
+) -> bytes:
+    """The bytes of *path* at *ref*. Anything but an inline base64 file body is
+    a failure, a missing file and a file too large for the endpoint included."""
+    quoted_path = urllib.parse.quote(path, safe="/")
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/contents/{quoted_path}?ref={urllib.parse.quote(ref)}"
+    status, body = _github_get(url, token, opener=opener)
+    if status != 200 or not isinstance(body, dict):
+        raise AcquireFetchError(f"{path} in {owner}/{repo} at {ref[:12]} returned HTTP {status}")
+    encoded = body.get("content")
+    if body.get("encoding") != "base64" or not isinstance(encoded, str):
+        raise AcquireFetchError(f"{path} in {owner}/{repo} at {ref[:12]} was not returned inline")
+    try:
+        return base64.b64decode(encoded)
+    except ValueError as exc:
+        raise AcquireFetchError(
+            f"{path} in {owner}/{repo} at {ref[:12]} is not valid base64"
+        ) from exc
+
+
 def fetch_range_diff(
     owner: str, repo: str, base_sha: str, head_sha: str, token: str, *, opener=None
 ) -> RangeDiff:
@@ -266,9 +310,17 @@ class GithubAcquireBackend:
             owner, repo, base_sha, head_sha, self._token, opener=self._opener
         )
 
+    def fetch_tree_paths(self, *, owner: str, repo: str, ref: str) -> list[str]:
+        return fetch_tree_paths(owner, repo, ref, self._token, opener=self._opener)
+
+    def fetch_file_bytes(self, *, owner: str, repo: str, path: str, ref: str) -> bytes:
+        return fetch_file_bytes(owner, repo, path, ref, self._token, opener=self._opener)
+
 
 __all__ = [
     "GithubAcquireBackend",
+    "fetch_file_bytes",
     "fetch_pr_content",
+    "fetch_tree_paths",
     "fetch_range_diff",
 ]

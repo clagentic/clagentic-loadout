@@ -29,6 +29,10 @@ endpoints):
         -> {"content": "<base64>", "encoding": "base64", ...} for a text
            file; used only when include_file_contents=True (scanner-staging
            path, lr-c17040 comment #1).
+  - GET  /api/v1/repos/{owner}/{repo}/git/trees/{sha}?recursive=true&page=N
+        -> {"tree": [{"path", "type"}, ...], "truncated": bool}, paged; with
+           the contents endpoint above, the policy-file read of
+           review.policy_reader.
 """
 
 from __future__ import annotations
@@ -189,6 +193,86 @@ def _get_file_content(
         return base64.b64decode(encoded).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return ""
+
+
+#: Bound on tree pages read; a tree needing more is reported as incomplete.
+_MAX_TREE_PAGES = 100
+
+
+def fetch_tree_paths(
+    git_host_base: str, token: str, owner: str, repo: str, ref: str, *, opener=None
+) -> list[str]:
+    """Every file path in the tree at *ref*, following the endpoint's pages
+    until it stops reporting the listing as truncated. A listing still
+    truncated after the page bound is a failure: policy markers read from a
+    partial tree could be silently missing."""
+    paths: list[str] = []
+    what = f"the tree of {owner}/{repo} at {ref[:12]}"
+    for page in range(1, _MAX_TREE_PAGES + 1):
+        try:
+            status, raw = git_host_api.request(
+                git_host_base,
+                "GET",
+                f"/api/v1/repos/{owner}/{repo}/git/trees/{urllib.parse.quote(ref, safe='')}"
+                f"?recursive=true&per_page=1000&page={page}",
+                token,
+                opener=opener,
+            )
+        except git_host_api.GitHostApiError as exc:
+            raise AcquireFetchError(f"{what}: {exc}") from exc
+        if status != 200:
+            raise AcquireFetchError(f"{what} returned HTTP {status}")
+        body = _parse_json(raw, dict, what)
+        entries = body.get("tree")
+        truncated = body.get("truncated")
+        if not isinstance(entries, list) or not isinstance(truncated, bool):
+            raise AcquireFetchError(f"{what} was not a complete listing")
+        paths.extend(
+            e["path"]
+            for e in entries
+            if isinstance(e, dict) and isinstance(e.get("path"), str) and e.get("type") != "tree"
+        )
+        if not truncated:
+            return paths
+        if not entries:
+            break
+    raise AcquireFetchError(f"{what} was truncated")
+
+
+def fetch_file_bytes(
+    git_host_base: str,
+    token: str,
+    owner: str,
+    repo: str,
+    path: str,
+    ref: str,
+    *,
+    opener=None,
+) -> bytes:
+    """The bytes of *path* at *ref*. Anything but an inline base64 file body is
+    a failure, a missing file included."""
+    what = f"{path} in {owner}/{repo} at {ref[:12]}"
+    try:
+        status, raw = git_host_api.request(
+            git_host_base,
+            "GET",
+            f"/api/v1/repos/{owner}/{repo}/contents/{urllib.parse.quote(path, safe='/')}"
+            f"?ref={urllib.parse.quote(ref)}",
+            token,
+            opener=opener,
+        )
+    except git_host_api.GitHostApiError as exc:
+        raise AcquireFetchError(f"{what}: {exc}") from exc
+    if status != 200:
+        raise AcquireFetchError(f"{what} returned HTTP {status}")
+    body = _parse_json(raw, dict, what)
+    encoded = body.get("content")
+    if body.get("encoding") != "base64" or not isinstance(encoded, str):
+        raise AcquireFetchError(f"{what} was not returned inline")
+    try:
+        return base64.b64decode(encoded)
+    except ValueError as exc:
+        raise AcquireFetchError(f"{what} is not valid base64") from exc
 
 
 def _compare_commit_count(
@@ -367,9 +451,21 @@ class ForgejoAcquireBackend:
             opener=self._opener,
         )
 
+    def fetch_tree_paths(self, *, owner: str, repo: str, ref: str) -> list[str]:
+        return fetch_tree_paths(
+            self._git_host_base, self._token, owner, repo, ref, opener=self._opener
+        )
+
+    def fetch_file_bytes(self, *, owner: str, repo: str, path: str, ref: str) -> bytes:
+        return fetch_file_bytes(
+            self._git_host_base, self._token, owner, repo, path, ref, opener=self._opener
+        )
+
 
 __all__ = [
     "ForgejoAcquireBackend",
+    "fetch_file_bytes",
     "fetch_pr_content",
+    "fetch_tree_paths",
     "fetch_range_diff",
 ]

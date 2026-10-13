@@ -216,6 +216,32 @@ class AcquireBackend(Protocol):
         ...
 
 
+@runtime_checkable
+class PolicyFileBackend(Protocol):
+    """Optional capability of a transport: read a repository's tree and file
+    contents at a commit from the host API, with no local checkout. Separate
+    from AcquireBackend for the same reason as RangeDiffBackend."""
+
+    def fetch_tree_paths(self, *, owner: str, repo: str, ref: str) -> list[str]:
+        """Every file path in the tree at *ref*.
+
+        Raises:
+            acquire.errors.AcquireFetchError: the tree could not be read in
+                full (non-2xx, network failure, a truncated listing, or an
+                unexpected response shape).
+        """
+        ...
+
+    def fetch_file_bytes(self, *, owner: str, repo: str, path: str, ref: str) -> bytes:
+        """The bytes of *path* at *ref*.
+
+        Raises:
+            acquire.errors.AcquireFetchError: the file could not be read in
+                full, including when it does not exist at *ref*.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class RangeDiff:
     """The change between two commits of one repository, from the host API.
@@ -259,6 +285,7 @@ __all__ = [
     "AcquireBackend",
     "AcquiredPr",
     "ChangedFile",
+    "PolicyFileBackend",
     "RangeDiff",
     "RangeDiffBackend",
     "pr_text",

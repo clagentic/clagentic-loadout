@@ -5,9 +5,11 @@ a real subprocess without any real model."""
 
 from __future__ import annotations
 
+import base64
 import json
 import sys
 import textwrap
+import urllib.parse
 from pathlib import Path
 
 import yaml
@@ -192,15 +194,20 @@ class Env:
             fallback = write_stub(self.stubs, "fallback", fallback_mode)
         write_profile_config(self.cfg, carrier=carrier, fallback=fallback, **extra)
 
-    def main(self, command: str, *extra: str, identity=None, **opener_kwargs) -> int:
+    def main(
+        self, command: str, *extra: str, identity=None, local_repo=True, **opener_kwargs
+    ) -> int:
         """One verb invocation against this deployment; returns the exit code.
-        `identity` overrides the attested subject; the rest shape the fake host."""
+        `identity` overrides the attested subject; `local_repo=False` omits
+        --repo-path, as a reviewer run from a scratch directory does; the rest
+        shape the fake host."""
         from clagentic_loadout.review import cli as review_cli
 
+        repo_path_args = ["--repo-path", str(self.repo)] if local_repo else []
         return review_cli.main(
             [
                 command, "--caller", "reviewer", "--repo", "some-owner/some-repo",
-                "--pr", "42", "--platform", "github", "--repo-path", str(self.repo), *extra,
+                "--pr", "42", "--platform", "github", *repo_path_args, *extra,
             ],
             token_provider=self.token_provider,
             opener=github_opener(
@@ -275,6 +282,10 @@ def github_opener(
     compare: dict | None = None,
     pr_fields: dict | None = None,
     repo_record: dict | None = PRIVATE_REPO_RECORD,
+    base_files: dict[str, str] | None = None,
+    tree_http: int = 200,
+    tree_truncated: bool = False,
+    contents_http: int = 200,
 ):
     """Serves the acquire reads and the review-post comment writes for one PR.
     `state` collects the posted body and every request URL. `compare`, when
@@ -282,7 +293,9 @@ def github_opener(
     (or "http_status" for a failing read); without it a compare request is an
     unexpected call. `pr_fields` adds fields (title, body) to the PR metadata.
     `repo_record` is the repository record under `base.repo` (None omits it, as
-    a host that does not state one)."""
+    a host that does not state one). `base_files`, when given, is the file tree
+    served by the git-trees and contents endpoints at any ref (path -> text);
+    `tree_http`, `tree_truncated` and `contents_http` make those reads fail."""
     recorded = state if state is not None else {}
     recorded.setdefault("posted_body", None)
     recorded.setdefault("requests", [])
@@ -307,6 +320,19 @@ def github_opener(
             if accept == "application/vnd.github.v3.diff":
                 return _Response(200, compare["diff"].encode("utf-8"), "text/plain")
             return _json({"status": compare["status"]})
+        if method == "GET" and base_files is not None and "/git/trees/" in url:
+            if tree_http != 200:
+                return _Response(tree_http, b"{}")
+            entries = [{"path": p, "type": "blob"} for p in base_files]
+            return _json({"tree": entries, "truncated": tree_truncated})
+        if method == "GET" and base_files is not None and "/contents/" in url:
+            if contents_http != 200:
+                return _Response(contents_http, b"{}")
+            name = urllib.parse.unquote(url.split("/contents/", 1)[1].split("?")[0])
+            if name not in base_files:
+                return _Response(404, b"{}")
+            encoded = base64.b64encode(base_files[name].encode("utf-8")).decode("ascii")
+            return _json({"type": "file", "encoding": "base64", "content": encoded})
         if method == "POST" and url.endswith(f"/issues/{pr_number}/comments"):
             recorded["posted_body"] = json.loads(req.data.decode("utf-8"))["body"]
             return _json({"id": 5, "html_url": "http://post"})
