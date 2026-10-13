@@ -149,7 +149,7 @@ replaced the PR's ENTIRE existing body with no explicit mode -- the only
 semantic the verb had. A caller who wanted to append a short follow-up
 note had no way to do so short of first reading the existing body out of
 band and hand-concatenating it into a new --body-stdin payload; the
-observed incident (clagentic-config PR #16) replaced a full measurement
+observed incident on a downstream repo replaced a full measurement
 writeup with a two-sentence note using exactly this (the only) code path.
 Operator directive: destructive must be OPT-IN, and there is NO default
 body mode -- supplying a body on --update-pr without ALSO supplying

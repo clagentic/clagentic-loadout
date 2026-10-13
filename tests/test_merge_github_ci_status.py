@@ -7,7 +7,7 @@ parity for the CI-status gate-fact fetch).
 Coverage:
   - Empty combined state + zero check-runs total_count => a CiStatusResult
     with is_empty True — the same no-runner-by-design shape observed on the
-    Forgejo side (PR #49 @ head 6a8fcbd).
+    Forgejo side.
   - Non-empty combined state (a real statuses list + a non-zero check-runs
     total_count) => a populated, non-empty CiStatusResult carrying the real
     state.

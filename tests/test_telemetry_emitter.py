@@ -202,9 +202,9 @@ class TestEmitDispatchResumeAck:
     def test_resume_ack_with_resuming_label(self):
         sink = _RecordingSink()
         emit_dispatch_resume_ack(
-            "dispatch-1", ts=FIXED_TS, resuming="continuing PR #332 fix", sink=sink
+            "dispatch-1", ts=FIXED_TS, resuming="continuing the review fix", sink=sink
         )
-        assert sink.records[0]["resuming"] == "continuing PR #332 fix"
+        assert sink.records[0]["resuming"] == "continuing the review fix"
 
     def test_resume_ack_references_original_dispatch_id(self):
         """A resume-ack continues an EXISTING dispatch -- it must carry the

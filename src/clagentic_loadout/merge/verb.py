@@ -193,7 +193,7 @@ IDENTITY / SEAM STRIP FROM THE SOURCE MODULE (full inventory in the PR body):
      service-specific merge-authority check are now merge.authority's
      provider seam: which ROLE may authorize a merge is config (--role / an
      AuthorityProvider), never a baked identity.
-  3. Credential mint (an OpenBao self-fetch + a gatekeeper-CLI subprocess
+  3. Credential mint (a secret-broker self-fetch + a helper-CLI subprocess
      call) is now the SAME transport.credential_provider seam every other
      loadout verb uses — a TokenProvider resolves a token for a
      caller-supplied role, never a hardcoded broker client or fixed

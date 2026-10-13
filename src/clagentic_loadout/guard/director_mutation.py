@@ -43,7 +43,7 @@ five-point convention; the short version applied here):
    needed explicit scrutiny.
 3. NO HARDCODED MACHINE/OPERATOR PATHS OR TRANSPORT-VERB NAMES. Every
    reference literal that names a fixed script path, forge hostname, or a
-   specific harness's IPC verb (`clagentic-relay`) is generalized to
+   specific harness's IPC verb is generalized to
    caller-supplied config — see `DirectorClagenticConfig`/
    `DirectorLeadMutationConfig` below.
 4. NO PERMISSIVE FALLBACK. Every function here returns a closed (ok, reason)
@@ -63,7 +63,7 @@ WHAT THIS MODULE PORTS:
   - `check_director_identity_discipline` — port of the reference's
     `_check_director_clagentic` (reference guard-bash.py ll.3619-3709):
     caller-identity discipline on a configurable "relay-shaped" IPC verb's
-    open/post/close subcommands (reference: `clagentic-relay conversation`,
+    open/post/close subcommands (reference: `<relay-binary> conversation`,
     generalized to `DirectorClagenticConfig.relay_verb_pattern` — no
     specific binary name hardcoded here).
   - `check_lead_mutation` (SE3 PR2, THIS PR, lr-1cc4df) — port of the
@@ -224,7 +224,7 @@ class DirectorClagenticConfig:
         for `<relay-binary> conversation`) — this module never hardcodes a
         specific relay binary name (CLAUDE.md rule 1); a caller wires its
         own installed IPC verb name in. The reference's exact shape is
-        `clagentic-relay conversation <subcommand> ...`; this module
+        `<relay-binary> conversation <subcommand> ...`; this module
         generalizes only the leading two tokens (binary + noun) via this
         pattern, and always inspects `tokens[2]` as the subcommand itself
         (open/post/close) — a caller supplying a differently-shaped IPC verb
@@ -603,7 +603,7 @@ class LeadMutationConfig:
         would otherwise false-trigger the shell-write-redirect deny below).
     relay_body_redirect_prefix: an exact path PREFIX (not a full path) this
         module treats as the sole carved-out shell-write-redirect target
-        (reference: the fixed `/run/clagentic-relay/spawn-homes/<id>/
+        (reference: the fixed `/run/<relay>/spawn-homes/<id>/
         relay-body.json` envelope-posting path) — a caller supplies its own
         per-spawn envelope-staging path prefix; `None` (the default) means
         no carve-out at all, so EVERY write-redirect denies (a strict

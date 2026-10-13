@@ -2443,7 +2443,7 @@ class TestMainExpectVerdictBlockUsageGuards:
 
     def test_pre_embedded_fence_in_stdin_body_rejected(self, monkeypatch):
         # lr-5260f9 end-to-end: a pre-embedded fence in --body-stdin's
-        # 'body' field is refused -- the PR #485 shape never reaches a
+        # 'body' field is refused -- the double-fence shape never reaches a
         # POST/comments call. build_expected_verdict_body runs AFTER the
         # existing --pr-sha readback (a real GET this invocation already
         # performs regardless of this fix -- see check_pr_sha's call site
@@ -3180,7 +3180,7 @@ class TestAdversarialBodyAcceptanceViaBodyEnv:
 
 
 class TestMainBodyEnvStaleReadRegression:
-    """lr-becdef: PR #388 foreign-body incident regression, exercised
+    """lr-becdef: foreign-body incident regression, exercised
     through this verb's own main() entry point (the Forgejo read call
     site, git_host_api._run). A body staged for one PR must never be
     silently re-read/re-posted for a DIFFERENT PR, and a body must never
@@ -3195,7 +3195,7 @@ class TestMainBodyEnvStaleReadRegression:
         )
 
     def test_body_staged_for_different_pr_refused_before_network(self, monkeypatch, tmp_path):
-        # Direct reproduction of the PR #388 incident shape: a body staged
+        # Direct reproduction of the foreign-body incident shape: a body staged
         # for PR 100 (a prior, unrelated review) must never be read as if
         # it were staged for PR 200.
         monkeypatch.setenv("TMPDIR", str(tmp_path))
@@ -3219,7 +3219,7 @@ class TestMainBodyEnvStaleReadRegression:
 
     def test_read_twice_without_restaging_fails_closed(self, monkeypatch, tmp_path, capsys):
         # First invocation posts and consumes the staged body; a SECOND
-        # invocation with no re-staging step (the exact PR #388 mechanism:
+        # invocation with no re-staging step (the exact foreign-body mechanism:
         # a harness's staging write skipped/guard-denied) must fail closed
         # rather than silently re-reading and re-posting the first body.
         monkeypatch.setenv("TMPDIR", str(tmp_path))

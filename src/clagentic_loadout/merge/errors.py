@@ -126,7 +126,7 @@ class VerdictRoleMismatchError(Exception):
     missing/stale/malformed verdict: the right App posted, but the CONTENT
     riding in the comment belongs to a different reviewer (e.g. a
     security-audit body posted under the code-review App's login after a
-    shared staging path was clobbered — console PR #332, lr-f00c6f Fault 3,
+    shared staging path was clobbered — an observed downstream PR, lr-f00c6f Fault 3,
     re-scoped by lr-23fe19). DEFENSE-IN-DEPTH ON TOP OF, NOT INSTEAD OF, the
     user.login authorship binding in merge.verdict.read_reviewer_verdict —
     this check never substitutes body text for the login check; it adds a

@@ -4,8 +4,8 @@ CI-status-gate slice, comment #6; HEAD-scoping fix lr-2d2293).
 
 Coverage:
   - Empty combined state + zero HEAD-scoped commit-status entries => a
-    CiStatusResult with is_empty True — the exact shape observed on PR #49
-    @ head 6a8fcbd (empty combined state, zero commit-status entries).
+    CiStatusResult with is_empty True — the no-runner shape (empty combined
+    state, zero commit-status entries).
   - Non-empty combined state (a real statuses list) => a populated,
     non-empty CiStatusResult carrying the real state.
   - Unreachable / non-200 status endpoint => GateFactUnavailableError
