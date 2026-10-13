@@ -575,9 +575,11 @@ a block on its own authority.
 
 ### Policy is read at the live base
 
-Dispositions and stakes are read from the PR's **live base revision** (`git show
-<base>:<path>` in the local tree at `--repo-path`), where the base is the one the host
-reports for the PR at merge time. The `policy_base_sha` a fence or findings file records is
+Dispositions and stakes are read from the PR's **live base revision**, where the base is the
+one the host reports for the PR at merge time. They are read through the host API with the
+run's own credential, so no local checkout is needed; an explicit `--repo-path` is an optional
+local source (`git show <base>:<path>`), used instead of the host when given, the same choice
+`loadout-review` makes. The `policy_base_sha` a fence or findings file records is
 provenance only and is never used to pick the revision; a reviewer editing its own findings
 file, or a fence recording a base with a permissive policy, changes nothing. The expected
 head is the PR's current head. Consequences:
@@ -586,9 +588,10 @@ head is the PR's current head. Consequences:
   is on the trusted base, which the PR under review cannot have written.
 - A base that gained a stricter policy, or whose disposition has expired, since the review
   **blocks** at merge.
-- With no `--repo-path`, or a base commit the local tree does not hold, the policy cannot be
-  read, so the gate's computation is DEGRADED. A fence that recorded CLEAN is then refused,
-  naming the missing input.
+- A policy file that cannot be read (a host error, or a base commit the named local tree does
+  not hold), or no known base revision, makes the gate's computation DEGRADED. A fence that
+  recorded CLEAN is then refused, naming the missing input. There is no fallback from one
+  source to the other.
 
 ### Decision table
 
@@ -598,7 +601,7 @@ head is the PR's current head. Consequences:
 |---|---|
 | `F` or `G` is STALE | Refused, naming the fence head and the merge head. |
 | `F` is CLEAN, `G` is anything else | Refused, naming the difference: the expired entry, the policy base that moved, the degraded input, the findings that now block. |
-| `F` is BLOCKED, `G` is CLEAN, and a standing disposition on the live base now demotes the blocking finding | Passes. The gate names the applied disposition on stderr, in the merge result and in the attestation. A disposition that narrows by `fingerprint` never counts: the fence does not carry fingerprints, so it cannot be shown to match. |
+| `F` is BLOCKED, `G` is CLEAN, the fence's `findings_open` is non-empty, and **every** finding in it is individually matched by a standing disposition on the live base | Passes. The gate names each applied disposition on stderr, in the merge result and in the attestation. A disposition on some other finding clears nothing; a recorded finding that stopped blocking for any other reason, or that no disposition matches, refuses the merge and is named. A BLOCKED fence with an empty or absent `findings_open` refuses (nothing can be shown to be cleared). Finding ids are derived from file, line and rule and can be shared by findings with different messages: every finding holding the id must be covered. A disposition that narrows by `fingerprint` never counts: the fence does not carry fingerprints, so it cannot be shown to match. |
 | BLOCKED in `F` or `G` (otherwise) | Refused, naming each open blocking finding and the exact `dispositions.yaml` entry that would clear it (or that the security floor forbids clearing it as `by_design`). |
 | DEGRADED in `F` or `G`, nothing blocked | Refused, naming the reasons, unless `merge.evaluator.allow_degraded` is true for the role. |
 | Both CLEAN | Passes, subject to the rest of the gate chain. |
