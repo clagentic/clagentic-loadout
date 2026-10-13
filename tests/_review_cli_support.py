@@ -324,6 +324,22 @@ def github_opener(
             if tree_http != 200:
                 return _Response(tree_http, b"{}")
             entries = [{"path": p, "type": "blob"} for p in base_files]
+            query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            if "per_page" in query and not tree_truncated:
+                # Forgejo-shaped paging: total_count on every page, truncated
+                # true on a non-final page, a page past the end is HTTP 200
+                # with tree null and truncated false.
+                per_page = int(query["per_page"][0])
+                page = int(query.get("page", ["1"])[0])
+                chunk = entries[(page - 1) * per_page : page * per_page]
+                return _json(
+                    {
+                        "tree": chunk or None,
+                        "truncated": page * per_page < len(entries),
+                        "page": page,
+                        "total_count": len(entries),
+                    }
+                )
             return _json({"tree": entries, "truncated": tree_truncated})
         if method == "GET" and base_files is not None and "/contents/" in url:
             if contents_http != 200:
