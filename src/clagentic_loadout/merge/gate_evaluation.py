@@ -25,8 +25,10 @@ Decision table, for the fence outcome F and the gate's own outcome G:
   F CLEAN, G anything else             refuse, naming the difference (an expired
                                        entry, a policy base that moved, a
                                        degraded input, a finding that now blocks)
-  F BLOCKED, G CLEAN, a disposition    pass, naming the disposition applied
-    applied to a finding
+  F BLOCKED, G CLEAN, F's findings_open  pass, naming each disposition applied; only
+    non-empty and every entry matched    when EVERY recorded-blocking finding is
+    by a disposition at the live base    individually matched, never on one match
+                                         among several, and never on an empty list
   BLOCKED in F or G                    refuse, naming each open blocking finding
                                        and the entry that would clear it
   DEGRADED in F or G (no BLOCKED)      refuse unless merge.evaluator.allow_degraded
@@ -66,13 +68,13 @@ from clagentic_loadout.review.evaluate import (
 )
 from clagentic_loadout.review.evaluate_render import finding_notes
 from clagentic_loadout.review.evaluate_verb import EvaluateError
-from clagentic_loadout.review.evaluation import context_from_config, evaluate_findings
-from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
-
-_NO_REPO_PATH = (
-    "no local repository was given (--repo-path), so the policy at the live base "
-    "revision could not be read"
+from clagentic_loadout.review.evaluation import (
+    context_from_config,
+    evaluate_findings,
+    finding_state_id,
 )
+from clagentic_loadout.review.policy_reader import PolicyReader
+from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,57 @@ def _blocking_text(verdict: Verdict) -> str:
     return "\n".join(parts)
 
 
+def unmatched_recorded_blocks(
+    recorded: Sequence[Mapping[str, Any]], computed: Verdict
+) -> list[tuple[Mapping[str, Any], str]]:
+    """The recorded blocking entries no disposition at the live base matches,
+    each with why. A recorded entry is matched when the gate's computation holds
+    at least one finding with that id and EVERY such finding carries an applied
+    disposition: ids are a digest of location and rule, so two findings with
+    different messages can share one, and covering only one of them clears
+    nothing. A disposition that narrows by fingerprint is applied on path and
+    rule alone here because the fence does not carry fingerprints, so it cannot
+    be shown to match and never counts."""
+    by_id: dict[str, list[Any]] = {}
+    for finding in computed.findings:
+        if finding.praise:
+            # Praise is never scored or dispositioned, so it cannot be the
+            # finding a recorded block names, whatever id it happens to share.
+            continue
+        by_id.setdefault(finding_state_id(finding.file, finding.line, finding.rule_id), []).append(
+            finding
+        )
+    unmatched: list[tuple[Mapping[str, Any], str]] = []
+    for entry in recorded:
+        group = by_id.get(str(entry.get("id")), [])
+        if not group:
+            unmatched.append((entry, "the gate's computation holds no such finding"))
+        elif any(f.disposition is None for f in group):
+            unmatched.append((entry, "no disposition at the live base matches it"))
+        elif any(f.disposition.get("fingerprint") for f in group):
+            unmatched.append(
+                (
+                    entry,
+                    "the disposition that applies narrows by fingerprint, which the fence "
+                    "does not carry, so it cannot be shown to match",
+                )
+            )
+    return unmatched
+
+
+def _unmatched_text(
+    recorded: Sequence[Mapping[str, Any]], unmatched: Sequence[tuple[Mapping[str, Any], str]]
+) -> str:
+    if not recorded:
+        return (
+            "  - the fence lists no open finding (findings_open is empty or absent), so "
+            "nothing can be shown to be cleared"
+        )
+    return "\n".join(
+        f"  - {entry.get('id')} (rule {entry.get('rule_id')}): {why}" for entry, why in unmatched
+    )
+
+
 def _finding_dicts(state_findings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     return [dict(item) for item in state_findings]
 
@@ -156,22 +209,22 @@ def _recompute(
     *,
     current_head_sha: str,
     live_base_sha: str,
-    repo_path: str | Path | None,
+    policy_reader: PolicyReader | None,
     visibility: str | None,
     config_root: str | Path | None,
     today: dt.date | None,
 ) -> Verdict:
-    """The gate's own evaluation of the fence's findings. Policy is read at
-    *live_base_sha*, never at a revision a fence or findings file names; with no
-    repository or no base revision it is not read and the verdict is DEGRADED."""
+    """The gate's own evaluation of the fence's findings. Policy is read through
+    *policy_reader* at *live_base_sha*, never at a revision a fence or findings
+    file names; with no reader or no base revision it is not read and the
+    verdict is DEGRADED."""
     state = verdict.state
     assert state.evaluated_findings is not None
-    readable = repo_path is not None and bool(live_base_sha)
     try:
         context = context_from_config(
             config_root,
-            repo_path=Path(repo_path) if repo_path is not None else None,
-            policy_base_sha=live_base_sha if readable else None,
+            policy_reader=policy_reader,
+            policy_base_sha=live_base_sha or None,
             visibility=visibility,
         )
     except EvaluateError as exc:
@@ -189,14 +242,10 @@ def _recompute(
     )
 
 
-def _difference_text(
-    verdict: ReviewerVerdict, computed: Verdict, live_base_sha: str, repo_path: object
-) -> str:
+def _difference_text(verdict: ReviewerVerdict, computed: Verdict, live_base_sha: str) -> str:
     """Why the gate's outcome is worse than the fence's, in the terms an
     operator can act on."""
     lines = []
-    if repo_path is None:
-        lines.append(_NO_REPO_PATH)
     recorded_base = verdict.state.policy_base_sha
     if recorded_base and live_base_sha and recorded_base != live_base_sha:
         lines.append(
@@ -218,7 +267,7 @@ def evaluate_at_gate(
     *,
     current_head_sha: str,
     live_base_sha: str,
-    repo_path: str | Path | None,
+    policy_reader: PolicyReader | None,
     visibility: str | None,
     evaluator: EvaluatorGate,
     config_root: str | Path | None = None,
@@ -296,7 +345,7 @@ def evaluate_at_gate(
         verdict,
         current_head_sha=current_head_sha,
         live_base_sha=live_base_sha,
-        repo_path=repo_path,
+        policy_reader=policy_reader,
         visibility=visibility,
         config_root=config_root,
         today=today,
@@ -315,23 +364,21 @@ def evaluate_at_gate(
             f"{label} verdict ({where}) records CLEAN, but the merge gate computed "
             f"{gate_outcome} from the same findings at the live base revision "
             f"{live_base_sha or '(unknown)'}:\n"
-            + _difference_text(verdict, computed, live_base_sha, repo_path)
+            + _difference_text(verdict, computed, live_base_sha)
             + "\nThe gate does not accept a clean verdict it cannot reproduce. Have the "
             "reviewer post again against the current base, then retry the merge gate."
         )
 
-    # The fence does not carry a finding's fingerprint, so a disposition that
-    # narrows by fingerprint was applied here on path and rule alone. It cannot
-    # be shown to match, so it never demotes a recorded block.
-    unverifiable = any(
-        finding.disposition is not None and finding.disposition.get("fingerprint")
-        for finding in computed.findings
-    )
+    # A recorded block passes only when every finding the fence recorded as
+    # blocking is individually matched by a disposition applied at the live
+    # base. A disposition on some other finding, or a finding that stopped
+    # blocking for any other reason, clears nothing.
+    unmatched = unmatched_recorded_blocks(state.findings_open, computed)
     cleared_by_disposition = (
         fence_outcome == OUTCOME_BLOCKED
         and gate_outcome == OUTCOME_CLEAN
-        and bool(applied)
-        and not unverifiable
+        and bool(state.findings_open)
+        and not unmatched
     )
     if cleared_by_disposition:
         return GateEvaluation(
@@ -358,17 +405,10 @@ def evaluate_at_gate(
         else:
             listing = (
                 "the fence records: " + "; ".join(fence_reasons)
-                + (
-                    f". The gate's own computation at the live base finds nothing blocking "
-                    f"(outcome {gate_outcome}), but "
-                    + (
-                        "the disposition(s) that apply narrow by fingerprint, which the fence "
-                        "does not carry, so they cannot be shown to match"
-                        if unverifiable
-                        else "no disposition explains the difference"
-                    )
-                    + "; a recorded block is not cleared without one"
-                )
+                + f". The gate's own computation at the live base finds nothing blocking "
+                f"(outcome {gate_outcome}), but a recorded block is cleared only by a "
+                f"disposition that matches each finding it recorded:\n"
+                + _unmatched_text(state.findings_open, unmatched)
             )
         raise VerdictBlockingError(
             f"{label} BLOCKED merge — verdict ({where}) outcome {fence_outcome}, gate outcome "
@@ -379,8 +419,6 @@ def evaluate_at_gate(
 
     if OUTCOME_DEGRADED in (fence_outcome, gate_outcome):
         reasons = tuple(dict.fromkeys([*fence_reasons, *computed.degraded]))
-        if repo_path is None:
-            reasons = (*reasons, _NO_REPO_PATH)
         if reviewer_name not in evaluator.allow_degraded:
             raise VerdictDegradedError(
                 f"{label} verdict ({where}) is DEGRADED (fence {fence_outcome}, gate "
@@ -412,4 +450,4 @@ def evaluate_at_gate(
     )
 
 
-__all__ = ["GateEvaluation", "evaluate_at_gate"]
+__all__ = ["GateEvaluation", "evaluate_at_gate", "unmatched_recorded_blocks"]

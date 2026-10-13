@@ -70,14 +70,17 @@ documented step ordering):
   5a. Computed verdict (merge.gate_evaluation) — for each required reviewer's
      newest fence, run BEFORE its recorded status is read: an evaluated fence
      (fence_schema_version 3) has its findings evaluated again at merge time,
-     with policy read at the live PR base and the PR's current head as the
-     expected head. BLOCKED, STALE and (unless merge.evaluator.allow_degraded
+     with policy read at the live PR base (through the host API with the run's
+     credential, or from the local repository when --repo-path names one) and
+     the PR's current head as the expected head. BLOCKED, STALE and (unless merge.evaluator.allow_degraded
      is true for the role) DEGRADED refuse, naming the findings, heads or
      reasons; a CLEAN fence the gate cannot reproduce refuses naming the
      difference. A fence below version 3 applies its asserted status with a
      notice, or refuses under merge.evaluator.require_evaluated. The gate
-     only adds refusals, except that a standing disposition now on the base
-     can demote a recorded BLOCKED, named in the output. --report-only prints
+     only adds refusals, except that standing dispositions now on the base
+     can demote a recorded BLOCKED when every finding the fence recorded as
+     blocking is individually matched by one (and the recorded list is not
+     empty); each is named in the output. --report-only prints
      the outcome per reviewer; the merge result and the attestation record it.
   5b. Model attestation (merge.model_attestation, lr-95543d) — OPT-IN
      (`merge: require_model_attestation: true`, default off): when enabled,
@@ -474,6 +477,8 @@ import urllib.error
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.acquire.contract import repository_visibility
+from clagentic_loadout.acquire.forgejo_backend import ForgejoAcquireBackend
+from clagentic_loadout.acquire.github_backend import GithubAcquireBackend
 from clagentic_loadout.merge import (
     ci_status,
     commit_subjects,
@@ -592,6 +597,7 @@ from clagentic_loadout.push.namespace_guard import (
 from clagentic_loadout.review.errors import ReviewPostError, ReviewVerifyError
 from clagentic_loadout.review.forgejo_backend import post_and_verify_comment as _forgejo_post_and_verify_comment
 from clagentic_loadout.review.github_backend import post_and_verify_review as _github_post_and_verify_review
+from clagentic_loadout.review.policy_reader import GitPolicyReader, HostPolicyReader, PolicyReader
 from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
@@ -734,6 +740,13 @@ class _ForgejoMergeBackend:
         )
         return verified.id
 
+    def policy_file_backend(self) -> ForgejoAcquireBackend:
+        """The acquisition backend that reads files at a revision, holding this
+        run's credential, so the gate reads policy without a local checkout."""
+        return ForgejoAcquireBackend(
+            self._token, git_host_base=self._git_host_base, opener=self._opener
+        )
+
     def get_pr_info(self, owner: str, repo: str, pr_number: int) -> dict:
         return forgejo_backend.get_pr_info(
             self._git_host_base, owner, repo, pr_number, token=self._token, opener=self._opener
@@ -797,6 +810,11 @@ class _GithubMergeBackend:
         )
         return verified.id
 
+    def policy_file_backend(self) -> GithubAcquireBackend:
+        """The acquisition backend that reads files at a revision, holding this
+        run's credential, so the gate reads policy without a local checkout."""
+        return GithubAcquireBackend(self._token, opener=self._opener)
+
     def get_pr_info(self, owner: str, repo: str, pr_number: int) -> dict:
         return github_backend.get_pr_info(owner, repo, pr_number, token=self._token, opener=self._opener)
 
@@ -824,6 +842,15 @@ class _GithubMergeBackend:
             owner, repo, pr_number, token=self._token, merge_message=merge_message,
             merge_title=merge_title, merge_method=merge_method, opener=self._opener,
         )
+
+
+def _gate_policy_reader(backend, *, owner: str, repo: str, repo_path: str | None) -> PolicyReader:
+    """Where the gate reads policy from, the same choice loadout-review makes: a
+    local repository only when the caller names one, else the host API. The
+    current directory is never a source."""
+    if repo_path:
+        return GitPolicyReader(repo_path)
+    return HostPolicyReader(backend.policy_file_backend(), owner=owner, repo=repo)
 
 
 def _resolve_backend(
@@ -1508,14 +1535,12 @@ def _run(
                 code=EXIT_POST_MERGE_FAILED,
             )
 
-        # The policy for the gate's own computation is read from the live PR
-        # base, in the local tree when there is one (merge.gate_evaluation).
-        evaluation_tree: str | None = args.repo_path
-        if args.repo_path:
-            try:
-                evaluation_tree = str(resolve_gate_git_tree(args.repo_path))
-            except PostMergeConfigError:
-                evaluation_tree = args.repo_path
+        # The policy for the gate's own computation is read at the live PR base:
+        # from the local repository only when --repo-path names one, else from
+        # the host API with this run's credential (merge.gate_evaluation).
+        policy_reader = _gate_policy_reader(
+            backend, owner=owner, repo=repo, repo_path=args.repo_path
+        )
         live_base_sha = resolve_base_sha(pr_info)
         host_visibility = repository_visibility(pr_info)
         for reviewer_name, bot_login in required_reviewers.items():
@@ -1545,7 +1570,7 @@ def _run(
                     reviewer_name,
                     current_head_sha=current_head_sha,
                     live_base_sha=live_base_sha,
-                    repo_path=evaluation_tree,
+                    policy_reader=policy_reader,
                     visibility=host_visibility,
                     evaluator=repo_gate.evaluator,
                 )
