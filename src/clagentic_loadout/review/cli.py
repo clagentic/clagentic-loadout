@@ -767,7 +767,7 @@ def _check_base_sha_flag(args: argparse.Namespace) -> None:
     if args.base_sha is not None and not FULL_SHA_RE.match(args.base_sha):
         _fail(
             f"--base-sha must be 40 lowercase hex characters, got {args.base_sha!r}",
-            EXIT_FINDINGS_INVALID,
+            EXIT_USAGE,
         )
 
 

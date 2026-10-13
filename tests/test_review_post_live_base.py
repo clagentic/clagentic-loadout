@@ -135,7 +135,7 @@ def test_a_malformed_base_sha_is_refused(env, capsys, tmp_path):
 
     code, _, err = _post(env, capsys, findings, "--head-sha", HEAD_SHA, "--base-sha", "main")
 
-    assert code == review_cli.EXIT_FINDINGS_INVALID
+    assert code == review_cli.EXIT_USAGE == 1
     assert "--base-sha" in err
     assert env.opener_state["posted_body"] is None
 

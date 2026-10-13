@@ -792,7 +792,7 @@ reviewer's, the policy base is not. A bare array needs no `--base-sha`. A
 `policy_base_sha` recorded in the file, or a `--base-sha`, that differs from the live
 base is not used; `post` prints a notice on stderr naming both, and the fence records
 the live base as `policy_base_sha`. `--base-sha` stays accepted for compatibility (a
-malformed value exits 32). If the policy cannot be read at the live base the outcome is
+malformed value is a usage error and exits 1). If the policy cannot be read at the live base the outcome is
 DEGRADED naming the cause; the recorded base is never a fallback. `--status` is
 optional and kept for compatibility: `clean` over a computed outcome other than
 CLEAN is refused naming both, `blocking` over a computed CLEAN is honoured (it can
