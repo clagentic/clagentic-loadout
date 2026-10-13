@@ -67,8 +67,31 @@ def _status_entry(raw: Any, state_keys: tuple[str, ...], index: int, fail) -> St
     return StatusEntry(context=context, state=state.lower())
 
 
+def _null_statuses_as_empty(body: dict, state: str, fail) -> list:
+    """Forgejo encodes a commit with no statuses as `statuses: null`. That null
+    is read as an empty set only when the response positively says so:
+    `total_count` is an int equal to 0 and `state` is the empty string. Any other
+    null-statuses shape is unreadable, so a null never hides a real status."""
+    if "total_count" not in body:
+        raise fail("statuses is null and total_count is missing")
+    total = body["total_count"]
+    if not isinstance(total, int) or isinstance(total, bool):
+        raise fail(f"statuses is null and total_count must be int, got {type(total).__name__}")
+    if total != 0:
+        raise fail(f"statuses is null but total_count is {total}")
+    if state != "":
+        raise fail(f"statuses is null but state is {state!r}, not empty")
+    return []
+
+
 def _combined_status(
-    body: Any, *, state_keys: tuple[str, ...], endpoint: str, where: str, head_sha: str
+    body: Any,
+    *,
+    state_keys: tuple[str, ...],
+    endpoint: str,
+    where: str,
+    head_sha: str,
+    null_statuses_means_empty: bool = False,
 ) -> CombinedStatus:
     def fail(why: str) -> GateFactUnavailableError:
         return _unreadable(endpoint, where, head_sha, why)
@@ -76,7 +99,10 @@ def _combined_status(
     if not isinstance(body, dict):
         raise fail(f"the response must be an object, got {type(body).__name__}")
     state = _field(body, "state", str, "state", fail)
-    entries = _field(body, "statuses", list, "statuses", fail)
+    if null_statuses_means_empty and "statuses" in body and body["statuses"] is None:
+        entries = _null_statuses_as_empty(body, state, fail)
+    else:
+        entries = _field(body, "statuses", list, "statuses", fail)
     return CombinedStatus(
         state=state.lower(),
         statuses=tuple(_status_entry(e, state_keys, i, fail) for i, e in enumerate(entries)),
@@ -92,13 +118,16 @@ def parse_github_combined_status(body: Any, *, where: str, head_sha: str) -> Com
 
 def parse_forgejo_combined_status(body: Any, *, where: str, head_sha: str) -> CombinedStatus:
     """Forgejo `GET /commits/{sha}/status`. An entry spells its result `state`
-    or `status`; whichever key is present must hold a string."""
+    or `status`; whichever key is present must hold a string. A commit with no
+    statuses comes back as `statuses: null`, read as empty only under the
+    conditions in `_null_statuses_as_empty`."""
     return _combined_status(
         body,
         state_keys=("state", "status"),
         endpoint="commit statuses",
         where=where,
         head_sha=head_sha,
+        null_statuses_means_empty=True,
     )
 
 
