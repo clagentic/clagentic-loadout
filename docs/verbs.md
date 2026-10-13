@@ -637,9 +637,10 @@ loadout-review post --caller <role> --repo <owner/repo> --pr <n> --findings <pat
 every other verb, and is accepted before or after the subcommand. `--platform`
 is detected from the origin remote of `--repo-path` (default: the current
 directory) when omitted. That directory is never used for the diff; it is used
-for config, platform detection, and, since the verdict is computed, to read
-policy from the PR's base revision, so the base commit must be present in it
-(see [Computed verdict](#computed-verdict)).
+for config and platform detection. Policy is read from the PR's base revision
+through the host API unless `--repo-path` is given explicitly, in which case the
+base commit must be present in that repository (see
+[Computed verdict](#computed-verdict)).
 
 **`run`** does everything between "a PR exists" and "findings are in hand":
 
@@ -749,11 +750,16 @@ unknown, unrecognised or unverifiable value resolves to the worst case.
 
 - **Facts** come from the findings. A finding with none, or with facts outside
   the vocabulary, is worst case: it blocks, and the verdict is DEGRADED naming it.
-- **Policy** (dispositions, stakes) is read with `git show <base>:<path>` from the
-  PR's base revision in the repository at `--repo-path`, never from the working
-  tree or the head. In a delta run the base is still the PR's own base, not the
-  last reviewed head. A base revision that is not in that repository, or a policy
-  file that cannot be read, is DEGRADED with the reason named.
+- **Policy** (dispositions, stakes, CODEOWNERS and the file list) is read at the
+  PR's base revision from the host API (the tree and contents endpoints, under the
+  same reader credential as the diff), so no local checkout is needed and the
+  working directory may be any directory. When `--repo-path` is given explicitly,
+  it is read with `git show <base>:<path>` from that repository instead. It is
+  never read from a working tree or the head. In a delta run the base is still the
+  PR's own base, not the last reviewed head. A failed or truncated read, a
+  base revision the source cannot serve, or a policy file that cannot be read or
+  parsed is DEGRADED with the reason named; a policy file that is absent is simply
+  no policy.
 - **Repository visibility** is read from the repository record the host returns
   with the PR metadata, under the same reader credential. It replaces the
   evaluator's `--visibility` input on this path. A record that is absent,

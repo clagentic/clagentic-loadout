@@ -78,6 +78,7 @@ from clagentic_loadout.review.findings_contract import (
     InvalidReplyError,
     validate_finding,
 )
+from clagentic_loadout.review.policy_reader import GitPolicyReader, HostPolicyReader, PolicyReader
 from clagentic_loadout.review.pr_record import write_pr_record
 from clagentic_loadout.review.resolutions import (
     BY_CALLER,
@@ -229,9 +230,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "--repo-path",
             default=None,
             help="Local repository used to find repo-level config and the origin "
-            "remote for platform detection, and to read policy (dispositions, "
-            "stakes) from the PR's base revision, which must be present in it "
-            "(default: the current directory). The diff is never read from it.",
+            "remote for platform detection (default: the current directory). When "
+            "given, it is also where policy (dispositions, stakes) is read from the "
+            "PR's base revision, which must be present in it; when omitted, policy "
+            "is read from the host API at the base revision and no checkout is "
+            "needed. The diff is never read from it.",
         )
         sub.add_argument(
             "--git-host-base-url",
@@ -447,6 +450,18 @@ def _fetch_acquired(backend, args: argparse.Namespace, *, owner: str, repo: str)
     return acquired
 
 
+def _policy_reader(args: argparse.Namespace, backend, *, owner: str, repo: str) -> PolicyReader:
+    """Where policy is read from: a local repository only when --repo-path
+    names one, else the host API through the acquisition credential. The
+    current directory is not a source: reviewer runs execute in scratch
+    directories that are not repositories."""
+    if args.repo_path:
+        return GitPolicyReader(Path(args.repo_path))
+    if backend is None:
+        raise ValueError("a host policy reader needs an acquisition backend")
+    return HostPolicyReader(backend, owner=owner, repo=repo)
+
+
 def _resolve_run_root(run_root: Path | None, config_root: str | Path | None) -> Path:
     if run_root is not None:
         return run_root
@@ -494,7 +509,7 @@ def _run_command(
     resolutions = _load_resolutions(args.resolved_findings)
     # Read before any model is called, so a bad evaluator setting costs nothing.
     try:
-        evaluation = context_from_config(config_root, repo_path=repo_path)
+        evaluation = context_from_config(config_root)
     except EvaluateError as exc:
         _fail(str(exc), EXIT_PROFILE_INVALID)
 
@@ -513,7 +528,10 @@ def _run_command(
     # the acquired base with the last reviewed head, which is not that revision,
     # so the PR's own base and the host's repository record are taken here.
     evaluation = dataclasses.replace(
-        evaluation, policy_base_sha=acquired.base_sha, visibility=acquired.repo_visibility
+        evaluation,
+        policy_base_sha=acquired.base_sha,
+        visibility=acquired.repo_visibility,
+        policy_reader=_policy_reader(args, backend, owner=owner, repo=repo),
     )
 
     delta = None
@@ -865,9 +883,17 @@ def _post_command(
     # The verdict is computed here, from the facts in the findings file and the
     # host's and the base revision's own records, whatever an earlier `run`
     # wrote into that file: the file is the reviewer's, the policy is not.
+    policy_backend = (
+        None
+        if args.repo_path
+        else _build_acquire_backend(
+            args, owner=owner, repo=repo, caller=caller, platform=platform,
+            token_provider=token_provider, opener=opener,
+        )
+    )
     evaluation = dataclasses.replace(
         evaluation,
-        repo_path=repo_path,
+        policy_reader=_policy_reader(args, policy_backend, owner=owner, repo=repo),
         policy_base_sha=policy_base,
         visibility=live_pr.repo_visibility,
     )

@@ -258,10 +258,11 @@ above), and the reply contract changes accordingly:
   lenient path.
 
 `run` evaluates after the chunks are merged and, in delta mode, after prior findings are
-accounted for. Policy is read from the PR's base revision (not the last reviewed head) in the
-repository at `--repo-path`; repository visibility comes from the host's repository record
-under the same reader credential as the diff. A base revision that is missing from the
-repository, a policy file that cannot be read, or a visibility the host did not state each
+accounted for. Policy is read from the PR's base revision (not the last reviewed head) through
+the host API, or from the repository at `--repo-path` when that is given explicitly;
+repository visibility comes from the host's repository record
+under the same reader credential as the diff. A base revision the source cannot serve, a failed
+or truncated read, a policy file that cannot be read, or a visibility the host did not state each
 make the outcome DEGRADED with the reason named (an unstated visibility counts as public).
 
 Each finding in `findings.json` gains `computed_severity`, `blocking`, `facts_state`,
