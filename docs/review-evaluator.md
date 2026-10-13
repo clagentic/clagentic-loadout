@@ -16,8 +16,9 @@ Design rules this follows:
 
 The subcommand is offline and read-only: it reads a findings file and a local repository,
 makes no host call, posts nothing, and binds no caller identity. `run` and `post` use the
-same evaluator (see [Use in `run` and `post`](#use-in-run-and-post)); the merge gate does
-not yet act on its outcome.
+same evaluator (see [Use in `run` and `post`](#use-in-run-and-post)). `loadout-merge` runs it
+again at merge time over the findings a fence carries, with policy read at the live base
+(see [Computed verdicts at the gate](merge-authority.md#computed-verdicts-at-the-gate)).
 
 ## Facts vocabulary
 
@@ -281,8 +282,10 @@ BLOCKED lists each blocking finding with the exact `dispositions.yaml` entry tha
 clear it (or the note that the security floor forbids clearing it as `by_design`); DEGRADED
 lists its reasons; CLEAN lists the advisory findings. `--status` is optional: `clean` over
 any other outcome is refused, naming both. The fence records `verdict_outcome`,
-`verdict_reasons`, `evaluator_version` and `policy_base_sha` at `fence_schema_version` 3;
-a fence without them reads as not evaluated.
+`verdict_reasons`, `evaluator_version` and `policy_base_sha` at `fence_schema_version` 3,
+plus `evaluated_findings` (each finding with its facts, so the merge gate can compute the
+outcome again; fingerprints are not carried) and `findings_open`, the computed blocking set
+after dispositions; a fence without them reads as not evaluated.
 
 To reproduce a posted outcome offline, run `evaluate` on the same `findings.json` with the
 recorded `policy_base_sha` as `--base`, the head, and the visibility the run recorded as
