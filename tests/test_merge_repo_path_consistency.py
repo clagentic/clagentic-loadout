@@ -117,12 +117,12 @@ class TestDotGithubShapeNeverFlagged:
         assert result.checked
         assert result.matches
 
-    def test_dot_github_repo_at_clagentic_github_directory_name_is_consistent(self, tmp_path):
-        # Mirrors the exact real-world shape named in the task: directory
-        # basename "clagentic-github" (unrelated to the actual repo name
-        # ".github") pointing at clagentic/.github's real remote.
+    def test_dot_github_repo_at_unrelated_directory_name_is_consistent(self, tmp_path):
+        # A dot-prefixed repo name checked out under a directory whose
+        # basename ("org-profile-checkout") is unrelated to the actual repo
+        # name (".github"): only the remote matters.
         tree = _make_tree_with_remote(
-            tmp_path, "clagentic-github", "https://git-host.example.com/clagentic/.github.git"
+            tmp_path, "org-profile-checkout", "https://git-host.example.com/clagentic/.github.git"
         )
         result = check_repo_path_consistency("clagentic/.github", str(tree))
         assert result.checked, result.reason

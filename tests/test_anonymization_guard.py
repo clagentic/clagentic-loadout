@@ -259,6 +259,9 @@ CREW_REFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
     # ties the product to a deployment a reader cannot see.
     "operator-local project reference (clagentic-console)": re.compile(r"clagentic-console"),
     "operator-local project reference (clagentic-triage)": re.compile(r"clagentic-triage"),
+    "operator-local project reference (clagentic-github)": re.compile(r"clagentic-github"),
+    "operator-local project reference (clagentic-relay)": re.compile(r"clagentic-relay"),
+    "operator-local project reference (clagentic-config)": re.compile(r"clagentic-config"),
 }
 
 # Operator-name deny pattern (lr-1659 item 2): "andy" as an operator name in
@@ -513,6 +516,11 @@ def test_guard_actually_finds_something_when_present(tmp_path: Path) -> None:
         "ship.py",
         "/workspace/crew-manifest/scripts/",
         "crew-manifest PR #486",
+        "clagentic-console",
+        "clagentic-triage",
+        "clagentic-github",
+        "clagentic-relay conversation",
+        "clagentic-config PR",
     ],
 )
 def test_publication_scope_guard_catches_crew_reference(literal: str, tmp_path: Path) -> None:

@@ -162,7 +162,7 @@ class TestPackagedTemplateContent:
         self, initialized_repo
     ):
         """lr-638945 root-cause regression: the shipped template must never
-        again reproduce the live clagentic-github incident (comment #1) --
+        again reproduce the observed incident (comment #1) --
         every role named in required_reviewer_roles/authorized_roles must
         have a real verb set declared under this SAME template's roles:
         section. Locks the property doctor's own unsatisfiable-gate FAIL

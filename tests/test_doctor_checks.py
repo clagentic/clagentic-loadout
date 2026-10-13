@@ -738,8 +738,8 @@ class TestCheckRepoLoadoutSchema:
         assert result.resolved["errors"] == []
 
     def test_unsatisfiable_gate_role_fails_when_roles_section_exists(self, tmp_path):
-        """lr-638945 comment #1: the LIVE clagentic-github incident, verbatim
-        shape. roles: is DECLARED (builder/reviewer only, no security) and
+        """lr-638945 comment #1: an observed incident, synthetic
+        reproduction of its shape. roles: is DECLARED (builder/reviewer only, no security) and
         merge.required_reviewer_roles names 'security' -- security has no
         verb set and can never emit a verdict. The config AS WRITTEN can
         never satisfy its own gate, so this is a hard FAIL, not a WARN."""
