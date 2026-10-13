@@ -2570,16 +2570,10 @@ Wiring a verb to a live, running agent cast — the step where a real
 deployment's agents actually invoke these console scripts instead of their
 pre-existing reference scripts — is tracked per verb.
 
-`loadout-merge`: SHADOW-PARITY proven — replaying a real,
-already-merged PR's gate facts (SHA-stamp, both reviewer verdict fences,
-diff-scope, title) through `merge.verb`'s own gate chain reached the
-identical decision the deployment's reference merge tool reached on that
-same PR, with zero deltas (see `tests/test_merge_shadow_parity_pr42.py`).
-The CI-status gate (added after the original
-shadow-parity proof landed) is proven against that same PR's real,
-empty CI-status evidence — the gate's explicit no-runner-by-design pass
-case — plus runner-wired failure/pending negative controls, in the same
-test module (`TestCiStatusGateAgainstPR42Facts`).
+`loadout-merge`: gate-chain parity is covered by synthetic tests in
+`tests/test_merge_verb.py` (stale SHA, diff-scope, title, blocking verdict,
+CI-status failing, pending, unreachable and empty-evidence cases) and
+`tests/test_merge_verdict.py` (latest fenced verdict wins).
 `.clagentic/loadout/config.yaml`'s `merge.post_merge_steps` is
 already configured so a `loadout-merge --repo-path <this-checkout>` invocation
 self-installs the merged build. The remaining step — pointing the live
