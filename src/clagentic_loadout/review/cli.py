@@ -48,6 +48,7 @@ from clagentic_loadout.platform_detect import (
 from clagentic_loadout.merge.fence_state import (
     EVIDENCE_KEYS,
     KEY_DROPPED,
+    KEY_EVALUATED_FINDINGS,
     KEY_FAILURE_SEQUENCES,
     KEY_FINDINGS_OPEN,
     KEY_RESOLVED,
@@ -70,7 +71,9 @@ from clagentic_loadout.review.evaluation import (
     annotate_findings,
     context_from_config,
     evaluate_findings,
+    evaluated_findings_for_fence,
     fence_evaluation_fields,
+    findings_open_from_verdict,
     is_unsafe_status,
 )
 from clagentic_loadout.review.findings_contract import (
@@ -866,6 +869,17 @@ def _post_command(
             normalize_findings_state(state, head_sha=head_sha, review_status=claimed_status)
         except ValueError as exc:
             _fail(f"state file {args.state_file!r}: {exc}", EXIT_FINDINGS_INVALID)
+        if KEY_FINDINGS_OPEN in state:
+            # Which findings are open is the computed blocking set, never a
+            # list the caller types: a caller-held finding would hold a later
+            # merge open that the evaluator says does not block, and a
+            # finding left out would drop one that does.
+            print(
+                f"loadout-review: warning: {KEY_FINDINGS_OPEN} in the state file is ignored; "
+                "the open findings are the ones the computed verdict blocks on",
+                file=sys.stderr,
+            )
+            state = {k: v for k, v in state.items() if k != KEY_FINDINGS_OPEN}
 
     # The evidence is validated for the same reason: a malformed dropped
     # candidate or a fence-shaped sequence fails here, before any I/O.
@@ -928,16 +942,11 @@ def _post_command(
             _unsafe_status_message(args.status, verdict, fence_fields[KEY_VERDICT_REASONS]),
             EXIT_FINDINGS_INVALID,
         )
-    # A verdict that holds findings open is blocking, so state that lists some
-    # keeps a computed CLEAN from being posted as clean.
-    status = (
-        "clean"
-        if verdict.outcome == OUTCOME_CLEAN
-        and args.status != "blocking"
-        and not state.get(KEY_FINDINGS_OPEN)
-        else "blocking"
-    )
+    # A CLEAN outcome has no blocking finding, so nothing is held open and the
+    # only thing that can still make the status blocking is the caller asking.
+    status = "clean" if verdict.outcome == OUTCOME_CLEAN and args.status != "blocking" else "blocking"
     annotated = annotate_findings(findings, verdict)
+    open_findings = findings_open_from_verdict(verdict, head_sha)
 
     body = {
         "review_status": status,
@@ -950,8 +959,10 @@ def _post_command(
             for item, evaluated in zip(annotated, verdict.findings)
         ],
         **state,
+        **({KEY_FINDINGS_OPEN: open_findings} if open_findings else {}),
         **evidence,
         **fence_fields,
+        KEY_EVALUATED_FINDINGS: evaluated_findings_for_fence(findings),
     }
     try:
         stage_caller_body(
@@ -1036,6 +1047,7 @@ def _post_command(
         "pr_number": args.pr,
         "finding_count": len(annotated),
         "blocking_count": len(verdict.blocking),
+        "open_finding_ids": [entry["id"] for entry in open_findings],
         "verified_id": posted.get("verified_id"),
         "verified_url": posted.get("verified_url"),
         "verified_by_login": posted.get("verified_by_login"),

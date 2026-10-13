@@ -21,6 +21,7 @@ computed fields written beside whatever the finding already carried.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,6 +41,7 @@ from clagentic_loadout.review.evaluate import (
     evaluate,
 )
 from clagentic_loadout.review.evaluate_verb import load_evaluator_config
+from clagentic_loadout.review.facts import KEY_FACTS
 from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader
 from clagentic_loadout.review.policy_source import PolicySource, read_policy_from
 from clagentic_loadout.review.rubric import DEFAULT_BLOCK_AT
@@ -66,6 +68,7 @@ SEVERITY_BLOCKING = "blocking"
 SEVERITY_NIT = "nit"
 
 _MAX_REASON_CHARS = 300
+_PRAISE = "praise"
 
 
 @dataclass(frozen=True)
@@ -218,6 +221,51 @@ def fence_evaluation_fields(verdict: Verdict, context: EvaluationContext) -> dic
     return fields
 
 
+def evaluated_findings_for_fence(findings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """The findings *as given to the evaluator*, reduced to the fields the
+    verdict depends on, for the fence to carry. The merge gate evaluates these
+    again; carrying what the evaluator saw (not what was posted as prose) is
+    what lets the two computations agree on identical policy.
+
+    A finding's fingerprint is deliberately not carried: it is a link hint that
+    is never posted. The gate therefore cannot apply a disposition's
+    fingerprint narrowing, and merge.gate_evaluation refuses to let such a
+    disposition demote a block."""
+    carried: list[dict[str, Any]] = []
+    for finding in findings:
+        item: dict[str, Any] = {key: finding[key] for key in ("file", "line", "rule_id", "message")}
+        if finding.get(KEY_FACTS) is not None:
+            item[KEY_FACTS] = finding[KEY_FACTS]
+        if finding.get("severity") == _PRAISE:
+            item["severity"] = _PRAISE
+        carried.append(item)
+    return carried
+
+
+def finding_state_id(file: str, line: int, rule_id: str) -> str:
+    """The id a blocking finding holds in the fence's ``findings_open`` and a
+    later fence names in ``cleared_claims``. Derived from the finding's
+    location and rule, so it is the same wherever it is computed; a digest,
+    because a path holds characters the id grammar does not allow."""
+    digest = hashlib.sha256("\0".join((file, str(line), rule_id)).encode("utf-8"))
+    return f"f-{digest.hexdigest()[:16]}"
+
+
+def findings_open_from_verdict(verdict: Verdict, head_sha: str) -> list[dict[str, str]]:
+    """The fence's ``findings_open`` for *verdict*: exactly the findings that
+    block, after dispositions. A finding a base-revision disposition demoted is
+    advisory and is not listed, so it cannot hold a later merge open."""
+    # Two findings with different messages on one line and rule share an id;
+    # the fence lists that id once, since it names a location and a rule.
+    entries: dict[str, dict[str, str]] = {}
+    for finding in verdict.blocking:
+        state_id = finding_state_id(finding.file, finding.line, finding.rule_id)
+        entries.setdefault(
+            state_id, {"id": state_id, "rule_id": finding.rule_id, "head": head_sha}
+        )
+    return list(entries.values())
+
+
 def verdict_document_fields(verdict: Verdict, context: EvaluationContext) -> dict[str, Any]:
     """The file-level fields a findings document records about its verdict."""
     return {
@@ -244,7 +292,10 @@ __all__ = [
     "annotate_findings",
     "context_from_config",
     "evaluate_findings",
+    "evaluated_findings_for_fence",
     "fence_evaluation_fields",
+    "finding_state_id",
+    "findings_open_from_verdict",
     "is_unsafe_status",
     "verdict_document_fields",
     "verdict_reasons",
