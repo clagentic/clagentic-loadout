@@ -286,6 +286,7 @@ def github_opener(
     tree_http: int = 200,
     tree_truncated: bool = False,
     contents_http: int = 200,
+    comments: list[dict] | None = None,
 ):
     """Serves the acquire reads and the review-post comment writes for one PR.
     `state` collects the posted body and every request URL. `compare`, when
@@ -340,10 +341,11 @@ def github_opener(
             return _json({"login": login})
         if method == "GET" and url.split("?")[0].endswith(f"/issues/{pr_number}/comments"):
             # A real server answers a page past the end with an empty list.
-            if recorded["posted_body"] is None or not url.endswith("&page=1"):
+            if not url.endswith("&page=1"):
                 return _json([])
-            return _json(
-                [
+            listed = list(comments or [])
+            if recorded["posted_body"] is not None:
+                listed.append(
                     {
                         "id": 5,
                         "user": {"login": login},
@@ -351,8 +353,8 @@ def github_opener(
                         "created_at": "2099-01-01T00:00:10Z",
                         "html_url": "http://readback",
                     }
-                ]
-            )
+                )
+            return _json(listed)
         raise AssertionError(f"unexpected request: {method} {url} accept={accept!r}")
 
     return opener

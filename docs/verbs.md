@@ -1134,6 +1134,21 @@ Resolved by caller (1):
 `resolved` is derived by `post` from the run record and `--resolved-findings`, so
 `--state-file` may not carry it.
 
+**Clearing earlier open findings.** `post` reads the reviewer's earlier verdicts on the
+PR and writes `cleared_claims` (at the head being posted) for each earlier open finding
+that the new verdict does not raise again and that a recorded resolution names. Silence
+never clears. The resolutions it accepts, in order: a `resolved` entry (from the run
+directory's `findings.json`, read from `--run-dir`, the directory holding `--findings`, or
+the single run at this head under the run root, and only when its binding and findings
+name this repository, PR and head; and from an object-form `--findings` document); a
+`--resolved-findings` ruling; a base-revision disposition that demotes the finding; a
+`--dropped` candidate that maps to exactly one earlier open finding (same file and rule,
+the same line or the line the earlier one maps to through the commit range). A source
+that is missing is named on stderr and clears nothing; a run directory bound to another
+head clears nothing from any reviewer-side source. A finding left uncleared keeps the
+merge gate refusing, which names it. The result adds `cleared_finding_ids` and
+`uncleared_finding_ids`; `loadout-merge` prints a notice naming each clearing it relied on.
+
 **Failure diagnostics.** When no engine can answer a chunk, the blocked result carries
 each engine's saved stderr path (`carrier_stderr_file`, `fallback_stderr_file`;
 `stderr_file` is the engine tried last), and a fallback that itself fails reports its

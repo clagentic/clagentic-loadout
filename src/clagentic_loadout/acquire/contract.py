@@ -262,6 +262,22 @@ class PolicyFileBackend(Protocol):
         ...
 
 
+@runtime_checkable
+class IssueCommentBackend(Protocol):
+    """Optional capability of a transport: every comment on a PR, as the host
+    returns them, read with the acquisition credential."""
+
+    def fetch_issue_comments(self, *, owner: str, repo: str, pr_number: int) -> list[dict]:
+        """Every comment on the PR, complete and ordered by id.
+
+        Raises:
+            acquire.errors.AcquireFetchError: the list could not be read in
+                full (non-2xx, network failure, a truncated or unexpected
+                response shape).
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class RangeDiff:
     """The change between two commits of one repository, from the host API.
@@ -305,6 +321,7 @@ __all__ = [
     "AcquireBackend",
     "AcquiredPr",
     "ChangedFile",
+    "IssueCommentBackend",
     "PolicyFileBackend",
     "RangeDiff",
     "RangeDiffBackend",

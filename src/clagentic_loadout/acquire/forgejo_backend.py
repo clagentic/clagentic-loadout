@@ -50,7 +50,7 @@ from clagentic_loadout.acquire.contract import (
     tree_file_paths,
 )
 from clagentic_loadout.acquire.errors import AcquireFetchError
-from clagentic_loadout.transport import git_host_api
+from clagentic_loadout.transport import comment_paging, git_host_api
 
 
 def _parse_json(raw: bytes, expect: type, what: str) -> Any:
@@ -351,6 +351,27 @@ def fetch_range_diff(
     )
 
 
+def fetch_issue_comments(
+    git_host_base: str,
+    token: str,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    opener=None,
+) -> list[dict[str, Any]]:
+    """Every comment on the PR, through the one shared comment reader. A
+    failed or incomplete read is a fetch failure, never a short list."""
+    try:
+        return comment_paging.list_forgejo_issue_comments(
+            git_host_api.request, git_host_base, owner, repo, pr_number, token, opener=opener
+        )
+    except (comment_paging.CommentListError, git_host_api.GitHostApiError) as exc:
+        raise AcquireFetchError(
+            f"cannot read the comments of PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
+
+
 def fetch_pr_content(
     git_host_base: str,
     token: str,
@@ -458,10 +479,16 @@ class ForgejoAcquireBackend:
             self._git_host_base, self._token, owner, repo, path, ref, opener=self._opener
         )
 
+    def fetch_issue_comments(self, *, owner: str, repo: str, pr_number: int) -> list[dict]:
+        return fetch_issue_comments(
+            self._git_host_base, self._token, owner, repo, pr_number, opener=self._opener
+        )
+
 
 __all__ = [
     "ForgejoAcquireBackend",
     "fetch_file_bytes",
+    "fetch_issue_comments",
     "fetch_pr_content",
     "fetch_tree_paths",
     "fetch_range_diff",

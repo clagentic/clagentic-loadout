@@ -1585,6 +1585,14 @@ def _run(
                 if gate_evaluation.fence_outcome in (None, "CLEAN"):
                     verdict.assert_clean_verdict(verdict_obj, reviewer_name)
                 verdict.assert_prior_findings_resolved(verdict_obj, reviewer_name)
+                for cleared_finding, cleared_claim in verdict_obj.cleared_prior_findings:
+                    print(
+                        f"merge: NOTICE -- {reviewer_name!r} cleared earlier finding "
+                        f"{cleared_finding['id']} (rule {cleared_finding['rule_id']}, raised at "
+                        f"{cleared_finding['head']}) at {cleared_claim['head']}: "
+                        f"{cleared_claim['evidence']}",
+                        file=sys.stderr,
+                    )
                 required_scanners = (
                     () if args.ignore_repo_gate else repo_gate.scanners_for(reviewer_name)
                 )

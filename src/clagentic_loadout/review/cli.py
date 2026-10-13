@@ -47,6 +47,7 @@ from clagentic_loadout.platform_detect import (
 )
 from clagentic_loadout.merge.fence_state import (
     EVIDENCE_KEYS,
+    KEY_CLEARED_CLAIMS,
     KEY_DROPPED,
     KEY_EVALUATED_FINDINGS,
     KEY_FAILURE_SEQUENCES,
@@ -91,7 +92,9 @@ from clagentic_loadout.review.resolutions import (
     resolved_entry,
     split_resolved,
 )
+from clagentic_loadout.review.clearing_sources import compute_clearing
 from clagentic_loadout.review.run_evidence import evidence_from_document
+from clagentic_loadout.review.run_resolved import candidate_run_dirs, read_run_resolved
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
     ReviewProfileError,
@@ -343,6 +346,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "findings and do not change the verdict.",
     )
     post.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
+    post.add_argument(
+        "--run-dir",
+        default=None,
+        help="The `run` directory that produced the findings, read for the prior "
+        "findings the run resolved. Default: the directory holding --findings when "
+        "it is a run directory, else the one run at this head under the run root. "
+        "Used only when its binding and findings name this repository, PR and head.",
+    )
 
     add_evaluate_parser(subparsers)
     return parser
@@ -705,25 +716,26 @@ def _apply_caller_resolutions(
     findings: list[dict[str, Any]],
     evidence: dict[str, Any],
     resolutions: list[Resolution],
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
     """Take the findings the caller ruled resolved out of what is posted and
     list them, with the caller's reason, beside the resolved entries the run
-    already recorded. A ruling the run already applied is not unknown."""
+    already recorded. A ruling the run already applied is not unknown. The
+    third value is the refs that matched nothing here; the caller reports them
+    after it has also tried them against the earlier open findings."""
     if not resolutions:
-        return findings, evidence
+        return findings, evidence, []
     remaining, ruled, unknown = split_resolved(findings, resolutions)
     recorded = evidence.get(KEY_RESOLVED, [])
     if not isinstance(recorded, list):
         # Left as is: the evidence validation that follows refuses it.
-        return findings, evidence
+        return findings, evidence, []
     if unknown:
         pending = [r for r in resolutions if r.ref in unknown]
         _, _, unknown = split_resolved([e for e in recorded if isinstance(e, dict)], pending)
-    _warn_unknown_resolutions(unknown)
     entries = [resolved_entry(f, BY_CALLER, r.reason) for f, r in ruled]
     if entries:
         evidence = {**evidence, KEY_RESOLVED: [*recorded, *entries]}
-    return remaining, evidence
+    return remaining, evidence, list(unknown)
 
 
 def _warn_unknown_resolutions(refs) -> None:
@@ -821,6 +833,7 @@ def _post_command(
     opener,
     identity_provider,
     config_root,
+    run_root=None,
 ) -> int:
     loaded_meta: dict[str, Any] = {}
     head_sha, findings, evidence = _load_findings(
@@ -836,9 +849,10 @@ def _post_command(
         dropped = _load_dropped(args.dropped)
         if dropped:
             evidence = {**evidence, KEY_DROPPED: dropped}
-    findings, evidence = _apply_caller_resolutions(
-        findings, evidence, _load_resolutions(args.resolved_findings)
-    )
+    document_resolved = list(evidence.get(KEY_RESOLVED) or [])
+    rulings = _load_resolutions(args.resolved_findings)
+    findings, evidence, unmatched_rulings = _apply_caller_resolutions(findings, evidence, rulings)
+    caller_resolved = list(evidence.get(KEY_RESOLVED) or [])[len(document_resolved):]
     # The state and evidence below are checked as if the caller's status stood;
     # the computed status can only be stricter, and is checked again when the
     # fence is built.
@@ -914,17 +928,13 @@ def _post_command(
     # The verdict is computed here, from the facts in the findings file and the
     # host's and the base revision's own records, whatever an earlier `run`
     # wrote into that file: the file is the reviewer's, the policy is not.
-    policy_backend = (
-        None
-        if args.repo_path
-        else _build_acquire_backend(
-            args, owner=owner, repo=repo, caller=caller, platform=platform,
-            token_provider=token_provider, opener=opener,
-        )
+    host_backend = _build_acquire_backend(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener,
     )
     evaluation = dataclasses.replace(
         evaluation,
-        policy_reader=_policy_reader(args, policy_backend, owner=owner, repo=repo),
+        policy_reader=_policy_reader(args, host_backend, owner=owner, repo=repo),
         policy_base_sha=policy_base,
         visibility=live_pr.repo_visibility,
     )
@@ -948,6 +958,42 @@ def _post_command(
     annotated = annotate_findings(findings, verdict)
     open_findings = findings_open_from_verdict(verdict, head_sha)
 
+    try:
+        scan_root = _resolve_run_root(run_root, config_root)
+    except ReviewProfileError:
+        # An unreadable run-root setting only costs the run directory scan.
+        scan_root = None
+    run_resolved = read_run_resolved(
+        candidate_run_dirs(
+            args.run_dir, args.findings, scan_root, owner=owner, repo=repo,
+            pr_number=args.pr, head_sha=head_sha,
+        )
+        if scan_root is not None
+        else [],
+        owner=owner, repo=repo, pr_number=args.pr, head_sha=head_sha,
+    )
+    clearing = compute_clearing(
+        backend=host_backend, owner=owner, repo=repo, pr_number=args.pr, reviewer=caller,
+        head_sha=head_sha, base_sha=policy_base, verdict=verdict,
+        raised_ids=[entry["id"] for entry in open_findings],
+        document_resolved=document_resolved, caller_resolved=caller_resolved,
+        caller_rulings=rulings, drops=evidence.get(KEY_DROPPED, []), run=run_resolved,
+    )
+    prior_ruled = [
+        resolved_entry(prior.as_finding(), BY_CALLER, ruling.reason)
+        for prior, ruling in clearing.ruled
+    ]
+    if prior_ruled:
+        evidence = {**evidence, KEY_RESOLVED: [*(evidence.get(KEY_RESOLVED) or []), *prior_ruled]}
+    _warn_unknown_resolutions(
+        [ref for ref in unmatched_rulings if ref not in {r.ref for _, r in clearing.ruled}]
+    )
+    for note in clearing.notes:
+        print(f"loadout-review: notice: {note}", file=sys.stderr)
+    held = state.get(KEY_CLEARED_CLAIMS) or []
+    taken = {claim["id"] for claim in held}
+    claims = [*held, *(c for c in clearing.claims if c["id"] not in taken)]
+
     body = {
         "review_status": status,
         "findings": [
@@ -959,6 +1005,7 @@ def _post_command(
             for item, evaluated in zip(annotated, verdict.findings)
         ],
         **state,
+        **({KEY_CLEARED_CLAIMS: claims} if claims else {}),
         **({KEY_FINDINGS_OPEN: open_findings} if open_findings else {}),
         **evidence,
         **fence_fields,
@@ -1048,6 +1095,8 @@ def _post_command(
         "finding_count": len(annotated),
         "blocking_count": len(verdict.blocking),
         "open_finding_ids": [entry["id"] for entry in open_findings],
+        "cleared_finding_ids": [claim["id"] for claim in clearing.claims],
+        "uncleared_finding_ids": [prior.id for prior in clearing.uncleared],
         "verified_id": posted.get("verified_id"),
         "verified_url": posted.get("verified_url"),
         "verified_by_login": posted.get("verified_by_login"),
@@ -1142,7 +1191,7 @@ def main(
         return _post_command(
             args, caller, owner=owner, repo=repo, platform=platform, repo_path=repo_path,
             token_provider=token_provider, opener=opener, identity_provider=identity_provider,
-            config_root=config_root,
+            config_root=config_root, run_root=run_root,
         )
     except ReviewCliError as exc:
         print(f"loadout-review: {exc}", file=sys.stderr)

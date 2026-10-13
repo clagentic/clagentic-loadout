@@ -133,6 +133,7 @@ from clagentic_loadout.merge.fence_state import (
     FindingsState,
     failure_sequences_of,
     has_findings_state,
+    cleared_prior_findings,
     index_scanners,
     normalize_findings_state,
     raw_mentions_findings_state,
@@ -666,6 +667,9 @@ class ReviewerVerdict:
     #: asserts nothing: unreadable with no findings state, or not this
     #: reviewer's or this PR's. The verb prints one warning per entry.
     ignored_earlier_fences: tuple[tuple[Any, str], ...] = ()
+    #: (finding, claim) for each earlier open finding this fence clears at its
+    #: own head. The verb names each one when the gate proceeds.
+    cleared_prior_findings: tuple[tuple[dict[str, Any], dict[str, Any]], ...] = ()
 
 
 def parse_verdict_block(comment_body: str) -> dict[str, Any] | None:
@@ -998,6 +1002,11 @@ def read_reviewer_verdict(
         unresolved_supersedes=unresolved_supersedes,
         ignored_earlier_fences=tuple(
             (fence.comment_id, fence.reason) for fence in ignored_earlier
+        ),
+        cleared_prior_findings=tuple(
+            cleared_prior_findings(
+                [(fence.head, fence.state) for fence in valid_earlier], current_state, verdict_sha
+            )
         ),
     )
 

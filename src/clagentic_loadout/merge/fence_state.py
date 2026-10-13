@@ -628,6 +628,13 @@ def unresolved_prior_findings(
     function). What is returned is exactly what the current fence leaves
     unaccounted for.
     """
+    still_open = _open_before(earlier)
+    cleared_now = {c["id"] for c in current.cleared_claims if c.get("head") == current_head}
+    raised_now = {f["id"] for f in current.findings_open}
+    return [f for fid, f in still_open.items() if fid not in cleared_now and fid not in raised_now]
+
+
+def _open_before(earlier: Iterable[tuple[str, FindingsState]]) -> dict[str, dict[str, Any]]:
     still_open: dict[str, dict[str, Any]] = {}
     for fence_head, state in earlier:
         for finding in state.findings_open:
@@ -635,9 +642,25 @@ def unresolved_prior_findings(
         for claim in state.cleared_claims:
             if claim.get("head") == fence_head:
                 still_open.pop(claim["id"], None)
-    cleared_now = {c["id"] for c in current.cleared_claims if c.get("head") == current_head}
+    return still_open
+
+
+def cleared_prior_findings(
+    earlier: Iterable[tuple[str, FindingsState]],
+    current: FindingsState,
+    current_head: str,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """(finding, claim) for each earlier open finding the current fence clears
+    at the current head, so the gate can name each clearing it relied on."""
+    still_open = _open_before(earlier)
     raised_now = {f["id"] for f in current.findings_open}
-    return [f for fid, f in still_open.items() if fid not in cleared_now and fid not in raised_now]
+    return [
+        (still_open[claim["id"]], claim)
+        for claim in current.cleared_claims
+        if claim.get("head") == current_head
+        and claim["id"] in still_open
+        and claim["id"] not in raised_now
+    ]
 
 
 _SHORT_SHA = 12
@@ -735,6 +758,7 @@ __all__ = [
     "SCANNER_STATUSES",
     "STATE_KEYS",
     "FindingsState",
+    "cleared_prior_findings",
     "has_findings_state",
     "index_scanners",
     "normalize_findings_state",

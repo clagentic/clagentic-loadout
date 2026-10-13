@@ -49,7 +49,12 @@ from clagentic_loadout.acquire.contract import (
     tree_file_paths,
 )
 from clagentic_loadout.acquire.errors import AcquireFetchError
-from clagentic_loadout.transport.github_client import GITHUB_API_BASE, request_json
+from clagentic_loadout.transport import comment_paging
+from clagentic_loadout.transport.github_client import (
+    GITHUB_API_BASE,
+    request_json,
+    request_json_with_headers,
+)
 from clagentic_loadout.transport.redirect_guard import no_redirect_opener
 
 #: Accept header requesting the raw unified diff instead of the ordinary
@@ -190,6 +195,41 @@ def fetch_file_bytes(
         ) from exc
 
 
+def fetch_issue_comments(
+    owner: str, repo: str, pr_number: int, token: str, *, opener=None
+) -> list[dict]:
+    """Every comment on the PR, all pages, through the one shared comment
+    reader. A failed or incomplete read is a fetch failure, never a short list."""
+
+    def fetch_page(url: str):
+        return request_json_with_headers(
+            "GET",
+            url,
+            token,
+            accept="application/vnd.github+json",
+            parse_mode="content_type",
+            opener=opener,
+            opener_factory=no_redirect_opener,
+        )
+
+    try:
+        return comment_paging.list_github_issue_comments(
+            owner, repo, pr_number, fetch_page, api_base=GITHUB_API_BASE
+        )
+    except comment_paging.CommentListError as exc:
+        raise AcquireFetchError(
+            f"cannot read the comments of PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise AcquireFetchError(
+            f"the comments of PR #{pr_number} in {owner}/{repo} were not valid JSON"
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise AcquireFetchError(
+            f"cannot read the comments of PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
+
+
 def fetch_range_diff(
     owner: str, repo: str, base_sha: str, head_sha: str, token: str, *, opener=None
 ) -> RangeDiff:
@@ -313,10 +353,14 @@ class GithubAcquireBackend:
     def fetch_file_bytes(self, *, owner: str, repo: str, path: str, ref: str) -> bytes:
         return fetch_file_bytes(owner, repo, path, ref, self._token, opener=self._opener)
 
+    def fetch_issue_comments(self, *, owner: str, repo: str, pr_number: int) -> list[dict]:
+        return fetch_issue_comments(owner, repo, pr_number, self._token, opener=self._opener)
+
 
 __all__ = [
     "GithubAcquireBackend",
     "fetch_file_bytes",
+    "fetch_issue_comments",
     "fetch_pr_content",
     "fetch_tree_paths",
     "fetch_range_diff",
