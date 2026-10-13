@@ -138,7 +138,7 @@ from clagentic_loadout.merge import post_merge_verb as merge_post_merge_verb
 from clagentic_loadout.merge import verb as merge_verb
 from clagentic_loadout.push import verb as push_verb
 from clagentic_loadout.review import verb as review_verb
-from clagentic_loadout.transport import attestation, git_host_api, github_app_config
+from clagentic_loadout.transport import attestation, git_host_api, github_app_config, provider_config
 
 #: Env vars a live crew/harness spawn environment may set that could steer
 #: the REAL `attestation.resolve_identity()` chain toward a session-specific
@@ -300,6 +300,19 @@ def _isolate_github_app_config_root(monkeypatch, tmp_path):
     every test that resolves a role observes."""
     monkeypatch.setattr(github_app_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "no-github-app-config")
     monkeypatch.delenv(github_app_config.GITHUB_APP_SLUG_ENV_VAR, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_user_config_root(monkeypatch, tmp_path):
+    """Autouse repo-wide: the merge gate's user-level config reads (the
+    pre-merge canary among them) never see the host's real config file.
+
+    A host that configures a canary would otherwise run it, and be refused by
+    it, in every test that drives the merge verb. A test that wants a user-level
+    config file points the root at its own directory, which wins."""
+    monkeypatch.setattr(
+        provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "no-user-level-config"
+    )
 
 
 @pytest.fixture(autouse=True)
