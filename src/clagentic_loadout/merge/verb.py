@@ -67,6 +67,18 @@ documented step ordering):
      assert_prior_findings_resolved), and a clean verdict reporting a
      `merge: required_scanners` scanner as failed refuses
      (merge.verdict.check_required_scanners).
+  5a. Computed verdict (merge.gate_evaluation) — for each required reviewer's
+     newest fence, run BEFORE its recorded status is read: an evaluated fence
+     (fence_schema_version 3) has its findings evaluated again at merge time,
+     with policy read at the live PR base and the PR's current head as the
+     expected head. BLOCKED, STALE and (unless merge.evaluator.allow_degraded
+     is true for the role) DEGRADED refuse, naming the findings, heads or
+     reasons; a CLEAN fence the gate cannot reproduce refuses naming the
+     difference. A fence below version 3 applies its asserted status with a
+     notice, or refuses under merge.evaluator.require_evaluated. The gate
+     only adds refusals, except that a standing disposition now on the base
+     can demote a recorded BLOCKED, named in the output. --report-only prints
+     the outcome per reviewer; the merge result and the attestation record it.
   5b. Model attestation (merge.model_attestation, lr-95543d) — OPT-IN
      (`merge: require_model_attestation: true`, default off): when enabled,
      a required reviewer's `clean` verdict must ALSO carry a genuine
@@ -461,6 +473,7 @@ import sys
 import urllib.error
 
 from clagentic_loadout._version import get_version
+from clagentic_loadout.acquire.contract import repository_visibility
 from clagentic_loadout.merge import (
     ci_status,
     commit_subjects,
@@ -488,13 +501,17 @@ from clagentic_loadout.merge.errors import (
     StaleHeadShaError,
     TitleInvalidError,
     VerdictBlockingError,
+    VerdictDegradedError,
+    VerdictGateDisagreementError,
     VerdictMalformedError,
     VerdictMissingError,
+    VerdictNotEvaluatedError,
     VerdictPriorFindingsOpenError,
     VerdictRoleMismatchError,
     VerdictScannerFailedError,
     VerdictStaleError,
 )
+from clagentic_loadout.merge.gate_evaluation import GateEvaluation, evaluate_at_gate
 from clagentic_loadout.merge.merge_readback import verify_merge_landed
 from clagentic_loadout.merge.model_attestation import (
     ModelAttestationInvalidError,
@@ -1449,6 +1466,7 @@ def _run(
             )
 
     # 5. Reviewer-verdict fences — for each required reviewer.
+    gate_evaluations: list[GateEvaluation] = []
     if required_reviewers:
         if not current_head_sha:
             _fail(
@@ -1490,6 +1508,16 @@ def _run(
                 code=EXIT_POST_MERGE_FAILED,
             )
 
+        # The policy for the gate's own computation is read from the live PR
+        # base, in the local tree when there is one (merge.gate_evaluation).
+        evaluation_tree: str | None = args.repo_path
+        if args.repo_path:
+            try:
+                evaluation_tree = str(resolve_gate_git_tree(args.repo_path))
+            except PostMergeConfigError:
+                evaluation_tree = args.repo_path
+        live_base_sha = resolve_base_sha(pr_info)
+        host_visibility = repository_visibility(pr_info)
         for reviewer_name, bot_login in required_reviewers.items():
             try:
                 verdict_obj = verdict.read_reviewer_verdict(
@@ -1509,7 +1537,28 @@ def _run(
                         f"reviewer on this PR and clears nothing",
                         file=sys.stderr,
                     )
-                verdict.assert_clean_verdict(verdict_obj, reviewer_name)
+                # The gate's own computation comes before the recorded status is
+                # read: an evaluated fence that says BLOCKED is refused here by
+                # name, and one a standing disposition now clears is passed.
+                gate_evaluation = evaluate_at_gate(
+                    verdict_obj,
+                    reviewer_name,
+                    current_head_sha=current_head_sha,
+                    live_base_sha=live_base_sha,
+                    repo_path=evaluation_tree,
+                    visibility=host_visibility,
+                    evaluator=repo_gate.evaluator,
+                )
+                for evaluation_notice in gate_evaluation.notices:
+                    print(f"merge: NOTICE -- {evaluation_notice}", file=sys.stderr)
+                gate_evaluations.append(gate_evaluation)
+                # A fence the evaluator computed as anything but CLEAN carries
+                # status blocking by construction; reaching here means the gate
+                # passed that outcome on a trusted basis, so the status is not
+                # read again. A CLEAN fence whose poster still asked for
+                # blocking is refused by it.
+                if gate_evaluation.fence_outcome in (None, "CLEAN"):
+                    verdict.assert_clean_verdict(verdict_obj, reviewer_name)
                 verdict.assert_prior_findings_resolved(verdict_obj, reviewer_name)
                 required_scanners = (
                     () if args.ignore_repo_gate else repo_gate.scanners_for(reviewer_name)
@@ -1533,6 +1582,9 @@ def _run(
                 VerdictRoleMismatchError,
                 VerdictStaleError,
                 VerdictBlockingError,
+                VerdictDegradedError,
+                VerdictGateDisagreementError,
+                VerdictNotEvaluatedError,
                 VerdictPriorFindingsOpenError,
                 VerdictScannerFailedError,
                 ModelAttestationMissingError,
@@ -1792,6 +1844,8 @@ def _run(
     # would, and a refusal already exited with its own code. Nothing below
     # mutates the host, the tree or any task state.
     if args.report_only:
+        for gate_evaluation in gate_evaluations:
+            print(f"merge: report-only -- verdict {gate_evaluation.attestation_line()}")
         print(
             f"merge: report-only -- all gates PASSED; PR #{args.pr_number} in "
             f"{owner}/{repo} would be merged (method={args.merge_method!r}, "
@@ -1881,6 +1935,7 @@ def _run(
         ci_disposition=ci_disposition,
         task_id=args.task_id,
         issue_number=issue_number,
+        verdict_evaluations=[e.attestation_line() for e in gate_evaluations],
     )
     verified_comment_id: "str | int | None" = None
     try:
@@ -1917,6 +1972,11 @@ def _run(
         "pr_number": args.pr_number, "owner": owner, "repo": repo,
         READBACK_ENVELOPE_KEY: merge_readback.to_dict(),
         "ci_source": ci_source,
+        **(
+            {"verdict_evaluations": [e.to_dict() for e in gate_evaluations]}
+            if gate_evaluations
+            else {}
+        ),
         **({"repo_gate_ignored": list(repo_gate.reviewer_roles)} if args.ignore_repo_gate else {}),
     }))
 
