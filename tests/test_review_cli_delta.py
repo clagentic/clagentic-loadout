@@ -307,6 +307,13 @@ def test_a_delta_findings_file_posts_with_its_carried_findings(env, tmp_path, ca
     assert payload["result"] == "posted"
     assert payload["finding_count"] == 1
     assert "a.py:3 [R1] bad" in env.opener_state["posted_body"]
+    # The carried prior finding is classified, not merely listed: it blocks, and
+    # it is held open in the fence.
+    lines = env.opener_state["posted_body"].split("```review-result")[0].splitlines()
+    assert lines.index("Blocking findings (1):") < lines.index("- a.py:3 [R1] bad")
+    assert "Advisory findings" not in "\n".join(lines)
+    assert payload["blocking_count"] == 1
+    assert len(payload["open_finding_ids"]) == 1
 
 
 def test_a_fingerprint_in_the_findings_file_is_never_posted(env, tmp_path, capsys):

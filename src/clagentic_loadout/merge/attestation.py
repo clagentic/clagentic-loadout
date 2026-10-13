@@ -134,6 +134,7 @@ def build_attestation_body(
     task_id: str | None = None,
     issue_number: int | None = None,
     version: str | None = None,
+    verdict_evaluations: "list[str] | tuple[str, ...]" = (),
 ) -> str:
     """Build the merge-completion attestation comment body.
 
@@ -178,6 +179,12 @@ def build_attestation_body(
         (push.issue_link.parse_closes_issue_number) -- git-host-native,
         never a lore field. None when the PR body carries no such trailer;
         the line is omitted entirely in that case.
+      - `verdict_evaluations`: one line per required reviewer, from
+        merge.gate_evaluation.GateEvaluation.attestation_line: the outcome the
+        fence recorded, the outcome the gate computed, and any disposition
+        applied or DEGRADED verdict allowed to pass. Rendered as a `Verdicts`
+        row so a degradation that did not stop the merge is never silent; the
+        row is omitted when empty.
       - `version`: the clagentic-loadout package version. Defaults to
         `clagentic_loadout._version.get_version()` when omitted -- a caller
         overrides only for testing against a pinned version string.
@@ -206,6 +213,10 @@ def build_attestation_body(
                 "merge.required_reviewer_roles and merge.required_scanners ignored "
                 "via --ignore-repo-gate",
             )
+        )
+    if verdict_evaluations:
+        rows.append(
+            ("Verdicts", "<br>".join(_escape_table_cell(line) for line in verdict_evaluations))
         )
     rows.append(("CI status", _escape_table_cell(ci_disposition)))
     if task_id:

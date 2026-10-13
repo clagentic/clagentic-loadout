@@ -24,6 +24,9 @@ or drop its pre_checks. The base commit is not something the PR controls.
     must be green), so the merge that lands the fix is never blocked by the
     broken file; a `ci_strict` that cannot be validated is read as strict, so a
     broken file never relaxes the gate.
+  - `evaluator` holds `allow_degraded` (per reviewer role) and `require_evaluated`
+    (see merge.gate_evaluation). Both can relax the gate, so a declaration that
+    cannot be validated is the strict setting, with a warning.
 
 Keys that are machine-local (`post_merge_steps`, host paths, the sync knobs)
 stay in the gitignored deployment file. A gate key found in that file while the
@@ -107,11 +110,15 @@ from typing import Iterable
 from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
 from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_CI_STRICT,
+    CONFIG_KEY_EVALUATOR,
     CONFIG_KEY_REQUIRED_CI_CHECKS,
     CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
     CONFIG_KEY_REQUIRED_SCANNERS,
+    STRICT_EVALUATOR_GATE,
+    EvaluatorGate,
     InvalidMergeGateConfigError,
     ci_strict_from_section,
+    evaluator_gate_from_section,
     parse_tracked_merge_section,
     read_merge_section,
     required_ci_checks_from_section,
@@ -134,6 +141,7 @@ GATE_KEYS = (
     CONFIG_KEY_PRE_CHECKS,
     CONFIG_KEY_REQUIRED_CI_CHECKS,
     CONFIG_KEY_CI_STRICT,
+    CONFIG_KEY_EVALUATOR,
 )
 
 
@@ -157,6 +165,9 @@ class RepoGate:
     required_ci_checks: tuple[str, ...] = ()
     #: A head with no CI evidence refuses instead of passing.
     ci_strict: bool = False
+    #: What the gate says about computed verdicts (merge.evaluator). A declaration
+    #: that cannot be read is the strict value, never the default.
+    evaluator: EvaluatorGate = EvaluatorGate()
 
     def scanners_for(self, reviewer_name: str) -> tuple[str, ...]:
         return (self.required_scanners or {}).get(reviewer_name, ())
@@ -265,6 +276,19 @@ def gate_from_tracked_text(
             f"merge.ci_strict is malformed, so strict CI applies (a head with no CI "
             f"evidence refuses): {exc}",
         )
+    evaluator = EvaluatorGate()
+    try:
+        evaluator = evaluator_gate_from_section(source, merge_section)
+    except InvalidMergeGateConfigError as exc:
+        # A value that cannot be read must never relax the gate: no role is
+        # allowed a DEGRADED verdict and evaluation is required.
+        evaluator = STRICT_EVALUATOR_GATE
+        warnings = (
+            *warnings,
+            f"merge.evaluator is malformed, so the strict setting applies (no role may "
+            f"merge on a DEGRADED verdict, and a fence without a computed verdict "
+            f"refuses): {exc}",
+        )
     return RepoGate(
         reviewer_roles=roles,
         required_scanners=scanners,
@@ -273,6 +297,7 @@ def gate_from_tracked_text(
         pre_checks_error=pre_checks_error,
         required_ci_checks=ci_checks,
         ci_strict=ci_strict,
+        evaluator=evaluator,
     )
 
 

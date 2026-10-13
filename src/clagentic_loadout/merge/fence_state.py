@@ -48,6 +48,10 @@ fence_schema_version 3 fence adds:
   evaluator_version str                  the rules the verdict was computed under
   policy_base_sha   <sha>                the base revision policy was read from;
                                          omitted when it was not known
+  evaluated_findings [{file, line, rule_id, message, facts?}]
+                                         the findings the outcome was computed
+                                         from, so the merge gate can compute it
+                                         again under the policy it reads itself
 
 They are present together or not at all (policy_base_sha excepted). A fence at
 version 1 or 2 carries none of them and reads as NOT EVALUATED: its
@@ -106,6 +110,7 @@ KEY_VERDICT_OUTCOME = "verdict_outcome"
 KEY_VERDICT_REASONS = "verdict_reasons"
 KEY_EVALUATOR_VERSION = "evaluator_version"
 KEY_POLICY_BASE_SHA = "policy_base_sha"
+KEY_EVALUATED_FINDINGS = "evaluated_findings"
 
 #: The tool-supplied evaluation fields. Part of EVIDENCE_KEYS because they ride
 #: in the same tool-built fence, are derived rather than caller-typed, and hold
@@ -115,6 +120,7 @@ EVALUATION_KEYS = (
     KEY_VERDICT_REASONS,
     KEY_EVALUATOR_VERSION,
     KEY_POLICY_BASE_SHA,
+    KEY_EVALUATED_FINDINGS,
 )
 
 VERDICT_OUTCOMES = ("CLEAN", "BLOCKED", "DEGRADED", "STALE")
@@ -160,6 +166,9 @@ class FindingsState:
     verdict_reasons: tuple[str, ...] = ()
     evaluator_version: str | None = None
     policy_base_sha: str | None = None
+    #: The findings the outcome was computed from; None when the fence does not
+    #: carry them, which is different from a fence that carries none.
+    evaluated_findings: tuple[dict[str, Any], ...] | None = None
 
     @property
     def evaluated(self) -> bool:
@@ -501,6 +510,63 @@ def _normalize_evaluation(raw: Mapping[str, Any]) -> dict[str, Any]:
     }
     if raw.get(KEY_POLICY_BASE_SHA) is not None:
         rendered[KEY_POLICY_BASE_SHA] = _head(raw[KEY_POLICY_BASE_SHA], KEY_POLICY_BASE_SHA)
+    if KEY_EVALUATED_FINDINGS in raw:
+        rendered[KEY_EVALUATED_FINDINGS] = _normalize_evaluated_findings(raw[KEY_EVALUATED_FINDINGS])
+    return rendered
+
+
+#: The only severity a carried finding may state: a finding the evaluator does
+#: not score. Anything else a reviewer wrote is not an input to the verdict.
+_PRAISE = "praise"
+
+
+def _plain_json(value: Any, where: str) -> Any:
+    """*value* if it is plain JSON data none of whose strings is fence-shaped.
+    Facts are reviewer-typed and nested, so each string in them is checked the
+    way every other caller text is."""
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        offending = find_fence_syntax(value)
+        if offending is not None:
+            raise ValueError(
+                f"{where} contains the fence-delimiter sequence {offending!r}; a "
+                f"tool-constructed fence never carries fence-shaped caller text"
+            )
+        return value
+    if isinstance(value, list):
+        return [_plain_json(item, f"{where}[{i}]") for i, item in enumerate(value)]
+    if isinstance(value, Mapping):
+        return {
+            _text(key, f"{where} key"): _plain_json(item, f"{where}.{key}")
+            for key, item in value.items()
+        }
+    raise ValueError(f"{where} must be plain JSON data, got {type(value).__name__}")
+
+
+def _normalize_evaluated_findings(value: Any) -> list[dict[str, Any]]:
+    rendered = []
+    for index, entry in enumerate(_entries(value, KEY_EVALUATED_FINDINGS)):
+        where = f"{KEY_EVALUATED_FINDINGS}[{index}]"
+        _exact_keys(entry, ("file", "line", "rule_id", "message", "facts", "severity"), where)
+        item: dict[str, Any] = {
+            "file": _text(entry.get("file"), f"{where}.file"),
+            "line": _line_number(entry.get("line"), f"{where}.line"),
+            "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+            "message": _text(entry.get("message"), f"{where}.message", single_line=False),
+        }
+        if entry.get("facts") is not None:
+            facts = entry["facts"]
+            if not isinstance(facts, Mapping):
+                raise ValueError(f"{where}.facts must be a JSON object, got {type(facts).__name__}")
+            item["facts"] = _plain_json(facts, f"{where}.facts")
+        if entry.get("severity") is not None:
+            if entry["severity"] != _PRAISE:
+                raise ValueError(
+                    f"{where}.severity may only be {_PRAISE!r}, got {entry['severity']!r}"
+                )
+            item["severity"] = _PRAISE
+        rendered.append(item)
     return rendered
 
 
@@ -539,6 +605,11 @@ def state_from_fence(data: Mapping[str, Any]) -> FindingsState:
         verdict_reasons=tuple(data.get(KEY_VERDICT_REASONS) or ()),
         evaluator_version=data.get(KEY_EVALUATOR_VERSION),
         policy_base_sha=data.get(KEY_POLICY_BASE_SHA),
+        evaluated_findings=(
+            tuple(data[KEY_EVALUATED_FINDINGS])
+            if isinstance(data.get(KEY_EVALUATED_FINDINGS), list)
+            else None
+        ),
     )
 
 
@@ -633,6 +704,7 @@ __all__ = [
     "EVALUATED_FENCE_SCHEMA_VERSION",
     "EVALUATION_KEYS",
     "EVIDENCE_KEYS",
+    "KEY_EVALUATED_FINDINGS",
     "KEY_EVALUATOR_VERSION",
     "KEY_POLICY_BASE_SHA",
     "KEY_VERDICT_OUTCOME",
