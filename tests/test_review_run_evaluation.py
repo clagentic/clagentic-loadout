@@ -327,31 +327,31 @@ def test_status_may_be_omitted_and_the_computed_one_is_posted(env, capsys):
     assert _fence(env)["review_status"] == "clean"
 
 
-def test_a_bare_array_without_a_base_is_degraded_not_clean(env, tmp_path, capsys):
+def test_a_bare_array_without_a_base_sha_is_evaluated_at_the_live_base(env, tmp_path, capsys):
     bare = tmp_path / "bare.json"
     bare.write_text("[]", encoding="utf-8")
 
-    refused, _, err = env.invoke(
+    code, _, err = env.invoke(
         "post", "--findings", str(bare), "--head-sha", HEAD_SHA, "--status", "clean",
         capsys=capsys,
     )
 
-    assert refused == review_cli.EXIT_FINDINGS_INVALID
-    assert "DEGRADED" in err
-    assert "policy base revision is not known" in err
+    assert code == 0, err
+    assert "DEGRADED" not in err
 
 
-def test_a_base_sha_that_conflicts_with_the_recorded_one_is_refused(env, capsys):
+def test_a_base_sha_that_differs_from_the_live_base_is_noticed_and_not_used(env, capsys):
     env.configure(carrier_mode="facts_mild")
     _, payload = env.run(capsys=capsys)
 
-    code, _, _ = env.invoke(
+    code, _, err = env.invoke(
         "post", "--findings", payload["findings_file"], "--base-sha", "d" * 40,
         "--status", "blocking", capsys=capsys,
     )
 
-    assert code == review_cli.EXIT_FINDINGS_INVALID
-    assert env.opener_state["posted_body"] is None
+    assert code == 0, err
+    assert "d" * 40 in err and env.base_sha in err
+    assert "d" * 40 not in env.opener_state["posted_body"]
 
 
 def test_the_standalone_evaluate_verb_reaches_the_outcome_the_post_recorded(env, capsys):
