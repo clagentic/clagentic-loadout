@@ -491,6 +491,7 @@ sourced from outside the merge that just happened:
 | Gated HEAD SHA | `<sha>` |
 | Merged SHA | `<sha>` |
 | Reviews | `<login>, <login>` |
+| Verdicts | `<role>: fence <outcome>, gate <outcome>[; disposition applied: ...]` |
 | CI status | `<disposition>` |
 | task_id | `<opaque work-item ref>` |
 | Issue | `#<NN>` |
@@ -556,6 +557,99 @@ every gate *before* the merge call, all of which are fail-closed (§2 above,
 and [docs/verbs.md](verbs.md)'s gate-chain list) — because by this point
 there is no longer a "refuse the merge" outcome available to fail closed
 into.
+
+## Computed verdicts at the gate
+
+A reviewer posted with `loadout-review post` records, in its fence, the verdict the
+evaluator computed (`verdict_outcome`: `CLEAN`, `BLOCKED`, `DEGRADED` or `STALE`, at
+`fence_schema_version` 3) and the findings it was computed from (`evaluated_findings`, each
+with the facts the reviewer stated). `loadout-merge` does not take that outcome on trust and
+does not re-judge a finding. For each required reviewer role it takes the newest valid fence
+and runs the same evaluator ([review-evaluator.md](review-evaluator.md)) over the same
+findings **at merge time**. No model is called at the gate.
+
+**One rule governs every choice below.** Anything that can lower a verdict must be positively
+established from trusted input, and an absent, unknown, unrecognised or unverifiable value
+resolves to the worst case. The gate is a one-way barrier: it adds refusals and never clears
+a block on its own authority.
+
+### Policy is read at the live base
+
+Dispositions and stakes are read from the PR's **live base revision** (`git show
+<base>:<path>` in the local tree at `--repo-path`), where the base is the one the host
+reports for the PR at merge time. The `policy_base_sha` a fence or findings file records is
+provenance only and is never used to pick the revision; a reviewer editing its own findings
+file, or a fence recording a base with a permissive policy, changes nothing. The expected
+head is the PR's current head. Consequences:
+
+- A disposition merged to the base between review and merge **applies**, because the policy
+  is on the trusted base, which the PR under review cannot have written.
+- A base that gained a stricter policy, or whose disposition has expired, since the review
+  **blocks** at merge.
+- With no `--repo-path`, or a base commit the local tree does not hold, the policy cannot be
+  read, so the gate's computation is DEGRADED. A fence that recorded CLEAN is then refused,
+  naming the missing input.
+
+### Decision table
+
+`F` is the fence's outcome, `G` the gate's own.
+
+| Outcome | Result |
+|---|---|
+| `F` or `G` is STALE | Refused, naming the fence head and the merge head. |
+| `F` is CLEAN, `G` is anything else | Refused, naming the difference: the expired entry, the policy base that moved, the degraded input, the findings that now block. |
+| `F` is BLOCKED, `G` is CLEAN, and a standing disposition on the live base now demotes the blocking finding | Passes. The gate names the applied disposition on stderr, in the merge result and in the attestation. A disposition that narrows by `fingerprint` never counts: the fence does not carry fingerprints, so it cannot be shown to match. |
+| BLOCKED in `F` or `G` (otherwise) | Refused, naming each open blocking finding and the exact `dispositions.yaml` entry that would clear it (or that the security floor forbids clearing it as `by_design`). |
+| DEGRADED in `F` or `G`, nothing blocked | Refused, naming the reasons, unless `merge.evaluator.allow_degraded` is true for the role. |
+| Both CLEAN | Passes, subject to the rest of the gate chain. |
+
+A fence that recorded CLEAN but whose poster asked for `blocking` is still refused: the
+poster's stricter status stands.
+
+An evaluated fence that does not carry its `evaluated_findings` cannot be checked. It is
+refused unless the fence itself already records a refusal (BLOCKED, STALE, DEGRADED without
+the role allowed), in which case it is refused on what it records.
+
+### `merge.evaluator`
+
+Read from the tracked gate file at the PR base commit, like every other key that changes what
+a merge needs (so the PR under review cannot relax it):
+
+```yaml
+merge:
+  evaluator:
+    allow_degraded:        # per reviewer role; default false for every role
+      reviewer: false
+    require_evaluated: false   # migration default
+```
+
+- **`allow_degraded`** — a mapping of reviewer role to boolean. Only a role set `true` may
+  merge on a DEGRADED verdict; the merge result and the attestation record that it did and
+  why. It never lets a BLOCKED or STALE verdict through.
+- **`require_evaluated`** — a fence below `fence_schema_version` 3 has no computed verdict:
+  its `review_status` was typed by whoever posted it. With `false` (the migration default)
+  the gate applies that status exactly as before and prints a notice that the verdict was not
+  evaluated. With `true` it refuses, naming the fence.
+
+A `merge.evaluator` declaration that cannot be read is the strict one (no role may merge on a
+DEGRADED verdict, evaluation required), with a warning naming the problem; it never relaxes
+the gate. `--ignore-repo-gate` does not lift it.
+
+### Seeing the outcome without merging
+
+`loadout-merge --report-only` runs the whole chain and prints, per reviewer, the outcome the
+fence recorded and the one the gate computed (`verdict <role>: fence CLEAN, gate CLEAN`), then
+exits without merging. A real merge records the same lines in its JSON result
+(`verdict_evaluations`) and in the attestation's `Verdicts` row.
+
+### Open findings come from the computed set
+
+`loadout-review post` derives the fence's `findings_open` from the computed blocking set, after
+dispositions: a finding a base-revision disposition demotes to advisory is not held open. A
+`findings_open` in `--state-file` is ignored with a warning. The ids are derived from the
+finding's file, line and rule (`open_finding_ids` in the post result), and a later fence clears
+a finding by naming that id in `cleared_claims`. The carry-forward refusal for findings an
+earlier fence held open therefore operates on computed state.
 
 ## See also
 
