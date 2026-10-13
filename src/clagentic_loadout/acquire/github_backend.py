@@ -46,6 +46,7 @@ from clagentic_loadout.acquire.contract import (
     RangeDiff,
     pr_text,
     repository_visibility,
+    tree_file_paths,
 )
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport.github_client import GITHUB_API_BASE, request_json
@@ -165,11 +166,7 @@ def fetch_tree_paths(owner: str, repo: str, ref: str, token: str, *, opener=None
         raise AcquireFetchError(
             f"the tree of {owner}/{repo} at {ref[:12]} was truncated or not a complete listing"
         )
-    return [
-        e["path"]
-        for e in entries
-        if isinstance(e, dict) and isinstance(e.get("path"), str) and e.get("type") != "tree"
-    ]
+    return tree_file_paths(entries, f"the tree of {owner}/{repo} at {ref[:12]}")
 
 
 def fetch_file_bytes(

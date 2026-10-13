@@ -47,6 +47,7 @@ from clagentic_loadout.acquire.contract import (
     RangeDiff,
     pr_text,
     repository_visibility,
+    tree_file_paths,
 )
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.transport import git_host_api
@@ -227,11 +228,7 @@ def fetch_tree_paths(
         truncated = body.get("truncated")
         if not isinstance(entries, list) or not isinstance(truncated, bool):
             raise AcquireFetchError(f"{what} was not a complete listing")
-        paths.extend(
-            e["path"]
-            for e in entries
-            if isinstance(e, dict) and isinstance(e.get("path"), str) and e.get("type") != "tree"
-        )
+        paths.extend(tree_file_paths(entries, what))
         if not truncated:
             return paths
         if not entries:

@@ -188,3 +188,33 @@ def test_policy_is_read_through_the_host_reader(platform):
 
     assert [d.rule_id for d in policy.dispositions] == ["R1"]
     assert policy.degraded == ()
+
+
+_MALFORMED_ENTRIES = [
+    "not-an-object",
+    {"type": "blob"},
+    {"path": 7, "type": "blob"},
+    {"path": "a.py"},
+    {"path": "a.py", "type": None},
+]
+
+
+@pytest.mark.parametrize("entry", _MALFORMED_ENTRIES, ids=repr)
+def test_a_malformed_tree_entry_is_a_failure_not_a_skip(platform, entry):
+    pages = [([_blob("a.py"), entry], False)]
+    backend = _backend(platform, pages, {})
+
+    with pytest.raises(AcquireFetchError, match="malformed entry"):
+        backend.fetch_tree_paths(owner=_OWNER, repo=_REPO, ref=_REF)
+
+
+def test_a_malformed_tree_entry_degrades_the_policy_naming_the_cause(platform):
+    pages = [([_blob(DISPOSITIONS_PATH), {"type": "blob"}], False)]
+    backend = _backend(platform, pages, {DISPOSITIONS_PATH: _file(b"dispositions: []\n")})
+
+    policy = read_policy_from(
+        HostPolicyReader(backend, owner=_OWNER, repo=_REPO), _REF, visibility="private"
+    )
+
+    assert policy.degraded
+    assert "malformed entry" in " ".join(str(d) for d in policy.degraded)

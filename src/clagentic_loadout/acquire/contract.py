@@ -56,6 +56,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from clagentic_loadout.acquire.errors import AcquireFetchError
+
 
 @dataclass(frozen=True)
 class ChangedFile:
@@ -132,6 +134,24 @@ def pr_text(pr_info: dict, key: str) -> str:
     absent or non-string host value is ``""``."""
     value = pr_info.get(key)
     return value if isinstance(value, str) else ""
+
+
+def tree_file_paths(entries: list, what: str) -> list[str]:
+    """File paths from a host tree listing, directories left out. Every entry
+    must be an object with a string ``path`` and a string ``type``: an entry
+    that is not is a failure, never skipped, because a dropped entry could be
+    the very policy file the caller is looking for."""
+    paths: list[str] = []
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("path"), str)
+            or not isinstance(entry.get("type"), str)
+        ):
+            raise AcquireFetchError(f"{what} contained a malformed entry")
+        if entry["type"] != "tree":
+            paths.append(entry["path"])
+    return paths
 
 
 VISIBILITY_PUBLIC = "public"
@@ -290,4 +310,5 @@ __all__ = [
     "RangeDiffBackend",
     "pr_text",
     "repository_visibility",
+    "tree_file_paths",
 ]
