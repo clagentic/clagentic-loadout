@@ -1849,7 +1849,9 @@ rendered inside the fence, never as body text, and a fence that lands without
 them fails the readback. A hand-authored fence is refused as it always was.
 At the gate, the reviewer's earlier fences are walked in order: a finding an
 earlier fence held open that the current verdict neither clears at its own
-head (with evidence) nor re-raises refuses the merge and names the finding. A
+head (with evidence) nor re-raises does not refuse the merge: the latest
+verdict at the head decides, and the merge prints a NOTICE naming each such
+finding id. A clean verdict that itself lists `findings_open` still refuses. A
 clean verdict reporting a `merge.required_scanners` scanner as `failed`
 refuses, as does one that records no scanner outcomes for a role that has
 required scanners; a scanner name listed twice in a fence is malformed. Each

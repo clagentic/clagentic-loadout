@@ -86,7 +86,8 @@ Verdict enforcement (read_reviewer_verdict)
 8. Findings state (merge.fence_state): the reviewer's EARLIER fences are
    walked in order, each classified by classify_earlier_fence; a finding one
    of the valid ones held open that the selected fence neither clears at its
-   own head nor re-raises refuses via assert_prior_findings_resolved. An
+   own head nor re-raises is reported by the merge verb as a notice and
+   does not refuse. An
    earlier fence that is unreadable AND may carry findings state refuses
    (VerdictMalformedError); one that is unreadable with no state, or is
    another reviewer's or PR's, is ignored with a warning.
@@ -656,7 +657,7 @@ class ReviewerVerdict:
     model_attested: str | None = None
     state: FindingsState = FindingsState()
     #: Findings an earlier fence held open that this verdict leaves
-    #: unaccounted for. Enforced by assert_prior_findings_resolved.
+    #: unaccounted for. Reported as a notice by the merge verb, never refused.
     unresolved_prior_findings: tuple[dict[str, Any], ...] = ()
     #: The comment id this fence says it replaces, when no earlier verdict
     #: comment from the reviewer on the PR has that id. None when the fence
@@ -1193,27 +1194,15 @@ def assert_clean_verdict(verdict: ReviewerVerdict, reviewer_name: str) -> None:
 
 
 def assert_prior_findings_resolved(verdict: ReviewerVerdict, reviewer_name: str) -> None:
-    """Refuse the merge when an earlier fence's open finding has no
-    resolution at this verdict's head, or when this clean verdict itself
-    still lists findings open.
+    """Refuse the merge when this clean verdict itself still lists findings
+    open.
 
-    A version 1 fence, or any history with no findings state, has nothing to
-    carry forward and passes.
+    An earlier fence's open findings do not refuse: the latest verdict per
+    reviewer at the head decides. They stay computed on the verdict
+    (unresolved_prior_findings) and the merge verb reports them as a notice.
 
     Raises merge.errors.VerdictPriorFindingsOpenError naming each finding id.
     """
-    if verdict.unresolved_prior_findings:
-        listed = ", ".join(
-            f"{f['id']} (rule {f['rule_id']}, raised at {f['head']})"
-            for f in verdict.unresolved_prior_findings
-        )
-        raise VerdictPriorFindingsOpenError(
-            f"{reviewer_name.upper()} left finding(s) open: {listed}. The verdict on PR "
-            f"#{verdict.pr_number} at {verdict.head_sha!r} (comment #{verdict.comment_id}) "
-            f"neither clears them with evidence at this head nor re-raises them. A "
-            f"clean verdict at a later head does not resolve an earlier blocker. "
-            f"Re-run {reviewer_name.upper()} so each is adjudicated, then retry the merge gate."
-        )
     if verdict.review_status == "clean" and verdict.state.findings_open:
         ids = ", ".join(f["id"] for f in verdict.state.findings_open)
         raise VerdictPriorFindingsOpenError(
