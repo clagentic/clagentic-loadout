@@ -98,7 +98,13 @@ def test_a_findings_file_without_the_field_posts_the_computed_verdict(env, tmp_p
     assert set(fence) == {
         "reviewer", "review_status", "head_sha", "pr_number", "fence_schema_version",
         "verdict_outcome", "verdict_reasons", "evaluator_version", "policy_base_sha",
+        "evaluated_findings", "findings_open",
     }
+    # Both findings block, so both are held open: the open set is the computed
+    # blocking set, one entry per location and rule.
+    assert [entry["rule_id"] for entry in fence["findings_open"]] == ["R1", "R1"]
+    assert len({entry["id"] for entry in fence["findings_open"]}) == 2
+    assert [(f["file"], f["line"]) for f in fence["evaluated_findings"]] == [("a.py", 3), ("a.py", 4)]
     assert fence["verdict_outcome"] == "DEGRADED"
     assert fence["policy_base_sha"] == env.base_sha
 
