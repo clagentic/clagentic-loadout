@@ -81,12 +81,24 @@ F1_CLEARED = {"cleared_claims": [{"id": "F1", "head": HEAD_B, "evidence": "guard
 
 
 class TestPriorFindingsMustBeResolved:
-    def test_clean_at_a_later_head_without_clearing_is_refused_naming_the_finding(self, capsys):
+    def test_clean_at_a_later_head_without_clearing_proceeds_with_a_notice_naming_the_finding(
+        self, capsys
+    ):
         comments = [
             _comment(1, _fence("blocking", HEAD_A, F1_OPEN)),
             _comment(2, _fence("clean", HEAD_B)),
         ]
         code, err = _merge(comments, capsys=capsys)
+        assert code == verb.EXIT_OK
+        assert "NOTICE" in err
+        assert "F1" in err
+
+    def test_a_clean_verdict_that_itself_lists_findings_open_still_refuses(self, capsys):
+        # Hand-built: the emit side refuses to construct a clean fence holding findings open.
+        clean_with_open = _raw_fence(
+            review_status="clean", head_sha=HEAD_B, fence_schema_version=2, findings_open=_F1_RAW_OPEN
+        )
+        code, err = _merge([_comment(1, clean_with_open)], capsys=capsys)
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
         assert "F1" in err
 
@@ -105,7 +117,8 @@ class TestPriorFindingsMustBeResolved:
             _comment(2, _fence("clean", HEAD_B, other)),
         ]
         code, err = _merge(comments, capsys=capsys)
-        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert code == verb.EXIT_OK
+        assert "NOTICE" in err
         assert "F1" in err
 
     def test_a_blocking_verdict_that_re_raises_it_still_refuses_as_blocking(self):
@@ -353,7 +366,8 @@ class TestSupersedesResolution:
             _comment(2, _fence("clean", HEAD_B, {"supersedes": 1})),
         ]
         code, err = _merge(comments, capsys=capsys)
-        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert code == verb.EXIT_OK
+        assert "NOTICE" in err
         assert "F1" in err
 
 
@@ -846,7 +860,8 @@ class TestEarlierFenceClassification:
             _comment(3, _CLEAN_B),
         ]
         code, err = _merge(comments, capsys=capsys)
-        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert code == verb.EXIT_OK
+        assert "NOTICE" in err
         assert "F1" in err
 
     def test_the_ignored_fences_are_reported_on_the_verdict_with_their_reasons(self):

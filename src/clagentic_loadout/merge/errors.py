@@ -73,10 +73,8 @@ class VerdictStaleAfterCommentsError(VerdictStaleError):
 
 
 class VerdictPriorFindingsOpenError(Exception):
-    """A finding an earlier verdict held open at an earlier head has no
-    resolution at the current head: the current verdict neither clears it
-    (with evidence) nor re-raises it. A clean verdict at a later head is not,
-    by itself, evidence that an earlier blocker was examined."""
+    """A clean verdict that itself still lists findings open, which makes it
+    blocking."""
 
 
 class VerdictScannerFailedError(Exception):

@@ -63,8 +63,9 @@ documented step ordering):
      pair (only) falls back to flags-only with a stderr warning; a loadable but unsatisfiable floor refuses, overridable
      only by --ignore-repo-gate (logged, attested). Findings state: a
      finding an earlier fence held open that the current verdict neither
-     clears at this head nor re-raises refuses (merge.verdict.
-     assert_prior_findings_resolved), and a clean verdict reporting a
+     clears at this head nor re-raises is reported as a NOTICE and does not
+     refuse; a clean verdict that itself lists findings_open refuses
+     (merge.verdict.assert_prior_findings_resolved), and a clean verdict reporting a
      `merge: required_scanners` scanner as failed refuses
      (merge.verdict.check_required_scanners).
   5a. Computed verdict (merge.gate_evaluation) — for each required reviewer's
@@ -1585,6 +1586,14 @@ def _run(
                 if gate_evaluation.fence_outcome in (None, "CLEAN"):
                     verdict.assert_clean_verdict(verdict_obj, reviewer_name)
                 verdict.assert_prior_findings_resolved(verdict_obj, reviewer_name)
+                if verdict_obj.unresolved_prior_findings:
+                    prior_ids = ", ".join(f["id"] for f in verdict_obj.unresolved_prior_findings)
+                    print(
+                        f"merge: NOTICE -- {reviewer_name.upper()} has earlier-fence finding(s) "
+                        f"not cleared at this head: {prior_ids}. They do not refuse the merge; "
+                        f"the latest verdict at the head decides.",
+                        file=sys.stderr,
+                    )
                 required_scanners = (
                     () if args.ignore_repo_gate else repo_gate.scanners_for(reviewer_name)
                 )
