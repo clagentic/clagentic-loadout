@@ -255,6 +255,10 @@ CREW_REFERENCE_PATTERNS: dict[str, re.Pattern[str]] = {
     "internal script reference (crew_merge.py)": re.compile(r"crew_merge\.py"),
     "internal script reference (crew_run.py)": re.compile(r"crew_run\.py"),
     "internal script reference (ship.py)": re.compile(r"\bship\.py\b"),
+    # Operator-local sibling projects: a fixture, comment or doc that cites one
+    # ties the product to a deployment a reader cannot see.
+    "operator-local project reference (clagentic-console)": re.compile(r"clagentic-console"),
+    "operator-local project reference (clagentic-triage)": re.compile(r"clagentic-triage"),
 }
 
 # Operator-name deny pattern (lr-1659 item 2): "andy" as an operator name in

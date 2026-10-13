@@ -184,10 +184,10 @@ class TestPackagedTemplateContent:
         merger/lead with NO security role, while the /loadout-init skill's
         own step 2b guidance tells the operator to confirm reviewer AND
         security roles -- following the skill against the shipped template
-        naturally produced an unsatisfiable gate (the live clagentic-github
+        naturally produced an unsatisfiable gate (a live
         incident). This locks the fix: security must stay declared with a
-        real, non-empty verb set (mirroring clagentic-console's reference
-        shape, git-host-api + review-post) so a future edit cannot silently
+        real, non-empty verb set (a reference deployment's shape,
+        git-host-api + review-post) so a future edit cannot silently
         drop it back out."""
         role_verbs = load_role_verbs(initialized_repo)
         assert "security" in role_verbs

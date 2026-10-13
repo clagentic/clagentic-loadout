@@ -570,7 +570,7 @@ def load_post_merge_steps_from_git_sha(
     an untracked-config repo look like `steps` "disagrees" with a fabricated
     empty list, even though the ACTUAL config the caller correctly resolved
     from disk is perfectly current. Only a repo that DOES commit this file
-    (the observed incident's own repo, clagentic-triage — confirmed by its
+    (the observed incident's own repo — confirmed by its
     `git diff --stat <old-sha> <new-sha> -- .clagentic/loadout/config.yaml`
     showing a real diff between two commits, i.e. the file IS tracked there)
     can ever produce a genuine, comparable git-object reading here; the
