@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 
 import pytest
@@ -33,6 +34,7 @@ from clagentic_loadout.merge.pre_merge_canary import (
     ENV_PLATFORM,
     ENV_PR,
     ENV_REPO,
+    OUTPUT_CAPTURE_BYTES,
     OUTPUT_TAIL_CHARS,
     PreMergeCanary,
     PreMergeCanaryConfigError,
@@ -125,6 +127,12 @@ class TestLoading:
         with pytest.raises(PreMergeCanaryConfigError, match="pre_merge_canary"):
             load_pre_merge_canary(tmp_path)
 
+    def test_an_argv_element_with_a_nul_is_a_config_error_naming_only_its_index(self, tmp_path):
+        _write_user_config(tmp_path, {"cmd": ["tool", "ab\x00SECRETTAIL"]})
+        with pytest.raises(PreMergeCanaryConfigError, match=r"cmd\[1\]") as raised:
+            load_pre_merge_canary(tmp_path)
+        assert "SECRETTAIL" not in str(raised.value)
+
     def test_a_config_that_names_the_key_but_does_not_parse_is_a_config_error(self, tmp_path):
         _write_user_config(tmp_path, raw="merge:\n  pre_merge_canary: [unclosed\n")
         with pytest.raises(PreMergeCanaryConfigError, match="not valid YAML"):
@@ -183,6 +191,44 @@ class TestRunning:
         message = str(raised.value)
         assert "END" in message
         assert 100 < message.count("Q") <= OUTPUT_TAIL_CHARS
+
+    def test_a_nul_in_an_argv_element_still_refuses_and_never_tracebacks(self):
+        with pytest.raises(PreMergeCanaryRefusedError, match="could not be run") as raised:
+            self._run(["tool", "a\x00b"])
+        assert "ValueError" in str(raised.value)
+
+    def test_an_unexpected_launch_exception_refuses(self, monkeypatch):
+        def explode(*_a, **_k):
+            raise RuntimeError("launch blew up")
+
+        monkeypatch.setattr(subprocess, "run", explode)
+        with pytest.raises(PreMergeCanaryRefusedError, match="could not be run") as raised:
+            self._run(["tool"])
+        assert "RuntimeError: launch blew up" in str(raised.value)
+
+    def test_output_far_past_the_cap_keeps_the_last_bytes_and_says_so(self):
+        total = OUTPUT_CAPTURE_BYTES * 4
+        code = f"import sys; sys.stdout.write('A' * {total} + 'LASTBYTES'); sys.exit(1)"
+        with pytest.raises(PreMergeCanaryRefusedError) as raised:
+            self._run(_script(code))
+        message = str(raised.value)
+        assert "LASTBYTES" in message
+        assert f"stdout exceeded {OUTPUT_CAPTURE_BYTES} bytes" in message
+        assert len(message) < 2 * OUTPUT_TAIL_CHARS + 1000
+
+    def test_a_noisy_command_that_exits_zero_passes(self):
+        code = f"import sys; sys.stderr.write('x' * {OUTPUT_CAPTURE_BYTES * 4})"
+        self._run(_script(code))
+
+    def test_a_noisy_command_that_times_out_refuses_with_a_capped_tail(self):
+        code = (
+            f"import sys, time; sys.stdout.write('B' * {OUTPUT_CAPTURE_BYTES * 2} + 'TIMEDOUT');"
+            "sys.stdout.flush(); time.sleep(30)"
+        )
+        with pytest.raises(PreMergeCanaryRefusedError, match="timed out") as raised:
+            self._run(_script(code), timeout=1.5)
+        assert "TIMEDOUT" in str(raised.value)
+        assert "exceeded" in str(raised.value)
 
     def test_a_command_that_is_not_found_refuses(self, tmp_path):
         missing = str(tmp_path / "no-such-canary")

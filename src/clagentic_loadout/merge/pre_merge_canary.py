@@ -36,7 +36,9 @@ messages would change what every pre_checks and post_merge_steps caller prints.
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +58,10 @@ DEFAULT_TIMEOUT_SECONDS = 60
 
 #: Characters kept from the end of each output stream in a refusal.
 OUTPUT_TAIL_CHARS = 400
+
+#: Bytes read back from the end of each output stream. The command may write
+#: far more; only this much is ever held in memory.
+OUTPUT_CAPTURE_BYTES = 64 * 1024
 
 ENV_REPO = "CLAGENTIC_LOADOUT_CANARY_REPO"
 ENV_PR = "CLAGENTIC_LOADOUT_CANARY_PR"
@@ -130,6 +136,13 @@ def load_pre_merge_canary(config_root: str | Path | None = None) -> PreMergeCana
             f"{where}.cmd must be a non-empty list of non-empty strings (an argv, "
             f"never a shell string), got {cmd!r}"
         )
+    # An argv element cannot carry a NUL: the OS rejects the launch. Name the
+    # index only, never echo the raw element.
+    for index, token in enumerate(cmd):
+        if "\x00" in token:
+            raise PreMergeCanaryConfigError(
+                f"{where}.cmd[{index}] contains a NUL character, which cannot appear in an argv"
+            )
     timeout = declared.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     if (
         isinstance(timeout, bool)
@@ -149,8 +162,26 @@ def _tail(data: bytes | str | None) -> str:
     return text.strip()[-OUTPUT_TAIL_CHARS:]
 
 
-def _output_note(stdout: bytes | str | None, stderr: bytes | str | None) -> str:
-    return f"; stdout tail: {_tail(stdout)!r}; stderr tail: {_tail(stderr)!r}"
+def _read_capture(stream) -> tuple[bytes, bool]:
+    """The last `OUTPUT_CAPTURE_BYTES` of a capture file, and whether earlier
+    bytes were dropped. Reading from the end keeps memory bounded however much
+    the command wrote."""
+    stream.flush()
+    size = stream.seek(0, os.SEEK_END)
+    start = max(0, size - OUTPUT_CAPTURE_BYTES)
+    stream.seek(start)
+    return stream.read(OUTPUT_CAPTURE_BYTES), start > 0
+
+
+def _output_note(out: tuple[bytes, bool], err: tuple[bytes, bool]) -> str:
+    note = f"; stdout tail: {_tail(out[0])!r}; stderr tail: {_tail(err[0])!r}"
+    capped = [name for name, (_, dropped) in (("stdout", out), ("stderr", err)) if dropped]
+    if capped:
+        note += (
+            f"; {' and '.join(capped)} exceeded {OUTPUT_CAPTURE_BYTES} bytes, "
+            "only the last bytes were kept"
+        )
+    return note
 
 
 def run_pre_merge_canary(
@@ -165,10 +196,13 @@ def run_pre_merge_canary(
     """Run the canary for one merge; return on exit 0.
 
     *base_env* is the environment before the scrub (default `os.environ`).
+    Output goes to anonymous temp files (under the spawn's TMPDIR) and only the
+    last `OUTPUT_CAPTURE_BYTES` of each stream are read back.
 
     Raises:
-        PreMergeCanaryRefusedError: non-zero exit, timeout, or a command that
-            could not be started.
+        PreMergeCanaryRefusedError: non-zero exit, timeout, or any failure to
+            start or wait on the command. No other exception escapes: the gate
+            refuses, it never surfaces a traceback.
     """
     env = pre_check_env(base_env)
     env.update(
@@ -180,28 +214,39 @@ def run_pre_merge_canary(
         }
     )
     command = list(canary.argv)
+    out: tuple[bytes, bool] = (b"", False)
+    err: tuple[bytes, bool] = (b"", False)
     try:
-        result = subprocess.run(
-            command,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=canary.timeout_seconds,
-            env=env,
-        )
+        with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
+            try:
+                result = subprocess.run(
+                    command,
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    stdout=out_file,
+                    stderr=err_file,
+                    timeout=canary.timeout_seconds,
+                    env=env,
+                )
+            finally:
+                out, err = _read_capture(out_file), _read_capture(err_file)
     except subprocess.TimeoutExpired as exc:
         raise PreMergeCanaryRefusedError(
             f"configured command {command!r} timed out after {canary.timeout_seconds}s"
-            + _output_note(exc.stdout, exc.stderr)
+            + _output_note(out, err)
         ) from exc
     except OSError as exc:
         raise PreMergeCanaryRefusedError(
-            f"configured command {command!r} could not be started: {exc}"
+            f"configured command {command!r} could not be started: {exc}" + _output_note(out, err)
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - the gate refuses on any launch failure, never a traceback
+        raise PreMergeCanaryRefusedError(
+            f"configured command {command!r} could not be run: "
+            f"{type(exc).__name__}: {exc}" + _output_note(out, err)
         ) from exc
     if result.returncode != 0:
         raise PreMergeCanaryRefusedError(
-            f"configured command {command!r} exited {result.returncode}"
-            + _output_note(result.stdout, result.stderr)
+            f"configured command {command!r} exited {result.returncode}" + _output_note(out, err)
         )
 
 
@@ -212,6 +257,7 @@ __all__ = [
     "ENV_PLATFORM",
     "ENV_PR",
     "ENV_REPO",
+    "OUTPUT_CAPTURE_BYTES",
     "OUTPUT_TAIL_CHARS",
     "PreMergeCanary",
     "PreMergeCanaryConfigError",

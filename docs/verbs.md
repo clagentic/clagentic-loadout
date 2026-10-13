@@ -1995,7 +1995,10 @@ variables withheld) plus `CLAGENTIC_LOADOUT_CANARY_REPO` (`owner/repo`),
 A non-zero exit, a timeout, a command that is not found or not executable, or a
 declaration that cannot be read refuses the merge with
 `EXIT_PRE_MERGE_CANARY_FAILED` (38), naming the configured command and carrying
-the last 400 characters of its stdout and stderr. `--skip-pre-checks` and
+the last 400 characters of its stdout and stderr (only the last 64 KiB of each
+stream is read back; a refusal says when a stream exceeded that). Any failure
+to start or wait on the command refuses the same way, and an argv element
+containing a NUL is an unreadable declaration. `--skip-pre-checks` and
 `--ignore-repo-gate` do not lift it. It runs under `--report-only`, as the other
 gates do, and never from `loadout-post-merge`. With the key absent, nothing runs
 and nothing extra is printed; a config file that does not mention the key is not
