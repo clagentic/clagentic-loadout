@@ -215,6 +215,7 @@ def fetch_tree_paths(
     silently missing."""
     paths: list[str] = []
     collected = 0
+    expected_total: int | None = None
     what = f"the tree of {owner}/{repo} at {ref[:12]}"
     for page in range(1, _MAX_TREE_PAGES + 1):
         try:
@@ -236,6 +237,13 @@ def fetch_tree_paths(
         total = body.get("total_count")
         if isinstance(total, bool) or not isinstance(total, int):
             total = None
+        # Once stated, the expected total holds for the whole listing: a later
+        # page that drops or changes it means the tree moved or the response is
+        # untrustworthy, and completeness can no longer be judged.
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise AcquireFetchError(f"{what} was not a complete listing")
         if entries is None and total is not None and truncated is False and collected == total:
             return paths
         if not isinstance(entries, list) or not isinstance(truncated, bool):

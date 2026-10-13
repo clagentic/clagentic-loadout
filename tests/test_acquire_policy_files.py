@@ -225,6 +225,43 @@ def test_forgejo_tree_null_before_total_count_is_reached_is_a_failure():
         _backends(opener)["forgejo"].fetch_tree_paths(owner=_OWNER, repo=_REPO, ref=_REF)
 
 
+def _two_page_opener(second_page_fields):
+    entries = _synthetic_tree(1371)
+
+    def opener(req, timeout=30):
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(req.full_url).query)
+        page = int(query["page"][0])
+        if page == 1:
+            return _json(
+                {"tree": entries[:1000], "truncated": True, "page": 1, "total_count": 1371}
+            )
+        return _json({"tree": entries[1000:], "truncated": False, "page": 2, **second_page_fields})
+
+    return opener
+
+
+def test_forgejo_later_page_without_total_count_is_a_failure():
+    opener = _two_page_opener({})
+
+    with pytest.raises(AcquireFetchError, match="not a complete listing"):
+        _backends(opener)["forgejo"].fetch_tree_paths(owner=_OWNER, repo=_REPO, ref=_REF)
+
+
+def test_forgejo_later_page_with_a_different_total_count_is_a_failure():
+    opener = _two_page_opener({"total_count": 1000})
+
+    with pytest.raises(AcquireFetchError, match="not a complete listing"):
+        _backends(opener)["forgejo"].fetch_tree_paths(owner=_OWNER, repo=_REPO, ref=_REF)
+
+
+def test_forgejo_later_page_repeating_total_count_reads_in_full():
+    opener = _two_page_opener({"total_count": 1371})
+
+    paths = _backends(opener)["forgejo"].fetch_tree_paths(owner=_OWNER, repo=_REPO, ref=_REF)
+
+    assert len(paths) == 1371
+
+
 def test_forgejo_tree_that_never_reaches_total_count_is_a_failure():
     def opener(req, timeout=30):
         return _json({"tree": [_blob("a.py")], "truncated": True, "total_count": 10**6})
