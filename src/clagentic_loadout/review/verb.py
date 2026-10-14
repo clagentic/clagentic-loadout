@@ -162,6 +162,7 @@ from clagentic_loadout._version import get_version
 from clagentic_loadout.merge.errors import VerdictMalformedError
 from clagentic_loadout.merge.fence_state import (
     EVIDENCE_KEYS,
+    KEY_DROPPED,
     KEY_FENCE_SCHEMA_VERSION,
     STATE_KEYS,
     normalize_findings_state,
@@ -182,6 +183,7 @@ from clagentic_loadout.review.contract import (
     validate_review_findings_body_stdin_content,
     validate_review_verdict_body_stdin_content,
 )
+from clagentic_loadout.review.dropped_overlap import overlap_message, overlapping_ids
 from clagentic_loadout.review.errors import (
     DeleteOwnCommentRefusedError,
     PlatformMismatchError,
@@ -1120,6 +1122,11 @@ def _run(
         # derived here so the readback below expects exactly what the body
         # builder renders.
         findings_state = with_derived_failure_sequences(findings_state, verdict_findings)
+        # Direct callers of this verb stage findings and dropped themselves, so
+        # the overlap is refused here as well as in loadout-review post.
+        shared = overlapping_ids(verdict_findings, findings_state.get(KEY_DROPPED) or [])
+        if shared:
+            _fail(f"--verdict-findings: {overlap_message(shared)}", code=EXIT_VERDICT_BLOCK_USAGE)
         body = None  # constructed below, entirely from structured fields
     elif args.verdict_review_status is not None:
         try:

@@ -60,6 +60,7 @@ from clagentic_loadout.merge.fence_state import (
 )
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.delta import resolve_delta
+from clagentic_loadout.review.dropped_overlap import overlap_message, overlapping_ids
 from clagentic_loadout.review.evaluate import OUTCOME_CLEAN, Verdict
 from clagentic_loadout.review.evaluate_render import finding_notes
 from clagentic_loadout.review.evaluate_verb import (
@@ -839,6 +840,11 @@ def _post_command(
     findings, evidence = _apply_caller_resolutions(
         findings, evidence, _load_resolutions(args.resolved_findings)
     )
+    # Checked after the caller's rulings are applied, so a finding ruled resolved
+    # is not a conflict, and before anything is evaluated or staged.
+    shared = overlapping_ids(findings, evidence.get(KEY_DROPPED) or [])
+    if shared:
+        _fail(overlap_message(shared), EXIT_FINDINGS_INVALID)
     # The state and evidence below are checked as if the caller's status stood;
     # the computed status can only be stricter, and is checked again when the
     # fence is built.
