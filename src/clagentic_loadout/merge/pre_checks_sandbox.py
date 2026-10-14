@@ -22,8 +22,12 @@ shell: `{clone}` is the private merge-result clone the check runs in, and
 is forced to that same directory, so the sandbox bind and the environment agree
 and a step's inline `TMPDIR=` cannot pick the read-write path the sandbox
 binds. The prefix is applied after a step's inline `VAR=VALUE` env prefix has
-been split off, so the rest of the environment still reaches the launched
-process and the prefix is the outermost argv.
+been split off. The launcher process starts with loadout-controlled
+environment only (the scrubbed base plus the private `TMPDIR`); the step's
+inline `VAR=VALUE` assignments, which a repository declares, are passed after
+the prefix as `/usr/bin/env` arguments and so reach only the sandboxed
+command, never the launcher (a loader variable such as `LD_PRELOAD` cannot run
+repository code before isolation). The prefix is the outermost argv.
 
 USER-LEVEL ONLY. The key is never read from a repo's config file, tracked or
 not: a PR that could set or remove its own sandbox would defeat it. A repo
@@ -75,13 +79,25 @@ def validate_pre_checks_sandbox(value: object, *, source: str = "user-level conf
         raise PreChecksSandboxConfigError(
             f"{label} must be a non-empty list of non-empty strings, got {shape}."
         )
+    for index, part in enumerate(value):
+        # Named by index only: the element may carry a secret.
+        if "\x00" in part:
+            raise PreChecksSandboxConfigError(
+                f"{label}: element {index} contains a NUL byte."
+            )
     launcher = value[0]
     if not os.path.isabs(launcher):
         raise PreChecksSandboxConfigError(
             f"{label}: the first element must be an absolute path to the sandbox "
             f"executable, got {launcher!r}."
         )
-    if not (os.path.isfile(launcher) and os.access(launcher, os.X_OK)):
+    try:
+        usable = os.path.isfile(launcher) and os.access(launcher, os.X_OK)
+    except Exception as exc:  # noqa: BLE001 - any failure to inspect the launcher is a refusal
+        raise PreChecksSandboxConfigError(
+            f"{label}: the first element could not be checked ({type(exc).__name__})."
+        ) from exc
+    if not usable:
         raise PreChecksSandboxConfigError(
             f"{label}: {launcher!r} is not an existing executable file."
         )

@@ -11,8 +11,10 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -40,9 +42,13 @@ import json, os, sys
 args = sys.argv[1:]
 with open({log!r}, "a") as handle:
     handle.write(json.dumps(args) + "\\n")
+with open({log!r} + ".env", "a") as handle:
+    handle.write(json.dumps(dict(os.environ)) + "\\n")
 rest = args[args.index("--") + 1:]
 os.execvp(rest[0], rest)
 """
+
+_ENV_PROGRAM = "/usr/bin/env"
 
 
 def _write_launcher(directory: Path) -> tuple[Path, Path]:
@@ -55,6 +61,26 @@ def _write_launcher(directory: Path) -> tuple[Path, Path]:
 
 def _logged(log: Path) -> list[list[str]]:
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def _launcher_envs(log: Path) -> list[dict[str, str]]:
+    """The environment each launcher invocation actually started with."""
+    env_log = Path(str(log) + ".env")
+    return [json.loads(line) for line in env_log.read_text(encoding="utf-8").splitlines()]
+
+
+def _inner(argv: list[str]) -> tuple[dict[str, str], list[str]]:
+    """Split a logged launcher argv into the assignments delivered inside the
+    sandbox and the command that follows them."""
+    after = argv[argv.index("--") + 1:]
+    assert after[0] == _ENV_PROGRAM, after
+    assignments: dict[str, str] = {}
+    index = 1
+    while index < len(after) and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", after[index]):
+        key, _, value = after[index].partition("=")
+        assignments[key] = value
+        index += 1
+    return assignments, after[index:]
 
 
 def _write_user_config(root: Path, merge_section: dict) -> None:
@@ -109,7 +135,10 @@ class TestWrappingEachCheckArgv:
 
         [argv] = _logged(log)
         private = _private_dir_under(merger_tmp, argv)
-        assert argv == ["--clone", str(clone), "--tmp", str(private), "--", *step["cmd"]]
+        assert argv == [
+            "--clone", str(clone), "--tmp", str(private), "--",
+            _ENV_PROGRAM, f"TMPDIR={private}", *step["cmd"],
+        ]
         assert marker.exists()
 
     def test_string_form_step_is_wrapped(self, tmp_path, launcher):
@@ -126,10 +155,10 @@ class TestWrappingEachCheckArgv:
         [argv] = _logged(log)
         _private_dir_under(merger_tmp, argv)
         assert argv[:3] == ["--clone", str(clone), "--tmp"]
-        assert argv[4:] == ["--", _PY, "-c", "import sys"]
+        assert _inner(argv)[1] == [_PY, "-c", "import sys"]
 
     @pytest.mark.parametrize("as_list", [True, False])
-    def test_inline_env_prefix_is_split_off_and_still_reaches_the_check(self, tmp_path, launcher, as_list):
+    def test_inline_env_prefix_reaches_the_check_inside_the_sandbox_only(self, tmp_path, launcher, as_list):
         launcher_path, log = launcher
         clone = tmp_path / "clone"
         clone.mkdir()
@@ -144,8 +173,10 @@ class TestWrappingEachCheckArgv:
         )
 
         argv = _logged(log)[0]
-        assert argv[argv.index("--") + 1:] == [_PY, "-c", code]
-        assert not any(part.startswith("SANDBOX_PROBE=") for part in argv)
+        assignments, command = _inner(argv)
+        assert command == [_PY, "-c", code]
+        assert assignments["SANDBOX_PROBE"] == "from-step"
+        assert "SANDBOX_PROBE" not in _launcher_envs(log)[0]
         assert out.read_text(encoding="utf-8") == "from-step"
 
     @pytest.mark.parametrize("as_list", [True, False])
@@ -251,7 +282,7 @@ class TestWrappingEachCheckArgv:
             base_env={**os.environ, "TMPDIR": str(_scratch(tmp_path))},
             argv_prefix=_prefix(launcher_path),
         )
-        assert [entry[entry.index("--") + 1:] for entry in _logged(log)] == [
+        assert [_inner(entry)[1] for entry in _logged(log)] == [
             [_PY, "-c", "pass"],
             [_PY, "-c", "print('ok')"],
         ]
@@ -274,6 +305,104 @@ class TestWrappingEachCheckArgv:
         )
         verify_argv = _logged(log)[1]
         assert seen.read_text(encoding="utf-8") == str(_private_dir_under(merger_tmp, verify_argv))
+
+
+class TestLauncherEnvironmentIsLoadoutControlled:
+    """A repository declares a step's inline VAR=VALUE assignments, so none of
+    them may reach the sandbox launcher: a loader variable would run
+    repository code inside the launcher before any isolation."""
+
+    _STEP_ASSIGNMENTS = ["LD_PRELOAD=x", "FOO=y"]
+
+    def _run(self, tmp_path, launcher, step_extra=None, **kwargs):
+        launcher_path, log = launcher
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        merger_tmp = _scratch(tmp_path)
+        step = {"cmd": [*self._STEP_ASSIGNMENTS, _PY, "-c", "pass"], "on_failure": "fail", **(step_extra or {})}
+        run_post_merge_steps(
+            [step],
+            clone,
+            base_env={**os.environ, "TMPDIR": str(merger_tmp), "BASE_MARK": "base"},
+            argv_prefix=_prefix(launcher_path),
+            **kwargs,
+        )
+        return log, merger_tmp
+
+    def test_step_assignments_reach_the_command_not_the_launcher(self, tmp_path, launcher):
+        log, merger_tmp = self._run(tmp_path, launcher)
+
+        [argv] = _logged(log)
+        [launcher_env] = _launcher_envs(log)
+        assert "LD_PRELOAD" not in launcher_env and "FOO" not in launcher_env
+        assert launcher_env["BASE_MARK"] == "base"
+        assert launcher_env["TMPDIR"] == str(_private_dir_under(merger_tmp, argv))
+        assignments, command = _inner(argv)
+        assert assignments["LD_PRELOAD"] == "x" and assignments["FOO"] == "y"
+        assert command == [_PY, "-c", "pass"]
+        assert argv.index("--") < argv.index(_ENV_PROGRAM) < argv.index("LD_PRELOAD=x")
+
+    def test_deployment_overrides_stay_out_of_the_launcher_too(self, tmp_path, launcher):
+        log, _ = self._run(tmp_path, launcher, deployment_env_overrides={"DEPLOY_ONLY": "d"})
+        [launcher_env] = _launcher_envs(log)
+        assert "DEPLOY_ONLY" not in launcher_env
+        assert _inner(_logged(log)[0])[0]["DEPLOY_ONLY"] == "d"
+
+    def test_verify_assignments_stay_out_of_the_launcher(self, tmp_path, launcher):
+        log, _ = self._run(
+            tmp_path, launcher, step_extra={"verify": ["LD_PRELOAD=v", "BAR=z", _PY, "-c", "print('ok')"]}
+        )
+        step_argv, verify_argv = _logged(log)
+        for env in _launcher_envs(log):
+            assert not {"LD_PRELOAD", "FOO", "BAR"} & set(env)
+        assignments, command = _inner(verify_argv)
+        assert command == [_PY, "-c", "print('ok')"]
+        assert assignments["LD_PRELOAD"] == "v" and assignments["BAR"] == "z" and assignments["FOO"] == "y"
+        assert _inner(step_argv)[0]["LD_PRELOAD"] == "x"
+
+    def test_liveness_probe_and_detached_step_keep_assignments_out_of_the_launcher(
+        self, tmp_path, launcher
+    ):
+        counter = tmp_path / "counter.txt"
+        probe = [
+            _PY, "-c",
+            f"import os; p = {str(counter)!r}; "
+            "n = int(open(p).read()) + 1 if os.path.exists(p) else 1; "
+            "open(p, 'w').write(str(n)); print(n)",
+        ]
+        log, _ = self._run(
+            tmp_path,
+            launcher,
+            step_extra={
+                "detaches": True,
+                "on_failure": "warn",
+                "liveness_probe": {"cmd": probe, "poll_interval_seconds": 0.05, "max_polls": 3},
+            },
+        )
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not (
+            Path(str(log) + ".env").exists() and len(_logged(log)) >= 3
+        ):
+            time.sleep(0.05)
+        entries = _logged(log)
+        assert len(entries) >= 3
+        for env in _launcher_envs(log):
+            assert not {"LD_PRELOAD", "FOO"} & set(env)
+        for entry in entries:
+            assert _inner(entry)[0]["LD_PRELOAD"] == "x"
+
+    def test_a_program_name_the_env_would_misread_is_refused(self, tmp_path, launcher):
+        launcher_path, log = launcher
+        clone = tmp_path / "clone"
+        clone.mkdir()
+        with pytest.raises(PostMergeStepFailedError):
+            run_post_merge_steps(
+                [{"cmd": ["./odd=name"], "on_failure": "warn"}],
+                clone,
+                base_env={**os.environ, "TMPDIR": str(_scratch(tmp_path))},
+                argv_prefix=_prefix(launcher_path),
+            )
+        assert not log.exists()
 
 
 class TestAbsentPrefixChangesNothing:
@@ -350,6 +479,39 @@ class TestValidation:
         with pytest.raises(PreChecksSandboxConfigError):
             validate_pre_checks_sandbox([str(tmp_path)])
 
+    def test_a_nul_in_the_launcher_is_a_controlled_refusal(self):
+        with pytest.raises(PreChecksSandboxConfigError) as excinfo:
+            validate_pre_checks_sandbox(["/bin/tr\x00ue"])
+        assert "element 0" in str(excinfo.value) and "/bin" not in str(excinfo.value)
+
+    def test_a_nul_in_a_later_element_is_a_controlled_refusal(self, launcher):
+        launcher_path, _ = launcher
+        with pytest.raises(PreChecksSandboxConfigError) as excinfo:
+            validate_pre_checks_sandbox([str(launcher_path), "--ok", "--secret\x00tail"])
+        assert "element 2" in str(excinfo.value) and "secret" not in str(excinfo.value)
+
+    def test_an_unexpected_failure_while_inspecting_the_launcher_is_a_controlled_refusal(
+        self, launcher, monkeypatch
+    ):
+        launcher_path, _ = launcher
+
+        def _boom(_path):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(os.path, "isfile", _boom)
+        with pytest.raises(PreChecksSandboxConfigError):
+            validate_pre_checks_sandbox([str(launcher_path)])
+
+    def test_nul_through_the_merge_verb_refuses_without_a_traceback(
+        self, tmp_path, scratch_tmp, user_config_root, capsys
+    ):
+        _write_user_config(user_config_root, {CONFIG_KEY_PRE_CHECKS_SANDBOX: ["/bin/tr\x00ue"]})
+        marker = tmp_path / "ran.txt"
+        repo = _gate_repo(tmp_path, [_record_check(marker)])
+        assert run_gate_merge(repo, []) == verb.EXIT_PRE_CHECKS_FAILED
+        assert not marker.exists()
+        assert "Traceback" not in capsys.readouterr().err
+
     def test_absent_key_resolves_to_nothing(self, user_config_root):
         assert resolve_pre_checks_sandbox() == ()
         _write_user_config(user_config_root, {"foreign_config_globs": []})
@@ -388,7 +550,7 @@ class TestTheMergeVerb:
         assert Path(argv[3]).parent == scratch_tmp and Path(argv[3]).name.startswith("pre-check-")
         assert not Path(argv[3]).exists()
         assert Path(argv[1]).name == "tree" and Path(argv[1]).parent.parent == scratch_tmp
-        assert argv[5:] == [_PY, "-c", f"open({str(marker)!r}, 'w').write('ran')"]
+        assert _inner(argv)[1] == [_PY, "-c", f"open({str(marker)!r}, 'w').write('ran')"]
         assert marker.read_text(encoding="utf-8") == "ran"
         assert len(calls) == 1
 
