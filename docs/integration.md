@@ -998,7 +998,7 @@ emit_dispatch_record(dispatch_id, "completed", result_summary="PR opened")
 # --- Emitting side: a RESUMED dispatch --------------------------------
 # Same dispatch_id as the original in_flight write -- a resume continues
 # an existing dispatch, it does not mint a new one.
-emit_dispatch_resume_ack(dispatch_id, resuming="continuing PR #332 fix")
+emit_dispatch_resume_ack(dispatch_id, resuming="continuing the review fix")
 emit_dispatch_heartbeat(dispatch_id, progress="applying requested fix")
 emit_dispatch_record(dispatch_id, "completed", result_summary="fix pushed")
 

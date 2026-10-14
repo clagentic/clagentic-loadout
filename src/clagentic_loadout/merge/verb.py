@@ -139,6 +139,14 @@ documented step ordering):
      readable at all" boundary every other repo-tier key in this chain
      already has, not a new gap this step introduces. See "PRE-MERGE
      CHECKS" further down for the full history/contract this closes.
+  8c. Pre-merge canary (merge.pre_merge_canary) — an OPTIONAL command the
+     operator names in the user-level config (`merge: pre_merge_canary:`),
+     run with the merge's repo, PR number, head SHA and platform in its
+     environment. Exit 0 proceeds; a non-zero exit, timeout, missing or
+     non-executable command, or an unreadable declaration refuses
+     (EXIT_PRE_MERGE_CANARY_FAILED) naming the command and its output tail.
+     No key, no run, no output. Not lifted by --skip-pre-checks or
+     --ignore-repo-gate; runs under --report-only like step 8b.
   9. Only after ALL of the above pass: execute the merge via the resolved
      backend's merge_pr (Forgejo or GitHub, both via a redirect-hardened
      transport), passing args.merge_method THROUGH to the backend (lr-14f704
@@ -185,7 +193,7 @@ IDENTITY / SEAM STRIP FROM THE SOURCE MODULE (full inventory in the PR body):
      service-specific merge-authority check are now merge.authority's
      provider seam: which ROLE may authorize a merge is config (--role / an
      AuthorityProvider), never a baked identity.
-  3. Credential mint (an OpenBao self-fetch + a gatekeeper-CLI subprocess
+  3. Credential mint (a secret-broker self-fetch + a helper-CLI subprocess
      call) is now the SAME transport.credential_provider seam every other
      loadout verb uses — a TokenProvider resolves a token for a
      caller-supplied role, never a hardcoded broker client or fixed
@@ -249,7 +257,7 @@ ABSENT --repo-path IS NEVER A SILENT SKIP (lr-ac5c8a): before lr-ac5c8a,
 omitting --repo-path silently downgraded a merge to "no post-merge run
 attempted", exit 0, with no warning — even for a repo whose OWN committed
 config declares post_merge_steps. That recurred three times across three
-repos (lr-5854ff, lr-4e6f31, clagentic-console PR #365/#366) precisely
+repos (lr-5854ff, lr-4e6f31, and a third) precisely
 because a missing flag and an intentional skip were indistinguishable.
 _run now REQUIRES one of three explicit shapes whenever --repo-path is
 omitted, checked BEFORE any credential mint or network call (same fail-fast
@@ -561,6 +569,12 @@ from clagentic_loadout.merge.merge_result_clone import (
 )
 from clagentic_loadout.merge.pre_check_env import pre_check_env
 from clagentic_loadout.merge.pre_checks_config import decide_pre_checks_env_passthrough
+from clagentic_loadout.merge.pre_merge_canary import (
+    PreMergeCanaryConfigError,
+    PreMergeCanaryRefusedError,
+    load_pre_merge_canary,
+    run_pre_merge_canary,
+)
 from clagentic_loadout.merge.repo_gate_runtime import (
     load_repo_gate_at_base,
     resolve_gate_git_tree,
@@ -685,6 +699,11 @@ EXIT_TASK_ID_GUARD_VIOLATION = 36
 #: -- a declared `on_failure: fail` pre_check was previously accepted by
 #: config and silently never executed at all).
 EXIT_PRE_CHECKS_FAILED = 37
+#: The deployment's own `merge: pre_merge_canary:` command (merge.
+#: pre_merge_canary) exited non-zero, timed out, could not be started, or its
+#: declaration could not be read. Distinct from EXIT_PRE_CHECKS_FAILED so a
+#: caller can tell a repo-declared check from an operator-configured canary.
+EXIT_PRE_MERGE_CANARY_FAILED = 38
 
 #: Reviewers required to post a clean verdict before a merge is authorized.
 #: A caller wanting a different reviewer roster passes --required-reviewer
@@ -1182,7 +1201,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         dest="report_only",
         help="Run the entire gate chain exactly as a real merge would "
         "(namespace, authority, stale-SHA, reviewer verdicts, repo gate, "
-        "diff-scope, title, CI status, pre_checks in the merge-result clone) "
+        "diff-scope, title, CI status, pre_checks in the merge-result clone, "
+        "and the operator's pre-merge canary when one is configured) "
         "and print the verdict, then exit without merging, without "
         "post_merge_steps, without tree sync and without posting the merge "
         "attestation or any task signal. Exits 0 when the merge would be "
@@ -1344,7 +1364,7 @@ def _run(
 
     # lr-ac5c8a: an absent --repo-path must never silently downgrade to "no
     # post-merge run attempted" -- that is the recurring silent-skip defect
-    # class (lr-5854ff, lr-4e6f31, clagentic-console PR #365/#366). A caller
+    # class (lr-5854ff, lr-4e6f31, and a third). A caller
     # with genuinely no local tree must say so explicitly (--no-post-merge-tree)
     # or explicitly skip altogether (--skip-post-merge, which already covers
     # the "skip regardless of tree" case). Omitting --repo-path with NEITHER
@@ -1871,6 +1891,44 @@ def _run(
         print(
             f"merge: pre_checks gate -- all {len(pre_checks)} check(s) "
             f"PASSED for PR #{args.pr_number} in {owner}/{repo}",
+            file=sys.stderr,
+        )
+
+    # 8c. Operator-configured pre-merge canary (merge.pre_merge_canary). Read
+    # from the user-level config, so neither the PR nor a repo flag controls it:
+    # --skip-pre-checks and --ignore-repo-gate do not lift it. Runs under
+    # --report-only like every other gate above (see that flag's help); no key
+    # means no run and no output.
+    try:
+        canary = load_pre_merge_canary()
+    except PreMergeCanaryConfigError as exc:
+        _fail(
+            f"pre-merge canary config FAILED to load -- {exc} -- refusing to merge "
+            f"PR #{args.pr_number} in {owner}/{repo}.",
+            code=EXIT_PRE_MERGE_CANARY_FAILED,
+        )
+    if canary is not None:
+        print(
+            f"merge: pre-merge canary -- running {list(canary.argv)!r} for PR "
+            f"#{args.pr_number} in {owner}/{repo} (head {current_head_sha!r})",
+            file=sys.stderr,
+        )
+        try:
+            run_pre_merge_canary(
+                canary,
+                repo=f"{owner}/{repo}",
+                pr_number=args.pr_number,
+                head_sha=current_head_sha,
+                platform=args.platform,
+            )
+        except PreMergeCanaryRefusedError as exc:
+            _fail(
+                f"pre-merge canary REFUSED -- {exc} -- refusing to merge "
+                f"PR #{args.pr_number} in {owner}/{repo}.",
+                code=EXIT_PRE_MERGE_CANARY_FAILED,
+            )
+        print(
+            f"merge: pre-merge canary -- PASSED for PR #{args.pr_number} in {owner}/{repo}",
             file=sys.stderr,
         )
 

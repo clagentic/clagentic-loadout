@@ -1974,6 +1974,36 @@ carrying no base SHA) refuses the merge
 and `--ignore-repo-gate` does not lift `pre_checks` (see
 [docs/merge-authority.md](merge-authority.md#where-the-gate-is-read-from)).
 
+**Pre-merge canary (`merge.pre_merge_canary`):** an optional command the
+operator names in the user-level config file (`<config root>/config.yaml`,
+`merge:` section; never a repo file, so a pull request cannot add or edit it):
+
+```yaml
+merge:
+  pre_merge_canary:
+    cmd: ["/usr/local/bin/my-canary", "--strict"]   # argv list, never a shell string
+    timeout_seconds: 60                              # optional, default 60
+```
+
+loadout ships no default command and no target list. It runs after the
+`pre_checks` gate and before the merge call, with `shell=False`, stdin closed,
+in the merge process's working directory, and with the same scrubbed
+environment `pre_checks` get (identity, attestation and credential-shaped
+variables withheld) plus `CLAGENTIC_LOADOUT_CANARY_REPO` (`owner/repo`),
+`CLAGENTIC_LOADOUT_CANARY_PR`, `CLAGENTIC_LOADOUT_CANARY_HEAD_SHA` and
+`CLAGENTIC_LOADOUT_CANARY_PLATFORM` (`forgejo` or `github`). Exit 0 proceeds.
+A non-zero exit, a timeout, a command that is not found or not executable, or a
+declaration that cannot be read refuses the merge with
+`EXIT_PRE_MERGE_CANARY_FAILED` (38), naming the configured command and carrying
+the last 400 characters of its stdout and stderr (only the last 64 KiB of each
+stream is read back; a refusal says when a stream exceeded that). Any failure
+to start or wait on the command refuses the same way, and an argv element
+containing a NUL is an unreadable declaration. `--skip-pre-checks` and
+`--ignore-repo-gate` do not lift it. It runs under `--report-only`, as the other
+gates do, and never from `loadout-post-merge`. With the key absent, nothing runs
+and nothing extra is printed; a config file that does not mention the key is not
+parsed for it.
+
 **Merge-completion attestation (`merge.attestation`):**
 immediately after step 9 actually merges the PR — before any post-merge
 step below — `loadout-merge` posts exactly one git-host-visible comment (PR
@@ -2543,16 +2573,10 @@ Wiring a verb to a live, running agent cast — the step where a real
 deployment's agents actually invoke these console scripts instead of their
 pre-existing reference scripts — is tracked per verb.
 
-`loadout-merge`: SHADOW-PARITY proven — replaying a real,
-already-merged PR's gate facts (SHA-stamp, both reviewer verdict fences,
-diff-scope, title) through `merge.verb`'s own gate chain reached the
-identical decision the deployment's reference merge tool reached on that
-same PR, with zero deltas (see `tests/test_merge_shadow_parity_pr42.py`).
-The CI-status gate (added after the original
-shadow-parity proof landed) is proven against that same PR's real,
-empty CI-status evidence — the gate's explicit no-runner-by-design pass
-case — plus runner-wired failure/pending negative controls, in the same
-test module (`TestCiStatusGateAgainstPR42Facts`).
+`loadout-merge`: gate-chain parity is covered by synthetic tests in
+`tests/test_merge_verb.py` (stale SHA, diff-scope, title, blocking verdict,
+CI-status failing, pending, unreachable and empty-evidence cases) and
+`tests/test_merge_verdict.py` (latest fenced verdict wins).
 `.clagentic/loadout/config.yaml`'s `merge.post_merge_steps` is
 already configured so a `loadout-merge --repo-path <this-checkout>` invocation
 self-installs the merged build. The remaining step — pointing the live

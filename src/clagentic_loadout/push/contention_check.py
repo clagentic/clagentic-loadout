@@ -4,7 +4,7 @@ checkout (lr-78a584).
 
 WHY THIS EXISTS, AND WHY IT LOOKS THE WAY IT DOES: a prior
 deployment shipped a STATEFUL advisory lock for the identical problem
-(lr-edc731, PR #534) and it failed in production within a day, in three
+(lr-edc731) and it failed in production within a day, in three
 documented ways. This module is shaped explicitly to avoid each one:
 
   1. NO STATE (predecessor failure: acquire-on-one-hook / release-on-another,

@@ -3,8 +3,8 @@
 
 Coverage:
   - Empty CI evidence (zero HEAD-scoped commit statuses) PASSES — the
-    no-runner-by-design case this repo itself hits (PR #49 @ head 6a8fcbd:
-    empty combined state, zero commit-status entries).
+    no-runner-by-design case this repo itself hits (empty combined state,
+    zero commit-status entries).
   - Non-empty + combined_state="success" PASSES.
   - Non-empty + a failure/error/pending state REFUSES
     (CiStatusFailedError), naming the actual state observed.

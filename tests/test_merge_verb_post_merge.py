@@ -364,7 +364,7 @@ class TestAbsentRepoPathIsNeverASilentSkip:
     """lr-ac5c8a: omitting --repo-path with no explicit acknowledgment must
     NEVER silently downgrade to a bare API-only merge that runs zero
     post_merge_steps and exits 0 -- that recurring shape (lr-5854ff,
-    lr-4e6f31, clagentic-console PR #365/#366) is the defect this task
+    lr-4e6f31, and a third) is the defect this task
     closes. --repo-path is an OPTIONAL override (a dispatcher with its own
     project registry supplies it whenever a local tree exists); loadout
     itself has no such registry to derive one from. Omitting it now requires
@@ -1417,7 +1417,7 @@ def _init_repo_with_origin_and_tracked_config(tmp_path, steps: list[dict]) -> st
     tests specifically: unlike that fixture (and `_write_merge_config`, used
     everywhere else in this file), THIS repo commits
     `.clagentic/loadout/config.yaml` as part of its seed commit -- matching
-    the observed incident's own repo shape (clagentic-triage tracks this
+    the observed incident's own repo shape (that repo tracks this
     file; confirmed by a real `git diff --stat <old> <new> --
     .clagentic/loadout/config.yaml` showing a genuine diff between two
     commits there), NOT this package's own dogfooding convention (gitignored

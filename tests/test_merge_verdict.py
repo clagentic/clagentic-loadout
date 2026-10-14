@@ -28,7 +28,7 @@ Coverage:
       * role/content consistency (lr-23fe19, defense-in-depth ON TOP OF the
         user.login binding): expected_reviewer_name given + block's own
         'reviewer' field disagrees -> VerdictRoleMismatchError (replays the
-        console PR #332 shape: a security-audit body's 'reviewer' field
+        an observed downstream shape: a security-audit body's 'reviewer' field
         posted under the code-reviewer App's correct login); a genuine,
         matching verdict still passes; the parameter is opt-in (omitting it
         is a no-op, unaffected existing callers/tests keep passing)
@@ -255,7 +255,7 @@ class TestReadReviewerVerdictCreatedAtOrdering:
     comments API is not guaranteed to return comments in chronological
     order (pagination, platform ordering) -- a resolver that just reverses
     the given list can pick a STALE 'blocking' comment over a NEWER 'clean'
-    one at the same SHA. Session evidence: console PR #341, PEACHES posted
+    one at the same SHA. Session evidence: an observed downstream PR, a reviewer posted
     'blocking' (comment 4980366091) on a false claim, then a corrected
     'clean' (4980399228) at the same SHA -- the merge stayed blocked
     because the resolver did not deterministically prefer the newer clean."""
@@ -400,7 +400,7 @@ class TestReadReviewerVerdictFencePresenceSelection:
     fenced one either."""
 
     def test_earlier_fenced_then_later_prose_still_resolves_to_the_fence(self):
-        # THE REGRESSION SHAPE (PR #1797): the reviewer posts a valid,
+        # THE REGRESSION SHAPE (observed downstream): the reviewer posts a valid,
         # well-formed fenced 'clean' verdict, then LATER posts a prose-only
         # correction to a false sub-observation in the original review --
         # no re-verdict, by design (cf. lr-cb8db9: emitting a second fence
@@ -486,7 +486,7 @@ class TestReadReviewerVerdictFencePresenceSelection:
     def test_double_fence_on_the_selected_comment_still_refuses(self):
         # lr-cb8db9 double-fence handling must not regress: even though
         # selection now filters by fence-presence first, a SELECTED
-        # comment carrying two fences (the PR #485 shape) is still refused
+        # comment carrying two fences (the double-fence shape) is still refused
         # by the existing multi-fence backstop, exactly as before.
         blocking = build_verdict_block("expected-login", "blocking", _FULL_SHA, 1)
         clean = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
@@ -572,8 +572,8 @@ class TestReadReviewerVerdictFencePresenceSelection:
 class TestReadReviewerVerdictRoleConsistency:
     """Defense-in-depth role/content consistency (lr-23fe19), layered ON TOP
     OF the user.login authorship binding tested above -- never a
-    replacement for it. CONCRETE EVIDENCE this guards against: console PR
-    #332 (lr-f00c6f Fault 3, re-scoped by lr-23fe19 comment #1) -- a
+    replacement for it. CONCRETE EVIDENCE this guards against: an observed
+    downstream PR (lr-f00c6f Fault 3, re-scoped by lr-23fe19 comment #1) -- a
     security-audit verdict body ('reviewer': 'bobbie') was posted under the
     code-reviewer App's own (correct) login after a shared body-staging path
     was clobbered. The user.login check alone passes in that shape (the App
@@ -581,7 +581,7 @@ class TestReadReviewerVerdictRoleConsistency:
     'reviewer' field against the required-reviewer name catches it."""
 
     def test_security_audit_body_under_reviewer_login_raises_role_mismatch(self):
-        # THE PR #332 SHAPE: bobbie's (security-audit) verdict content,
+        # THE CROSS-ROLE SHAPE: a reviewer's (security-audit) verdict content,
         # posted under peaches's (code-review) App login. The login is
         # exactly right for the 'peaches' required-reviewer slot -- only the
         # fence's own 'reviewer' field ('bobbie') betrays the mismatch.
@@ -671,7 +671,7 @@ class TestReadReviewerVerdictEnforceSingleFence:
             read_reviewer_verdict(comments, "expected-login", _FULL_SHA, 1, "owner", "repo")
 
     def test_default_is_on_pr_485_shape_two_identical_fences_refused(self):
-        # THE PR #485 SHAPE: two IDENTICAL fences back to back (the actual
+        # THE DOUBLE-FENCE SHAPE: two IDENTICAL fences back to back (the actual
         # producer-side bug this task's other half closes) -- refused by
         # default, with no enforce_single_fence argument passed at all.
         block = build_verdict_block("expected-login", "clean", _FULL_SHA, 1)
@@ -748,7 +748,7 @@ class TestAssertVerdictBlockCountAtMostOne:
         assert_verdict_block_count_at_most_one(block)  # no raise
 
     def test_two_identical_blocks_raises(self):
-        # THE PR #485 SHAPE exactly: two byte-identical fences.
+        # THE DOUBLE-FENCE SHAPE exactly: two byte-identical fences.
         block = build_verdict_block("reviewer", "clean", _FULL_SHA, 1)
         with pytest.raises(VerdictMalformedError, match="2 fenced"):
             assert_verdict_block_count_at_most_one(f"{block}\n{block}")
@@ -945,7 +945,7 @@ class TestAssertSingleOwnVerdictBlock:
             assert_single_own_verdict_block(f"{first}\n{second}", "peaches")
 
     def test_foreign_reviewer_block_alongside_own_block_raises(self):
-        # THE PR #380 SHAPE: a body carrying peaches's own block plus
+        # THE EMBEDDED-BLOCK SHAPE: a body carrying a reviewer's own block plus
         # bobbie's foreign block riding along.
         foreign = build_verdict_block("bobbie", "clean", _FULL_SHA, 1)
         own = build_verdict_block("peaches", "clean", _FULL_SHA, 1)

@@ -67,7 +67,7 @@ Verdict enforcement (read_reviewer_verdict)
    replacement for it: the login check already establishes WHO posted;
    this check additionally establishes that the posted CONTENT is
    self-consistent with that authenticated identity. Concrete evidence this
-   guards against (console PR #332, lr-f00c6f Fault 3): a security-audit
+   guards against (an observed downstream PR, lr-f00c6f Fault 3): a security-audit
    verdict body was posted under the reviewer App's (correct) login after a
    shared body-staging path was clobbered — the login was right, but the
    fence's own 'reviewer' field still read the security auditor's name, a
@@ -937,7 +937,7 @@ def read_reviewer_verdict(
     # SEPARATE assertion that WHAT they posted is self-consistent with that
     # identity — the block's own 'reviewer' field must name the reviewer
     # this slot is for. A mismatch means the authenticated App carried
-    # another reviewer/role's content (console PR #332 shape: a
+    # another reviewer/role's content (an observed downstream shape: a
     # security-audit body posted under the reviewer App's correct login
     # after a shared body-staging path was clobbered). Case-insensitive:
     # build_findings_verdict_body's header uppercases the display name but

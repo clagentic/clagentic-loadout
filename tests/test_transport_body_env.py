@@ -15,7 +15,7 @@ Coverage:
     mechanism -- no per-invocation variation).
   - resolve_caller_body_path / read_caller_body_bytes / read_body_bytes(
     caller=...) (lr-3a7ae8): caller-namespaced staging that fixes the
-    concurrent same-TMPDIR collision proven on console PR #332 --
+    concurrent same-TMPDIR collision proven on an observed downstream PR --
     two DIFFERENT callers on the SAME TMPDIR resolve to two DIFFERENT
     physical paths (structural collision-proofing, not a race-prone
     ownership check), and a caller reading before its OWN write has landed
@@ -349,7 +349,7 @@ class TestOwnerMismatchFailsClosed:
 
 
 class TestReadAndConsumeRegression:
-    """lr-becdef Axis 1 PRIMARY regression: PR #388 foreign-body incident.
+    """lr-becdef Axis 1 PRIMARY regression: foreign-body incident.
     A staged body is now unlinked (consumed) on a successful read -- a
     retried/later invocation of the SAME caller must RE-STAGE, never
     silently re-read a leftover from a prior, unrelated invocation."""
@@ -387,7 +387,7 @@ class TestReadAndConsumeRegression:
         assert not stamp_path.exists()
 
     def test_stale_leftover_from_unrelated_pr_never_silently_reread(self, tmp_path):
-        # Direct reproduction of the PR #388 incident shape: a body staged
+        # Direct reproduction of the foreign-body incident shape: a body staged
         # for PR 100 (a prior, unrelated review) is left on disk (as it
         # always was pre-fix); a LATER invocation for a DIFFERENT PR (200)
         # must never read it as if it were its own.

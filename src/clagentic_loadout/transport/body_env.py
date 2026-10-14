@@ -151,7 +151,7 @@ argument. `--body-env` remains a bare, zero-argument switch on every verb
 surface; the namespacing is an internal resolution detail the verb's own
 `--caller` flag now also feeds, not a new flag.
 
-SEQUENTIAL STALE-READ (lr-becdef, PR #388 foreign-body incident): the
+SEQUENTIAL STALE-READ (lr-becdef, foreign-body incident): the
 lr-3a7ae8 fix above closes CONCURRENT same-TMPDIR collision between two
 DIFFERENT callers -- but it does nothing for a SEQUENTIAL stale read of
 the SAME caller's own path. `_read_staged_bytes` never consumed the

@@ -59,8 +59,8 @@ Seven checks, matching the task's numbered scope plus one added later
      for the fail-open-on-silent-absence gap this closes). Also cross-checks
      every role named in `required_reviewer_roles`/`authorized_roles`
      against this repo's own role declaration, with SEVERITY split on
-     whether the repo actually wrote one (lr-638945 comment #1 — the live
-     clagentic-github incident: `required_reviewer_roles: [reviewer,
+     whether the repo actually wrote one (lr-638945 comment #1 — an observed
+     incident: `required_reviewer_roles: [reviewer,
      security]` with no `security` key in `roles:`, doctor reporting a
      clean 6/6):
        - This repo's own `roles:` section is PRESENT (not a fallback) and a
@@ -1120,7 +1120,7 @@ def check_repo_loadout_schema(
     except InvalidMergeGateConfigError as exc:
         errors.append(f"merge (gate declaration): {exc}")
     else:
-        # lr-638945 comment #1 (ADDITIONAL EVIDENCE, the live clagentic-github
+        # lr-638945 comment #1 (ADDITIONAL EVIDENCE, an observed
         # incident): a gate role that matches no key in this repo's own role
         # declaration can never produce a verdict -- but the SEVERITY of that
         # gap depends on whether the config, AS WRITTEN, could possibly have

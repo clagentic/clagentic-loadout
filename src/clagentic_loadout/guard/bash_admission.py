@@ -216,7 +216,7 @@ def is_admitted_loadout_family_readonly(
     mutating_verb_names: frozenset[str],
     sanctioned_bin_dir: str | None = None,
 ) -> bool:
-    """Return True iff *command* is a clagentic-brand READ+VALIDATE tool
+    """Return True iff *command* is a loadout-family READ+VALIDATE tool
     invocation: the bare basename or (if *sanctioned_bin_dir* is given) fixed
     absolute install-path form of a non-mutating `loadout-<name>` tool, OR
     the `python3 -m clagentic_*` module-namespace form (reference

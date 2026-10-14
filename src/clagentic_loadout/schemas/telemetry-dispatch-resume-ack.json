@@ -21,7 +21,7 @@
     "resuming": {
       "type": "string",
       "maxLength": 256,
-      "description": "Optional short, non-prose description of what the resumed dispatch is about to work on (e.g. \"continuing PR #332 fix\"). Purely descriptive — no schema-enforced vocabulary, a consumer treats it as opaque display text."
+      "description": "Optional short, non-prose description of what the resumed dispatch is about to work on (e.g. \"continuing the review fix\"). Purely descriptive — no schema-enforced vocabulary, a consumer treats it as opaque display text."
     }
   }
 }
