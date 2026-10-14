@@ -243,6 +243,7 @@ def _run_one_engine(
         findings=parsed.findings,
         resolved_ids=parsed.resolved,
         ignored_severity=parsed.ignored_severity,
+        reply_problems=list(parsed.problems),
     )
     return record
 
