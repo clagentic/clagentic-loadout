@@ -574,7 +574,7 @@ class TestReadReviewerVerdictRoleConsistency:
     OF the user.login authorship binding tested above -- never a
     replacement for it. CONCRETE EVIDENCE this guards against: an observed
     downstream PR (lr-f00c6f Fault 3, re-scoped by lr-23fe19 comment #1) -- a
-    security-audit verdict body ('reviewer': 'bobbie') was posted under the
+    security-audit verdict body ('reviewer': 'agent-charlie') was posted under the
     code-reviewer App's own (correct) login after a shared body-staging path
     was clobbered. The user.login check alone passes in that shape (the App
     identity IS correct); only a check of the fence's own self-declared
@@ -582,53 +582,53 @@ class TestReadReviewerVerdictRoleConsistency:
 
     def test_security_audit_body_under_reviewer_login_raises_role_mismatch(self):
         # THE CROSS-ROLE SHAPE: a reviewer's (security-audit) verdict content,
-        # posted under peaches's (code-review) App login. The login is
-        # exactly right for the 'peaches' required-reviewer slot -- only the
-        # fence's own 'reviewer' field ('bobbie') betrays the mismatch.
-        clobbered_block = build_verdict_block("bobbie", "clean", _FULL_SHA, 1)
-        comments = [_comment(1, "peaches-login", clobbered_block)]
+        # posted under agent-bravo's (code-review) App login. The login is
+        # exactly right for the 'agent-bravo' required-reviewer slot -- only the
+        # fence's own 'reviewer' field ('agent-charlie') betrays the mismatch.
+        clobbered_block = build_verdict_block("agent-charlie", "clean", _FULL_SHA, 1)
+        comments = [_comment(1, "agent-bravo-login", clobbered_block)]
         with pytest.raises(VerdictRoleMismatchError, match="ROLE/CONTENT MISMATCH"):
             read_reviewer_verdict(
                 comments,
-                "peaches-login",
+                "agent-bravo-login",
                 _FULL_SHA,
                 1,
                 "owner",
                 "repo",
-                expected_reviewer_name="peaches",
+                expected_reviewer_name="agent-bravo",
             )
 
     def test_genuine_matching_verdict_passes(self):
-        # The non-adversarial case: peaches's own verdict, posted under
-        # peaches's own login, self-declaring 'peaches' -- all three agree.
-        block = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
-        comments = [_comment(1, "peaches-login", block)]
+        # The non-adversarial case: agent-bravo's own verdict, posted under
+        # agent-bravo's own login, self-declaring 'agent-bravo' -- all three agree.
+        block = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
+        comments = [_comment(1, "agent-bravo-login", block)]
         verdict = read_reviewer_verdict(
             comments,
-            "peaches-login",
+            "agent-bravo-login",
             _FULL_SHA,
             1,
             "owner",
             "repo",
-            expected_reviewer_name="peaches",
+            expected_reviewer_name="agent-bravo",
         )
-        assert verdict.reviewer == "peaches"
+        assert verdict.reviewer == "agent-bravo"
         assert verdict.review_status == "clean"
 
     def test_case_insensitive_match_passes(self):
         # A fence's 'reviewer' field carrying a different case than the
         # tool-authoritative reviewer name is still a genuine match, not a
         # mismatch -- this check compares identity, not a casing convention.
-        block = build_verdict_block("PEACHES", "clean", _FULL_SHA, 1)
-        comments = [_comment(1, "peaches-login", block)]
+        block = build_verdict_block("AGENT-BRAVO", "clean", _FULL_SHA, 1)
+        comments = [_comment(1, "agent-bravo-login", block)]
         verdict = read_reviewer_verdict(
             comments,
-            "peaches-login",
+            "agent-bravo-login",
             _FULL_SHA,
             1,
             "owner",
             "repo",
-            expected_reviewer_name="peaches",
+            expected_reviewer_name="agent-bravo",
         )
         assert verdict.review_status == "clean"
 
@@ -636,12 +636,12 @@ class TestReadReviewerVerdictRoleConsistency:
         # Back-compat / opt-in: a caller that does not pass
         # expected_reviewer_name is unaffected even when the fence's
         # 'reviewer' field disagrees with the login-matched identity.
-        mismatched_block = build_verdict_block("bobbie", "clean", _FULL_SHA, 1)
-        comments = [_comment(1, "peaches-login", mismatched_block)]
+        mismatched_block = build_verdict_block("agent-charlie", "clean", _FULL_SHA, 1)
+        comments = [_comment(1, "agent-bravo-login", mismatched_block)]
         verdict = read_reviewer_verdict(
-            comments, "peaches-login", _FULL_SHA, 1, "owner", "repo"
+            comments, "agent-bravo-login", _FULL_SHA, 1, "owner", "repo"
         )
-        assert verdict.reviewer == "bobbie"
+        assert verdict.reviewer == "agent-charlie"
 
 
 class TestReadReviewerVerdictEnforceSingleFence:
@@ -754,8 +754,8 @@ class TestAssertVerdictBlockCountAtMostOne:
             assert_verdict_block_count_at_most_one(f"{block}\n{block}")
 
     def test_two_different_blocks_raises(self):
-        first = build_verdict_block("bobbie", "clean", _FULL_SHA, 1)
-        second = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
+        first = build_verdict_block("agent-charlie", "clean", _FULL_SHA, 1)
+        second = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
         with pytest.raises(VerdictMalformedError, match="2 fenced"):
             assert_verdict_block_count_at_most_one(f"{first}\n{second}")
 
@@ -906,12 +906,12 @@ class TestFindAllVerdictBlocks:
         assert blocks[0]["reviewer"] == "reviewer"
 
     def test_two_blocks_returns_two_entries_in_order(self):
-        first = build_verdict_block("bobbie", "clean", _FULL_SHA, 1)
-        second = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
+        first = build_verdict_block("agent-charlie", "clean", _FULL_SHA, 1)
+        second = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
         blocks = find_all_verdict_blocks(f"{first}\n{second}")
         assert len(blocks) == 2
-        assert blocks[0]["reviewer"] == "bobbie"
-        assert blocks[1]["reviewer"] == "peaches"
+        assert blocks[0]["reviewer"] == "agent-charlie"
+        assert blocks[1]["reviewer"] == "agent-bravo"
 
     def test_malformed_block_included_as_malformed_marker(self):
         body = "```review-result\n{not valid json\n```"
@@ -928,37 +928,37 @@ class TestAssertSingleOwnVerdictBlock:
     not catch."""
 
     def test_single_own_block_passes(self):
-        block = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
-        assert_single_own_verdict_block(block, "peaches")  # no raise
+        block = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
+        assert_single_own_verdict_block(block, "agent-bravo")  # no raise
 
     def test_no_block_raises(self):
         with pytest.raises(VerdictMalformedError, match="no fenced"):
-            assert_single_own_verdict_block("just prose, no fence", "peaches")
+            assert_single_own_verdict_block("just prose, no fence", "agent-bravo")
 
     def test_two_blocks_same_reviewer_still_raises(self):
         # Even if BOTH blocks happen to be tagged with the caller's own
         # reviewer id, more than one block is itself the refused shape --
         # a genuine single-post invocation never needs two.
-        first = build_verdict_block("peaches", "blocking", _FULL_SHA, 1)
-        second = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
+        first = build_verdict_block("agent-bravo", "blocking", _FULL_SHA, 1)
+        second = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
         with pytest.raises(VerdictMalformedError, match="2 fenced"):
-            assert_single_own_verdict_block(f"{first}\n{second}", "peaches")
+            assert_single_own_verdict_block(f"{first}\n{second}", "agent-bravo")
 
     def test_foreign_reviewer_block_alongside_own_block_raises(self):
         # THE EMBEDDED-BLOCK SHAPE: a body carrying a reviewer's own block plus
-        # bobbie's foreign block riding along.
-        foreign = build_verdict_block("bobbie", "clean", _FULL_SHA, 1)
-        own = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
-        body = f"bobbie's narrative here\n{foreign}\n{own}"
+        # agent-charlie's foreign block riding along.
+        foreign = build_verdict_block("agent-charlie", "clean", _FULL_SHA, 1)
+        own = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
+        body = f"agent-charlie's narrative here\n{foreign}\n{own}"
         with pytest.raises(VerdictMalformedError, match="2 fenced"):
-            assert_single_own_verdict_block(body, "peaches")
+            assert_single_own_verdict_block(body, "agent-bravo")
 
     def test_single_block_wrong_reviewer_raises(self):
-        foreign = build_verdict_block("bobbie", "clean", _FULL_SHA, 1)
+        foreign = build_verdict_block("agent-charlie", "clean", _FULL_SHA, 1)
         with pytest.raises(VerdictMalformedError, match="FOREIGN"):
-            assert_single_own_verdict_block(foreign, "peaches")
+            assert_single_own_verdict_block(foreign, "agent-bravo")
 
     def test_single_malformed_block_raises(self):
         body = "```review-result\n{not valid json\n```"
         with pytest.raises(VerdictMalformedError, match="could not be parsed"):
-            assert_single_own_verdict_block(body, "peaches")
+            assert_single_own_verdict_block(body, "agent-bravo")

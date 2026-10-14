@@ -597,8 +597,8 @@ class TestBareReviewerNameGithubPlatform:
             "clagentic_loadout.merge.reviewer_login.resolve_github_app_slug",
             lambda **kwargs: "clagentic-reviewer",
         )
-        block = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
-        argv = _base_args("github", **{"--required-reviewer": "peaches"})
+        block = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
+        argv = _base_args("github", **{"--required-reviewer": "agent-bravo"})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
@@ -630,7 +630,7 @@ class TestBareReviewerNameGithubPlatform:
         monkeypatch.setattr(
             "clagentic_loadout.merge.reviewer_login.resolve_github_app_slug", _raise
         )
-        argv = _base_args("github", **{"--required-reviewer": "peaches"})
+        argv = _base_args("github", **{"--required-reviewer": "agent-bravo"})
         code = verb.main(
             argv,
             token_provider=_RefusingTokenProvider(),

@@ -451,11 +451,11 @@ class TestVerifyCommentOnPr:
         created = (not_before + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
         comments = [
             {"id": 42, "html_url": "http://x/42", "user": {"login": "some-bot"},
-             "body": "PEACHES verdict: clean", "created_at": created},
+             "body": "REVIEWER verdict: clean", "created_at": created},
         ]
         result = git_host_api.verify_comment_on_pr(
             "http://git-host.example.com", "tok", "o", "r", "7",
-            "PEACHES verdict: clean", "some-bot",
+            "REVIEWER verdict: clean", "some-bot",
             not_before=not_before, opener=self._opener_with_comments(comments),
         )
         assert result["id"] == 42
@@ -466,12 +466,12 @@ class TestVerifyCommentOnPr:
         stale_created = (not_before - timedelta(hours=1)).isoformat().replace("+00:00", "Z")
         comments = [
             {"id": 41, "html_url": "http://x/41", "user": {"login": "some-bot"},
-             "body": "PEACHES verdict: clean", "created_at": stale_created},
+             "body": "REVIEWER verdict: clean", "created_at": stale_created},
         ]
         with pytest.raises(git_host_api.GitHostApiError) as exc_info:
             git_host_api.verify_comment_on_pr(
                 "http://git-host.example.com", "tok", "o", "r", "7",
-                "PEACHES verdict: clean", "some-bot",
+                "REVIEWER verdict: clean", "some-bot",
                 not_before=not_before, opener=self._opener_with_comments(comments),
             )
         assert exc_info.value.code == git_host_api.EXIT_VERIFY_FAILED
@@ -482,12 +482,12 @@ class TestVerifyCommentOnPr:
         created = (not_before + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
         comments = [
             {"id": 43, "html_url": "http://x/43", "user": {"login": "someone-else"},
-             "body": "PEACHES verdict: clean", "created_at": created},
+             "body": "REVIEWER verdict: clean", "created_at": created},
         ]
         with pytest.raises(git_host_api.GitHostApiError) as exc_info:
             git_host_api.verify_comment_on_pr(
                 "http://git-host.example.com", "tok", "o", "r", "7",
-                "PEACHES verdict: clean", "some-bot",
+                "REVIEWER verdict: clean", "some-bot",
                 not_before=not_before, opener=self._opener_with_comments(comments),
             )
         assert exc_info.value.code == git_host_api.EXIT_VERIFY_FAILED
@@ -502,7 +502,7 @@ class TestVerifyCommentOnPr:
         with pytest.raises(git_host_api.GitHostApiError) as exc_info:
             git_host_api.verify_comment_on_pr(
                 "http://git-host.example.com", "tok", "o", "r", "7",
-                "PEACHES verdict: clean", "some-bot",
+                "REVIEWER verdict: clean", "some-bot",
                 not_before=not_before, opener=self._opener_with_comments(comments),
             )
         assert exc_info.value.code == git_host_api.EXIT_VERIFY_FAILED
@@ -514,7 +514,7 @@ class TestVerifyCommentOnPr:
         with pytest.raises(git_host_api.GitHostApiError) as exc_info:
             git_host_api.verify_comment_on_pr(
                 "http://git-host.example.com", "tok", "o", "r", "7",
-                "PEACHES verdict: clean", "some-bot",
+                "REVIEWER verdict: clean", "some-bot",
                 not_before=not_before, opener=self._opener_with_comments([]),
             )
         assert exc_info.value.code == git_host_api.EXIT_VERIFY_FAILED
@@ -526,11 +526,11 @@ class TestVerifyCommentOnPr:
         created = (not_before - timedelta(seconds=2)).isoformat().replace("+00:00", "Z")
         comments = [
             {"id": 45, "html_url": "http://x/45", "user": {"login": "some-bot"},
-             "body": "PEACHES verdict: clean", "created_at": created},
+             "body": "REVIEWER verdict: clean", "created_at": created},
         ]
         result = git_host_api.verify_comment_on_pr(
             "http://git-host.example.com", "tok", "o", "r", "7",
-            "PEACHES verdict: clean", "some-bot",
+            "REVIEWER verdict: clean", "some-bot",
             not_before=not_before, opener=self._opener_with_comments(comments),
         )
         assert result["id"] == 45
@@ -1171,7 +1171,7 @@ class TestMainGithubTargetRouting:
 
         rc = git_host_api.main(
             [
-                "--caller", "holden",
+                "--caller", "agent-echo",
                 "GET", "https://api.github.com/repos/some-owner/some-repo/pulls/318/reviews",
             ],
             token_provider=_PlatformRecordingProvider("gh-reader-tok"),
@@ -1932,26 +1932,26 @@ class TestMainGithubRepoContext:
 
         rc = git_host_api.main(
             [
-                "--caller", "holden",
+                "--caller", "agent-echo",
                 "GET", "https://api.github.com/repos/some-owner/some-repo/pulls/318/reviews",
             ],
             token_provider=provider, opener=fake_opener,
         )
         assert rc == git_host_api.EXIT_OK
-        assert provider.calls == [("holden", "some-owner/some-repo")]
+        assert provider.calls == [("agent-echo", "some-owner/some-repo")]
 
     def test_non_repo_github_url_passes_none(self, capsys):
         provider = _RepoAndPlatformRecordingProvider()
 
         def fake_opener(req, timeout=15):
-            return _FakeResponse(200, b'{"login": "holden-bot"}')
+            return _FakeResponse(200, b'{"login": "agent-echo-bot"}')
 
         rc = git_host_api.main(
-            ["--caller", "holden", "GET", "https://api.github.com/user"],
+            ["--caller", "agent-echo", "GET", "https://api.github.com/user"],
             token_provider=provider, opener=fake_opener,
         )
         assert rc == git_host_api.EXIT_OK
-        assert provider.calls == [("holden", None)]
+        assert provider.calls == [("agent-echo", None)]
 
     def test_forgejo_repos_path_still_threads_via_existing_path(self, capsys):
         """Byte-identical regression guard: the pre-existing Forgejo
@@ -1963,11 +1963,11 @@ class TestMainGithubRepoContext:
             return _FakeResponse(200, b'{"ok": true}')
 
         rc = git_host_api.main(
-            ["--caller", "holden", "/api/v1/repos/some-owner/some-repo/pulls/1.diff"],
+            ["--caller", "agent-echo", "/api/v1/repos/some-owner/some-repo/pulls/1.diff"],
             token_provider=provider, opener=fake_opener,
         )
         assert rc == git_host_api.EXIT_OK
-        assert provider.calls == [("holden", "some-owner/some-repo")]
+        assert provider.calls == [("agent-echo", "some-owner/some-repo")]
 
 
 # ---------------------------------------------------------------------------
@@ -3200,7 +3200,7 @@ class TestMainBodyEnvStaleReadRegression:
         # it were staged for PR 200.
         monkeypatch.setenv("TMPDIR", str(tmp_path))
         self._stage(
-            tmp_path, b'{"body": "BOBBIE - clean: archivist_client.py review."}',
+            tmp_path, b'{"body": "REVIEWER - clean: client.py review."}',
             caller="some-role", target_pr=100,
         )
 

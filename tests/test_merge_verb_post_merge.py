@@ -1286,7 +1286,7 @@ class TestDeadCrewPostMergeConfigWarning:
         )
         _init_repo_with_origin(tmp_path)
         _write_crew_yaml(
-            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+            tmp_path, "builder.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
         )
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
@@ -1301,7 +1301,7 @@ class TestDeadCrewPostMergeConfigWarning:
     def test_stale_crew_yaml_mention_warns_but_still_exits_ok(self, tmp_path, capsys):
         _init_repo_with_origin(tmp_path)
         _write_crew_yaml(
-            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+            tmp_path, "builder.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
         )
         # No .clagentic/loadout/config.yaml at all -- the trap shape.
         argv = _base_args(**{"--repo-path": str(tmp_path)})
@@ -1314,7 +1314,7 @@ class TestDeadCrewPostMergeConfigWarning:
         assert code == verb.EXIT_OK
         stderr = capsys.readouterr().err
         assert "NEVER reads that key from .crew/*.yaml" in stderr
-        assert str(tmp_path / ".crew" / "amos.yaml") in stderr
+        assert str(tmp_path / ".crew" / "builder.yaml") in stderr
 
     def test_stale_crew_yaml_mention_never_makes_a_step_execute(self, tmp_path, capsys):
         """READ-ONLY CONTRACT: a .crew/*.yaml mention is never a source of
@@ -1324,7 +1324,7 @@ class TestDeadCrewPostMergeConfigWarning:
         marker = tmp_path / "should-never-exist.txt"
         _write_crew_yaml(
             tmp_path,
-            "amos.yaml",
+            "builder.yaml",
             f"post_merge_steps:\n  - cmd: \"{_PY} -c \\\"open('{marker}', 'w').close()\\\"\"\n",
         )
         argv = _base_args(**{"--repo-path": str(tmp_path)})
@@ -1340,7 +1340,7 @@ class TestDeadCrewPostMergeConfigWarning:
     def test_no_warning_when_live_config_already_declares_steps(self, tmp_path, capsys):
         _init_repo_with_origin(tmp_path)
         _write_crew_yaml(
-            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+            tmp_path, "builder.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
         )
         _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         argv = _base_args(**{"--repo-path": str(tmp_path)})
@@ -1363,7 +1363,7 @@ class TestDeadCrewPostMergeConfigWarning:
         stale .crew/*.yaml mention just because bool([]) is falsy."""
         _init_repo_with_origin(tmp_path)
         _write_crew_yaml(
-            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+            tmp_path, "builder.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
         )
         _write_merge_config(tmp_path, [])
         argv = _base_args(**{"--repo-path": str(tmp_path)})
@@ -1397,7 +1397,7 @@ class TestDeadCrewPostMergeConfigWarning:
         naming loudly."""
         _init_repo_with_origin(tmp_path)
         _write_crew_yaml(
-            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+            tmp_path, "builder.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
         )
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         argv.append("--skip-post-merge")

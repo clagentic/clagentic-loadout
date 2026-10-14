@@ -96,10 +96,10 @@ class TestForgejoProbe:
         result = probe_forgejo_credential(
             "http://git-host.example.com",
             "tok-well-formed",
-            opener=_fake_opener_200(login="amos"),
+            opener=_fake_opener_200(login="some-builder"),
         )
         assert result.state == CREDENTIAL_STATE_OK
-        assert "amos" in result.detail
+        assert "some-builder" in result.detail
         assert result.platform == "forgejo"
 
     def test_malformed_token_shape_reports_malformed_not_expiry_not_permission(self):
@@ -177,7 +177,7 @@ class TestForgejoProbe:
 
 class TestGithubProbe:
     def test_well_formed_accepted_credential_reports_ok(self):
-        result = probe_github_credential("tok-well-formed", opener=_fake_opener_200(login="amos"))
+        result = probe_github_credential("tok-well-formed", opener=_fake_opener_200(login="some-builder"))
         assert result.state == CREDENTIAL_STATE_OK
         assert result.platform == "github"
 

@@ -44,7 +44,7 @@ class TestIsTrivialPath:
         assert is_trivial_path("/some/project/docs/guard-policy.md".replace(".md", "")) is True
 
     def test_deployment_dir_segment_is_trivial_only_when_the_caller_supplies_it(self):
-        path = "/some/project/.crew/amos.yaml"
+        path = "/some/project/.crew/builder.yaml"
         assert is_trivial_path(path) is False
         assert is_trivial_path(path, DEFAULT_TRIVIAL_DIR_SEGMENTS | {".crew"}) is True
 

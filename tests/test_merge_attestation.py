@@ -88,12 +88,12 @@ class TestRequiredReviewerLogins:
         body = build_attestation_body(
             gated_head_sha=_FULL_SHA,
             merged_sha=_FULL_SHA,
-            required_reviewer_logins=["peaches", "bobbie"],
+            required_reviewer_logins=["agent-bravo", "agent-charlie"],
             ci_disposition="no-runner-by-design (0 commit-status entries at HEAD)",
             version="1.0.0",
         )
-        assert "peaches" in body
-        assert "bobbie" in body
+        assert "agent-bravo" in body
+        assert "agent-charlie" in body
         assert "Reviews" in body
 
     def test_empty_reviewer_list_omits_reviews_line(self):
@@ -347,7 +347,7 @@ class TestLoreFreeConformance:
         body = build_attestation_body(
             gated_head_sha=_FULL_SHA,
             merged_sha=_FULL_SHA,
-            required_reviewer_logins=["peaches", "bobbie"],
+            required_reviewer_logins=["agent-bravo", "agent-charlie"],
             ci_disposition="combined_state='success' (1 status(es), 0 run(s))",
             version="1.0.0",
         )

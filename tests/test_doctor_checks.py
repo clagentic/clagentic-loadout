@@ -451,7 +451,7 @@ class TestCheckGithubAppSlugsCoverage:
     def test_agent_name_keyed_deployment_uses_declared_caller_registry(self, tmp_path):
         """lr-46a83a: the exact live-deployment shape. A deployment whose
         token helper (and therefore github_app.slugs) is keyed by AGENT NAME
-        (amos/peaches/bobbie/naomi) rather than provisioning.roles' bare
+        (agent-alpha/agent-bravo/agent-charlie/agent-delta) rather than provisioning.roles' bare
         ROLE-name taxonomy (builder/reviewer/security/merger) declares that
         key-space via github_app.callers -- the check must validate slugs
         coverage against the DECLARED registry, not silently compare against
@@ -461,12 +461,17 @@ class TestCheckGithubAppSlugsCoverage:
             tmp_path,
             {
                 CONFIG_SECTION_GITHUB_APP: {
-                    CONFIG_KEY_CALLERS: ["amos", "peaches", "bobbie", "naomi"],
+                    CONFIG_KEY_CALLERS: [
+                        "agent-alpha",
+                        "agent-bravo",
+                        "agent-charlie",
+                        "agent-delta",
+                    ],
                     CONFIG_KEY_SLUGS: {
-                        "amos": "clagentic-builder",
-                        "peaches": "clagentic-reviewer",
-                        "bobbie": "clagentic-security",
-                        "naomi": "clagentic-merger",
+                        "agent-alpha": "clagentic-builder",
+                        "agent-bravo": "clagentic-reviewer",
+                        "agent-charlie": "clagentic-security",
+                        "agent-delta": "clagentic-merger",
                     },
                 }
             },
@@ -489,8 +494,8 @@ class TestCheckGithubAppSlugsCoverage:
         assert result.resolved["caller_source"] == "github_app.callers"
 
     def test_agent_name_keyed_deployment_missing_slug_still_flagged(self, tmp_path):
-        """The lr-46a83a holden-reader-slug shape: a declared caller
-        (holden, mapped reader in the token helper) with no matching
+        """The lr-46a83a reader-slug shape: a declared caller
+        (agent-echo, mapped reader in the token helper) with no matching
         github_app.slugs entry is a REAL gap and must still FAIL -- the
         caller-registry fix must not silence real missing-slug findings,
         only stop comparing against the wrong key-space."""
@@ -498,25 +503,31 @@ class TestCheckGithubAppSlugsCoverage:
             tmp_path,
             {
                 CONFIG_SECTION_GITHUB_APP: {
-                    CONFIG_KEY_CALLERS: ["amos", "peaches", "bobbie", "naomi", "holden"],
+                    CONFIG_KEY_CALLERS: [
+                        "agent-alpha",
+                        "agent-bravo",
+                        "agent-charlie",
+                        "agent-delta",
+                        "agent-echo",
+                    ],
                     CONFIG_KEY_SLUGS: {
-                        "amos": "clagentic-builder",
-                        "peaches": "clagentic-reviewer",
-                        "bobbie": "clagentic-security",
-                        "naomi": "clagentic-merger",
+                        "agent-alpha": "clagentic-builder",
+                        "agent-bravo": "clagentic-reviewer",
+                        "agent-charlie": "clagentic-security",
+                        "agent-delta": "clagentic-merger",
                     },
                 }
             },
         )
         result = check_github_app_slugs_coverage(config_root=tmp_path)
         assert result.ok is False
-        assert result.resolved["missing_slugs"] == ["holden"]
+        assert result.resolved["missing_slugs"] == ["agent-echo"]
         assert result.resolved["caller_source"] == "github_app.callers"
         # lr-3160c0: summary text is user-facing and must never carry an
         # internal task id -- see the sibling assertion above for why this
         # checks absence rather than presence.
         assert "lr-e41f" not in result.summary
-        assert "holden" in result.summary
+        assert "agent-echo" in result.summary
 
     def test_no_callers_declared_falls_back_to_role_taxonomy(self, tmp_path):
         """No github_app.callers declared at all -- byte-identical to
@@ -541,7 +552,7 @@ class TestCheckGithubAppSlugsCoverage:
             tmp_path,
             {
                 CONFIG_SECTION_GITHUB_APP: {
-                    CONFIG_KEY_CALLERS: ["amos", 42],
+                    CONFIG_KEY_CALLERS: ["agent-alpha", 42],
                     CONFIG_KEY_SLUGS: {"builder": "app-builder"},
                 }
             },
@@ -857,7 +868,7 @@ class TestCheckDeadCrewPostMergeConfig:
     def test_crew_dir_with_no_post_merge_steps_mention_is_ok(self, tmp_path):
         _write_crew_config(
             tmp_path,
-            "amos.yaml",
+            "builder.yaml",
             "schema_version: 1\nmerge_allowed: false\n",
         )
         result = check_dead_crew_post_merge_config(tmp_path)
@@ -867,12 +878,12 @@ class TestCheckDeadCrewPostMergeConfig:
     def test_top_level_post_merge_steps_in_crew_yaml_with_no_live_config_fails(
         self, tmp_path
     ):
-        """The exact trap: .crew/amos.yaml declares post_merge_steps at its
+        """The exact trap: .crew/builder.yaml declares post_merge_steps at its
         own top level (the shape its own starter template shows), and the
         repo's .clagentic/loadout/config.yaml never mentions it at all."""
         _write_crew_config(
             tmp_path,
-            "amos.yaml",
+            "builder.yaml",
             "schema_version: 1\n"
             "post_merge_steps:\n"
             "  - cmd: 'make install'\n"
@@ -881,7 +892,7 @@ class TestCheckDeadCrewPostMergeConfig:
         )
         result = check_dead_crew_post_merge_config(tmp_path)
         assert result.ok is False
-        assert str(tmp_path / ".crew" / "amos.yaml") in result.resolved["offending_files"]
+        assert str(tmp_path / ".crew" / "builder.yaml") in result.resolved["offending_files"]
         assert result.resolved["live_steps_count"] == 0
         assert "post_merge_steps" in result.summary
         assert "never" in result.summary
@@ -889,10 +900,10 @@ class TestCheckDeadCrewPostMergeConfig:
     def test_nested_merge_section_post_merge_steps_in_crew_yaml_fails(self, tmp_path):
         """A repo author who has seen the merge: section convention this
         package's own .clagentic/loadout/config.yaml uses might reasonably
-        try nesting under merge: inside .crew/naomi.yaml too -- still dead."""
+        try nesting under merge: inside .crew/merger.yaml too -- still dead."""
         _write_crew_config(
             tmp_path,
-            "naomi.yaml",
+            "merger.yaml",
             "schema_version: 1\n"
             "merge:\n"
             "  post_merge_steps:\n"
@@ -901,16 +912,16 @@ class TestCheckDeadCrewPostMergeConfig:
         )
         result = check_dead_crew_post_merge_config(tmp_path)
         assert result.ok is False
-        assert str(tmp_path / ".crew" / "naomi.yaml") in result.resolved["offending_files"]
+        assert str(tmp_path / ".crew" / "merger.yaml") in result.resolved["offending_files"]
 
     def test_crew_yaml_mention_with_live_config_present_passes(self, tmp_path):
-        """The correctly-migrated shape (.crew/naomi.yaml's own real-world
+        """The correctly-migrated shape (.crew/merger.yaml's own real-world
         header comment): .crew/*.yaml still has an old commented-out
         example, but the LIVE config already declares its own
         post_merge_steps -- not a dead deploy, so this check passes."""
         _write_crew_config(
             tmp_path,
-            "amos.yaml",
+            "builder.yaml",
             "schema_version: 1\n"
             "post_merge_steps:\n"
             "  - cmd: 'make install'\n"
@@ -935,7 +946,7 @@ class TestCheckDeadCrewPostMergeConfig:
         because bool([]) is falsy, same as the missing-key case would be."""
         _write_crew_config(
             tmp_path,
-            "amos.yaml",
+            "builder.yaml",
             "post_merge_steps:\n  - cmd: 'make install'\n",
         )
         _write_loadout_config(tmp_path, "merge:\n  post_merge_steps: []\n")
@@ -946,12 +957,12 @@ class TestCheckDeadCrewPostMergeConfig:
     def test_multiple_offending_crew_files_all_named(self, tmp_path):
         _write_crew_config(
             tmp_path,
-            "amos.yaml",
+            "builder.yaml",
             "post_merge_steps:\n  - cmd: 'make install'\n",
         )
         _write_crew_config(
             tmp_path,
-            "naomi.yaml",
+            "merger.yaml",
             "post_merge_steps:\n  - cmd: 'make deploy'\n",
         )
         result = check_dead_crew_post_merge_config(tmp_path)
@@ -959,7 +970,7 @@ class TestCheckDeadCrewPostMergeConfig:
         assert len(result.resolved["offending_files"]) == 2
 
     def test_malformed_crew_yaml_is_skipped_not_raised(self, tmp_path):
-        _write_crew_config(tmp_path, "amos.yaml", "not: valid: yaml: [\n")
+        _write_crew_config(tmp_path, "builder.yaml", "not: valid: yaml: [\n")
         result = check_dead_crew_post_merge_config(tmp_path)
         assert result.ok is True
         assert result.resolved["offending_files"] == []
@@ -974,7 +985,7 @@ class TestCheckDeadForeignPostMergeConfigGlobs:
     def test_no_globs_configured_disables_the_check_even_with_a_dead_declaration(
         self, tmp_path
     ):
-        _write_crew_config(tmp_path, "amos.yaml", self._DEAD_STEPS)
+        _write_crew_config(tmp_path, "builder.yaml", self._DEAD_STEPS)
         result = check_dead_foreign_post_merge_config(
             tmp_path, config_root=tmp_path / "no-user-config"
         )
@@ -984,7 +995,7 @@ class TestCheckDeadForeignPostMergeConfigGlobs:
         assert result.resolved["offending_files"] == []
 
     def test_empty_globs_list_disables_the_check(self, tmp_path):
-        _write_crew_config(tmp_path, "amos.yaml", self._DEAD_STEPS)
+        _write_crew_config(tmp_path, "builder.yaml", self._DEAD_STEPS)
         _write_foreign_globs_config(tmp_path / "cfg", [])
         result = check_dead_foreign_post_merge_config(tmp_path, config_root=tmp_path / "cfg")
         assert result.ok is True
@@ -1001,7 +1012,7 @@ class TestCheckDeadForeignPostMergeConfigGlobs:
         assert "tooling/*.yml" in result.summary
 
     def test_second_glob_adds_files_to_the_scan(self, tmp_path):
-        _write_crew_config(tmp_path, "amos.yaml", self._DEAD_STEPS)
+        _write_crew_config(tmp_path, "builder.yaml", self._DEAD_STEPS)
         other = tmp_path / "tooling"
         other.mkdir()
         (other / "agent.yml").write_text(self._DEAD_STEPS, encoding="utf-8")
@@ -1411,7 +1422,7 @@ class TestCheckCredentialValidity:
         def opener(req, timeout=15):
             class _Resp:
                 def read(self_inner):
-                    return b'{"login": "amos"}'
+                    return b'{"login": "agent-alpha"}'
 
                 def getcode(self_inner):
                     return 200
@@ -1425,7 +1436,7 @@ class TestCheckCredentialValidity:
             return _Resp()
 
         results = check_credential_validity(
-            caller="amos",
+            caller="agent-alpha",
             config_root=tmp_path,
             token_provider_forgejo=_FakeProvider("tok-forgejo"),
             token_provider_github=_FakeProvider("tok-github"),
@@ -1456,7 +1467,7 @@ class TestCheckCredentialValidity:
             )
 
         results = check_credential_validity(
-            caller="amos",
+            caller="agent-alpha",
             config_root=tmp_path,
             token_provider_forgejo=_FakeProvider(),
             token_provider_github=_FakeProvider(),
@@ -1476,7 +1487,7 @@ class TestCheckCredentialValidity:
                 raise CredentialProviderError("no such role configured")
 
         results = check_credential_validity(
-            caller="amos",
+            caller="agent-alpha",
             config_root=tmp_path,
             token_provider_forgejo=_RefusingProvider(),
             token_provider_github=_RefusingProvider(),
@@ -1494,7 +1505,7 @@ class TestCheckCredentialValidity:
         def opener(req, timeout=15):
             class _Resp:
                 def read(self_inner):
-                    return b'{"login": "amos"}'
+                    return b'{"login": "agent-alpha"}'
 
                 def getcode(self_inner):
                     return 200
@@ -1508,7 +1519,7 @@ class TestCheckCredentialValidity:
             return _Resp()
 
         results = check_credential_validity(
-            caller="amos",
+            caller="agent-alpha",
             config_root=tmp_path,
             token_provider_forgejo=_FakeProvider(),
             token_provider_github=_FakeProvider(),

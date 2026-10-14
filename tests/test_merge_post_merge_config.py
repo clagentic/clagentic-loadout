@@ -824,7 +824,7 @@ class TestFindForeignConfigFilesEdgeCases:
     def test_empty_globs_scan_nothing_even_when_a_file_declares_the_key(self, tmp_path):
         foreign = tmp_path / ".crew"
         foreign.mkdir()
-        (foreign / "amos.yaml").write_text("post_merge_steps: []\n", encoding="utf-8")
+        (foreign / "builder.yaml").write_text("post_merge_steps: []\n", encoding="utf-8")
         assert find_foreign_config_files_declaring_post_merge_steps(tmp_path, []) == []
         assert find_foreign_config_files_declaring_post_merge_steps(tmp_path, ()) == []
 
@@ -888,40 +888,40 @@ class TestFindCrewYamlFilesDeclaringPostMergeSteps:
         assert find_crew_yaml_files_declaring_post_merge_steps(tmp_path) == []
 
     def test_crew_yaml_with_no_mention_returns_empty(self, tmp_path):
-        self._write_crew_yaml(tmp_path, "amos.yaml", "schema_version: 1\n")
+        self._write_crew_yaml(tmp_path, "builder.yaml", "schema_version: 1\n")
         assert find_crew_yaml_files_declaring_post_merge_steps(tmp_path) == []
 
     def test_top_level_mention_is_found(self, tmp_path):
         self._write_crew_yaml(
-            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
+            tmp_path, "builder.yaml", "post_merge_steps:\n  - cmd: 'make install'\n"
         )
         result = find_crew_yaml_files_declaring_post_merge_steps(tmp_path)
-        assert result == [str(tmp_path / ".crew" / "amos.yaml")]
+        assert result == [str(tmp_path / ".crew" / "builder.yaml")]
 
     def test_nested_merge_section_mention_is_found(self, tmp_path):
         self._write_crew_yaml(
             tmp_path,
-            "naomi.yaml",
+            "merger.yaml",
             "merge:\n  post_merge_steps:\n    - cmd: 'make deploy'\n",
         )
         result = find_crew_yaml_files_declaring_post_merge_steps(tmp_path)
-        assert result == [str(tmp_path / ".crew" / "naomi.yaml")]
+        assert result == [str(tmp_path / ".crew" / "merger.yaml")]
 
     def test_malformed_yaml_is_skipped(self, tmp_path):
-        self._write_crew_yaml(tmp_path, "amos.yaml", "not: valid: yaml: [\n")
+        self._write_crew_yaml(tmp_path, "builder.yaml", "not: valid: yaml: [\n")
         assert find_crew_yaml_files_declaring_post_merge_steps(tmp_path) == []
 
     def test_multiple_files_sorted(self, tmp_path):
         self._write_crew_yaml(
-            tmp_path, "naomi.yaml", "post_merge_steps:\n  - cmd: 'b'\n"
+            tmp_path, "merger.yaml", "post_merge_steps:\n  - cmd: 'b'\n"
         )
         self._write_crew_yaml(
-            tmp_path, "amos.yaml", "post_merge_steps:\n  - cmd: 'a'\n"
+            tmp_path, "builder.yaml", "post_merge_steps:\n  - cmd: 'a'\n"
         )
         result = find_crew_yaml_files_declaring_post_merge_steps(tmp_path)
         assert result == [
-            str(tmp_path / ".crew" / "amos.yaml"),
-            str(tmp_path / ".crew" / "naomi.yaml"),
+            str(tmp_path / ".crew" / "builder.yaml"),
+            str(tmp_path / ".crew" / "merger.yaml"),
         ]
 
 
