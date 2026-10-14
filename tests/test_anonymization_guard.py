@@ -1284,3 +1284,117 @@ def test_deployment_vocabulary_guard_catches_doc_shapes(line: str, tmp_path: Pat
     bad_doc = tmp_path / "synthetic.md"
     bad_doc.write_text(line)
     assert _check_patterns(bad_doc, DEPLOYMENT_VOCABULARY_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# TEST FIXTURE-DATA CAST-NAME GUARD -- CLAUDE.md hard rules 1 and 6: the suite
+# must pass with a synthetic registry and invented agent names, so a test that
+# exercises a caller, reviewer or role identity uses an invented name
+# (agent-alpha, agent-bravo, ...) rather than a deployment's real cast name.
+#
+# Scope: string constants under tests/ (fixture data: callers, logins, role
+# keys, yaml text, file names). The deny list is AGENT_ROLE_IDENTIFIERS above
+# (the guard's own list, never deployment config), matched by the same
+# word-boundary and underscore-adjacent pattern the src/ guard uses.
+# Docstrings are structurally exempt (_walk_user_facing_strings) and comments
+# are not scanned: both are contributor-facing provenance prose, not fixture
+# data.
+# ---------------------------------------------------------------------------
+
+#: Test files exempt from the fixture-data cast-name guard, each with the
+#: reason. Named, never a glob, so a new file is scanned by default.
+CAST_NAME_FIXTURE_EXEMPT_FILES: dict[str, str] = {
+    "tests/test_anonymization_guard.py": "the names are this guard's own deny patterns",
+    "tests/test_guard_role_allowlist.py": "asserts role enums carry no cast name; the names are its deny list",
+    "tests/test_guard_role_allowlist_se2.py": "asserts role enums carry no cast name; the names are its deny list",
+    "tests/test_guard_role_allowlist_se3.py": "asserts role enums carry no cast name; the names are its deny list",
+    "tests/test_guard_role_allowlist_se4.py": "asserts role enums carry no cast name; the names are its deny list",
+    "tests/test_guard_write_scope.py": "asserts role enums carry no cast name; the names are its deny list",
+    # TODO(lr-69ffbd): drop these entries as the legacy caller-derived
+    # identity and attestation paths are rewritten or deleted, which removes
+    # their cast-name fixtures with them.
+    "tests/test_transport_attestation.py": "pending legacy deletion",
+    "tests/test_transport_attestation_bound.py": "pending legacy deletion",
+    "tests/test_push_agent_identity.py": "pending legacy deletion",
+    "tests/test_merge_reviewer_login.py": "pending legacy deletion",
+    "tests/test_transport_github_app_config.py": "pending legacy deletion",
+    "tests/test_declared_role_resolution.py": "pending legacy deletion",
+}
+
+_CAST_NAME_PATTERN: dict[str, re.Pattern[str]] = {
+    "deployment cast name in test fixture data": PRODUCT_CODE_PATTERNS[
+        "internal agent-role identifier"
+    ],
+}
+
+
+def _check_cast_names_in_fixture_strings(path: Path) -> list[str]:
+    """One violation per non-docstring string constant in *path* that carries
+    a cast name, formatted like `_check_patterns`."""
+    try:
+        display_path = path.relative_to(REPO_ROOT)
+    except ValueError:
+        display_path = path
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    violations = []
+    for const in _walk_user_facing_strings(tree):
+        for label, pattern in _CAST_NAME_PATTERN.items():
+            if pattern.search(const.value):
+                snippet = const.value.strip().replace("\n", " ")[:120]
+                violations.append(f"{display_path}:{const.lineno}: [{label}] {snippet}")
+    return violations
+
+
+def _test_files_under_cast_name_guard() -> list[Path]:
+    return [
+        p
+        for p in _tracked_files("tests", suffixes=(".py",))
+        if str(p.relative_to(REPO_ROOT)) not in CAST_NAME_FIXTURE_EXEMPT_FILES
+    ]
+
+
+@pytest.mark.parametrize(
+    "path",
+    _test_files_under_cast_name_guard(),
+    ids=lambda p: str(p.relative_to(REPO_ROOT)),
+)
+def test_test_fixture_strings_carry_no_deployment_cast_names(path: Path) -> None:
+    violations = _check_cast_names_in_fixture_strings(path)
+    assert not violations, "\n" + "\n".join(violations)
+
+
+def test_cast_name_fixture_exemptions_name_real_files() -> None:
+    """A stale exemption (the file was renamed or deleted) would silently
+    stop exempting nothing and hide that the list needs pruning."""
+    missing = [rel for rel in CAST_NAME_FIXTURE_EXEMPT_FILES if not (REPO_ROOT / rel).is_file()]
+    assert not missing, f"exempt files no longer exist: {missing}"
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'CALLERS = ["amos", "agent-bravo"]\n',
+        'LOGIN = "peaches-login"\n',
+        'NAME = "BOBBIE"\n',
+        'YAML = "roles:\\n  naomi: x\\n"\n',
+        'FILE = "holden.yaml"\n',
+        'KEY = "reviewer_miller_slug"\n',
+    ],
+)
+def test_cast_name_fixture_guard_catches_fixture_data(source: str, tmp_path: Path) -> None:
+    bad_file = tmp_path / "synthetic_cast_bad.py"
+    bad_file.write_text(source)
+    assert _check_cast_names_in_fixture_strings(bad_file), source
+
+
+def test_cast_name_fixture_guard_ignores_docstrings_comments_and_invented_names(
+    tmp_path: Path,
+) -> None:
+    clean_file = tmp_path / "synthetic_cast_ok.py"
+    clean_file.write_text(
+        '"""Module docstring that names amos as provenance."""\n'
+        "# a comment naming peaches\n"
+        'CALLERS = ["agent-alpha", "agent-bravo", "agent-charlie"]\n'
+        'WORD = "amosphere"\n'
+    )
+    assert _check_cast_names_in_fixture_strings(clean_file) == []

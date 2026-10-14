@@ -3162,7 +3162,7 @@ class TestCrewCallerDerivedIdentity:
     def test_caller_derives_identity_with_no_builder_identity_config(
         self, tmp_path, monkeypatch
     ):
-        """Acceptance criterion 1: --caller amos, NO builder_identity:
+        """Acceptance criterion 1: --caller agent-alpha, NO builder_identity:
         config, NO local git identity flags -- the pushed commit's author
         resolves to the derived bot identity, not the ambient git author."""
         repo, remote = _repo_with_directly_resolvable_remote(tmp_path)
@@ -3173,9 +3173,9 @@ class TestCrewCallerDerivedIdentity:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  slugs:\n"
-            "    amos: some-builder-app\n"
+            "    agent-alpha: some-builder-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3185,7 +3185,7 @@ class TestCrewCallerDerivedIdentity:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=provider,
             opener=opener,
@@ -3211,7 +3211,7 @@ class TestCrewCallerDerivedIdentity:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3221,7 +3221,7 @@ class TestCrewCallerDerivedIdentity:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=_RefusingTokenProvider(),
             builder_identity_config_root=config_root,
@@ -3262,9 +3262,9 @@ class TestCrewCallerDerivedIdentity:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  slugs:\n"
-            "    amos: some-builder-app\n"
+            "    agent-alpha: some-builder-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3273,14 +3273,14 @@ class TestCrewCallerDerivedIdentity:
         code = verb.main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=provider,
             opener=opener,
             builder_identity_config_root=config_root,
         )
         assert code == verb.EXIT_OK
-        assert provider.resolved_for == ["amos"]
+        assert provider.resolved_for == ["agent-alpha"]
 
         r = subprocess.run(
             ["git", "log", "-1", "--format=%ae", "refs/heads/feature"],
@@ -3301,9 +3301,9 @@ class TestCrewCallerDerivedIdentity:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  slugs:\n"
-            "    amos: some-builder-app\n"
+            "    agent-alpha: some-builder-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3313,7 +3313,7 @@ class TestCrewCallerDerivedIdentity:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
                 "--bot-name", "CLI Bot", "--bot-email", "cli-bot@example.com",
             ],
             token_provider=provider,
@@ -3343,9 +3343,9 @@ class TestCrewCallerDerivedIdentity:
             "  email: config-bot@example.com\n"
             "github_app:\n"
             "  slugs:\n"
-            "    amos: some-builder-app\n"
+            "    agent-alpha: some-builder-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3355,7 +3355,7 @@ class TestCrewCallerDerivedIdentity:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=provider,
             opener=opener,
@@ -3386,9 +3386,9 @@ class TestCrewCallerDerivedIdentity:
             "  email: config-bot@example.com\n"
             "github_app:\n"
             "  slugs:\n"
-            "    amos: some-builder-app\n"
+            "    agent-alpha: some-builder-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3432,7 +3432,7 @@ class TestCrewCallerDerivedIdentity:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=provider,
             opener=opener,
@@ -3481,9 +3481,9 @@ class TestProviderVerifiedIdentityTier:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  slugs:\n"
-            "    amos: config-app\n"
+            "    agent-alpha: config-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3493,7 +3493,7 @@ class TestProviderVerifiedIdentityTier:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=provider,
             opener=opener,
@@ -3523,9 +3523,9 @@ class TestProviderVerifiedIdentityTier:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  slugs:\n"
-            "    amos: config-app\n"
+            "    agent-alpha: config-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3535,7 +3535,7 @@ class TestProviderVerifiedIdentityTier:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=provider,
             opener=opener,
@@ -3564,9 +3564,9 @@ class TestProviderVerifiedIdentityTier:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  slugs:\n"
-            "    amos: config-app\n"
+            "    agent-alpha: config-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3576,7 +3576,7 @@ class TestProviderVerifiedIdentityTier:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=provider,
             opener=opener,
@@ -3629,9 +3629,9 @@ class TestProviderVerifiedIdentityTier:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  slugs:\n"
-            "    amos: config-app\n"
+            "    agent-alpha: config-app\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3641,7 +3641,7 @@ class TestProviderVerifiedIdentityTier:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
                 "--bot-name", "CLI Bot", "--bot-email", "cli-bot@example.com",
             ],
             token_provider=provider,
@@ -3670,7 +3670,7 @@ class TestProviderVerifiedIdentityTier:
         (config_root / "config.yaml").write_text(
             "github_app:\n"
             "  callers:\n"
-            "    - amos\n"
+            "    - agent-alpha\n"
         )
 
         monkeypatch.setattr(
@@ -3680,7 +3680,7 @@ class TestProviderVerifiedIdentityTier:
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--caller", "amos", "--title", "feat: t", "--body-stdin",
+                "--caller", "agent-alpha", "--title", "feat: t", "--body-stdin",
             ],
             token_provider=_RefusingTokenProvider(),
             builder_identity_config_root=config_root,

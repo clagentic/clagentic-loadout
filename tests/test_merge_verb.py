@@ -380,16 +380,16 @@ class TestBareReviewerNameResolution:
 
     def test_bare_name_on_forgejo_resolves_to_bare_login_and_gates_clean(self):
         # (a) bare name on forgejo resolves to the bare login and gates
-        # correctly: the comment must be authored by literally "peaches".
-        block = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
-        argv = _base_args(**{"--required-reviewer": "peaches"})
+        # correctly: the comment must be authored by literally "agent-bravo".
+        block = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
+        argv = _base_args(**{"--required-reviewer": "agent-bravo"})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
                 pr_info={"head": {"sha": _FULL_SHA}, "title": "feat: x"},
-                comments=[{"id": 1, "user": {"login": "peaches"}, "body": block}],
+                comments=[{"id": 1, "user": {"login": "agent-bravo"}, "body": block}],
             ),
         )
         assert code == verb.EXIT_OK
@@ -406,9 +406,9 @@ class TestBareReviewerNameResolution:
         # (c) explicit name:login still works (override/back-compat path),
         # even where the bare-name derivation would have produced a
         # DIFFERENT login (forgejo's bare-name-is-login rule would have
-        # expected "peaches"; this pins a different literal login instead).
-        block = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
-        argv = _base_args(**{"--required-reviewer": "peaches:pinned-login"})
+        # expected "agent-bravo"; this pins a different literal login instead).
+        block = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
+        argv = _base_args(**{"--required-reviewer": "agent-bravo:pinned-login"})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
@@ -422,11 +422,11 @@ class TestBareReviewerNameResolution:
 
     def test_bare_name_anti_spoof_binding_still_holds(self):
         # (e) the anti-spoof binding still holds -- a comment authored by a
-        # non-matching login (an attacker claiming to be "peaches" inside
+        # non-matching login (an attacker claiming to be "agent-bravo" inside
         # the verdict block's own reviewer field) does NOT satisfy the gate,
         # even though the block content itself is well-formed and clean.
-        block = build_verdict_block("peaches", "clean", _FULL_SHA, 1)
-        argv = _base_args(**{"--required-reviewer": "peaches"})
+        block = build_verdict_block("agent-bravo", "clean", _FULL_SHA, 1)
+        argv = _base_args(**{"--required-reviewer": "agent-bravo"})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),

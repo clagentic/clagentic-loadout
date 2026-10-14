@@ -393,14 +393,14 @@ class TestReadAndConsumeRegression:
         # must never read it as if it were its own.
         env = {"TMPDIR": str(tmp_path)}
         body_env.stage_caller_body(
-            caller="peaches",
-            body_bytes=b'{"body": "BOBBIE - clean: archivist_client.py review."}',
+            caller="agent-bravo",
+            body_bytes=b'{"body": "REVIEWER - clean: client.py review."}',
             target_pr=100,
             env=env,
         )
 
         with pytest.raises(body_env.BodyEnvError) as exc_info:
-            body_env.read_caller_body_bytes(caller="peaches", expect_target_pr=200, env=env)
+            body_env.read_caller_body_bytes(caller="agent-bravo", expect_target_pr=200, env=env)
         assert "different PR" in str(exc_info.value)
 
 

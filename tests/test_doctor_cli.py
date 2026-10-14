@@ -102,7 +102,7 @@ def _repo_with_dead_foreign_steps(tmp_path):
     repo_root = tmp_path / "repo"
     crew_dir = repo_root / ".crew"
     crew_dir.mkdir(parents=True)
-    (crew_dir / "amos.yaml").write_text(
+    (crew_dir / "builder.yaml").write_text(
         "post_merge_steps:\n  - cmd: 'make install'\n", encoding="utf-8"
     )
     return repo_root

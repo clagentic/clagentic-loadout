@@ -201,26 +201,26 @@ class TestStagesBodyAndStamp:
         assert stamp["head_sha"] == "deadbeef"
 
     def test_two_different_callers_stage_to_two_different_paths(self, monkeypatch):
-        monkeypatch.setattr("sys.stdin.buffer.read", lambda: b'{"body": "peaches body"}')
-        assert stage_body_verb.main(["--caller", "peaches", "--target-pr", "1"]) == 0
+        monkeypatch.setattr("sys.stdin.buffer.read", lambda: b'{"body": "bravo body"}')
+        assert stage_body_verb.main(["--caller", "agent-bravo", "--target-pr", "1"]) == 0
 
-        monkeypatch.setattr("sys.stdin.buffer.read", lambda: b'{"body": "bobbie body"}')
-        assert stage_body_verb.main(["--caller", "bobbie", "--target-pr", "1"]) == 0
+        monkeypatch.setattr("sys.stdin.buffer.read", lambda: b'{"body": "charlie body"}')
+        assert stage_body_verb.main(["--caller", "agent-charlie", "--target-pr", "1"]) == 0
 
-        peaches_body = body_env.resolve_caller_body_path(caller="peaches").read_bytes()
-        bobbie_body = body_env.resolve_caller_body_path(caller="bobbie").read_bytes()
-        assert peaches_body == b'{"body": "peaches body"}'
-        assert bobbie_body == b'{"body": "bobbie body"}'
+        bravo_body = body_env.resolve_caller_body_path(caller="agent-bravo").read_bytes()
+        charlie_body = body_env.resolve_caller_body_path(caller="agent-charlie").read_bytes()
+        assert bravo_body == b'{"body": "bravo body"}'
+        assert charlie_body == b'{"body": "charlie body"}'
 
 
 class TestEndToEndWithReadSide:
     """The exact regression this task fixes: stage via loadout-stage-body,
     then read via the lr-becdef read-and-consume + identity-stamp API.
     Proves BOTH reviewer roles succeed identically -- no reviewer-specific
-    branch anywhere in the stage verb, so PEACHES and BOBBIE (or any other
+    branch anywhere in the stage verb, so any two reviewer callers (or any other
     role) get the same deterministic outcome."""
 
-    @pytest.mark.parametrize("caller", ["peaches", "bobbie"])
+    @pytest.mark.parametrize("caller", ["agent-bravo", "agent-charlie"])
     def test_stage_then_read_succeeds_for_any_caller(self, caller, monkeypatch):
         monkeypatch.setattr(
             "sys.stdin.buffer.read",
