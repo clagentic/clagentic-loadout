@@ -1224,11 +1224,22 @@ def _describe_ci_disposition(ci_result: ci_status.CiStatusResult) -> str:
             "no CI found at head (no-runner-by-design: 0 commit-status entries, "
             "0 check-runs; source=none)"
         )
+    if ci_result.combined_state_is_evidence:
+        combined = f"combined_state={ci_result.combined_state!r}"
+    else:
+        # The host rolls up zero statuses as "pending"; printing that bare read
+        # as the gate's verdict. The check-runs decide in this shape.
+        combined = (
+            f"combined_state={ci_result.combined_state!r} (ignored: 0 commit "
+            f"statuses, so the check-runs decide)"
+        )
+    unfinished = ci_result.unfinished_check_names
+    unfinished_note = f"; unfinished check-runs={list(unfinished)!r}" if unfinished else ""
     return (
-        f"combined_state={ci_result.combined_state!r} "
+        f"{combined} "
         f"({ci_result.status_count} status(es), "
         f"{len(ci_result.check_runs)} run(s); "
-        f"source={ci_result.source})"
+        f"source={ci_result.source}{unfinished_note})"
     )
 
 

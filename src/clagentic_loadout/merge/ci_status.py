@@ -30,7 +30,12 @@ THE GATE DECISION (explicit, not an accidental fall-through):
   - Statuses present => the combined state must be "success".
   - Check-runs present => each check name must be green (see below).
   - Anything pending, unrecognized or failing refuses: a gate cannot authorize
-    a merge against CI that has not conclusively passed.
+    a merge against CI that has not conclusively passed. The gate refuses
+    rather than waits: the refusal names each unfinished check and the caller
+    retries once CI settles, so no unbounded or hidden wait sits in a merge.
+  - A combined state with no commit statuses behind it (GitHub reports
+    `pending` for a bare commit) is not evidence in either direction; the
+    check-runs alone decide, and with none the head is the no-CI pass above.
 
 WHICH CHECK NAMES GATE. With no `required_checks`, every check-run name present
 at HEAD gates. With `required_checks` (a list read from TRUSTED configuration —
@@ -142,6 +147,19 @@ class CiStatusResult:
         """True iff there is NO HEAD-scoped CI evidence: no commit-status
         entries and no check-runs."""
         return not self.statuses and not self.check_runs
+
+    @property
+    def combined_state_is_evidence(self) -> bool:
+        """False when the combined rollup stands on no commit statuses. GitHub
+        reports `pending` for a commit with zero statuses, so the rollup says
+        nothing there and the verdict comes from the check-runs alone."""
+        return bool(self.statuses)
+
+    @property
+    def unfinished_check_names(self) -> tuple[str, ...]:
+        """Names of check-runs that have not completed, in first-seen order."""
+        names = (run.name for run in self.check_runs if run.status != _RUN_COMPLETED)
+        return tuple(dict.fromkeys(names))
 
     @property
     def source(self) -> str:
@@ -270,7 +288,7 @@ def check_ci_status(
         problems = _required_problems(result, required)
     else:
         problems = []
-        if result.status_count > 0 and result.combined_state != _SUCCESS_STATE:
+        if result.combined_state_is_evidence and result.combined_state != _SUCCESS_STATE:
             seen = result.combined_state or "<no combined state reported despite non-empty CI evidence>"
             problems.append(f"combined commit-status state={seen!r}")
         problems.extend(_all_check_problems(result))
