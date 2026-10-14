@@ -12,7 +12,7 @@ import pytest
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.errors import VerdictBlockingError, VerdictMissingError
-from clagentic_loadout.merge.fence_precedence import select_passed_fence
+from clagentic_loadout.merge.fence_precedence import NO_MESSAGE, first_line, select_passed_fence
 from clagentic_loadout.merge.verdict import build_verdict_block, read_reviewer_verdict
 from clagentic_loadout.review.evaluate import EVALUATOR_VERSION
 from clagentic_loadout.review.evaluation import finding_state_id
@@ -171,6 +171,92 @@ class TestBehaviourWithoutAPassedFenceIsUnchanged:
 
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
         assert "invalid JSON" in err
+
+
+class TestEvaluationRecord:
+    """What is recorded as the gate's evaluation for a role."""
+
+    @staticmethod
+    def _spy(monkeypatch):
+        computed, recorded = [], []
+        real_evaluate = verb.evaluate_at_gate
+
+        def evaluate(candidate, *args, **kwargs):
+            result = real_evaluate(candidate, *args, **kwargs)
+            computed.append((candidate.comment_id, result))
+            return result
+
+        monkeypatch.setattr(verb, "evaluate_at_gate", evaluate)
+        monkeypatch.setattr(
+            verb, "_record_gate_evaluation", lambda target, evaluation: recorded.append(evaluation)
+        )
+        return computed, recorded
+
+    def test_no_standing_fence_records_the_newest_fences_evaluation(self, capsys, monkeypatch):
+        computed, recorded = self._spy(monkeypatch)
+
+        code, _, _, _ = _run([_comment(1, "blocking"), _comment(2, "blocking")], capsys)
+
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        newest = dict(computed)[2]
+        assert len(recorded) == 1 and recorded[0] is newest
+
+    def test_a_standing_older_fence_records_its_own_evaluation(self, capsys, monkeypatch):
+        computed, recorded = self._spy(monkeypatch)
+
+        code, _, _, _ = _run([_comment(1, "clean"), _comment(2, "blocking")], capsys)
+
+        assert code == verb.EXIT_OK
+        standing = dict(computed)[1]
+        assert len(recorded) == 1 and recorded[0] is standing
+
+    def test_a_single_passing_fence_records_one_evaluation(self, capsys, monkeypatch):
+        computed, recorded = self._spy(monkeypatch)
+
+        code, _, _, _ = _run([_comment(1, "clean")], capsys)
+
+        assert code == verb.EXIT_OK
+        assert len(recorded) == 1 and recorded[0] is dict(computed)[1]
+
+
+class TestPassedOverNotices:
+    def test_an_empty_refusal_message_does_not_abort_the_verb(self, capsys, monkeypatch):
+        real = verb.verdict.assert_clean_verdict
+
+        def refuse_newest(candidate, reviewer_name):
+            if candidate.comment_id == 2:
+                raise VerdictBlockingError("")
+            return real(candidate, reviewer_name)
+
+        monkeypatch.setattr(verb.verdict, "assert_clean_verdict", refuse_newest)
+
+        code, err, _, _ = _run([_comment(1, "clean"), _comment(2, "clean")], capsys)
+
+        assert code == verb.EXIT_OK, err
+        assert f"({NO_MESSAGE})" in err
+        assert "comment_id=1" in err
+
+    def test_first_line_of_a_message(self):
+        assert first_line(VerdictBlockingError("one\ntwo")) == "one"
+        assert first_line(VerdictBlockingError("\n  one\ntwo")) == "one"
+        assert first_line(VerdictBlockingError("")) == NO_MESSAGE
+        assert first_line(VerdictBlockingError("  \n ")) == NO_MESSAGE
+
+    def test_a_candidates_evaluation_notice_names_its_comment(self, capsys, monkeypatch):
+        real = verb.evaluate_at_gate
+
+        def noisy(candidate, *args, **kwargs):
+            result = real(candidate, *args, **kwargs)
+            object.__setattr__(result, "notices", ("recomputed at the live base",))
+            return result
+
+        monkeypatch.setattr(verb, "evaluate_at_gate", noisy)
+
+        code, err, _, _ = _run([_comment(1, "clean"), _comment(2, "blocking")], capsys)
+
+        assert code == verb.EXIT_OK, err
+        assert "NOTICE -- comment #2: recomputed at the live base" in err
+        assert "NOTICE -- comment #1: recomputed at the live base" in err
 
 
 class TestRolesAreIndependent:

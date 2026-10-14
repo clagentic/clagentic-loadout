@@ -65,6 +65,19 @@ class PassedFence(Generic[T]):
     passed_over: tuple[tuple[Any, Exception], ...] = ()
 
 
+#: Shown in place of a refusal's first line when its message is empty.
+NO_MESSAGE = "no message"
+
+
+def first_line(refusal: Exception) -> str:
+    """The first non-blank line of a refusal's message, or NO_MESSAGE when it
+    has none, so naming a passed-over fence can never raise."""
+    for line in str(refusal).splitlines():
+        if line.strip():
+            return line.strip()
+    return NO_MESSAGE
+
+
 def select_passed_fence(
     read: Callable[[Collection[Any]], ReviewerVerdict],
     check: Callable[[ReviewerVerdict], T],
@@ -102,4 +115,4 @@ def select_passed_fence(
         return PassedFence(verdict, result, tuple(passed_over))
 
 
-__all__ = ["PassedFence", "select_passed_fence"]
+__all__ = ["NO_MESSAGE", "PassedFence", "first_line", "select_passed_fence"]

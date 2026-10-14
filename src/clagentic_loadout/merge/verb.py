@@ -531,7 +531,7 @@ from clagentic_loadout.merge.errors import (
     VerdictScannerFailedError,
     VerdictStaleError,
 )
-from clagentic_loadout.merge.fence_precedence import select_passed_fence
+from clagentic_loadout.merge.fence_precedence import first_line, select_passed_fence
 from clagentic_loadout.merge.gate_evaluation import GateEvaluation, evaluate_at_gate
 from clagentic_loadout.merge.merge_readback import verify_merge_landed
 from clagentic_loadout.merge.model_attestation import (
@@ -754,6 +754,10 @@ class MergeVerbError(Exception):
 
 def _fail(message: str, code: int) -> None:
     raise MergeVerbError(message, code)
+
+
+def _record_gate_evaluation(gate_evaluations: list, evaluation: GateEvaluation) -> None:
+    gate_evaluations.append(evaluation)
 
 
 # ---------------------------------------------------------------------------
@@ -1623,9 +1627,19 @@ def _run(
                     exclude_comment_ids=excluded,
                 )
 
+            # Evaluations by comment id, in the order the candidates were
+            # checked (newest first).
+            candidate_evaluations: dict = {}
+
             def check_fence(
-                candidate, reviewer_name=reviewer_name, required_scanners=required_scanners
+                candidate,
+                reviewer_name=reviewer_name,
+                required_scanners=required_scanners,
+                candidate_evaluations=candidate_evaluations,
             ):
+                # Placeholder first, so the newest candidate stays first even
+                # when its own evaluation raises before it is recorded.
+                candidate_evaluations[candidate.comment_id] = None
                 for ignored_id, ignored_reason in candidate.ignored_earlier_fences:
                     print(
                         f"merge: WARNING -- earlier comment #{ignored_id} from {reviewer_name!r} "
@@ -1645,8 +1659,15 @@ def _run(
                     visibility=host_visibility,
                     evaluator=repo_gate.evaluator,
                 )
+                # Recorded as soon as it is computed, as it always was, so a
+                # fence refused by a later check below still has its
+                # evaluation carried when no fence at the head stands.
+                candidate_evaluations[candidate.comment_id] = evaluation
                 for evaluation_notice in evaluation.notices:
-                    print(f"merge: NOTICE -- {evaluation_notice}", file=sys.stderr)
+                    print(
+                        f"merge: NOTICE -- comment #{candidate.comment_id}: {evaluation_notice}",
+                        file=sys.stderr,
+                    )
                 # A fence the evaluator computed as anything but CLEAN carries
                 # status blocking by construction; reaching here means the gate
                 # passed that outcome on a trusted basis, so the status is not
@@ -1658,7 +1679,8 @@ def _run(
                 if candidate.unresolved_prior_findings:
                     prior_ids = ", ".join(f["id"] for f in candidate.unresolved_prior_findings)
                     print(
-                        f"merge: NOTICE -- {reviewer_name.upper()} has earlier-fence finding(s) "
+                        f"merge: NOTICE -- {reviewer_name.upper()} comment "
+                        f"#{candidate.comment_id} has earlier-fence finding(s) "
                         f"not cleared at this head: {prior_ids}. They do not refuse the merge; "
                         f"the latest verdict at the head decides.",
                         file=sys.stderr,
@@ -1666,7 +1688,10 @@ def _run(
                 for scanner_warning in verdict.check_required_scanners(
                     candidate, reviewer_name, required_scanners
                 ):
-                    print(f"merge: WARNING -- {scanner_warning}", file=sys.stderr)
+                    print(
+                        f"merge: WARNING -- comment #{candidate.comment_id}: {scanner_warning}",
+                        file=sys.stderr,
+                    )
                 # lr-95543d: mirrors assert_clean_verdict's disposition --
                 # a clean verdict lacking genuine attestation refuses the
                 # merge exactly like a blocking one. No-op when
@@ -1683,12 +1708,12 @@ def _run(
                 # supersede a fence the gate passes at that head.
                 settled = select_passed_fence(read_fence, check_fence, _FENCE_REFUSALS)
                 verdict_obj = settled.verdict
-                gate_evaluations.append(settled.result)
+                _record_gate_evaluation(gate_evaluations, settled.result)
                 for passed_over_id, refusal in settled.passed_over:
                     print(
                         f"merge: NOTICE -- {reviewer_name.upper()} comment #{passed_over_id} at "
                         f"head {verdict_obj.head_sha} was refused "
-                        f"({str(refusal).splitlines()[0]}) but does not supersede the passed "
+                        f"({first_line(refusal)}) but does not supersede the passed "
                         f"verdict in comment #{verdict_obj.comment_id} at the same head; the "
                         f"gate result at this head stays the passed one.",
                         file=sys.stderr,
@@ -1707,6 +1732,11 @@ def _run(
                 ModelAttestationMissingError,
                 ModelAttestationInvalidError,
             ) as exc:
+                # With no fence standing at the head, the newest fence's
+                # evaluation is carried exactly as when it was the only one.
+                newest_evaluation = next(iter(candidate_evaluations.values()), None)
+                if newest_evaluation is not None:
+                    _record_gate_evaluation(gate_evaluations, newest_evaluation)
                 from_repo_gate = reviewer_name in floor_only_reviewers or (
                     isinstance(exc, VerdictScannerFailedError)
                 )
