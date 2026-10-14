@@ -69,8 +69,11 @@ def validate_pre_checks_sandbox(value: object, *, source: str = "user-level conf
         or not value
         or not all(isinstance(part, str) and part for part in value)
     ):
+        # Only the shape is named: the value's elements may carry a secret and
+        # this text reaches stderr and the doctor report.
+        shape = f"a list of {len(value)}" if isinstance(value, list) else f"a {type(value).__name__}"
         raise PreChecksSandboxConfigError(
-            f"{label} must be a non-empty list of non-empty strings, got {value!r}."
+            f"{label} must be a non-empty list of non-empty strings, got {shape}."
         )
     launcher = value[0]
     if not os.path.isabs(launcher):

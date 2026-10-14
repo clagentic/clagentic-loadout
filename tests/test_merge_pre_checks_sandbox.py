@@ -548,6 +548,47 @@ class TestDoctor:
         assert result.resolved["argv0"] == str(launcher_path)
         assert str(launcher_path) in result.summary
 
+    _SECRET = "synthetic-secret-token-0123456789"
+
+    def _assert_no_secret(self, result) -> None:
+        assert self._SECRET not in result.summary
+        assert self._SECRET not in json.dumps(result.resolved, default=str)
+        assert set(result.resolved) == {"config_root", "configured", "argv0"}
+
+    def test_a_secret_shaped_sandbox_argument_never_appears_in_the_report(
+        self, tmp_path, launcher, capsys
+    ):
+        from clagentic_loadout.doctor.cli import main as doctor_main
+
+        launcher_path, _ = launcher
+        argv = [str(launcher_path), "--token", self._SECRET, f"--env=TOKEN={self._SECRET}"]
+        _write_user_config(tmp_path / "cfg", {CONFIG_KEY_PRE_CHECKS_SANDBOX: argv})
+        result = check_pre_checks_sandbox(config_root=tmp_path / "cfg")
+        assert result.ok and result.resolved["configured"] is True
+        self._assert_no_secret(result)
+        doctor_main(["--config-root", str(tmp_path / "cfg")])
+        captured = capsys.readouterr()
+        assert self._SECRET not in captured.out + captured.err
+
+    @pytest.mark.parametrize("shape", ["bad-argv0", "empty-element", "not-a-list"])
+    def test_a_secret_in_an_invalid_value_never_appears_in_the_report(
+        self, tmp_path, capsys, shape
+    ):
+        from clagentic_loadout.doctor.cli import main as doctor_main
+
+        value = {
+            "bad-argv0": ["/nonexistent/sandbox", self._SECRET],
+            "empty-element": ["", self._SECRET],
+            "not-a-list": self._SECRET,
+        }[shape]
+        _write_user_config(tmp_path / "cfg", {CONFIG_KEY_PRE_CHECKS_SANDBOX: value})
+        result = check_pre_checks_sandbox(config_root=tmp_path / "cfg")
+        assert not result.ok
+        self._assert_no_secret(result)
+        doctor_main(["--config-root", str(tmp_path / "cfg")])
+        captured = capsys.readouterr()
+        assert self._SECRET not in captured.out + captured.err
+
     def test_an_invalid_value_fails(self, tmp_path):
         _write_user_config(tmp_path / "cfg", {CONFIG_KEY_PRE_CHECKS_SANDBOX: ["/nonexistent/sandbox"]})
         result = check_pre_checks_sandbox(config_root=tmp_path / "cfg")

@@ -1518,7 +1518,7 @@ def check_pre_checks_sandbox(*, config_root: str | Path | None = None) -> CheckR
         name="pre_checks_sandbox",
         ok=True,
         summary=f"{CONFIG_SECTION_MERGE}.{CONFIG_KEY_PRE_CHECKS_SANDBOX} configured; argv0={sandbox[0]}",
-        resolved={**resolved, "configured": True, "argv0": sandbox[0], "argv": list(sandbox)},
+        resolved={**resolved, "configured": True, "argv0": sandbox[0]},
     )
 
 
