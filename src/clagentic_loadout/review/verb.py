@@ -183,7 +183,7 @@ from clagentic_loadout.review.contract import (
     validate_review_findings_body_stdin_content,
     validate_review_verdict_body_stdin_content,
 )
-from clagentic_loadout.review.dropped_overlap import overlap_message, overlapping_ids
+from clagentic_loadout.review.dropped_overlap import drop_overlapping
 from clagentic_loadout.review.errors import (
     DeleteOwnCommentRefusedError,
     PlatformMismatchError,
@@ -1118,15 +1118,16 @@ def _run(
             )
         except ReviewBodyStdinEmptyError as exc:
             _fail(_maybe_augment(str(exc), args), code=EXIT_VERDICT_BLOCK_USAGE)
+        # Direct callers of this verb stage findings and dropped themselves, so
+        # a dropped candidate is removed from the findings here as well as in
+        # loadout-review post, before anything is derived from them.
+        verdict_findings = drop_overlapping(
+            verdict_findings, findings_state.get(KEY_DROPPED) or [], prog="review-post"
+        )
         # A finding's failure_sequence reaches the fence as well as the body;
         # derived here so the readback below expects exactly what the body
         # builder renders.
         findings_state = with_derived_failure_sequences(findings_state, verdict_findings)
-        # Direct callers of this verb stage findings and dropped themselves, so
-        # the overlap is refused here as well as in loadout-review post.
-        shared = overlapping_ids(verdict_findings, findings_state.get(KEY_DROPPED) or [])
-        if shared:
-            _fail(f"--verdict-findings: {overlap_message(shared)}", code=EXIT_VERDICT_BLOCK_USAGE)
         body = None  # constructed below, entirely from structured fields
     elif args.verdict_review_status is not None:
         try:

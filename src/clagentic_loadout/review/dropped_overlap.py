@@ -2,18 +2,21 @@
 
 A dropped candidate is one the reviewer examined and ruled out. The verdict is
 computed from the findings list alone, so a candidate that is also still in that
-list is scored and can block while the same comment lists it as dropped: the
-posted comment would contradict itself and the gate would act on the half the
-reviewer rejected. Whatever produced the two lists, the post path refuses the
-overlap instead of choosing a side.
+list would be scored and could block while the same comment lists it as dropped:
+the posted comment would contradict itself and the gate would act on the half
+the reviewer rejected. The drop wins: every post path removes such a candidate
+from the findings before anything is evaluated, says so on stderr, and leaves it
+listed under dropped with its reason. Refusing instead would turn a review whose
+producer emits overlapping lists into no post at all.
 
-A finding's identity here is its location and rule, ``file:line:rule_id``, the
-same id the rest of the review path uses. A dropped candidate carries exactly
-those three fields, so the match needs nothing the caller does not already state.
+A candidate is identified by its location and rule, ``file:line:rule_id``, the id
+the rest of the review path uses and which a finding and a dropped candidate both
+carry.
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterable, Mapping
 from typing import Any
 
@@ -23,33 +26,30 @@ def candidate_id(entry: Mapping[str, Any]) -> str:
     return f"{entry.get('file')}:{entry.get('line')}:{entry.get('rule_id')}"
 
 
-def overlapping_ids(
-    findings: Iterable[Mapping[str, Any]], dropped: Iterable[Mapping[str, Any]]
-) -> list[str]:
-    """Ids present in both *findings* and *dropped*, in finding order, each once.
-    Entries that are not mappings are skipped; their own validation reports them."""
+def drop_overlapping(
+    findings: list[dict[str, Any]],
+    dropped: Iterable[Any],
+    *,
+    prog: str = "loadout-review",
+) -> list[dict[str, Any]]:
+    """*findings* without any candidate that is also in *dropped*, order kept.
+    One stderr notice per removed candidate. Entries that are not mappings are
+    left alone; their own validation reports them. With nothing to remove the
+    same list is returned, untouched."""
     dropped_ids = {candidate_id(entry) for entry in dropped if isinstance(entry, Mapping)}
-    seen: set[str] = set()
-    shared: list[str] = []
+    if not dropped_ids:
+        return findings
+    kept: list[dict[str, Any]] = []
     for finding in findings:
-        if not isinstance(finding, Mapping):
+        if isinstance(finding, Mapping) and candidate_id(finding) in dropped_ids:
+            print(
+                f"{prog}: notice: candidate {candidate_id(finding)} is in both --findings "
+                "and --dropped; the drop is honoured",
+                file=sys.stderr,
+            )
             continue
-        found = candidate_id(finding)
-        if found in dropped_ids and found not in seen:
-            seen.add(found)
-            shared.append(found)
-    return shared
+        kept.append(finding)
+    return kept
 
 
-def overlap_message(shared: list[str]) -> str:
-    """The refusal text for a non-empty overlap."""
-    return (
-        f"{len(shared)} candidate(s) are both in the findings and in the dropped list: "
-        + ", ".join(shared)
-        + ". A dropped candidate is not a finding and must not be scored or block. "
-        "Remove each from the findings, or from the dropped list if it should be scored, "
-        "then post again"
-    )
-
-
-__all__ = ["candidate_id", "overlap_message", "overlapping_ids"]
+__all__ = ["candidate_id", "drop_overlapping"]
