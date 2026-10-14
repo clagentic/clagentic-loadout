@@ -135,13 +135,17 @@ unchanged `poll_interval`/`max_polls` budget.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Mapping
 
@@ -497,13 +501,32 @@ def _execution_host() -> str:
 
 
 def _run_verify(
-    verify_cmd, *, cwd: str, env: dict[str, str] | None, timeout: int | float | None, label: str
+    verify_cmd,
+    *,
+    cwd: str,
+    env: dict[str, str] | None,
+    timeout: int | float | None,
+    label: str,
+    wrap: SandboxWrap | None = None,
+    pinned_env: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
     """Run a step's `verify` argv. Returns (confirmed, evidence): evidence is
     the first stdout line on success, or the reason on failure. A timeout or a
-    launch failure is a failed verification, never an uncaught exception."""
+    launch failure is a failed verification, never an uncaught exception.
+
+    *pinned_env* is applied last, over the verify command's own `VAR=VALUE`
+    prefix, so a variable loadout fixed (the sandboxed `TMPDIR`) cannot be
+    re-pointed by the declared command.
+
+    With *wrap* (a sandbox), the verify command's own `VAR=VALUE` prefix is
+    delivered inside the sandbox by the wrapper; the launched sandbox process
+    gets *env* untouched."""
     argv, assignments = _resolve_argv(verify_cmd, step_label=f"{label}.{STEP_KEY_VERIFY}")
-    run_env = {**(env if env is not None else os.environ), **assignments}
+    if wrap is not None:
+        argv = wrap(argv, assignments)
+        run_env = dict(env if env is not None else os.environ)
+    else:
+        run_env = {**(env if env is not None else os.environ), **assignments, **(pinned_env or {})}
     try:
         result = subprocess.run(
             argv,
@@ -523,6 +546,85 @@ def _run_verify(
         return False, f"verify exited {result.returncode}" + (f": {detail[0]}" if detail else "")
     first_line = result.stdout.strip().splitlines()
     return True, first_line[0] if first_line else ""
+
+
+_SANDBOX_PLACEHOLDER_RE = re.compile(r"\{(clone|tmpdir)\}")
+
+
+#: The absolute `env` that delivers a step's `VAR=VALUE` assignments inside the
+#: sandbox. Absolute so no PATH lookup, by the launcher or by anything a
+#: repository controls, can substitute another program.
+SANDBOX_ENV_PROGRAM = "/usr/bin/env"
+
+#: A wrapper: (argv, extra assignments) -> the full sandboxed argv.
+SandboxWrap = Callable[..., list[str]]
+
+
+def _argv_wrapper(
+    argv_prefix: Sequence[str],
+    *,
+    clone: str,
+    tmpdir: str | None,
+    inner_assignments: Mapping[str, str],
+    pinned_env: Mapping[str, str],
+) -> SandboxWrap | None:
+    """A function that puts *argv_prefix* in front of a command's argv, or None
+    when there is no prefix (the argv then stays untouched).
+
+    `{clone}` and `{tmpdir}` are the only substitutions, done in one pass over
+    each prefix element so a substituted value is never expanded again. No
+    shell is involved. Both values are paths loadout itself created (the
+    merge-result clone and the private per-check directory); nothing a step or
+    a deployment override declares is ever substituted, because a repository
+    declares the steps and must not choose what the sandbox binds read-write.
+
+    The sandbox launcher itself is started with loadout-controlled environment
+    only. The step's own `VAR=VALUE` assignments (repository-declared, so
+    `LD_PRELOAD` and every other loader variable among them) travel as argv
+    after the prefix, through `SANDBOX_ENV_PROGRAM`, so they take effect only
+    inside the sandbox. *pinned_env* is applied last so a step cannot re-point
+    it.
+    """
+    if not argv_prefix:
+        return None
+    if tmpdir is None:
+        raise ValueError("a sandbox prefix needs the private per-check directory")
+    values = {"clone": clone, "tmpdir": tmpdir}
+    prefix = [_SANDBOX_PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], part) for part in argv_prefix]
+
+    def wrap(argv: list[str], extra_assignments: Mapping[str, str] | None = None) -> list[str]:
+        if "=" in argv[0]:
+            # `env` would read this token as another assignment and launch the
+            # following argument instead of the declared command.
+            raise PostMergeStepFailedError(
+                "a command whose program name contains '=' cannot run under a sandbox"
+            )
+        assignments = {**inner_assignments, **(extra_assignments or {}), **pinned_env}
+        return [*prefix, SANDBOX_ENV_PROGRAM, *(f"{k}={v}" for k, v in assignments.items()), *argv]
+
+    return wrap
+
+
+@contextlib.contextmanager
+def _private_check_dir(parent: str, *, label: str) -> Iterator[str]:
+    """A fresh mode-0700 directory under *parent*, removed on exit.
+
+    Fails closed: if it cannot be made, the step fails rather than the sandbox
+    being handed some other directory.
+    """
+    try:
+        path = tempfile.mkdtemp(prefix="pre-check-", dir=parent)
+    except OSError as exc:
+        raise PostMergeStepFailedError(
+            f"post-merge {label}: could not create the private check directory under "
+            f"{parent!r} ({exc}); refusing to run the sandboxed command"
+        ) from exc
+    try:
+        yield path
+    finally:
+        # Best effort: a sandboxed process may leave entries this user cannot
+        # remove, and the check's own verdict must not be lost to that.
+        shutil.rmtree(path, ignore_errors=True)
 
 
 def _env_kwarg(env: Mapping[str, str] | None) -> dict:
@@ -555,7 +657,12 @@ def _run_liveness_probe_once(
 
 
 def _capture_liveness_baseline(
-    probe_config: dict, *, cwd: str, label: str, env: Mapping[str, str] | None = None
+    probe_config: dict,
+    *,
+    cwd: str,
+    label: str,
+    env: Mapping[str, str] | None = None,
+    wrap: SandboxWrap | None = None,
 ) -> str:
     """Sample `probe_config['cmd']` ONCE and return its value, to be used as
     the pre-launch baseline `_verify_liveness` compares later samples
@@ -565,6 +672,8 @@ def _capture_liveness_baseline(
     probe_argv, _probe_env_overrides = _resolve_argv(
         probe_config[LIVENESS_PROBE_KEY_CMD], step_label=f"{label}.{STEP_KEY_LIVENESS_PROBE}"
     )
+    if wrap is not None:
+        probe_argv = wrap(probe_argv)
     return _run_liveness_probe_once(probe_argv, cwd=cwd, **_env_kwarg(env))
 
 
@@ -576,6 +685,7 @@ def _verify_liveness(
     cmd_repr: str,
     baseline_sample: str,
     env: Mapping[str, str] | None = None,
+    wrap: SandboxWrap | None = None,
 ) -> None:
     """Poll `probe_config['cmd']` and assert its reported value ADVANCES
     away from *baseline_sample*, within `max_polls` samples total (see
@@ -624,6 +734,8 @@ def _verify_liveness(
     probe_argv, _probe_env_overrides = _resolve_argv(
         probe_config[LIVENESS_PROBE_KEY_CMD], step_label=f"{label}.{STEP_KEY_LIVENESS_PROBE}"
     )
+    if wrap is not None:
+        probe_argv = wrap(probe_argv)
     poll_interval = probe_config.get(
         LIVENESS_PROBE_KEY_POLL_INTERVAL_SECONDS, DEFAULT_LIVENESS_POLL_INTERVAL_SECONDS
     )
@@ -657,6 +769,7 @@ def run_post_merge_steps(
     deployment_env_overrides: dict[str, str] | None = None,
     default_timeout_seconds: int | float | None = None,
     base_env: Mapping[str, str] | None = None,
+    argv_prefix: Sequence[str] = (),
 ) -> None:
     """Execute post_merge_steps IN ORDER inside *project_root*.
 
@@ -773,17 +886,59 @@ def run_post_merge_steps(
     copy (see `merge.pre_check_env`) because it executes PR-head code. Step
     `VAR=VALUE` prefixes and *deployment_env_overrides* layer on top of it.
 
+    `argv_prefix`: a command prefix (a process sandbox) put in front of the
+    argv of every step, `verify` command and liveness probe, so it is the
+    outermost argv. The prefix's own process starts with the base environment
+    plus the private `TMPDIR` only; the step's `VAR=VALUE` prefix and the
+    deployment overrides are delivered inside the sandbox, as `/usr/bin/env`
+    arguments after the prefix. `{clone}` (the step's cwd)
+    and `{tmpdir}` are substituted in it per step. `{tmpdir}` is a private
+    mode-0700 directory loadout creates for each step under the base
+    environment's `TMPDIR` (else the process default), resolved before any step
+    or deployment override; it is also forced as the command's `TMPDIR`, so the
+    sandbox bind and the environment agree and a step's inline `TMPDIR=` cannot
+    choose the bound path. It is removed once the step has run. `()` (the
+    default) leaves every argv, environment and directory exactly as before.
+
     The whole list is validated (`validate_post_merge_steps`) BEFORE any
     step executes, so a malformed step later in the list is caught up front
     rather than after earlier steps already ran with side effects.
     """
     validate_post_merge_steps(steps)
+    with contextlib.ExitStack() as scratch:
+        _execute_steps(
+            steps,
+            project_root,
+            scratch,
+            deployment_env_overrides=deployment_env_overrides,
+            default_timeout_seconds=default_timeout_seconds,
+            base_env=base_env,
+            argv_prefix=argv_prefix,
+        )
+
+
+def _execute_steps(
+    steps: list[dict],
+    project_root: str | Path,
+    scratch: contextlib.ExitStack,
+    *,
+    deployment_env_overrides: dict[str, str] | None,
+    default_timeout_seconds: int | float | None,
+    base_env: Mapping[str, str] | None,
+    argv_prefix: Sequence[str],
+) -> None:
+    """The step loop of `run_post_merge_steps`; *scratch* owns the private
+    per-step directories so they are removed however the loop ends."""
     root = str(project_root)
     host = _execution_host()
     active_deployment_overrides = deployment_env_overrides or {}
     inherited_env = base_env if base_env is not None else os.environ
+    # Resolved once, from the caller's environment, before any step or
+    # deployment override can influence it.
+    check_tmp_parent = (inherited_env.get("TMPDIR") or tempfile.gettempdir()) if argv_prefix else ""
 
     for i, step in enumerate(steps):
+        scratch.close()
         cmd = step["cmd"]
         description = step.get("description", "")
         on_failure = step.get("on_failure", ON_FAILURE_WARN)
@@ -799,17 +954,38 @@ def run_post_merge_steps(
 
         argv, env_overrides = _resolve_argv(cmd, step_label=f"post_merge_steps[{i}]")
         combined_overrides = {**active_deployment_overrides, **env_overrides}
-        step_env = (
-            {**inherited_env, **combined_overrides}
-            if combined_overrides or base_env is not None
+        check_tmp = (
+            scratch.enter_context(_private_check_dir(check_tmp_parent, label=label))
+            if argv_prefix
             else None
         )
+        pinned_env = {} if check_tmp is None else {"TMPDIR": check_tmp}
+        if argv_prefix:
+            # The sandbox launcher starts with loadout-controlled state only
+            # (the base environment plus the private TMPDIR). The step's and
+            # the deployment's assignments are delivered inside the sandbox by
+            # the wrapper, never to the launcher, whatever the variable.
+            step_env = {**inherited_env, **pinned_env}
+        elif combined_overrides or base_env is not None or pinned_env:
+            step_env = {**inherited_env, **combined_overrides, **pinned_env}
+        else:
+            step_env = None
 
         # The probe runs in the step's own environment when the caller chose a
         # base environment. Without one it keeps the inherited process
         # environment it always had, which never saw the step's VAR=VALUE
         # prefixes or the deployment overrides.
-        probe_env = step_env if base_env is not None else None
+        probe_env = step_env if base_env is not None or pinned_env else None
+
+        wrap = _argv_wrapper(
+            argv_prefix,
+            clone=root,
+            tmpdir=check_tmp,
+            inner_assignments=combined_overrides,
+            pinned_env=pinned_env,
+        )
+        if wrap is not None:
+            argv = wrap(argv)
 
         if detaches:
             liveness_probe = step.get(STEP_KEY_LIVENESS_PROBE)
@@ -822,7 +998,7 @@ def run_post_merge_steps(
                 # the race, rather than any adjustment to poll timing after
                 # the fact.
                 baseline_sample = _capture_liveness_baseline(
-                    liveness_probe, cwd=root, label=label, env=probe_env
+                    liveness_probe, cwd=root, label=label, env=probe_env, wrap=wrap
                 )
 
             # lr-53556a: fire-and-forget. No PIPE is ever created for this
@@ -858,6 +1034,7 @@ def run_post_merge_steps(
                     cmd_repr=repr(cmd),
                     baseline_sample=baseline_sample,
                     env=probe_env,
+                    wrap=wrap,
                 )
             continue
 
@@ -932,6 +1109,8 @@ def run_post_merge_steps(
                     env=step_env,
                     timeout=resolved_timeout,
                     label=label,
+                    wrap=wrap,
+                    pinned_env=pinned_env,
                 )
                 if not confirmed:
                     print(
