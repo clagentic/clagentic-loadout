@@ -1953,7 +1953,8 @@ absolute path, and leave daemons running. A deployment that needs those closed
 configures the optional, user-level `merge.pre_checks_sandbox` argv prefix
 (see [docs/provisioning.md](provisioning.md), "Pre-check sandbox", including
 how its `{clone}` and `{tmpdir}` placeholders are fixed by loadout, never by a
-step); without it the checks run exactly as described here. The check gates the merge itself:
+step, and how a step's inline `VAR=VALUE` assignments reach only the sandboxed
+command through `/usr/bin/env`, never the launcher); without it the checks run exactly as described here. The check gates the merge itself:
 an `on_failure: fail` pre_check that exits non-zero (or times out, or a
 `detaches: true` step's `liveness_probe` never confirms) refuses the merge
 (`EXIT_PRE_CHECKS_FAILED`) BEFORE `merge_pr` is ever called. `pre_checks_config`

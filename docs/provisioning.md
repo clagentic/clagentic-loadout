@@ -493,14 +493,23 @@ path holds the credentials to hide, whether the check needs the network).
   therefore cannot choose the read-write path the sandbox binds. Nothing else is
   expanded and no shell is involved.
 - **Where it applies.** The prefix is the outermost argv of every `pre_checks`
-  command, its `verify` command and its `liveness_probe`, applied after a step's
-  inline `VAR=VALUE` prefix is split off, so those variables still reach the
-  launched process. It never applies to `post_merge_steps`.
+  command, its `verify` command and its `liveness_probe`. It never applies to
+  `post_merge_steps`.
+- **Environment of the launcher.** The sandbox launcher process starts with
+  loadout-controlled environment only: the scrubbed base environment plus the
+  private `TMPDIR`. A step's inline `VAR=VALUE` assignments (declared by the
+  repository) and any deployment env overrides are not given to the launcher;
+  they are delivered inside the sandbox as arguments to `/usr/bin/env` placed
+  after the prefix, so a loader variable such as `LD_PRELOAD` cannot run
+  repository code before isolation. The sandbox therefore must allow
+  `/usr/bin/env` to run inside it. A command whose program name contains `=`
+  cannot be passed through `env` and is refused when a sandbox is configured.
 - **Recommended shape.** A read-only view of the host; read-write access only to
   `{clone}` and `{tmpdir}`; a PID namespace so daemons die with the check; no
   credential paths visible.
-- **Fail closed.** The value must be a non-empty list of non-empty strings whose
-  first element is an absolute path to an existing executable. Anything else, an
+- **Fail closed.** The value must be a non-empty list of non-empty strings, none
+  containing a NUL byte, whose first element is an absolute path to an existing
+  executable. Any failure while checking it is the same refusal. Anything else, an
   explicit null included, refuses the merge with `EXIT_PRE_CHECKS_FAILED` naming
   the key, before any check runs. A broken sandbox configuration never degrades
   into running unsandboxed.
