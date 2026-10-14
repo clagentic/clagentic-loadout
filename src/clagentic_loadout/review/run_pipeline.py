@@ -333,6 +333,17 @@ def _notice_ignored_severity(records: dict[int, dict[str, Any]]) -> None:
             )
 
 
+def _notice_reply_problems(records: dict[int, dict[str, Any]]) -> None:
+    """Say on stderr which reply slips were repaired in place, per chunk."""
+    for index, record in sorted(records.items()):
+        problems = record.get("reply_problems")
+        if not isinstance(problems, list):
+            continue
+        for problem in problems:
+            if isinstance(problem, str):
+                print(f"loadout-review: notice: chunk {index}: {problem}", file=sys.stderr)
+
+
 def _resolved_ids_of(record: dict[str, Any]) -> list[str]:
     """The ids a persisted chunk record says its reply resolved; a record
     whose value is not a list of strings resolves nothing."""
@@ -571,6 +582,7 @@ def run_review(
         )
 
     _notice_ignored_severity(records)
+    _notice_reply_problems(records)
     by_index = {chunk.index: chunk for chunk in chunks}
     per_chunk = [
         (index, with_fingerprints(record.get("findings", []), by_index[index]))

@@ -111,6 +111,7 @@ def validate_finding(
     carry_fingerprint: bool = False,
     carry_facts: bool = False,
     reply_contract: bool = False,
+    problems: list[str] | None = None,
 ) -> dict[str, Any]:
     """Validate one finding object and return it in canonical shape.
 
@@ -146,6 +147,16 @@ def validate_finding(
     and is reported, rather than refusing the whole file). Without the flag it is
     dropped like any unknown key, so every existing caller sees the shape it
     always did.
+
+    Under ``reply_contract`` a ``failure_sequence`` the reply placed inside
+    ``facts`` (where the contract does not put it) is moved to the top level when
+    the finding has none there, under the same checks; when the finding has one,
+    the top-level value stands and the nested one is dropped. Either way a line
+    is appended to ``problems`` so the caller can say so. A nested value that
+    fails the checks stays in ``facts``, which the evaluator then rejects like
+    any other unknown key. A move is preferred to a re-prompt: the content is
+    unambiguous and a re-prompt spends a whole chunk call on a slip that loses
+    nothing.
     """
     if not isinstance(item, dict):
         raise InvalidReplyError(f"finding {position} is not an object")
@@ -188,17 +199,47 @@ def validate_finding(
     if not reply_contract:
         validated["severity"] = severity
     carry_facts = carry_facts or reply_contract
-    sequence = item.get(KEY_FAILURE_SEQUENCE)
-    if (reply_contract or severity == "blocking") and isinstance(sequence, str) and sequence.strip():
-        sequence = sequence.strip()
-        if truncate_message and len(sequence) > MAX_FAILURE_SEQUENCE_CHARS:
-            sequence = sequence[: MAX_FAILURE_SEQUENCE_CHARS - 3] + "..."
+    sequence = _clean_sequence(item.get(KEY_FAILURE_SEQUENCE), truncate_message)
+    if sequence is not None and (reply_contract or severity == "blocking"):
         validated[KEY_FAILURE_SEQUENCE] = sequence
     if carry_fingerprint and is_fingerprint(item.get(KEY_FINGERPRINT)):
         validated[KEY_FINGERPRINT] = item[KEY_FINGERPRINT]
     if carry_facts and item.get(KEY_FACTS) is not None:
         validated[KEY_FACTS] = item[KEY_FACTS]
+        if reply_contract:
+            _relocate_nested_sequence(validated, truncate_message, position, problems)
     return validated
+
+
+def _clean_sequence(value: Any, truncate: bool) -> str | None:
+    """A usable failure_sequence (non-blank string, bounded), or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if truncate and len(value) > MAX_FAILURE_SEQUENCE_CHARS:
+        value = value[: MAX_FAILURE_SEQUENCE_CHARS - 3] + "..."
+    return value
+
+
+def _relocate_nested_sequence(
+    validated: dict[str, Any], truncate: bool, position: int, problems: list[str] | None
+) -> None:
+    """Move a failure_sequence a reply wrote inside ``facts`` to the top level."""
+    facts = validated[KEY_FACTS]
+    if not isinstance(facts, dict) or KEY_FAILURE_SEQUENCE not in facts:
+        return
+    rest = {k: v for k, v in facts.items() if k != KEY_FAILURE_SEQUENCE}
+    if KEY_FAILURE_SEQUENCE in validated:
+        outcome = "kept the top-level value and dropped the one inside facts"
+    else:
+        nested = _clean_sequence(facts[KEY_FAILURE_SEQUENCE], truncate)
+        if nested is None:
+            return
+        validated[KEY_FAILURE_SEQUENCE] = nested
+        outcome = "moved the one inside facts to the top level"
+    validated[KEY_FACTS] = rest
+    if problems is not None:
+        problems.append(f"finding {position} put failure_sequence inside facts: {outcome}")
 
 
 @dataclass(frozen=True)
@@ -212,6 +253,8 @@ class ChunkReply:
     #: How many findings carried a ``severity`` key. The value is discarded; the
     #: count lets the caller say so.
     ignored_severity: int = 0
+    #: One line per reply slip repaired without a re-prompt (see validate_finding).
+    problems: tuple[str, ...] = ()
 
 
 def _resolved_ids(value: Any) -> list[str]:
@@ -253,9 +296,13 @@ def parse_chunk_output(text: str) -> ChunkReply:
         data = data.get("findings")
     if not isinstance(data, list):
         raise InvalidReplyError("reply is not a JSON array")
-    findings = [validate_finding(item, i + 1, reply_contract=True) for i, item in enumerate(data)]
+    problems: list[str] = []
+    findings = [
+        validate_finding(item, i + 1, reply_contract=True, problems=problems)
+        for i, item in enumerate(data)
+    ]
     ignored = sum(1 for item in data if isinstance(item, dict) and "severity" in item)
-    return ChunkReply(findings, resolved, ignored)
+    return ChunkReply(findings, resolved, ignored, tuple(problems))
 
 
 def parse_chunk_reply(text: str) -> list[dict[str, Any]]:

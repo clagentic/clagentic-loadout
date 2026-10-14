@@ -150,3 +150,68 @@ def test_the_output_contract_offers_exactly_the_published_vocabulary():
         vocab.DURABILITY_VALUES,
     ):
         assert " | ".join(values) in OUTPUT_CONTRACT
+
+
+_SEQ = "open the page, submit the form, the session is shared"
+
+
+def _parse_one(finding):
+    return parse_chunk_output(json.dumps([finding]))
+
+
+def test_a_failure_sequence_inside_facts_moves_to_the_top_level():
+    from clagentic_loadout.review.facts import STATE_COMPLETE, parse_facts
+
+    reply = _parse_one({**_PARSED, "facts": {**_FACTS, "failure_sequence": f"  {_SEQ} "}})
+
+    finding = reply.findings[0]
+    assert finding["failure_sequence"] == _SEQ
+    assert "failure_sequence" not in finding["facts"]
+    assert parse_facts(finding["facts"]).state == STATE_COMPLETE
+    assert len(reply.problems) == 1 and "moved" in reply.problems[0]
+
+
+def test_a_top_level_failure_sequence_alone_records_no_problem():
+    reply = _parse_one({**_PARSED, "facts": _FACTS, "failure_sequence": _SEQ})
+
+    assert reply.findings[0]["failure_sequence"] == _SEQ
+    assert reply.findings[0]["facts"] == _FACTS
+    assert reply.problems == ()
+
+
+def test_with_both_the_top_level_value_stands_and_the_nested_is_dropped():
+    reply = _parse_one(
+        {**_PARSED, "failure_sequence": _SEQ, "facts": {**_FACTS, "failure_sequence": "other"}}
+    )
+
+    assert reply.findings[0]["failure_sequence"] == _SEQ
+    assert reply.findings[0]["facts"] == _FACTS
+    assert len(reply.problems) == 1 and "dropped" in reply.problems[0]
+
+
+@pytest.mark.parametrize("nested", [7, ["a"], {"a": 1}, "   ", None])
+def test_a_nested_failure_sequence_that_fails_the_checks_stays_invalid(nested):
+    from clagentic_loadout.review.facts import STATE_INVALID, parse_facts
+
+    reply = _parse_one({**_PARSED, "facts": {**_FACTS, "failure_sequence": nested}})
+
+    finding = reply.findings[0]
+    assert "failure_sequence" not in finding
+    assert parse_facts(finding["facts"]).state == STATE_INVALID
+    assert reply.problems == ()
+
+
+def test_another_unknown_fact_key_is_not_touched():
+    from clagentic_loadout.review.facts import STATE_INVALID, parse_facts
+
+    reply = _parse_one({**_PARSED, "facts": {**_FACTS, "note": "x"}})
+
+    assert parse_facts(reply.findings[0]["facts"]).state == STATE_INVALID
+
+
+def test_a_nested_failure_sequence_is_bounded_like_the_top_level_one():
+    from clagentic_loadout.review.findings_contract import MAX_FAILURE_SEQUENCE_CHARS
+
+    reply = _parse_one({**_PARSED, "facts": {**_FACTS, "failure_sequence": "x" * 900}})
+
+    assert len(reply.findings[0]["failure_sequence"]) == MAX_FAILURE_SEQUENCE_CHARS
