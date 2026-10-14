@@ -91,6 +91,9 @@ Verdict enforcement (read_reviewer_verdict)
    earlier fence that is unreadable AND may carry findings state refuses
    (VerdictMalformedError); one that is unreadable with no state, or is
    another reviewer's or PR's, is ignored with a warning.
+   The merge verb may re-read with ``exclude_comment_ids`` to fall back to an
+   older fence at the same head (merge.fence_precedence); the reader itself
+   still returns the newest unexcluded fence.
    check_required_scanners refuses a clean verdict whose required scanner is
    reported failed, or that records no scanner outcomes while scanners are
    required. A fence with no state fields asserts nothing and is never an
@@ -101,7 +104,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -715,9 +718,17 @@ def read_reviewer_verdict(
     *,
     expected_reviewer_name: str | None = None,
     enforce_single_fence: bool = True,
+    exclude_comment_ids: Collection[Any] = (),
 ) -> ReviewerVerdict:
     """Find the latest comment authored by *expected_login* and parse +
     enforce its verdict.
+
+    *exclude_comment_ids* names comments that selection must pass over, as if
+    the reviewer had not posted them. The merge gate uses it to fall back to an
+    older fence at the same head when the newest one is refused (see
+    merge.fence_precedence). Excluded comments are not read as earlier history
+    either. Timestamps are still validated on every comment first. The default
+    excludes nothing, which is the behaviour every other caller relies on.
 
     Authorship is verified by ``comment["user"]["login"]`` — NEVER by the
     comment body text. An attacker who posts a comment body claiming to be
@@ -840,7 +851,11 @@ def read_reviewer_verdict(
         parsed_timestamps.append((created_at, comment_id, comment))
 
     parsed_timestamps.sort(key=lambda entry: (entry[0], entry[1]))
-    ordered_comments = [entry[2] for entry in reversed(parsed_timestamps)]
+    ordered_comments = [
+        entry[2]
+        for entry in reversed(parsed_timestamps)
+        if entry[2].get("id", 0) not in exclude_comment_ids
+    ]
 
     # Walk newest-first and select the first candidate whose body carries at
     # least one fenced block. A candidate with ZERO fences (prose-only) is

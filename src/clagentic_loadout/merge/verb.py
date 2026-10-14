@@ -83,6 +83,12 @@ documented step ordering):
      blocking is individually matched by one (and the recorded list is not
      empty); each is named in the output. --report-only prints
      the outcome per reviewer; the merge result and the attestation record it.
+     A fence the chain passes at the PR head is not superseded by a later post
+     by the same role at that head (merge.fence_precedence): when the newest
+     fence is refused, older fences at the same head are tried newest first
+     and the first the full chain passes stands, the fences passed over being
+     named in a notice. With no passing fence at the head the newest fence's
+     refusal is the result, as before.
   5b. Model attestation (merge.model_attestation, lr-95543d) — OPT-IN
      (`merge: require_model_attestation: true`, default off): when enabled,
      a required reviewer's `clean` verdict must ALSO carry a genuine
@@ -525,6 +531,7 @@ from clagentic_loadout.merge.errors import (
     VerdictScannerFailedError,
     VerdictStaleError,
 )
+from clagentic_loadout.merge.fence_precedence import select_passed_fence
 from clagentic_loadout.merge.gate_evaluation import GateEvaluation, evaluate_at_gate
 from clagentic_loadout.merge.merge_readback import verify_merge_landed
 from clagentic_loadout.merge.model_attestation import (
@@ -642,6 +649,23 @@ from clagentic_loadout.transport.git_host_api import (
 )
 from clagentic_loadout.transport.provider_config import resolve_platform_provider
 from clagentic_loadout.transport.readback_envelope import READBACK_ENVELOPE_KEY
+
+#: The refusals a reviewer fence can earn from the gate chain once it has been
+#: read for the current head. Only these let the gate try an older fence at the
+#: same head (merge.fence_precedence); a defect in reading the newest comment
+#: is not among them.
+_FENCE_REFUSALS = (
+    VerdictBlockingError,
+    VerdictDegradedError,
+    VerdictGateDisagreementError,
+    VerdictMalformedError,
+    VerdictNotEvaluatedError,
+    VerdictPriorFindingsOpenError,
+    VerdictScannerFailedError,
+    VerdictStaleError,
+    ModelAttestationMissingError,
+    ModelAttestationInvalidError,
+)
 
 # ---------------------------------------------------------------------------
 # Exit codes — one reserved range for the merge verb.
@@ -1582,8 +1606,12 @@ def _run(
         live_base_sha = resolve_base_sha(pr_info)
         host_visibility = repository_visibility(pr_info)
         for reviewer_name, bot_login in required_reviewers.items():
-            try:
-                verdict_obj = verdict.read_reviewer_verdict(
+            required_scanners = (
+                () if args.ignore_repo_gate else repo_gate.scanners_for(reviewer_name)
+            )
+
+            def read_fence(excluded, bot_login=bot_login, reviewer_name=reviewer_name):
+                return verdict.read_reviewer_verdict(
                     comments,
                     expected_login=bot_login,
                     current_head_sha=current_head_sha,
@@ -1592,8 +1620,13 @@ def _run(
                     repo=repo,
                     expected_reviewer_name=reviewer_name,
                     enforce_single_fence=enforce_single_verdict_fence,
+                    exclude_comment_ids=excluded,
                 )
-                for ignored_id, ignored_reason in verdict_obj.ignored_earlier_fences:
+
+            def check_fence(
+                candidate, reviewer_name=reviewer_name, required_scanners=required_scanners
+            ):
+                for ignored_id, ignored_reason in candidate.ignored_earlier_fences:
                     print(
                         f"merge: WARNING -- earlier comment #{ignored_id} from {reviewer_name!r} "
                         f"is ignored: {ignored_reason}; it holds no findings open for this "
@@ -1603,8 +1636,8 @@ def _run(
                 # The gate's own computation comes before the recorded status is
                 # read: an evaluated fence that says BLOCKED is refused here by
                 # name, and one a standing disposition now clears is passed.
-                gate_evaluation = evaluate_at_gate(
-                    verdict_obj,
+                evaluation = evaluate_at_gate(
+                    candidate,
                     reviewer_name,
                     current_head_sha=current_head_sha,
                     live_base_sha=live_base_sha,
@@ -1612,30 +1645,26 @@ def _run(
                     visibility=host_visibility,
                     evaluator=repo_gate.evaluator,
                 )
-                for evaluation_notice in gate_evaluation.notices:
+                for evaluation_notice in evaluation.notices:
                     print(f"merge: NOTICE -- {evaluation_notice}", file=sys.stderr)
-                gate_evaluations.append(gate_evaluation)
                 # A fence the evaluator computed as anything but CLEAN carries
                 # status blocking by construction; reaching here means the gate
                 # passed that outcome on a trusted basis, so the status is not
                 # read again. A CLEAN fence whose poster still asked for
                 # blocking is refused by it.
-                if gate_evaluation.fence_outcome in (None, "CLEAN"):
-                    verdict.assert_clean_verdict(verdict_obj, reviewer_name)
-                verdict.assert_prior_findings_resolved(verdict_obj, reviewer_name)
-                if verdict_obj.unresolved_prior_findings:
-                    prior_ids = ", ".join(f["id"] for f in verdict_obj.unresolved_prior_findings)
+                if evaluation.fence_outcome in (None, "CLEAN"):
+                    verdict.assert_clean_verdict(candidate, reviewer_name)
+                verdict.assert_prior_findings_resolved(candidate, reviewer_name)
+                if candidate.unresolved_prior_findings:
+                    prior_ids = ", ".join(f["id"] for f in candidate.unresolved_prior_findings)
                     print(
                         f"merge: NOTICE -- {reviewer_name.upper()} has earlier-fence finding(s) "
                         f"not cleared at this head: {prior_ids}. They do not refuse the merge; "
                         f"the latest verdict at the head decides.",
                         file=sys.stderr,
                     )
-                required_scanners = (
-                    () if args.ignore_repo_gate else repo_gate.scanners_for(reviewer_name)
-                )
                 for scanner_warning in verdict.check_required_scanners(
-                    verdict_obj, reviewer_name, required_scanners
+                    candidate, reviewer_name, required_scanners
                 ):
                     print(f"merge: WARNING -- {scanner_warning}", file=sys.stderr)
                 # lr-95543d: mirrors assert_clean_verdict's disposition --
@@ -1645,7 +1674,24 @@ def _run(
                 # verdict itself is 'blocking' (already refused above).
                 if require_model_attestation:
                     assert_model_attested(
-                        verdict_obj, reviewer_name, denylist=model_attestation_denylist
+                        candidate, reviewer_name, denylist=model_attestation_denylist
+                    )
+                return evaluation
+
+            try:
+                # A later post by the same role at the same head does not
+                # supersede a fence the gate passes at that head.
+                settled = select_passed_fence(read_fence, check_fence, _FENCE_REFUSALS)
+                verdict_obj = settled.verdict
+                gate_evaluations.append(settled.result)
+                for passed_over_id, refusal in settled.passed_over:
+                    print(
+                        f"merge: NOTICE -- {reviewer_name.upper()} comment #{passed_over_id} at "
+                        f"head {verdict_obj.head_sha} was refused "
+                        f"({str(refusal).splitlines()[0]}) but does not supersede the passed "
+                        f"verdict in comment #{verdict_obj.comment_id} at the same head; the "
+                        f"gate result at this head stays the passed one.",
+                        file=sys.stderr,
                     )
             except (
                 VerdictMissingError,
