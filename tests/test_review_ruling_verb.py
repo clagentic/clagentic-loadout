@@ -223,6 +223,17 @@ class TestRecord:
 
         assert _record(role=WRITER, config_root=root) == verb.EXIT_OK
 
+    @pytest.mark.parametrize("value", [None, [], "merger", ["merger"]])
+    def test_a_present_roles_key_that_is_not_a_mapping_is_a_configuration_error(
+        self, tmp_path, registry, value
+    ):
+        """Only an absent key leaves the default; a null or non-mapping value is
+        malformed policy and never falls back to it."""
+        root = _user_config(tmp_path, value, name="malformed-roles")
+
+        assert _record(role=WRITER, config_root=root) == verb.EXIT_CONFIG_INVALID
+        assert not registry.exists()
+
     def test_the_authorized_role_flag_does_not_exist(self, registry, capsys):
         code = _run(["record", *_record_argv(), "--authorized-role", OUTSIDER], role=OUTSIDER)
 
@@ -292,6 +303,26 @@ class TestFenceAcceptance:
         assert code == verb.EXIT_FENCE_INVALID
         assert not registry.exists()
         assert "no comment with id 99" in capsys.readouterr().err
+
+    def test_a_fence_that_exists_only_in_another_repository_is_refused(self, registry, capsys):
+        """The fence is read from the requested repository's own pull request. A
+        valid fence with the same comment id and pull request number that lives in a
+        different repository is never reached."""
+        foreign = _opener()
+        local = _opener(comment(99, "unrelated prose", login=REVIEWER))
+        seen = []
+
+        def opener(req, timeout=15):
+            seen.append(req.full_url)
+            target = local if f"/{REPO}/" in req.full_url else foreign
+            return target(req, timeout)
+
+        code = _record(opener=opener, argv={"--repo": REPO})
+
+        assert code == verb.EXIT_FENCE_INVALID
+        assert not registry.exists()
+        assert "no comment with id" in capsys.readouterr().err
+        assert seen and all(f"/{REPO}/" in url for url in seen)
 
     def test_a_fence_for_another_pull_request_is_refused(self, registry, capsys):
         code = _record(opener=_opener(_fence_comment(pr=2)))

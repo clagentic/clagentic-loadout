@@ -80,7 +80,7 @@ def ruling_authorized_roles(config_root: str | Path | None = None) -> frozenset[
         raise InvalidRoleConfigError(
             f"{path}: top-level document must be a mapping, got {type(document).__name__}."
         )
-    if CONFIG_SECTION_ROLES not in document or document[CONFIG_SECTION_ROLES] is None:
+    if CONFIG_SECTION_ROLES not in document:
         return roles_holding_verb(AUTHORIZING_VERB)
     mapping = parse_roles_section(document[CONFIG_SECTION_ROLES], source=str(path))
     return frozenset(role for role, verbs in mapping.items() if AUTHORIZING_VERB in verbs)
