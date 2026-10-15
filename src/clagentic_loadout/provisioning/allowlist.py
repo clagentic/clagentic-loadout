@@ -53,6 +53,7 @@ VERB_CONSOLE_SCRIPTS: dict[str, str] = {
     "poll-wait": "loadout-poll-wait",
     "scoped-test-wait": "loadout-scoped-test-wait",
     "doctor": "loadout-doctor",
+    "ruling": "loadout-ruling",
 }
 
 assert set(VERB_CONSOLE_SCRIPTS) == set(KNOWN_VERBS), (

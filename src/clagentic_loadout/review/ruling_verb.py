@@ -10,15 +10,17 @@ pull request under review cannot write. This verb is the only writer.
       --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM]
   loadout-ruling list [--repo OWNER/REPO] [--pr N]
 
-WHO MAY RECORD. The attested caller's role must hold merge authority, decided
-the way the merge verb decides it for itself (merge.authority): an injected
-AuthorityProvider, else the roles named by repeated ``--authorized-role`` flags,
-else the roles the built-in role-to-verb mapping (provisioning.roles) grants the
-merge verb. The policy never comes from a checkout or path the caller selects:
-``--repo-path`` scopes the ruling (a registry inside it is refused) and supplies
-no role policy. Recording a ruling that clears a non-floor finding hands a
-merge-capable role no power it lacks, which is why that role is the writer. Which
-agent holds the role is the deployment's concern, never this package's.
+WHO MAY RECORD. The attested caller's role must hold the ``ruling`` verb. No
+caller-controlled input decides that (see review.ruling_authority): the authority
+comes only from an injected AuthorityProvider, else from the effective role-to-verb
+mapping, which is the ``roles:`` mapping in the trusted user-level config file when
+present (it replaces the default), else the built-in default, which grants
+``ruling`` to ``merger``. There is no ``--authorized-role`` flag, and no
+repository, checkout or environment variable contributes. ``--repo-path`` scopes
+the ruling (a registry inside it is refused) and supplies no role policy.
+Recording a ruling that clears a non-floor finding hands a merge-capable role no
+power it lacks, which is why the built-in default names that role. Which agent
+holds the role is the deployment's concern, never this package's.
 ``--requested-by`` records who asked, as the deployment names callers.
 
 NON-FLOOR ONLY. The finding the ruling is for must appear in ``--findings`` with
@@ -34,12 +36,13 @@ Exit codes (the reserved range; no child-process code is passed through):
   1   usage error
   3   the rulings configuration is invalid
   7   --role does not match the attested invoking identity
-  21  the attested role holds no merge authority
+  21  the attested role holds no ruling authority
   32  the findings file is unreadable, or is not for this repository and pull
       request (a file that names no pull request cannot be checked: refused)
   50  the finding is a security-floor finding
   51  no finding in the findings file matches the fingerprint, rule and path
-  52  the registry location is one the pull request could write
+  52  the registry location, or the user-level file holding the role mapping, is
+      one the pull request could write
   53  no ruling registry is configured
   54  an unexpired ruling already covers the finding
   55  the registry could not be written (including: it would exceed the size
@@ -63,8 +66,13 @@ from clagentic_loadout.merge.authority import (
     check_authority,
 )
 from clagentic_loadout.merge.errors import AuthorityDeniedError
-from clagentic_loadout.provisioning.roles import InvalidRoleConfigError, roles_holding_verb
+from clagentic_loadout.provisioning.roles import InvalidRoleConfigError
 from clagentic_loadout.review.dispositions import KINDS
+from clagentic_loadout.review.ruling_authority import (
+    AUTHORIZING_VERB,
+    UntrustedRolesSourceError,
+    ruling_authorized_roles,
+)
 from clagentic_loadout.review.evaluate import is_floor_finding
 from clagentic_loadout.review.evaluate_verb import EvaluateError, load_findings_file
 from clagentic_loadout.review.ruling_provider import (
@@ -107,9 +115,6 @@ EXIT_REGISTRY_NOT_CONFIGURED = 53
 EXIT_DUPLICATE = 54
 EXIT_REGISTRY_FAILED = 55
 
-#: The verb whose holders may record a ruling: the role-to-verb mapping is asked
-#: who may merge, rather than keeping a second list of role names.
-AUTHORIZING_VERB = "merge"
 
 
 class RulingVerbError(Exception):
@@ -206,15 +211,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Checkout of the reviewed repository. A ruling registry inside it is refused. "
         "It supplies no role policy.",
-    )
-    record.add_argument(
-        "--authorized-role",
-        action="append",
-        dest="authorized_roles",
-        default=None,
-        help="A role permitted to record rulings (repeatable), as the merge verb's flag of "
-        "the same name. Without it, the roles the built-in role-to-verb mapping grants the "
-        f"{AUTHORIZING_VERB!r} verb are used.",
     )
     record.add_argument(
         "--head",
@@ -326,19 +322,20 @@ def _authorize(
     owner: str,
     repo: str,
     pr: int,
-    authorized_roles: list[str] | None,
     authority_provider: AuthorityProvider | None,
+    config_root: str | Path | None,
 ) -> None:
-    """The policy is the merge verb's own: an injected provider, else the roles
-    the invoker names. It is never read from a path the caller selects."""
+    """No caller-controlled input decides this: an injected provider, else the
+    holders of the ruling verb in the effective role-to-verb mapping (the
+    trusted user-level ``roles:``, else the built-in default)."""
     try:
         provider = authority_provider or StaticRoleAuthorityProvider(
-            frozenset(authorized_roles)
-            if authorized_roles
-            else roles_holding_verb(AUTHORIZING_VERB)
+            ruling_authorized_roles(config_root)
         )
     except InvalidRoleConfigError as exc:
         raise RulingVerbError(f"role configuration is invalid: {exc}", EXIT_CONFIG_INVALID) from exc
+    except UntrustedRolesSourceError as exc:
+        raise RulingVerbError(str(exc), EXIT_REGISTRY_UNTRUSTED) from exc
     try:
         check_authority(role, owner, repo, pr, provider)
     except AuthorityDeniedError as exc:
@@ -375,7 +372,7 @@ def _record(
     role = args.role if args.role is not None else attested.subject
     bind_caller(role, caller_explicit=True, identity=attested)
 
-    _authorize(role, owner, repo, args.pr, args.authorized_roles, authority_provider)
+    _authorize(role, owner, repo, args.pr, authority_provider, config_root)
 
     config = _registry(config_root)
     if config.path is None:

@@ -259,13 +259,37 @@ rulings:
 ### Who may record a ruling
 
 `loadout-ruling record` is gated by role. The attested caller's role must hold merge
-authority, decided the way the merge verb decides it for itself: an injected authority
-provider, else the roles named with repeated `--authorized-role` flags (the merge verb's own
-flag, supplied by the deployment's launcher), else the roles the built-in role-to-verb mapping
-(`provisioning.roles`) grants the `merge` verb (default: `merger`). Which agent holds a role is
-the deployment's configuration, never this package's. The policy is never read from a
-checkout or path the caller selects: `--repo-path` scopes the ruling (a registry inside it is
-refused) and supplies no role policy. `--role` must match the attested identity, as for every
+authority: it must hold the `ruling` verb. No caller-controlled input decides that: the
+authority comes only from an injected authority provider, else from the effective role-to-verb
+mapping, which is the `roles:` mapping in the user-level config file when that key is present,
+else the built-in default (`provisioning.roles.DEFAULT_ROLE_VERBS`, which grants `ruling` to
+`merger`). No flag, environment variable, repository or checkout contributes, and there is no
+`--authorized-role` flag. Which agent holds a role is the deployment's configuration, never
+this package's.
+
+The user-level source is the `config.yaml` under the loadout config root (the file that holds
+the `rulings:` section), a top-level `roles:` key shaped exactly like the repo-tier `roles:`
+mapping (role name to a non-empty list of verb labels):
+
+```
+roles:
+  clerk:
+    - ruling
+  releaser:
+    - merge
+    - push
+```
+
+Here only `clerk` may record rulings. The mapping REPLACES the built-in default entirely when
+present (a role it omits, `merger` included, holds nothing); the default applies only when the
+key is absent. It decides nothing but who may use `loadout-ruling record`: provisioning,
+`loadout-doctor`, model routing and every other verb keep their own sources. The file is read
+only if it passes the registry's location check (not inside a git work tree, and neither the
+file nor any directory above it writable by a group or by everyone or owned by another user);
+otherwise `record` is refused with exit 52 and names the file. A malformed `roles:` value is
+exit 3. A deployment owns the whole `roles:` key: an installer should merge it into the user
+config alongside the other sections and never touch unrelated sections. `--repo-path` scopes the ruling (a registry inside it is refused) and supplies no
+role policy. `--role` must match the attested identity, as for every
 other caller-bound verb. `--requested-by` records who asked, as the deployment names callers.
 
 The findings file must name the requested repository and pull request (`owner`, `repo`,
@@ -277,7 +301,7 @@ loadout-ruling [--role ROLE] record --repo OWNER/REPO --pr N --findings FILE \
   --fingerprint FP --rule-id RULE --path PATH \
   --kind by_design|false_positive|accepted_risk|mitigated --rationale TEXT \
   --requested-by CALLER --source-ref REF [--expires YYYY-MM-DD] [--reference ITEM] \
-  [--repo-path DIR] [--authorized-role ROLE ...] [--head SHA]
+  [--repo-path DIR] [--head SHA]
 loadout-ruling list [--repo OWNER/REPO] [--pr N]
 ```
 

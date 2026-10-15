@@ -451,6 +451,11 @@ Read this carefully if you are pointing `loadout-merge` at this provider
   source than the OS-invoking-user configures `transport.attestation`'s
   `identity_env` or `sidecars` config accordingly; this package does not
   make that call on a deployment's behalf.
+- **Without an injected `AuthorityProvider`, the merge verb's
+  `--authorized-role` check is not a security boundary.** The list is
+  supplied by the caller, so a caller can name its own role; the boundary in
+  that configuration is the role-bound credential mint, which issues a token
+  only to an identity entitled to the role.
 - **An empty `authorized_roles` set denies every role.** This is the
   fail-closed default described in §2 — a deployment that never configures
   a role here has correctly configured "nobody may merge," not "everyone

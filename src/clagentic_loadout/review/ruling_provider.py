@@ -39,9 +39,8 @@ home directory hides the user-level file. With no path configured there is no
 registry and behaviour is exactly as it is without this feature.
 
 Which role may WRITE the registry is not configured here: the write verb
-(review.ruling_verb) authorizes the roles the deployment's own role-to-verb
-mapping (provisioning.roles) grants the merge verb, through the same
-merge-authority seam the merge verb uses.
+(review.ruling_verb) authorizes the roles that hold the ``ruling`` verb in the
+effective role-to-verb mapping (review.ruling_authority).
 """
 
 from __future__ import annotations

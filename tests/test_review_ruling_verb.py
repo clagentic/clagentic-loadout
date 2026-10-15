@@ -15,7 +15,8 @@ from clagentic_loadout.transport.attestation import SOURCE_CONFIGURED, Identity
 from tests._ruling_support import FLOOR, FP, NON_FLOOR, OTHER_FP, REPO, TODAY, registry_dir, ruled_finding
 
 HEAD = "b" * 40
-WRITER = "gatekeeper"
+#: The role the built-in role-to-verb mapping grants the merge verb.
+WRITER = "merger"
 OUTSIDER = "helper"
 
 
@@ -24,16 +25,30 @@ def _identity(subject):
     return lambda: identity
 
 
+@pytest.fixture(autouse=True)
+def _isolated_user_config(tmp_path, monkeypatch):
+    """Point the default user-level config root at an empty directory, so a host's
+    own config never decides who may record."""
+    from clagentic_loadout.transport import provider_config
+
+    monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "no-user-config")
+
+
+def _user_config(root, roles, *, mode=0o644, name="user-config"):
+    directory = root / name
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o755)
+    path = directory / "config.yaml"
+    path.write_text(yaml.safe_dump({"roles": roles}), encoding="utf-8")
+    os.chmod(path, mode)
+    return directory
+
+
 @pytest.fixture
 def repo_path(tmp_path):
-    """A repo-local config declaring which synthetic roles hold the merge verb."""
-    path = tmp_path / "role-config"
-    config = path / ".clagentic" / "loadout"
-    config.mkdir(parents=True)
-    (config / "config.yaml").write_text(
-        yaml.safe_dump({"roles": {WRITER: ["merge", "push"], OUTSIDER: ["push"]}}),
-        encoding="utf-8",
-    )
+    """A checkout of the reviewed repository; it supplies no role policy."""
+    path = tmp_path / "checkout"
+    path.mkdir()
     return path
 
 
@@ -85,13 +100,11 @@ def _record_argv(findings, **overrides):
     return argv
 
 
-def _run(argv, *, role=WRITER, repo_path=None, authorized=(WRITER,), **kwargs):
-    """Run the verb. ``authorized`` are the roles the invoker names as holding
-    merge authority (the merge verb's own flag); () relies on the built-in mapping."""
+def _run(argv, *, role=WRITER, repo_path=None, **kwargs):
+    """Run the verb. Authority is never injected here: the built-in mapping (or a
+    provider a test passes explicitly) decides."""
     full = (["--role", role] if role else []) + argv
     if "record" in argv:
-        for name in authorized:
-            full += ["--authorized-role", name]
         if repo_path is not None:
             full += ["--repo-path", str(repo_path)]
     kwargs.setdefault("identity_provider", _identity(role or verb.DEFAULT_ROLE))
@@ -117,12 +130,12 @@ class TestRecord:
     def test_the_documented_default_role_may_record_without_any_role_config(
         self, registry, findings_file
     ):
-        code = _run(["record", *_record_argv(findings_file())], role="merger", authorized=())
+        code = _run(["record", *_record_argv(findings_file())], role="merger")
 
         assert code == verb.EXIT_OK
 
     def test_a_default_role_without_the_merge_verb_may_not(self, registry, findings_file, capsys):
-        code = _run(["record", *_record_argv(findings_file())], role="builder", authorized=())
+        code = _run(["record", *_record_argv(findings_file())], role="builder")
 
         assert code == verb.EXIT_AUTHORITY_DENIED
         assert not registry.exists()
@@ -144,8 +157,82 @@ class TestRecord:
             ["record", *_record_argv(findings_file())],
             role=OUTSIDER,
             repo_path=hostile,
-            authorized=(),
         )
+
+        assert code == verb.EXIT_AUTHORITY_DENIED
+        assert not registry.exists()
+
+    def test_a_user_level_mapping_granting_ruling_authorizes_that_role(
+        self, tmp_path, registry, findings_file
+    ):
+        root = _user_config(tmp_path, {"clerk": ["ruling"], "merger": ["merge"]})
+
+        assert _run(["record", *_record_argv(findings_file())], role="clerk", config_root=root) == verb.EXIT_OK
+
+    def test_a_user_level_mapping_replaces_the_default_rather_than_adding_to_it(
+        self, tmp_path, registry, findings_file
+    ):
+        root = _user_config(tmp_path, {"clerk": ["ruling"], "merger": ["merge"]})
+
+        code = _run(["record", *_record_argv(findings_file())], role="merger", config_root=root)
+
+        assert code == verb.EXIT_AUTHORITY_DENIED
+        assert not registry.exists()
+
+    def test_a_group_writable_user_level_file_is_refused(self, tmp_path, registry, findings_file, capsys):
+        root = _user_config(tmp_path, {"clerk": ["ruling"]}, mode=0o664)
+
+        code = _run(["record", *_record_argv(findings_file())], role="clerk", config_root=root)
+
+        assert code == verb.EXIT_REGISTRY_UNTRUSTED
+        assert "not a trusted source for role authority" in capsys.readouterr().err
+        assert not registry.exists()
+
+    def test_a_user_level_file_inside_a_work_tree_is_refused(self, tmp_path, registry, findings_file):
+        tree = tmp_path / "tree"
+        (tree / ".git").mkdir(parents=True)
+        root = _user_config(tree, {"clerk": ["ruling"]})
+
+        code = _run(["record", *_record_argv(findings_file())], role="clerk", config_root=root)
+
+        assert code == verb.EXIT_REGISTRY_UNTRUSTED
+        assert not registry.exists()
+
+    def test_a_user_level_mapping_naming_an_unknown_verb_is_a_configuration_error(
+        self, tmp_path, registry, findings_file
+    ):
+        root = _user_config(tmp_path, {"clerk": ["no-such-verb"]})
+
+        code = _run(["record", *_record_argv(findings_file())], role="clerk", config_root=root)
+
+        assert code == verb.EXIT_CONFIG_INVALID
+
+    def test_a_user_level_file_without_a_roles_key_leaves_the_default(
+        self, tmp_path, registry, findings_file
+    ):
+        root = tmp_path / "plain-config"
+        root.mkdir()
+        os.chmod(root, 0o755)
+        (root / "config.yaml").write_text("rulings: {}\n", encoding="utf-8")
+        os.chmod(root / "config.yaml", 0o644)
+
+        code = _run(["record", *_record_argv(findings_file())], role=WRITER, config_root=root)
+
+        assert code == verb.EXIT_OK
+
+    def test_the_authorized_role_flag_does_not_exist(self, registry, findings_file, capsys):
+        code = _run(
+            ["record", *_record_argv(findings_file()), "--authorized-role", OUTSIDER], role=OUTSIDER
+        )
+
+        assert code == verb.EXIT_USAGE
+        assert not registry.exists()
+        assert "--authorized-role" in capsys.readouterr().err
+
+    def test_a_caller_naming_its_own_role_is_refused(self, registry, findings_file):
+        """Without the flag there is no way to name oneself into authority; the
+        parser refuses it as unknown, and the mapping refuses the role regardless."""
+        code = _run(["record", *_record_argv(findings_file())], role=OUTSIDER)
 
         assert code == verb.EXIT_AUTHORITY_DENIED
         assert not registry.exists()
@@ -355,10 +442,11 @@ class TestList:
 
 
 class TestSurface:
-    def test_the_verb_is_not_in_the_role_verb_vocabulary(self):
-        from clagentic_loadout.provisioning.roles import KNOWN_VERBS
+    def test_the_verb_is_in_the_role_verb_vocabulary_and_default_merger_holds_it(self):
+        from clagentic_loadout.provisioning.roles import DEFAULT_ROLE_VERBS, KNOWN_VERBS
 
-        assert "ruling" not in KNOWN_VERBS
+        assert "ruling" in KNOWN_VERBS
+        assert "ruling" in DEFAULT_ROLE_VERBS["merger"]
 
     def test_the_umbrella_dispatches_to_it(self, capsys):
         from clagentic_loadout.cli import main as umbrella

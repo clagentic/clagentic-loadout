@@ -1153,15 +1153,19 @@ output is read through a bounded tail, so memory stays flat however much it writ
 loadout-ruling [--role ROLE] record --repo OWNER/REPO --pr N --findings FILE \
   --fingerprint FP --rule-id RULE --path PATH --kind KIND --rationale TEXT \
   --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM] [--repo-path DIR] \
-  [--authorized-role ROLE ...] [--head SHA]
+  [--head SHA]
 loadout-ruling list [--repo OWNER/REPO] [--pr N]
 ```
 
 `record` writes a ruling to the ruling registry, a file the pull request under review cannot
 write; the evaluator and the merge gate read it. The caller's `--role` must match its
-attested identity, and the role must hold merge authority as the merge verb decides it
-(`--authorized-role`, else the built-in mapping's `merge` holders, default `merger`), never from
-a checkout the caller names. A
+attested identity, and the role must hold the `ruling` verb. No caller-controlled input decides
+that: the authority comes only from an injected `AuthorityProvider`, else from the effective
+role-to-verb mapping: the `roles:` mapping in the trusted user-level config file when present
+(it replaces the default), else the built-in default, which grants `ruling` to `merger`. There
+is no `--authorized-role` flag, and no checkout, repository or environment variable
+contributes. The mapping affects only this verb; see
+[review-evaluator.md](review-evaluator.md#who-may-record-a-ruling). A
 security-floor finding is refused (exit 50), as is a finding the `--findings` file does not
 hold (51), an untrusted registry location (52), no configured registry (53) and a duplicate
 (54). `list` is read-only and needs no role. The verb mints no credential and makes no
