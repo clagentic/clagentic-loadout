@@ -7,8 +7,8 @@ reader would refuse, and it holds an exclusive lock for the whole
 read-modify-write so two concurrent writers cannot lose an entry.
 
 The file is rewritten atomically (review.atomic_io), readable by every user so
-the reviewer and merger identities on the host can read what the lead role
-wrote, and writable by its owner only.
+the other identities on the host (the reviewer and the merge gate among them)
+can read what the recording role wrote, and writable by its owner only.
 """
 
 from __future__ import annotations
