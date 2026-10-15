@@ -91,6 +91,9 @@ Verdict enforcement (read_reviewer_verdict)
    earlier fence that is unreadable AND may carry findings state refuses
    (VerdictMalformedError); one that is unreadable with no state, or is
    another reviewer's or PR's, is ignored with a warning.
+   The merge verb re-reads with ``exclude_comment_ids`` to reach every older
+   fence of the same role at the same head (merge.fence_union), which must all
+   pass; the reader itself still returns the newest unexcluded fence.
    check_required_scanners refuses a clean verdict whose required scanner is
    reported failed, or that records no scanner outcomes while scanners are
    required. A fence with no state fields asserts nothing and is never an
@@ -101,7 +104,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -705,6 +708,83 @@ def parse_verdict_block(comment_body: str) -> dict[str, Any] | None:
     return data
 
 
+def _login_comments_newest_first(
+    comments: list[dict[str, Any]],
+    expected_login: str,
+    pr_number: int,
+    owner: str,
+    repo: str,
+) -> list[dict[str, Any]]:
+    """Every comment authored by *expected_login*, newest first.
+
+    DETERMINISTIC "latest verdict supersedes" ORDERING (lr-c14a2d): sort every
+    same-reviewer comment by its own created_at, tie-broken by comment id (both
+    monotonic per platform) — never by trusting the input list's position. The
+    git-host comments API is not guaranteed to return comments in
+    chronological order; reversing the given list and taking the first match
+    (an earlier implementation) could land on an OLDER 'blocking' comment
+    instead of a NEWER 'clean' one at the same SHA when the API returns them
+    out of order. Multiple same-reviewer comments are NORMAL here — a reviewer
+    legitimately re-posts a corrected verdict — never treated as an anomaly
+    (contrast assert_single_own_verdict_block, which is about multiple verdict
+    BLOCKS inside one comment BODY, a different concern).
+
+    created_at validation runs over EVERY matching comment (including
+    fenceless ones), so a comment with an unparseable timestamp still fails
+    closed rather than being silently skipped because it lacks a fence.
+    """
+    matching_comments = [
+        comment
+        for comment in comments
+        if comment.get("user", {}).get("login", "") == expected_login
+    ]
+
+    if not matching_comments:
+        raise VerdictMissingError(
+            f"No PR comment from reviewer login {expected_login!r} found on "
+            f"PR #{pr_number} in {owner}/{repo}. The reviewer must post a "
+            f"comment containing a fenced ```{VERDICT_FENCE}``` verdict "
+            f"block."
+        )
+
+    parsed_timestamps: list[tuple[datetime, int, dict[str, Any]]] = []
+    for comment in matching_comments:
+        created_at = _parse_comment_timestamp(comment.get("created_at"))
+        if created_at is None:
+            raise VerdictMalformedError(
+                f"PR comment id={comment.get('id')!r} from reviewer login "
+                f"{expected_login!r} on PR #{pr_number} in {owner}/{repo} "
+                f"has a missing or unparseable 'created_at' timestamp. "
+                f"Deterministic latest-verdict selection requires a valid "
+                f"created_at on every candidate comment — this fails "
+                f"closed rather than guessing an order."
+            )
+        comment_id = comment.get("id", 0)
+        parsed_timestamps.append((created_at, comment_id, comment))
+
+    parsed_timestamps.sort(key=lambda entry: (entry[0], entry[1]))
+    return [entry[2] for entry in reversed(parsed_timestamps)]
+
+
+def fenced_comment_ids_newest_first(
+    comments: list[dict[str, Any]],
+    expected_login: str,
+    pr_number: int,
+    owner: str,
+    repo: str,
+) -> list[Any]:
+    """The ids of *expected_login*'s comments that carry a fenced verdict block,
+    newest first, in the order read_reviewer_verdict walks them. Raises as it
+    does for a missing login or an unparseable timestamp."""
+    return [
+        comment.get("id", 0)
+        for comment in _login_comments_newest_first(
+            comments, expected_login, pr_number, owner, repo
+        )
+        if _FENCE_RE.search(comment.get("body", "")) is not None
+    ]
+
+
 def read_reviewer_verdict(
     comments: list[dict[str, Any]],
     expected_login: str,
@@ -715,9 +795,16 @@ def read_reviewer_verdict(
     *,
     expected_reviewer_name: str | None = None,
     enforce_single_fence: bool = True,
+    exclude_comment_ids: Collection[Any] = (),
 ) -> ReviewerVerdict:
     """Find the latest comment authored by *expected_login* and parse +
     enforce its verdict.
+
+    *exclude_comment_ids* names comments that selection must pass over, as if
+    the reviewer had not posted them. The merge gate uses it to reach each older
+    fence at the same head in turn (see merge.fence_union). Excluded comments are not read as earlier history
+    either. Timestamps are still validated on every comment first. The default
+    excludes nothing, which is the behaviour every other caller relies on.
 
     Authorship is verified by ``comment["user"]["login"]`` — NEVER by the
     comment body text. An attacker who posts a comment body claiming to be
@@ -786,61 +873,21 @@ def read_reviewer_verdict(
     'blocking' — callers enforce the blocking refusal separately via
     assert_clean_verdict, matching the reference module's step ordering).
     """
-    matching_comments = [
+    ordered_comments = [
         comment
-        for comment in comments
-        if comment.get("user", {}).get("login", "") == expected_login
+        for comment in _login_comments_newest_first(
+            comments, expected_login, pr_number, owner, repo
+        )
+        if comment.get("id", 0) not in exclude_comment_ids
     ]
 
-    if not matching_comments:
-        raise VerdictMissingError(
-            f"No PR comment from reviewer login {expected_login!r} found on "
-            f"PR #{pr_number} in {owner}/{repo}. The reviewer must post a "
-            f"comment containing a fenced ```{VERDICT_FENCE}``` verdict "
-            f"block."
-        )
-
-    # DETERMINISTIC "latest verdict supersedes" ORDERING (lr-c14a2d): sort
-    # every same-reviewer comment by its own created_at, tie-broken by
-    # comment id (both monotonic per platform) — never by trusting the
-    # input list's position. The git-host comments API is not guaranteed to
-    # return comments in chronological order; reversing the given list and
-    # taking the first match (an earlier implementation) could land on an
-    # OLDER 'blocking' comment instead of a NEWER 'clean' one at the same
-    # SHA when the API returns them out of order. Multiple same-reviewer
-    # comments are NORMAL supersede behavior here — a reviewer legitimately
-    # re-posts a corrected verdict — never treated as an anomaly (contrast
-    # assert_single_own_verdict_block, which is about multiple verdict
-    # BLOCKS inside one comment BODY, a different concern this loop does not
-    # touch).
-    #
-    # SELECTION is a SEPARATE step from ordering: pick the most recent
+    # SELECTION is a SEPARATE step from ordering (see
+    # _login_comments_newest_first): pick the most recent
     # comment that itself CONTAINS a fenced block, not merely the most
     # recent comment by this login. A reviewer's later PROSE-ONLY comment
     # (a retraction, a clarification, an answer to a lead's question) does
     # not blank out an earlier, still-valid fenced verdict — the fence is
     # the gate's atomic unit of validation, not comment recency by itself.
-    # created_at validation still runs over EVERY matching comment
-    # (including fenceless ones) before selection, so a comment with an
-    # unparseable timestamp still fails closed rather than being silently
-    # skipped because it lacks a fence.
-    parsed_timestamps: list[tuple[datetime, int, dict[str, Any]]] = []
-    for comment in matching_comments:
-        created_at = _parse_comment_timestamp(comment.get("created_at"))
-        if created_at is None:
-            raise VerdictMalformedError(
-                f"PR comment id={comment.get('id')!r} from reviewer login "
-                f"{expected_login!r} on PR #{pr_number} in {owner}/{repo} "
-                f"has a missing or unparseable 'created_at' timestamp. "
-                f"Deterministic latest-verdict selection requires a valid "
-                f"created_at on every candidate comment — this fails "
-                f"closed rather than guessing an order."
-            )
-        comment_id = comment.get("id", 0)
-        parsed_timestamps.append((created_at, comment_id, comment))
-
-    parsed_timestamps.sort(key=lambda entry: (entry[0], entry[1]))
-    ordered_comments = [entry[2] for entry in reversed(parsed_timestamps)]
 
     # Walk newest-first and select the first candidate whose body carries at
     # least one fenced block. A candidate with ZERO fences (prose-only) is
@@ -1197,8 +1244,8 @@ def assert_prior_findings_resolved(verdict: ReviewerVerdict, reviewer_name: str)
     """Refuse the merge when this clean verdict itself still lists findings
     open.
 
-    An earlier fence's open findings do not refuse: the latest verdict per
-    reviewer at the head decides. They stay computed on the verdict
+    An earlier fence's open findings do not refuse: the reviewer's fences at
+    this head decide (every one must pass). They stay computed on the verdict
     (unresolved_prior_findings) and the merge verb reports them as a notice.
 
     Raises merge.errors.VerdictPriorFindingsOpenError naming each finding id.
