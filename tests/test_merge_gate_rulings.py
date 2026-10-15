@@ -314,6 +314,50 @@ class TestCleanFenceAndRulingLifetime:
         assert "records CLEAN" in run.err
 
 
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("platform", sorted(_PLATFORMS))
+class TestRulingAppliesInEverySameRoleFenceAtTheHead:
+    """Under the fence union every fence a role posted at the head runs the
+    full chain, so a ruling is applied in each fence that carries its finding."""
+
+    def test_a_ruling_clears_its_finding_in_every_fence_that_carries_it(
+        self, platform, mode, repo, use_registry, capsys
+    ):
+        use_registry([ruling(kind="false_positive")])
+        comments = [
+            _comment(1, _fence("BLOCKED", findings=[_finding()])),
+            _comment(2, _fence("BLOCKED", findings=[_finding(), _finding()])),
+        ]
+
+        run = _gate(platform, comments, repo, capsys, mode)
+
+        assert run.code == verb.EXIT_OK, run.err
+        assert "every one must pass" in run.err
+        assert "comment #1: " in run.err and "comment #2: " in run.err
+        if not mode:
+            evaluations = json.loads(run.out.strip().splitlines()[-1])["verdict_evaluations"]
+            assert len(evaluations) == 2
+            assert all(e["gate_outcome"] == "CLEAN" and e["applied_rulings"] for e in evaluations)
+
+    @pytest.mark.parametrize("unruled_first", [True, False])
+    def test_a_second_fence_keeping_an_unruled_finding_still_refuses(
+        self, platform, mode, unruled_first, repo, use_registry, capsys
+    ):
+        use_registry([ruling(kind="false_positive")])
+        ruled = _fence("BLOCKED", findings=[_finding()])
+        unruled = _fence(
+            "BLOCKED", findings=[_finding(fingerprint=OTHER_FP, line=20, rule_id="R2")]
+        )
+        bodies = [unruled, ruled] if unruled_first else [ruled, unruled]
+        comments = [_comment(i + 1, body) for i, body in enumerate(bodies)]
+
+        run = _gate(platform, comments, repo, capsys, mode)
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "src/a.py:20:R2 (computed severity" in run.err
+        assert "src/a.py:10:R1 (computed severity" not in run.err
+
+
 class TestEveryFenceOfARole:
     """The gate evaluates each fence of a role on its own, with the registry
     read for that fence, so a ruling clears the finding in every fence."""
