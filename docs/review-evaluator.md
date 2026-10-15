@@ -236,8 +236,9 @@ rulings:
   named) when: it sits inside any git work tree, or inside the reviewed repository when that
   is known; or the file, or any directory above it up to the root, is writable by its group or
   by every user, or is owned by someone other than the process owner or root. A sticky shared
-  directory (a system temporary directory) is allowed as an ancestor. The location check does
-  not depend on any optional flag.
+  directory (a system temporary directory) is allowed as an ancestor. The registry must be
+  owned by the reading process's uid or by root. The location check does not depend on any
+  optional flag.
 - **Residual: code running as the same user.** These checks stop other users and a checkout.
   They cannot stop code that runs as the same user as the reader or the writer, for example a
   pull request's `pre_checks` executed at merge time, which can write the registry. Configure

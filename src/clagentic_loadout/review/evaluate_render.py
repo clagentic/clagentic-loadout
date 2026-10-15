@@ -19,6 +19,13 @@ from clagentic_loadout.review.evaluate import (
 from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
 from clagentic_loadout.review.rulings import SOURCE_RULING
 
+# A ruling never clears a floor finding, so the sentence must not point at one.
+_FLOOR_SENTENCE = (
+    "The security floor forbids clearing this finding as by_design. It can be cleared only by "
+    "a dispositions entry on the base branch of kind accepted_risk (expires, default 30 days), "
+    "false_positive or mitigated, or by a fix, and never by a ruling."
+)
+
 _HEADLINES = {
     OUTCOME_STALE: "STALE: the findings do not describe the expected head",
     OUTCOME_DEGRADED: "DEGRADED: a required input is missing, so this cannot clear the change",
@@ -98,8 +105,7 @@ def _blocking_lines(finding: EvaluatedFinding) -> list[str]:
     # clear it, so the general floor sentence would only repeat it less precisely.
     if finding.floor_forbids_clearing and not finding.refusal_specific:
         lines.append(
-            "     The security floor forbids clearing this finding as by_design. It can be "
-            "ruled accepted_risk (expires, default 30 days), false_positive or mitigated."
+            f"     {_FLOOR_SENTENCE}"
         )
     if finding.clear_with:
         lines.append(
@@ -135,10 +141,7 @@ def finding_notes(finding: EvaluatedFinding) -> list[str]:
         if finding.stakes is not None:
             notes.append(_stakes_line(finding))
         if finding.floor_forbids_clearing and not finding.refusal_specific:
-            notes.append(
-                "The security floor forbids clearing this finding as by_design. It can be "
-                "ruled accepted_risk (expires, default 30 days), false_positive or mitigated."
-            )
+            notes.append(_FLOOR_SENTENCE)
         if finding.clear_with:
             notes.append(
                 f"To clear it, add this entry to {DISPOSITIONS_PATH} on the base branch "

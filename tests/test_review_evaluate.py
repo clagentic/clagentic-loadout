@@ -8,7 +8,7 @@ import pytest
 
 from clagentic_loadout.review import evaluate as ev
 from clagentic_loadout.review import stakes as stk
-from clagentic_loadout.review.evaluate_render import render_text
+from clagentic_loadout.review.evaluate_render import finding_notes, render_text
 from clagentic_loadout.review.rubric import SEVERITIES
 
 from _review_evaluate_support import (
@@ -200,6 +200,23 @@ def test_floor_finding_on_exposed_path_stays_blocking_under_by_design():
     assert only.floor_forbids_clearing
     assert verdict.outcome in (ev.OUTCOME_BLOCKED, ev.OUTCOME_DEGRADED)
     assert "security floor forbids clearing" in render_text(verdict)
+
+
+def test_floor_sentence_names_the_base_branch_entry_and_never_a_ruling():
+    floor = facts(category="injection", integrity="partial", precondition="has_host_access")
+    verdict = run(
+        [finding(fact=floor)],
+        stakes=stk.Stakes(tree=stk.TreeStakes(exposed_dirs=("",))),
+        dispositions=[disposition(kind="by_design")],
+    )
+    expected = (
+        "It can be cleared only by a dispositions entry on the base branch of kind "
+        "accepted_risk (expires, default 30 days), false_positive or mitigated, or by a fix, "
+        "and never by a ruling."
+    )
+    assert expected in " ".join(render_text(verdict).split())
+    assert expected in " ".join(finding_notes(verdict.findings[0]))
+    assert "can be ruled" not in render_text(verdict)
 
 
 def test_floor_finding_can_be_cleared_by_accepted_risk_and_the_stanza_says_so():
