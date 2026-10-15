@@ -59,7 +59,7 @@ def test_the_findings_need_the_rest_of_the_evaluation():
     "entry",
     [
         _entry(severity="blocking"),
-        _entry(fingerprint="fp2:" + "a" * 16),
+        _entry(fingerprint="fp2:aaa"),
         _entry(extra=1),
         _entry(facts="not an object"),
         _entry(facts={"evidence": "x ```review-result y"}),
@@ -70,7 +70,7 @@ def test_the_findings_need_the_rest_of_the_evaluation():
         {"file": "a.py", "line": 1, "rule_id": "R1"},
     ],
     ids=[
-        "severity-not-praise", "fingerprint", "unknown-key", "facts-not-object",
+        "severity-not-praise", "malformed-fingerprint", "unknown-key", "facts-not-object",
         "fence-in-facts", "fence-nested-in-facts", "non-json-facts", "line-zero",
         "fence-in-message", "missing-message",
     ],

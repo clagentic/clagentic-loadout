@@ -82,6 +82,7 @@ KNOWN_VERBS: tuple[str, ...] = (
     "poll-wait",
     "scoped-test-wait",
     "doctor",
+    "ruling",
 )
 
 #: Reference/default role -> verb-set mapping for the seed roles named in
@@ -92,7 +93,7 @@ KNOWN_VERBS: tuple[str, ...] = (
 DEFAULT_ROLE_VERBS: dict[str, tuple[str, ...]] = {
     "builder": ("push",),
     "reviewer": ("git-host-api", "review-post", "stage-body"),
-    "merger": ("merge", "push", "release-dispatch", "release-detect"),
+    "merger": ("merge", "push", "release-dispatch", "release-detect", "ruling"),
     "lead": ("git-host-api",),
 }
 
@@ -208,9 +209,16 @@ def load_role_verbs(
     roles_section = raw.get(CONFIG_SECTION_ROLES)
     if roles_section is None:
         return dict(DEFAULT_ROLE_VERBS)
+    return parse_roles_section(roles_section, source=str(config_path))
+
+
+def parse_roles_section(roles_section: object, *, source: str) -> dict[str, tuple[str, ...]]:
+    """Validate a `roles:` value (role name -> non-empty verb list) and return
+    it as a role -> verb tuple mapping. The one parser both the repo-tier and
+    the user-level `roles:` sources go through."""
     if not isinstance(roles_section, dict) or not roles_section:
         raise InvalidRoleConfigError(
-            f"{config_path}: {CONFIG_SECTION_ROLES!r} section must be a "
+            f"{source}: {CONFIG_SECTION_ROLES!r} section must be a "
             f"non-empty mapping of role name -> verb list, got "
             f"{roles_section!r}."
         )
@@ -218,11 +226,9 @@ def load_role_verbs(
     resolved: dict[str, tuple[str, ...]] = {}
     for role, verbs in roles_section.items():
         if not isinstance(role, str):
-            raise InvalidRoleConfigError(
-                f"{config_path}: role keys must be strings, got {role!r}."
-            )
-        _validate_role_name(role, source=str(config_path))
-        resolved[role] = _validate_verb_list(role, verbs, source=str(config_path))
+            raise InvalidRoleConfigError(f"{source}: role keys must be strings, got {role!r}.")
+        _validate_role_name(role, source=source)
+        resolved[role] = _validate_verb_list(role, verbs, source=source)
     return resolved
 
 
@@ -257,12 +263,28 @@ def resolve_role_verbs(
     return mapping[role]
 
 
+def roles_holding_verb(
+    verb: str,
+    *,
+    repo_root: str | Path | None = None,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+) -> frozenset[str]:
+    """The roles whose verb set contains *verb*, under the same role -> verb
+    mapping `load_role_verbs` resolves (the default mapping when the repo
+    declares none). A verb that gates on "the roles this deployment lets use
+    verb X" asks here instead of keeping a second list of role names."""
+    mapping = load_role_verbs(repo_root, config_relative_path=config_relative_path)
+    return frozenset(role for role, verbs in mapping.items() if verb in verbs)
+
+
 __all__ = [
+    "roles_holding_verb",
     "CONFIG_SECTION_ROLES",
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "DEFAULT_ROLE_VERBS",
     "KNOWN_VERBS",
     "InvalidRoleConfigError",
     "load_role_verbs",
+    "parse_roles_section",
     "resolve_role_verbs",
 ]

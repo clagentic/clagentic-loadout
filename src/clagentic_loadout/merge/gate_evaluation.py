@@ -66,7 +66,11 @@ from clagentic_loadout.review.evaluate import (
     OUTCOME_STALE,
     Verdict,
 )
-from clagentic_loadout.review.evaluate_render import finding_notes
+from clagentic_loadout.review.evaluate_render import (
+    finding_notes,
+    ruling_provenance,
+    unapplied_ruling_line,
+)
 from clagentic_loadout.review.evaluate_verb import EvaluateError
 from clagentic_loadout.review.evaluation import (
     context_from_config,
@@ -75,6 +79,8 @@ from clagentic_loadout.review.evaluation import (
 )
 from clagentic_loadout.review.policy_reader import PolicyReader
 from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
+from clagentic_loadout.review.ruling_provider import IGNORED_PREFIX, RulingScope
+from clagentic_loadout.review.rulings import SOURCE_RULING
 
 
 @dataclass(frozen=True)
@@ -88,6 +94,11 @@ class GateEvaluation:
     gate_outcome: str | None = None
     #: Dispositions at the live base that cleared a finding the fence had blocked.
     applied_dispositions: tuple[str, ...] = ()
+    #: Per-PR rulings from the ruling registry that cleared a finding, and the
+    #: unexpired ones for this PR that cleared nothing (each with why). Both are
+    #: empty, and absent from the serialised form, when no registry is configured.
+    applied_rulings: tuple[str, ...] = ()
+    unapplied_rulings: tuple[str, ...] = ()
     #: Reasons carried when a DEGRADED verdict was allowed to pass.
     degraded_reasons: tuple[str, ...] = ()
     degraded_allowed: bool = False
@@ -95,7 +106,7 @@ class GateEvaluation:
     notices: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "reviewer": self.reviewer,
             "evaluated": self.evaluated,
             "fence_outcome": self.fence_outcome,
@@ -104,6 +115,11 @@ class GateEvaluation:
             "degraded_allowed": self.degraded_allowed,
             "degraded_reasons": list(self.degraded_reasons),
         }
+        if self.applied_rulings:
+            out["applied_rulings"] = list(self.applied_rulings)
+        if self.unapplied_rulings:
+            out["unapplied_rulings"] = list(self.unapplied_rulings)
+        return out
 
     def attestation_line(self) -> str:
         """One line for the merge-completion attestation."""
@@ -112,6 +128,10 @@ class GateEvaluation:
         text = f"{self.reviewer}: fence {self.fence_outcome}, gate {self.gate_outcome}"
         if self.applied_dispositions:
             text += f"; disposition applied: {'; '.join(self.applied_dispositions)}"
+        if self.applied_rulings:
+            text += f"; ruling applied: {'; '.join(self.applied_rulings)}"
+        if self.unapplied_rulings:
+            text += f"; ruling not applied: {'; '.join(self.unapplied_rulings)}"
         if self.degraded_allowed:
             text += f"; DEGRADED allowed by merge.evaluator.allow_degraded: {'; '.join(self.degraded_reasons)}"
         return text
@@ -129,13 +149,85 @@ def _applied_dispositions(verdict: Verdict) -> tuple[str, ...]:
     return tuple(
         f"{finding.id}: {_describe_disposition(finding.disposition)}"
         for finding in verdict.findings
-        if finding.disposition is not None
+        if finding.disposition is not None and not _from_registry(finding.disposition)
     )
+
+
+def _from_registry(entry: Mapping[str, Any]) -> bool:
+    """Whether a serialised disposition is a per-PR ruling rather than a
+    base-revision entry."""
+    return entry.get("source") == SOURCE_RULING
+
+
+def _describe_ruling(entry: Mapping[str, Any]) -> str:
+    expiry = f", expires {entry['expires']}" if entry.get("expires") else ""
+    return (
+        f"{entry['kind']} ruling {ruling_provenance(entry)} at {entry['repo']}#{entry['pr']}"
+        f"{expiry}: {entry['rationale']}"
+    )
+
+
+def _applied_rulings(verdict: Verdict) -> tuple[str, ...]:
+    return tuple(
+        f"{finding.id}: {_describe_ruling(finding.disposition)}"
+        for finding in verdict.findings
+        if finding.disposition is not None and _from_registry(finding.disposition)
+    )
+
+
+def _unapplied_rulings_text(verdict: Verdict) -> tuple[str, ...]:
+    return tuple(unapplied_ruling_line(entry) for entry in verdict.unapplied_rulings)
+
+
+def _expired_rulings_text(verdict: Verdict) -> list[str]:
+    return [
+        f"{entry['path']} {entry['rule_id']} ({entry['kind']}, expired {entry.get('expires')})"
+        for entry in verdict.expired_dispositions
+        if _from_registry(entry)
+    ]
+
+
+def _ruling_notices(
+    label: str,
+    where: str,
+    computed: Verdict,
+    applied_rulings: Sequence[str],
+    unapplied_rulings: Sequence[str],
+    *,
+    applied_already_named: bool = False,
+) -> tuple[str, ...]:
+    """Operator lines naming the registry's effect on this verdict, whatever its
+    outcome: rulings that cleared a finding, rulings that cleared nothing, and a
+    registry that was not used. Empty when a registry has nothing to say, which
+    is every verdict when none is configured."""
+    notices: list[str] = []
+    if applied_rulings and not applied_already_named:
+        notices.append(
+            f"{label} verdict ({where}): ruling(s) from the ruling registry cleared "
+            f"finding(s): {'; '.join(applied_rulings)}"
+        )
+    if unapplied_rulings:
+        notices.append(
+            f"{label} verdict ({where}): ruling(s) for this PR that cleared nothing: "
+            f"{'; '.join(unapplied_rulings)}"
+        )
+    expired = _expired_rulings_text(computed)
+    if expired:
+        notices.append(
+            f"{label} verdict ({where}): expired ruling(s), no longer applied: {'; '.join(expired)}"
+        )
+    ignored = [reason for reason in computed.degraded if reason.startswith(IGNORED_PREFIX)]
+    if ignored:
+        notices.append(
+            f"{label} verdict ({where}): the ruling registry was not used: {'; '.join(ignored)}"
+        )
+    return tuple(notices)
 
 
 def _expired_text(verdict: Verdict) -> list[str]:
     return [
-        f"{entry['path']} {entry['rule_id']} ({entry['kind']}, expired {entry.get('expires')})"
+        f"{'ruling ' if _from_registry(entry) else ''}{entry['path']} {entry['rule_id']} "
+        f"({entry['kind']}, expired {entry.get('expires')})"
         for entry in verdict.expired_dispositions
     ]
 
@@ -159,7 +251,9 @@ def unmatched_recorded_blocks(
     different messages can share one, and covering only one of them clears
     nothing. A disposition that narrows by fingerprint is applied on path and
     rule alone here because the fence does not carry fingerprints, so it cannot
-    be shown to match and never counts."""
+    be shown to match and never counts. A per-PR ruling is the exception: it
+    matches only a finding that carries the very fingerprint it names, so its
+    match is shown, and it counts."""
     by_id: dict[str, list[Any]] = {}
     for finding in computed.findings:
         if finding.praise:
@@ -176,7 +270,9 @@ def unmatched_recorded_blocks(
             unmatched.append((entry, "the gate's computation holds no such finding"))
         elif any(f.disposition is None for f in group):
             unmatched.append((entry, "no disposition at the live base matches it"))
-        elif any(f.disposition.get("fingerprint") for f in group):
+        elif any(
+            f.disposition.get("fingerprint") and not _from_registry(f.disposition) for f in group
+        ):
             unmatched.append(
                 (
                     entry,
@@ -213,11 +309,13 @@ def _recompute(
     visibility: str | None,
     config_root: str | Path | None,
     today: dt.date | None,
+    ruling_scope: RulingScope | None = None,
 ) -> Verdict:
     """The gate's own evaluation of the fence's findings. Policy is read through
     *policy_reader* at *live_base_sha*, never at a revision a fence or findings
     file names; with no reader or no base revision it is not read and the
-    verdict is DEGRADED."""
+    verdict is DEGRADED. Per-PR rulings are read for *ruling_scope* from the
+    registry, never from the fence."""
     state = verdict.state
     assert state.evaluated_findings is not None
     try:
@@ -226,6 +324,7 @@ def _recompute(
             policy_reader=policy_reader,
             policy_base_sha=live_base_sha or None,
             visibility=visibility,
+            ruling_scope=ruling_scope,
         )
     except EvaluateError as exc:
         raise VerdictNotEvaluatedError(
@@ -255,6 +354,9 @@ def _difference_text(verdict: ReviewerVerdict, computed: Verdict, live_base_sha:
     expired = _expired_text(computed)
     if expired:
         lines.append("expired disposition(s), no longer applied: " + "; ".join(expired))
+    unapplied = _unapplied_rulings_text(computed)
+    if unapplied:
+        lines.append("ruling(s) for this PR that cleared nothing: " + "; ".join(unapplied))
     lines.extend(computed.degraded)
     if computed.outcome == OUTCOME_BLOCKED:
         lines.append("finding(s) that now block:\n" + _blocking_text(computed))
@@ -272,6 +374,7 @@ def evaluate_at_gate(
     evaluator: EvaluatorGate,
     config_root: str | Path | None = None,
     today: dt.date | None = None,
+    ruling_scope: RulingScope | None = None,
 ) -> GateEvaluation:
     """Apply the decision table in the module docstring to *verdict*, the
     reviewer's newest valid fence (read by merge.verdict.read_reviewer_verdict,
@@ -349,9 +452,13 @@ def evaluate_at_gate(
         visibility=visibility,
         config_root=config_root,
         today=today,
+        ruling_scope=ruling_scope,
     )
     gate_outcome = computed.outcome
     applied = _applied_dispositions(computed)
+    applied_rulings = _applied_rulings(computed)
+    unapplied_rulings = _unapplied_rulings_text(computed)
+    ruling_fields = {"applied_rulings": applied_rulings, "unapplied_rulings": unapplied_rulings}
 
     if gate_outcome == OUTCOME_STALE:
         raise VerdictStaleError(
@@ -381,19 +488,35 @@ def evaluate_at_gate(
         and not unmatched
     )
     if cleared_by_disposition:
+        notices: list[str] = []
+        if applied:
+            notices.append(
+                f"{label} verdict ({where}) records BLOCKED, but the standing disposition(s) on "
+                f"the live base revision {live_base_sha} now demote the finding(s) to advisory "
+                f"and the gate computes CLEAN: {'; '.join(applied)}. A disposition merged to "
+                f"the base after the review applies, because policy is read from the base "
+                f"revision, which the PR under review cannot have written"
+            )
+        if applied_rulings:
+            notices.append(
+                f"{label} verdict ({where}) records BLOCKED, but the ruling(s) recorded for this "
+                f"PR in the ruling registry demote the finding(s) to advisory and the gate "
+                f"computes CLEAN: {'; '.join(applied_rulings)}. A ruling is read from the "
+                f"registry, which the PR under review cannot write"
+            )
+        notices.extend(
+            _ruling_notices(
+                label, where, computed, applied_rulings, unapplied_rulings, applied_already_named=True
+            )
+        )
         return GateEvaluation(
             reviewer=reviewer_name,
             evaluated=True,
             fence_outcome=fence_outcome,
             gate_outcome=gate_outcome,
             applied_dispositions=applied,
-            notices=(
-                f"{label} verdict ({where}) records BLOCKED, but the standing disposition(s) on "
-                f"the live base revision {live_base_sha} now demote the finding(s) to advisory "
-                f"and the gate computes CLEAN: {'; '.join(applied)}. A disposition merged to "
-                f"the base after the review applies, because policy is read from the base "
-                f"revision, which the PR under review cannot have written",
-            ),
+            notices=tuple(notices),
+            **ruling_fields,
         )
 
     if OUTCOME_BLOCKED in (fence_outcome, gate_outcome):
@@ -409,6 +532,24 @@ def evaluate_at_gate(
                 f"(outcome {gate_outcome}), but a recorded block is cleared only by a "
                 f"disposition that matches each finding it recorded:\n"
                 + _unmatched_text(state.findings_open, unmatched)
+            )
+        if applied_rulings:
+            listing += "\nruling(s) that cleared a finding:\n" + "\n".join(
+                f"  - {line}" for line in applied_rulings
+            )
+        if unapplied_rulings:
+            listing += "\nruling(s) for this PR that cleared nothing:\n" + "\n".join(
+                f"  - {line}" for line in unapplied_rulings
+            )
+        expired_rulings = _expired_rulings_text(computed)
+        if expired_rulings:
+            listing += "\nexpired ruling(s), no longer applied:\n" + "\n".join(
+                f"  - {line}" for line in expired_rulings
+            )
+        ignored = [r for r in computed.degraded if r.startswith(IGNORED_PREFIX)]
+        if ignored:
+            listing += "\nthe ruling registry was not used:\n" + "\n".join(
+                f"  - {line}" for line in ignored
             )
         raise VerdictBlockingError(
             f"{label} BLOCKED merge — verdict ({where}) outcome {fence_outcome}, gate outcome "
@@ -436,9 +577,11 @@ def evaluate_at_gate(
             gate_outcome=gate_outcome,
             degraded_reasons=reasons,
             degraded_allowed=True,
+            **ruling_fields,
             notices=(
                 f"{label} verdict ({where}) is DEGRADED and merge.evaluator.allow_degraded is "
                 f"true for role {reviewer_name!r}; proceeding. Reasons: {'; '.join(reasons)}",
+                *_ruling_notices(label, where, computed, applied_rulings, unapplied_rulings),
             ),
         )
 
@@ -447,6 +590,8 @@ def evaluate_at_gate(
         evaluated=True,
         fence_outcome=fence_outcome,
         gate_outcome=gate_outcome,
+        notices=_ruling_notices(label, where, computed, applied_rulings, unapplied_rulings),
+        **ruling_fields,
     )
 
 

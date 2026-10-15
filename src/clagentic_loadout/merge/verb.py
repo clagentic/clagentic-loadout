@@ -488,6 +488,7 @@ import json
 import subprocess
 import sys
 import urllib.error
+from pathlib import Path
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.acquire.contract import repository_visibility
@@ -625,6 +626,7 @@ from clagentic_loadout.review.errors import ReviewPostError, ReviewVerifyError
 from clagentic_loadout.review.forgejo_backend import post_and_verify_comment as _forgejo_post_and_verify_comment
 from clagentic_loadout.review.github_backend import post_and_verify_review as _github_post_and_verify_review
 from clagentic_loadout.review.policy_reader import GitPolicyReader, HostPolicyReader, PolicyReader
+from clagentic_loadout.review.ruling_provider import RulingScope
 from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
@@ -1587,6 +1589,13 @@ def _run(
         )
         live_base_sha = resolve_base_sha(pr_info)
         host_visibility = repository_visibility(pr_info)
+        # Per-PR rulings are looked up for exactly this repository and PR; a
+        # registry inside the --repo-path checkout is refused as a source.
+        ruling_scope = RulingScope(
+            f"{owner}/{repo}",
+            args.pr_number,
+            (Path(args.repo_path),) if args.repo_path else (),
+        )
         for reviewer_name, bot_login in required_reviewers.items():
             required_scanners = (
                 () if args.ignore_repo_gate else repo_gate.scanners_for(reviewer_name)
@@ -1639,6 +1648,7 @@ def _run(
                     policy_reader=policy_reader,
                     visibility=host_visibility,
                     evaluator=repo_gate.evaluator,
+                    ruling_scope=ruling_scope,
                 )
                 for evaluation_notice in evaluation.notices:
                     print(f"merge: NOTICE -- {label}{evaluation_notice}", file=sys.stderr)

@@ -451,6 +451,11 @@ Read this carefully if you are pointing `loadout-merge` at this provider
   source than the OS-invoking-user configures `transport.attestation`'s
   `identity_env` or `sidecars` config accordingly; this package does not
   make that call on a deployment's behalf.
+- **Without an injected `AuthorityProvider`, the merge verb's
+  `--authorized-role` check is not a security boundary.** The list is
+  supplied by the caller, so a caller can name its own role; the boundary in
+  that configuration is the role-bound credential mint, which issues a token
+  only to an identity entitled to the role.
 - **An empty `authorized_roles` set denies every role.** This is the
   fail-closed default described in §2 — a deployment that never configures
   a role here has correctly configured "nobody may merge," not "everyone
@@ -592,6 +597,38 @@ head is the PR's current head. Consequences:
   not hold), or no known base revision, makes the gate's computation DEGRADED. A fence that
   recorded CLEAN is then refused, naming the missing input. There is no fallback from one
   source to the other.
+
+### Per-PR rulings at the gate
+
+When a ruling registry is configured ([review-evaluator.md](review-evaluator.md), "Per-PR
+rulings"), the gate also reads the rulings recorded for exactly this repository and pull
+request, for each fence it evaluates, and applies them in the same place it applies
+base-revision dispositions. Under `--report-only` this is the same chain. A role with several
+fences at a head has the registry read for each of them, so a ruling clears its finding in
+every fence that carries it.
+
+- A fence carries a finding's `fingerprint` in `evaluated_findings` only when a registry is
+  configured; a ruling is keyed to it, so a fence without fingerprints cannot be ruled on.
+  Unlike a disposition that narrows by fingerprint (which never counts here), a ruling
+  matches only a finding that carries the very fingerprint it names, so its match is shown.
+- A ruling never clears a security-floor finding. The refusal names the finding and says it
+  clears only through a dispositions entry on the base branch, or by fixing it.
+- Every ruling that cleared a finding is named on stderr, in the merge result
+  (`applied_rulings`) and in the attestation, with who recorded it, who requested it, when,
+  its kind, the rationale, the source reference and any work-item reference. A ruling for the
+  PR that cleared nothing is named with the reason (`unapplied_rulings`). A registry that is
+  untrusted or unusable makes the gate's computation DEGRADED and the refusal names it.
+- Every outcome, CLEAN and allowed-DEGRADED included, names the rulings that cleared a finding,
+  the ones that cleared nothing, expired ones, and a registry that was not used, in its
+  notices on stderr whenever a registry has something to report.
+- With no registry configured, the gate's output and result are unchanged.
+- **Registry trust and a documented residual.** The registry is refused on every read and write
+  when it is inside any git work tree or the reviewed repository, or when it or any directory
+  above it is group- or world-writable or owned by neither the process owner nor root. This
+  does not stop code running as the same user as the gate: a pull request's `pre_checks`
+  executed at merge time can write the registry unless the optional sandbox
+  (`merge.pre_checks_sandbox`) is configured. Configure the sandbox for any deployment that
+  uses a ruling registry.
 
 ### Decision table
 

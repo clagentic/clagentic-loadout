@@ -47,6 +47,7 @@ roles:
     - push
     - release-dispatch
     - release-detect
+    - ruling
   lead:
     - git-host-api
 ```
@@ -54,7 +55,9 @@ roles:
 Verb labels are the same names used throughout [docs/verbs.md](verbs.md) and
 the `clagentic-loadout <verb>` umbrella dispatch (`push`, `review-post`,
 `merge`, `git-host-api`, `stage-body`, `release-dispatch`, `release-detect`,
-`poll-wait`, `scoped-test-wait`).
+`poll-wait`, `scoped-test-wait`, `doctor`, `ruling`). The `ruling` label
+gates `loadout-ruling record`; a user-level `roles:` mapping that decides it is
+read by that verb alone (see [review-evaluator.md](review-evaluator.md#who-may-record-a-ruling)).
 
 A repo with **no** repo-local config file, or one with no `roles:` section,
 falls back to a built-in reference mapping covering the four roles above —

@@ -191,6 +191,162 @@ dispositions:
 - **Because the file is read from the base revision, an entry that exists only in the
   change under review does not apply to that change.** Land the entry first.
 
+## Per-PR rulings
+
+A disposition lands on the base branch through a reviewed change. A decision made once for
+one open pull request ("this finding is by design here", "defer this to follow-up work")
+needs a faster route that the pull request still cannot use to clear its own findings. That
+route is the **ruling registry**: a file outside every repository, written only by
+`loadout-ruling record`, read by the evaluator and the merge gate.
+
+```yaml
+rulings:
+  - repo: some-owner/some-repo
+    pr: 33
+    fingerprint: "fp2:0123456789abcdef"   # the finding's fingerprint, required
+    rule_id: sql-string-building           # exact; a check on the fingerprint
+    path: src/legacy/export.py             # exact file path; a check on the fingerprint
+    kind: accepted_risk                    # by_design | false_positive | accepted_risk | mitigated
+    rationale: "Internal admin tool, behind the VPN."
+    by: some-role                          # the attested role that recorded it
+    requested_by: some-caller              # who asked, as the deployment names callers
+    source_ref: "design note 4"            # opaque reference to where it was decided
+    at: 2026-10-01
+    expires: 2026-10-31                    # optional; accepted_risk defaults to 30 days after `at`
+    reference: ABC-123                     # optional deferral to a work item; needs `expires`
+```
+
+- A ruling covers a kept finding the way a disposition does: the same kinds, the same expiry
+  rules, the same demotion to advisory. Nothing is deleted. It is keyed to the finding's
+  fingerprint, to one repository and to one pull request, so it never clears another PR or
+  another finding. A finding with no fingerprint cannot be ruled on.
+- **A ruling never clears a security-floor finding, whatever its kind.** A floor finding
+  clears only through a dispositions entry added to the base branch by a reviewed change, or
+  by being fixed. The evaluator reports the ruling as not applied, naming the finding and
+  that route; `loadout-ruling record` refuses a floor finding when it is asked to write one.
+- A ruling that clears a finding is named in the output with who recorded it, who requested
+  it, when, its kind, the rationale, the source reference and any work-item reference. A ruling
+  for the pull request that cleared nothing (expired, matched no kept finding, refused by the
+  floor, or already superseded by an earlier entry) is listed too, with the reason.
+- Base-revision dispositions apply first; a ruling applies only where they leave a finding
+  blocking.
+- **Trust.** The registry is a file named by user-level configuration (or
+  `CLAGENTIC_LOADOUT_RULINGS_FILE`), never by repository configuration. One check, applied on
+  every read and every write, refuses it (on a read the verdict is DEGRADED and the reason is
+  named) when: it sits inside any git work tree, or inside the reviewed repository when that
+  is known; or the file, or any directory above it up to the root, is writable by its group or
+  by every user, or is owned by someone other than the process owner or root. A sticky shared
+  directory (a system temporary directory) is allowed as an ancestor. The registry must be
+  owned by the reading process's uid or by root. The location check does not depend on any
+  optional flag.
+- **Residual: code running as the same user.** These checks stop other users and a checkout.
+  They cannot stop code that runs as the same user as the reader or the writer, for example a
+  pull request's `pre_checks` executed at merge time, which can write the registry. Configure
+  the optional pre-checks sandbox (`merge.pre_checks_sandbox`, see
+  [merge-authority.md](merge-authority.md)) so that code does not run as that user, and keep
+  the registry under a directory only the recording role's user can write.
+- **Size.** A write that would grow the registry past the size its readers accept
+  (512 KiB) is refused (exit 55) and leaves the file unchanged; remove expired rulings first.
+- With no registry configured, nothing changes: output is identical to a build without the
+  feature, and `EVALUATOR_VERSION` is unchanged.
+
+```yaml
+# ~/.config/clagentic/loadout/config.yaml
+rulings:
+  path: /var/lib/loadout/rulings.yaml     # absolute; omit for no registry
+  reference_pattern: '^[A-Z]+-[0-9]+$'    # optional grammar for deferral references
+```
+
+### Who may record a ruling
+
+`loadout-ruling record` is gated by role. The attested caller's role must hold merge
+authority: it must hold the `ruling` verb. No caller-controlled input decides that: the
+authority comes only from an injected authority provider, else from the effective role-to-verb
+mapping, which is the `roles:` mapping in the user-level config file when that key is present,
+else the built-in default (`provisioning.roles.DEFAULT_ROLE_VERBS`, which grants `ruling` to
+`merger`). No flag, environment variable, repository or checkout contributes, and there is no
+`--authorized-role` flag. Which agent holds a role is the deployment's configuration, never
+this package's.
+
+The user-level source is the `config.yaml` under the loadout config root (the file that holds
+the `rulings:` section), a top-level `roles:` key shaped exactly like the repo-tier `roles:`
+mapping (role name to a non-empty list of verb labels):
+
+```
+roles:
+  clerk:
+    - ruling
+  releaser:
+    - merge
+    - push
+```
+
+Here only `clerk` may record rulings. The mapping REPLACES the built-in default entirely when
+present (a role it omits, `merger` included, holds nothing); the default applies only when the
+key is absent. It decides nothing but who may use `loadout-ruling record`: provisioning,
+`loadout-doctor`, model routing and every other verb keep their own sources. The file is read
+only if it passes the registry's location check (not inside a git work tree, and neither the
+file nor any directory above it writable by a group or by everyone or owned by another user);
+otherwise `record` is refused with exit 52 and names the file. A present `roles:` key whose value is
+empty, `null` or not a mapping is malformed, exit 3, never the default. A deployment owns the whole `roles:` key: an installer should merge it into the user
+config alongside the other sections and never touch unrelated sections. `--repo-path` scopes the ruling (a registry inside it is refused) and supplies no
+role policy. `--role` must match the attested identity, as for every
+other caller-bound verb. `--requested-by` records who asked, as the deployment names callers.
+
+### Where the finding comes from
+
+A reviewer's findings file lives in scratch that is gone by the time a ruling is asked for, and
+regenerating it would not reliably reproduce the finding. The finding is therefore identified
+from the reviewer's POSTED verdict fence, which is durable and which the host attributes to a
+login. `--fence-comment ID` names that comment; `record` reads it through the host API with the
+caller's own role credential (the credential provider the merge verb uses for `--role`) and
+accepts it only if all of these hold:
+
+- the comment is on the requested repository's requested pull request (a comment id that is not
+  among that pull request's comments is refused);
+- its author's login is the login of a required reviewer role, resolved as the merge gate
+  resolves it, where the required roles are the ones the repository's tracked gate declares at
+  the pull request's BASE commit, read through the host API: content the pull request cannot
+  change, and never a checkout or flag the caller supplies. A repository whose base declares no
+  required reviewer role, or a gate that cannot be read, attributes no fence;
+- it is a well-formed verdict fence for that reviewer, read by the merge gate's own fence reader,
+  for the requested pull request, at the pull request's current head (or the full SHA given with
+  `--head`);
+- it is an evaluated fence carrying its `evaluated_findings`, and one of them has `--fingerprint`
+  (the fingerprint is carried only when the reviewing deployment has a registry configured).
+
+The finding's rule, path and facts, and so its floor status, are taken from the fence, not from
+anything the caller types. `--findings`, `--rule-id` and `--path` no longer exist.
+
+```
+loadout-ruling [--role ROLE] record --platform github|forgejo --repo OWNER/REPO --pr N \
+  --fence-comment ID --fingerprint FP \
+  --kind by_design|false_positive|accepted_risk|mitigated --rationale TEXT \
+  --requested-by CALLER --source-ref REF [--expires YYYY-MM-DD] [--reference ITEM] \
+  [--head SHA] [--repo-path DIR] [--git-host-base-url URL]
+loadout-ruling list [--repo OWNER/REPO] [--pr N]
+```
+
+Exit codes: `0` ok, `1` usage, `2` no credential for the caller's role, `3` configuration, `4`
+`--platform` does not match the backend, `7` identity mismatch, `21` role not authorized, `27`
+the host could not be read, `32` the comment is not an acceptable fence (not found, wrong
+author, malformed, another pull request or head, no evaluated findings, or no required reviewer
+can be established), `50` floor finding, `51` the fence holds no finding with the fingerprint,
+`52` registry location (or the user-level role mapping file) untrusted, `53` no registry
+configured, `54` an unexpired ruling already covers the finding, `55` registry could not be
+written.
+
+### Migration
+
+Additive. A deployment that configures no `rulings.path` sees no change. New: the
+`loadout-ruling` verb (also `clagentic-loadout ruling`); the user-level `rulings` section and
+`CLAGENTIC_LOADOUT_RULINGS_FILE`; `loadout-review evaluate --repo/--pr`; and the optional
+`fingerprint` on a fence's `evaluated_findings` entries, carried only when a registry is
+configured, so the merge gate can match a ruling to the same finding the evaluator did. No
+existing flag or exit code changes. `ruling` is a verb label in the role-to-verb vocabulary
+and in the default `merger` set, so a generated `merger` allowlist fragment also names
+`loadout-ruling`.
+
 ## Outcomes
 
 | Outcome | Exit code | Meaning |
@@ -236,8 +392,12 @@ review:
 loadout-review evaluate --findings findings.json \
   --base <merge-base-sha> --head <head-sha> \
   [--expected-head <current-pr-head-sha>] [--profile <name>] \
-  [--visibility public|private|internal] [--repo-path <dir>] [--format json|text]
+  [--visibility public|private|internal] [--repo-path <dir>] [--format json|text] \
+  [--repo <owner/repo> --pr <number>]
 ```
+
+`--repo` and `--pr`, given together, apply the rulings recorded for that pull request (see
+Per-PR rulings). Without them no ruling is applied.
 
 `--findings` is a `run` output or a bare JSON array. A `run` output may carry
 `scanners_run`. `--format json` (default) prints one JSON object with the verdict and the
@@ -285,8 +445,9 @@ lists its reasons; CLEAN lists the advisory findings. `--status` is optional: `c
 any other outcome is refused, naming both. The fence records `verdict_outcome`,
 `verdict_reasons`, `evaluator_version` and `policy_base_sha` at `fence_schema_version` 3,
 plus `evaluated_findings` (each finding with its facts, so the merge gate can compute the
-outcome again; fingerprints are not carried) and `findings_open`, the computed blocking set
-after dispositions; a fence without them reads as not evaluated.
+outcome again; a finding's fingerprint is carried only when a ruling registry is configured)
+and `findings_open`, the computed blocking set after dispositions and rulings; a fence
+without them reads as not evaluated.
 
 To reproduce a posted outcome offline, run `evaluate` on the same `findings.json` with the
 recorded `policy_base_sha` as `--base`, the head, and the visibility the run recorded as

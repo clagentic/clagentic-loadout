@@ -48,10 +48,12 @@ fence_schema_version 3 fence adds:
   evaluator_version str                  the rules the verdict was computed under
   policy_base_sha   <sha>                the base revision policy was read from;
                                          omitted when it was not known
-  evaluated_findings [{file, line, rule_id, message, facts?}]
+  evaluated_findings [{file, line, rule_id, message, facts?, fingerprint?}]
                                          the findings the outcome was computed
                                          from, so the merge gate can compute it
-                                         again under the policy it reads itself
+                                         again under the policy it reads itself;
+                                         the fingerprint is present only when a
+                                         ruling registry is configured
 
 They are present together or not at all (policy_base_sha excepted). A fence at
 version 1 or 2 carries none of them and reads as NOT EVALUATED: its
@@ -519,6 +521,10 @@ def _normalize_evaluation(raw: Mapping[str, Any]) -> dict[str, Any]:
 #: not score. Anything else a reviewer wrote is not an input to the verdict.
 _PRAISE = "praise"
 
+#: The shape of the finding link hint (review.finding_identity), restated here
+#: because the merge layer reads a fence without importing the review layer.
+_FINGERPRINT_RE = re.compile(r"\Afp2:[0-9a-f]{16}\Z")
+
 
 def _plain_json(value: Any, where: str) -> Any:
     """*value* if it is plain JSON data none of whose strings is fence-shaped.
@@ -548,13 +554,23 @@ def _normalize_evaluated_findings(value: Any) -> list[dict[str, Any]]:
     rendered = []
     for index, entry in enumerate(_entries(value, KEY_EVALUATED_FINDINGS)):
         where = f"{KEY_EVALUATED_FINDINGS}[{index}]"
-        _exact_keys(entry, ("file", "line", "rule_id", "message", "facts", "severity"), where)
+        _exact_keys(
+            entry, ("file", "line", "rule_id", "message", "facts", "severity", "fingerprint"), where
+        )
         item: dict[str, Any] = {
             "file": _text(entry.get("file"), f"{where}.file"),
             "line": _line_number(entry.get("line"), f"{where}.line"),
             "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
             "message": _text(entry.get("message"), f"{where}.message", single_line=False),
         }
+        if entry.get("fingerprint") is not None:
+            fingerprint = entry["fingerprint"]
+            if not (isinstance(fingerprint, str) and _FINGERPRINT_RE.match(fingerprint)):
+                raise ValueError(
+                    f"{where}.fingerprint must be a fingerprint like fp2:0123456789abcdef, "
+                    f"got {fingerprint!r}"
+                )
+            item["fingerprint"] = fingerprint
         if entry.get("facts") is not None:
             facts = entry["facts"]
             if not isinstance(facts, Mapping):

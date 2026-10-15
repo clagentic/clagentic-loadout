@@ -44,6 +44,11 @@ from clagentic_loadout.review.evaluate import (
 from clagentic_loadout.review.evaluate_render import render_text
 from clagentic_loadout.review.findings_contract import InvalidReplyError, validate_finding
 from clagentic_loadout.review.policy_source import read_policy
+from clagentic_loadout.review.ruling_provider import (
+    RulingScope,
+    read_scope_rulings,
+    resolve_ruling_provider,
+)
 from clagentic_loadout.review.rubric import DEFAULT_BLOCK_AT, SEVERITIES
 from clagentic_loadout.review.stakes import VISIBILITIES
 from clagentic_loadout.sha import FULL_SHA_RE
@@ -134,6 +139,19 @@ def add_evaluate_parser(subparsers: Any) -> argparse.ArgumentParser:
         "--repo-path",
         default=None,
         help="Local repository holding the base revision (default: the current directory).",
+    )
+    evaluate_parser.add_argument(
+        "--repo",
+        default=None,
+        help="owner/repo the findings are for. With --pr, the per-PR rulings recorded for "
+        "that pull request in the ruling registry are applied. Without both, no ruling is "
+        "applied.",
+    )
+    evaluate_parser.add_argument(
+        "--pr",
+        type=int,
+        default=None,
+        help="Pull request number the findings are for; see --repo.",
     )
     evaluate_parser.add_argument(
         "--format",
@@ -240,17 +258,37 @@ def run_verdict(args: argparse.Namespace, *, config_root: str | Path | None = No
         profile=args.profile,
         visibility=args.visibility,
     )
+    scope = _ruling_scope(args)
+    ruled = read_scope_rulings(resolve_ruling_provider(config_root), scope)
     return evaluate(
         findings,
         policy.stakes,
-        policy.dispositions,
+        (*policy.dispositions, *ruled.rulings),
         file_head if file_head is not None else head,
         expected,
         block_at=block_at,
         scanners_run=scanners,
         required_scanners=required_scanners,
-        degraded_reasons=policy.degraded,
+        degraded_reasons=[*policy.degraded, *ruled.degraded],
     )
+
+
+def _ruling_scope(args: argparse.Namespace) -> RulingScope | None:
+    """The scope rulings are read for: both --repo and --pr, or none. A value
+    given without its partner is a usage error rather than a silent no-op."""
+    if args.repo is None and args.pr is None:
+        return None
+    if args.repo is None or args.pr is None:
+        raise EvaluateError("--repo and --pr must be given together", EXIT_USAGE)
+    parts = args.repo.strip().split("/")
+    if len(parts) != 2 or not all(parts) or args.pr < 1:
+        raise EvaluateError(
+            f"--repo must be owner/repo and --pr a positive number, got {args.repo!r} "
+            f"and {args.pr!r}",
+            EXIT_USAGE,
+        )
+    repo_path = Path(args.repo_path) if args.repo_path else Path.cwd()
+    return RulingScope(args.repo.strip(), args.pr, (repo_path,))
 
 
 def run_evaluate(args: argparse.Namespace, *, config_root: str | Path | None = None) -> int:
