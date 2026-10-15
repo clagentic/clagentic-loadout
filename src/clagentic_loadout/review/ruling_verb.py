@@ -10,11 +10,13 @@ pull request under review cannot write. This verb is the only writer.
       --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM]
   loadout-ruling list [--repo OWNER/REPO] [--pr N]
 
-WHO MAY RECORD. The attested caller's role must be one the deployment's own
-role-to-verb mapping (provisioning.roles) grants the merge verb, checked through
-the same merge-authority seam the merge verb uses (merge.authority). The default
-mapping names the merger role; a deployment that declares its own ``roles:``
-section replaces it. Recording a ruling that clears a non-floor finding hands a
+WHO MAY RECORD. The attested caller's role must hold merge authority, decided
+the way the merge verb decides it for itself (merge.authority): an injected
+AuthorityProvider, else the roles named by repeated ``--authorized-role`` flags,
+else the roles the built-in role-to-verb mapping (provisioning.roles) grants the
+merge verb. The policy never comes from a checkout or path the caller selects:
+``--repo-path`` scopes the ruling (a registry inside it is refused) and supplies
+no role policy. Recording a ruling that clears a non-floor finding hands a
 merge-capable role no power it lacks, which is why that role is the writer. Which
 agent holds the role is the deployment's concern, never this package's.
 ``--requested-by`` records who asked, as the deployment names callers.
@@ -33,13 +35,15 @@ Exit codes (the reserved range; no child-process code is passed through):
   3   the rulings configuration is invalid
   7   --role does not match the attested invoking identity
   21  the attested role holds no merge authority
-  32  the findings file is unreadable or not for this pull request
+  32  the findings file is unreadable, or is not for this repository and pull
+      request (a file that names no pull request cannot be checked: refused)
   50  the finding is a security-floor finding
   51  no finding in the findings file matches the fingerprint, rule and path
   52  the registry location is one the pull request could write
   53  no ruling registry is configured
   54  an unexpired ruling already covers the finding
-  55  the registry could not be written
+  55  the registry could not be written (including: it would exceed the size
+      its readers accept)
 """
 
 from __future__ import annotations
@@ -120,8 +124,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     role_help = (
         "Role whose attested identity records the ruling. It must match this "
         "process's own attested invoking identity or the call is refused before "
-        "any other work, and it must be a role the deployment's role-to-verb "
-        f"mapping grants the {AUTHORIZING_VERB!r} verb. "
+        f"any other work, and it must be a role that holds {AUTHORIZING_VERB!r} authority. "
         f"{describe_omitted_caller_behavior(flag_name='--role')}"
     )
     parser = argparse.ArgumentParser(
@@ -201,9 +204,22 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--repo-path",
         default=None,
-        help="Repository whose repo-local configuration declares the role-to-verb mapping "
-        "(default: the built-in mapping). Point it at a checkout of the base branch, not "
-        "the pull request's branch. A ruling registry inside it is refused.",
+        help="Checkout of the reviewed repository. A ruling registry inside it is refused. "
+        "It supplies no role policy.",
+    )
+    record.add_argument(
+        "--authorized-role",
+        action="append",
+        dest="authorized_roles",
+        default=None,
+        help="A role permitted to record rulings (repeatable), as the merge verb's flag of "
+        "the same name. Without it, the roles the built-in role-to-verb mapping grants the "
+        f"{AUTHORIZING_VERB!r} verb are used.",
+    )
+    record.add_argument(
+        "--head",
+        default=None,
+        help="Head commit the findings file must be for, when the file records one.",
     )
 
     listing = sub.add_parser(
@@ -244,25 +260,43 @@ def _matching_findings(
     ]
 
 
-def _check_findings_document(path: str, owner: str, repo: str, pr: int) -> None:
-    """A findings file that names its pull request must name this one."""
+def _check_findings_document(
+    path: str, owner: str, repo: str, pr: int, head: str | None
+) -> None:
+    """The findings file must name this repository and pull request (and this
+    head, when one was requested and the file records one). A shape that names
+    nothing, such as a bare array, cannot be checked and is refused."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RulingVerbError(f"cannot read findings file {path!r}: {exc}", EXIT_FINDINGS_INVALID) from exc
-    if isinstance(data, dict):
-        named = f"{data.get('owner')}/{data.get('repo')}"
-        if named.lower() != f"{owner}/{repo}".lower() or data.get("pr_number") != pr:
-            raise RulingVerbError(
-                f"findings file {path!r} is for {named}#{data.get('pr_number')}, but "
-                f"{owner}/{repo}#{pr} was requested",
-                EXIT_FINDINGS_INVALID,
-            )
+    if not isinstance(data, dict):
+        raise RulingVerbError(
+            f"findings file {path!r} does not name the repository and pull request it is for "
+            f"(it is not an object), so it cannot be shown to be for {owner}/{repo}#{pr}; "
+            "use a `loadout-review run` output",
+            EXIT_FINDINGS_INVALID,
+        )
+    named = f"{data.get('owner')}/{data.get('repo')}"
+    named_pr = data.get("pr_number")
+    pr_matches = isinstance(named_pr, int) and not isinstance(named_pr, bool) and named_pr == pr
+    if named.lower() != f"{owner}/{repo}".lower() or not pr_matches:
+        raise RulingVerbError(
+            f"findings file {path!r} is for {named}#{named_pr}, but "
+            f"{owner}/{repo}#{pr} was requested",
+            EXIT_FINDINGS_INVALID,
+        )
+    recorded_head = data.get("head_sha")
+    if head is not None and recorded_head is not None and str(recorded_head).lower() != head.lower():
+        raise RulingVerbError(
+            f"findings file {path!r} is for head {recorded_head!r}, but head {head!r} was requested",
+            EXIT_FINDINGS_INVALID,
+        )
 
 
 def _establish_non_floor(args: argparse.Namespace, owner: str, repo: str) -> None:
     """Refuse unless the finding is in the findings file and is not a floor finding."""
-    _check_findings_document(args.findings, owner, repo, args.pr)
+    _check_findings_document(args.findings, owner, repo, args.pr, args.head)
     try:
         _, findings, _ = load_findings_file(args.findings)
     except EvaluateError as exc:
@@ -292,12 +326,16 @@ def _authorize(
     owner: str,
     repo: str,
     pr: int,
-    repo_path: str | None,
+    authorized_roles: list[str] | None,
     authority_provider: AuthorityProvider | None,
 ) -> None:
+    """The policy is the merge verb's own: an injected provider, else the roles
+    the invoker names. It is never read from a path the caller selects."""
     try:
         provider = authority_provider or StaticRoleAuthorityProvider(
-            roles_holding_verb(AUTHORIZING_VERB, repo_root=repo_path)
+            frozenset(authorized_roles)
+            if authorized_roles
+            else roles_holding_verb(AUTHORIZING_VERB)
         )
     except InvalidRoleConfigError as exc:
         raise RulingVerbError(f"role configuration is invalid: {exc}", EXIT_CONFIG_INVALID) from exc
@@ -337,7 +375,7 @@ def _record(
     role = args.role if args.role is not None else attested.subject
     bind_caller(role, caller_explicit=True, identity=attested)
 
-    _authorize(role, owner, repo, args.pr, args.repo_path, authority_provider)
+    _authorize(role, owner, repo, args.pr, args.authorized_roles, authority_provider)
 
     config = _registry(config_root)
     if config.path is None:
@@ -369,6 +407,8 @@ def _record(
     except RulingFormatError as exc:
         raise RulingVerbError(str(exc), EXIT_USAGE) from exc
 
+    # The same location check the readers apply, passed the reviewed repository
+    # when the caller names it; the unconditional checks run either way.
     untrusted = (Path(args.repo_path),) if args.repo_path else ()
     try:
         count = record_ruling(

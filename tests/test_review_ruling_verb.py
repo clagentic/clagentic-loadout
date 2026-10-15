@@ -85,10 +85,15 @@ def _record_argv(findings, **overrides):
     return argv
 
 
-def _run(argv, *, role=WRITER, repo_path=None, **kwargs):
+def _run(argv, *, role=WRITER, repo_path=None, authorized=(WRITER,), **kwargs):
+    """Run the verb. ``authorized`` are the roles the invoker names as holding
+    merge authority (the merge verb's own flag); () relies on the built-in mapping."""
     full = (["--role", role] if role else []) + argv
-    if repo_path is not None and "record" in argv:
-        full += ["--repo-path", str(repo_path)]
+    if "record" in argv:
+        for name in authorized:
+            full += ["--authorized-role", name]
+        if repo_path is not None:
+            full += ["--repo-path", str(repo_path)]
     kwargs.setdefault("identity_provider", _identity(role or verb.DEFAULT_ROLE))
     kwargs.setdefault("today", TODAY)
     return verb.main(full, **kwargs)
@@ -112,16 +117,38 @@ class TestRecord:
     def test_the_documented_default_role_may_record_without_any_role_config(
         self, registry, findings_file
     ):
-        code = _run(["record", *_record_argv(findings_file())], role="merger")
+        code = _run(["record", *_record_argv(findings_file())], role="merger", authorized=())
 
         assert code == verb.EXIT_OK
 
     def test_a_default_role_without_the_merge_verb_may_not(self, registry, findings_file, capsys):
-        code = _run(["record", *_record_argv(findings_file())], role="builder")
+        code = _run(["record", *_record_argv(findings_file())], role="builder", authorized=())
 
         assert code == verb.EXIT_AUTHORITY_DENIED
         assert not registry.exists()
         assert "may not record a ruling" in capsys.readouterr().err
+
+    def test_a_checkout_the_caller_selects_cannot_grant_merge_authority(
+        self, tmp_path, registry, findings_file
+    ):
+        """A role config inside the checkout named by --repo-path (the pull
+        request's own branch, say) must not decide who may record."""
+        hostile = tmp_path / "pr-checkout"
+        config = hostile / ".clagentic" / "loadout"
+        config.mkdir(parents=True)
+        (config / "config.yaml").write_text(
+            yaml.safe_dump({"roles": {OUTSIDER: ["merge"]}}), encoding="utf-8"
+        )
+
+        code = _run(
+            ["record", *_record_argv(findings_file())],
+            role=OUTSIDER,
+            repo_path=hostile,
+            authorized=(),
+        )
+
+        assert code == verb.EXIT_AUTHORITY_DENIED
+        assert not registry.exists()
 
     def test_a_role_without_the_merge_verb_in_the_deployments_mapping_may_not(
         self, registry, repo_path, findings_file
@@ -183,6 +210,35 @@ class TestRecord:
 
         assert code == verb.EXIT_FINDINGS_INVALID
 
+    @pytest.mark.parametrize("pr", [1, 2])
+    def test_a_findings_file_that_names_no_pull_request_is_refused(
+        self, tmp_path, registry, findings_file, capsys, pr
+    ):
+        """A bare array carries no repository or pull request, so a list from
+        another PR cannot be told apart from this one's and is refused."""
+        path = tmp_path / "list-findings.json"
+        path.write_text(json.dumps([ruled_finding(NON_FLOOR)]), encoding="utf-8")
+
+        code = _run(["record", *_record_argv(str(path), **{"--pr": pr})])
+
+        assert code == verb.EXIT_FINDINGS_INVALID
+        assert not registry.exists()
+        assert "does not name the repository and pull request" in capsys.readouterr().err
+
+    def test_a_findings_file_for_another_repository_is_refused(self, registry, findings_file):
+        code = _run(["record", *_record_argv(findings_file(repo="some-owner/other-repo"))])
+
+        assert code == verb.EXIT_FINDINGS_INVALID
+
+    def test_a_findings_file_for_another_head_is_refused(self, registry, findings_file, capsys):
+        code = _run(["record", *_record_argv(findings_file()), "--head", "c" * 40])
+
+        assert code == verb.EXIT_FINDINGS_INVALID
+        assert "head" in capsys.readouterr().err
+
+    def test_a_findings_file_for_the_requested_head_is_accepted(self, registry, findings_file):
+        assert _run(["record", *_record_argv(findings_file()), "--head", HEAD]) == verb.EXIT_OK
+
     def test_with_no_registry_configured_it_refuses(self, tmp_path, monkeypatch, repo_path, findings_file, capsys):
         monkeypatch.delenv(rp.RULINGS_FILE_ENV_VAR, raising=False)
 
@@ -208,6 +264,23 @@ class TestRecord:
         code = _run(["record", *_record_argv(findings_file())], repo_path=repo_path)
 
         assert code == verb.EXIT_REGISTRY_UNTRUSTED
+
+    def test_a_group_writable_registry_directory_is_refused(self, registry, findings_file):
+        os.chmod(registry.parent, 0o775)
+
+        assert _run(["record", *_record_argv(findings_file())]) == verb.EXIT_REGISTRY_UNTRUSTED
+        assert not registry.exists()
+
+    def test_a_registry_inside_a_git_work_tree_is_refused_without_a_repo_path(
+        self, tmp_path, monkeypatch, findings_file
+    ):
+        tree = tmp_path / "tree"
+        (tree / ".git").mkdir(parents=True)
+        inside = registry_dir(tree) / "rulings.yaml"
+        monkeypatch.setenv(rp.RULINGS_FILE_ENV_VAR, str(inside))
+
+        assert _run(["record", *_record_argv(findings_file())]) == verb.EXIT_REGISTRY_UNTRUSTED
+        assert not inside.exists()
 
     def test_recording_the_same_finding_twice_is_refused(self, registry, repo_path, findings_file):
         argv = ["record", *_record_argv(findings_file())]
