@@ -44,6 +44,12 @@ from clagentic_loadout.review.evaluate_verb import load_evaluator_config
 from clagentic_loadout.review.facts import KEY_FACTS
 from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader
 from clagentic_loadout.review.policy_source import PolicySource, read_policy_from
+from clagentic_loadout.review.ruling_provider import (
+    RulingProvider,
+    RulingRead,
+    RulingScope,
+    resolve_ruling_provider,
+)
 from clagentic_loadout.review.rubric import DEFAULT_BLOCK_AT
 from clagentic_loadout.review.stakes import VISIBILITIES, VISIBILITY_PUBLIC, Stakes
 
@@ -91,6 +97,14 @@ class EvaluationContext:
     policy_base_sha: str | None = None
     visibility: str | None = None
     stakes_profile: str | None = None
+    #: Where per-PR rulings are read from, and the one repository and pull
+    #: request they are for. With either missing no ruling is applied: a ruling
+    #: that cannot be tied to this pull request must not clear anything.
+    ruling_provider: RulingProvider | None = None
+    ruling_scope: RulingScope | None = None
+    #: Directories the pull request under review can write; a ruling registry
+    #: inside one is refused.
+    ruling_untrusted_roots: tuple[Path, ...] = ()
 
     @property
     def effective_visibility(self) -> str:
@@ -105,6 +119,8 @@ def context_from_config(
     """An EvaluationContext whose evaluator settings come from the user-level
     configuration. Raises evaluate_verb.EvaluateError when it is invalid."""
     block_at, required = load_evaluator_config(config_root)
+    if "ruling_provider" not in fields:
+        fields["ruling_provider"] = resolve_ruling_provider(config_root)
     return EvaluationContext(block_at=block_at, required_scanners=tuple(required), **fields)
 
 
@@ -127,6 +143,17 @@ def _policy(context: EvaluationContext) -> PolicySource:
     )
 
 
+def _rulings(context: EvaluationContext) -> RulingRead:
+    """The rulings on record for the context's pull request. None are applied
+    when no registry is configured or the scope is not known."""
+    provider, scope = context.ruling_provider, context.ruling_scope
+    if provider is None or scope is None:
+        return RulingRead()
+    return provider.rulings_for(
+        scope.repo, scope.pr, untrusted_roots=context.ruling_untrusted_roots
+    )
+
+
 def evaluate_findings(
     findings: Sequence[Mapping[str, Any]],
     head_sha: str,
@@ -138,7 +165,8 @@ def evaluate_findings(
 ) -> Verdict:
     """The Verdict for *findings* produced for *head_sha*, under *context*."""
     policy = _policy(context)
-    degraded = list(policy.degraded)
+    ruled = _rulings(context)
+    degraded = [*policy.degraded, *ruled.degraded]
     if context.visibility not in VISIBILITIES:
         degraded.append(
             "the repository visibility was not established from the host record, "
@@ -147,7 +175,9 @@ def evaluate_findings(
     return evaluate(
         findings,
         policy.stakes,
-        policy.dispositions,
+        # Base-revision dispositions first, so a standing entry keeps its place;
+        # a ruling then applies only where those leave a finding blocking.
+        (*policy.dispositions, *ruled.rulings),
         head_sha,
         expected_head if expected_head is not None else head_sha,
         block_at=context.block_at,

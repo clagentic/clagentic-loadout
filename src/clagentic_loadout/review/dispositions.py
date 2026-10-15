@@ -116,6 +116,12 @@ def _text(value: Any, where: str) -> str:
     raise DispositionsFormatError(f"{where} must be a non-empty string")
 
 
+#: The field validators, public so review.rulings validates a ruling's dates
+#: and text by the same rules rather than a second copy.
+date_field = _date
+text_field = _text
+
+
 def parse_dispositions(doc: Any) -> tuple[Disposition, ...]:
     """The entries of a parsed ``dispositions.yaml``. Any malformed entry
     rejects the whole file (DispositionsFormatError): the policy can only lower
@@ -202,5 +208,7 @@ __all__ = [
     "Disposition",
     "DispositionsFormatError",
     "clearing_stanza",
+    "date_field",
     "parse_dispositions",
+    "text_field",
 ]

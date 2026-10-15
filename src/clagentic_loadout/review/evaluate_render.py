@@ -17,6 +17,7 @@ from clagentic_loadout.review.evaluate import (
     Verdict,
 )
 from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
+from clagentic_loadout.review.rulings import SOURCE_RULING
 
 _HEADLINES = {
     OUTCOME_STALE: "STALE: the findings do not describe the expected head",
@@ -28,6 +29,32 @@ _HEADLINES = {
 
 def _short(sha: str | None) -> str:
     return sha[:12] if sha else "(none)"
+
+
+def cleared_line(d: dict) -> str:
+    """The sentence naming what cleared a finding: who ruled, when, the kind,
+    the rationale and, for a deferral, the work-item reference. A ruling is
+    named as one, never as a base-revision disposition."""
+    if d.get("source") != SOURCE_RULING:
+        return f"cleared by {d['kind']} disposition ({d['by']}, {d['at']}): {d['rationale']}"
+    deferral = f", deferred to {d['reference']}" if d.get("reference") else ""
+    return (
+        f"cleared by {d['kind']} ruling ({d['by']}, {d['at']}{deferral}) at "
+        f"{d['repo']}#{d['pr']}: {d['rationale']}"
+    )
+
+
+def _expired_line(entry: dict) -> str:
+    label = "ruling " if entry.get("source") == SOURCE_RULING else ""
+    return f"{label}{entry['path']} {entry['rule_id']} ({entry['kind']}, expired {entry['expires']})"
+
+
+def _unapplied_line(entry: dict) -> str:
+    deferral = f", deferred to {entry['reference']}" if entry.get("reference") else ""
+    return (
+        f"{entry['path']} {entry['rule_id']} ({entry['kind']}, ruled by {entry['by']} on "
+        f"{entry['at']}{deferral}): {entry['unapplied_reason']}"
+    )
 
 
 def _stakes_line(finding: EvaluatedFinding) -> str:
@@ -51,10 +78,7 @@ def _finding_lines(finding: EvaluatedFinding, *, detail: bool) -> list[str]:
     if finding.facts_state != "complete" and not finding.praise:
         lines.append(f"     facts {finding.facts_state}: {'; '.join(finding.facts_problems)}")
     if finding.disposition is not None:
-        d = finding.disposition
-        lines.append(
-            f"     cleared by {d['kind']} disposition ({d['by']}, {d['at']}): {d['rationale']}"
-        )
+        lines.append(f"     {cleared_line(finding.disposition)}")
     if finding.disposition_refused:
         lines.append(f"     disposition refused: {finding.disposition_refused}")
     if finding.possible_duplicates:
@@ -64,7 +88,9 @@ def _finding_lines(finding: EvaluatedFinding, *, detail: bool) -> list[str]:
 
 def _blocking_lines(finding: EvaluatedFinding) -> list[str]:
     lines = _finding_lines(finding, detail=True)
-    if finding.floor_forbids_clearing:
+    # A specific refusal already names this finding and the kinds that can still
+    # clear it, so the general floor sentence would only repeat it less precisely.
+    if finding.floor_forbids_clearing and not finding.refusal_specific:
         lines.append(
             "     The security floor forbids clearing this finding as by_design. It can be "
             "ruled accepted_risk (expires, default 30 days), false_positive or mitigated."
@@ -94,8 +120,7 @@ def finding_notes(finding: EvaluatedFinding) -> list[str]:
     if finding.facts_state != "complete" and not finding.praise:
         notes.append(f"facts {finding.facts_state}: {'; '.join(finding.facts_problems)}")
     if finding.disposition is not None:
-        d = finding.disposition
-        notes.append(f"cleared by {d['kind']} disposition ({d['by']}, {d['at']}): {d['rationale']}")
+        notes.append(cleared_line(finding.disposition))
     if finding.disposition_refused:
         notes.append(f"disposition refused: {finding.disposition_refused}")
     if finding.possible_duplicates:
@@ -103,7 +128,7 @@ def finding_notes(finding: EvaluatedFinding) -> list[str]:
     if finding.blocking:
         if finding.stakes is not None:
             notes.append(_stakes_line(finding))
-        if finding.floor_forbids_clearing:
+        if finding.floor_forbids_clearing and not finding.refusal_specific:
             notes.append(
                 "The security floor forbids clearing this finding as by_design. It can be "
                 "ruled accepted_risk (expires, default 30 days), false_positive or mitigated."
@@ -148,9 +173,11 @@ def render_text(verdict: Verdict) -> str:
     if verdict.expired_dispositions:
         lines.append(f"Expired dispositions, not applied ({len(verdict.expired_dispositions)}):")
         for entry in verdict.expired_dispositions:
-            lines.append(
-                f"  - {entry['path']} {entry['rule_id']} ({entry['kind']}, expired {entry['expires']})"
-            )
+            lines.append(f"  - {_expired_line(entry)}")
+    if verdict.unapplied_rulings:
+        lines.append(f"Rulings for this pull request that cleared nothing ({len(verdict.unapplied_rulings)}):")
+        for entry in verdict.unapplied_rulings:
+            lines.append(f"  - {_unapplied_line(entry)}")
     return "\n".join(lines)
 
 
