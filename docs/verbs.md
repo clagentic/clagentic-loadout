@@ -1134,12 +1134,37 @@ Resolved by caller (1):
 `resolved` is derived by `post` from the run record and `--resolved-findings`, so
 `--state-file` may not carry it.
 
+**Per-PR rulings.** When a ruling registry is configured, `run` and `post` apply the rulings
+recorded for the PR they review, and `post` carries each finding's fingerprint in the
+fence's `evaluated_findings` so the merge gate can match the same ruling. `evaluate` takes
+`--repo` and `--pr` for the same purpose. See
+[review-evaluator.md](review-evaluator.md#per-pr-rulings).
+
 **Failure diagnostics.** When no engine can answer a chunk, the blocked result carries
 each engine's saved stderr path (`carrier_stderr_file`, `fallback_stderr_file`;
 `stderr_file` is the engine tried last), and a fallback that itself fails reports its
 own error with the carrier's failure as context. Saved stderr lives in the run
 directory's `carrier-logs/`, created at mode 0700 with files at 0600, and an engine's
 output is read through a bounded tail, so memory stays flat however much it writes.
+
+### `loadout-ruling` — record and list per-PR rulings on kept findings
+
+```
+loadout-ruling [--role ROLE] record --repo OWNER/REPO --pr N --findings FILE \
+  --fingerprint FP --rule-id RULE --path PATH --kind KIND --rationale TEXT \
+  --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM] [--repo-path DIR]
+loadout-ruling list [--repo OWNER/REPO] [--pr N]
+```
+
+`record` writes a ruling to the ruling registry, a file the pull request under review cannot
+write; the evaluator and the merge gate read it. The caller's `--role` must match its
+attested identity, and the role must be one the deployment's role-to-verb mapping grants the
+`merge` verb (default mapping: `merger`), checked through the merge-authority seam. A
+security-floor finding is refused (exit 50), as is a finding the `--findings` file does not
+hold (51), an untrusted registry location (52), no configured registry (53) and a duplicate
+(54). `list` is read-only and needs no role. The verb mints no credential and makes no
+network call. Full semantics, registry format and exit codes:
+[review-evaluator.md](review-evaluator.md#per-pr-rulings).
 
 ### `loadout-push` — bot-attributed commit push + PR open/update
 
