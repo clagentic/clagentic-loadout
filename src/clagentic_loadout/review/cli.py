@@ -92,6 +92,7 @@ from clagentic_loadout.review.resolutions import (
     resolved_entry,
     split_resolved,
 )
+from clagentic_loadout.review.ruling_provider import RulingScope
 from clagentic_loadout.review.run_evidence import evidence_from_document
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
@@ -466,6 +467,14 @@ def _policy_reader(args: argparse.Namespace, backend, *, owner: str, repo: str) 
     return HostPolicyReader(backend, owner=owner, repo=repo)
 
 
+def _ruling_scope(args: argparse.Namespace, *, owner: str, repo: str) -> RulingScope:
+    """The one repository and PR this invocation's rulings are for. A registry
+    inside --repo-path is refused: that checkout holds the PR's branch."""
+    return RulingScope(
+        f"{owner}/{repo}", args.pr, (Path(args.repo_path),) if args.repo_path else ()
+    )
+
+
 def _resolve_run_root(run_root: Path | None, config_root: str | Path | None) -> Path:
     if run_root is not None:
         return run_root
@@ -536,6 +545,7 @@ def _run_command(
         policy_base_sha=acquired.base_sha,
         visibility=acquired.repo_visibility,
         policy_reader=_policy_reader(args, backend, owner=owner, repo=repo),
+        ruling_scope=_ruling_scope(args, owner=owner, repo=repo),
     )
 
     delta = None
@@ -931,6 +941,7 @@ def _post_command(
         policy_reader=_policy_reader(args, policy_backend, owner=owner, repo=repo),
         policy_base_sha=policy_base,
         visibility=live_pr.repo_visibility,
+        ruling_scope=_ruling_scope(args, owner=owner, repo=repo),
     )
     scanners_run = state.get(KEY_SCANNERS_RUN)
     verdict = evaluate_findings(
@@ -966,7 +977,9 @@ def _post_command(
         **({KEY_FINDINGS_OPEN: open_findings} if open_findings else {}),
         **evidence,
         **fence_fields,
-        KEY_EVALUATED_FINDINGS: evaluated_findings_for_fence(findings),
+        KEY_EVALUATED_FINDINGS: evaluated_findings_for_fence(
+            findings, with_fingerprint=evaluation.ruling_provider is not None
+        ),
     }
     try:
         stage_caller_body(

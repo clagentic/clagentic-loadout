@@ -70,7 +70,8 @@
           "rule_id": {"type": "string", "minLength": 1, "description": "Rule the finding was raised under."},
           "message": {"type": "string", "minLength": 1, "description": "What the finding claimed."},
           "facts": {"type": "object", "description": "The facts the reviewer stated, exactly as stated; judged against the published review-facts vocabulary, and anything outside it counts at its worst case."},
-          "severity": {"type": "string", "enum": ["praise"], "description": "Present only for a finding that is not a defect and is not scored."}
+          "severity": {"type": "string", "enum": ["praise"], "description": "Present only for a finding that is not a defect and is not scored."},
+          "fingerprint": {"type": "string", "pattern": "^fp2:[0-9a-f]{16}$", "description": "OPTIONAL link hint for the finding. Present only when the deployment records per-PR rulings, which are matched by it; absent otherwise."}
         }
       }
     },
