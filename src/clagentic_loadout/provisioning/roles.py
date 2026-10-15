@@ -257,7 +257,22 @@ def resolve_role_verbs(
     return mapping[role]
 
 
+def roles_holding_verb(
+    verb: str,
+    *,
+    repo_root: str | Path | None = None,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+) -> frozenset[str]:
+    """The roles whose verb set contains *verb*, under the same role -> verb
+    mapping `load_role_verbs` resolves (the default mapping when the repo
+    declares none). A verb that gates on "the roles this deployment lets use
+    verb X" asks here instead of keeping a second list of role names."""
+    mapping = load_role_verbs(repo_root, config_relative_path=config_relative_path)
+    return frozenset(role for role, verbs in mapping.items() if verb in verbs)
+
+
 __all__ = [
+    "roles_holding_verb",
     "CONFIG_SECTION_ROLES",
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "DEFAULT_ROLE_VERBS",

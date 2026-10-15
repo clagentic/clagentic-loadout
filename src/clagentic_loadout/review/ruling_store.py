@@ -35,6 +35,7 @@ from clagentic_loadout.review.rulings import (
 
 _FILE_MODE = 0o644
 _DIR_MODE = 0o755
+_LOCK_MODE = 0o600
 
 
 class RulingStoreError(Exception):
@@ -86,8 +87,10 @@ def record_ruling(
                 f"refusing to write the rulings registry {path}: {reason}"
             )
         lock_path = path.parent / f".{path.name}.lock"
-        with open(lock_path, "a", encoding="utf-8") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        # A descriptor opened only to hold the lock: nothing is ever written to it.
+        lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, _LOCK_MODE)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
             existing = _read(path, reference_pattern)
             for other in existing:
                 if _same_finding(other, ruling) and not other.is_expired(today):
@@ -102,6 +105,8 @@ def record_ruling(
             ).encode("utf-8")
             write_bytes_atomic(path, payload, mode=_FILE_MODE)
             os.chmod(path, _FILE_MODE)
+        finally:
+            os.close(lock_fd)
     except OSError as exc:
         raise RulingStoreError(f"cannot record the ruling in {path}: {exc}") from exc
     return len(stored)
