@@ -1658,12 +1658,7 @@ def _run(
                     print(
                         f"merge: NOTICE -- {label}{reviewer_name.upper()} has earlier-fence "
                         f"finding(s) not cleared at this head: {prior_ids}. They do not "
-                        f"refuse the merge; "
-                        + (
-                            "each fence at the head is judged on its own."
-                            if label
-                            else "the latest verdict at the head decides."
-                        ),
+                        "refuse the merge; the role's fences at this head decide.",
                         file=sys.stderr,
                     )
                 for scanner_warning in verdict.check_required_scanners(

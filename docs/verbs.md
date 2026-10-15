@@ -1849,8 +1849,8 @@ rendered inside the fence, never as body text, and a fence that lands without
 them fails the readback. A hand-authored fence is refused as it always was.
 At the gate, the reviewer's earlier fences are walked in order: a finding an
 earlier fence held open that the current verdict neither clears at its own
-head (with evidence) nor re-raises does not refuse the merge: the verdict at
-the head decides, and the merge prints a NOTICE naming each such finding id.
+head (with evidence) nor re-raises does not refuse the merge: the role's fences at
+this head decide, and the merge prints a NOTICE naming each such finding id.
 A required role's verdict at the PR head is the union of every fence the role
 posted at that head: each runs the full chain and each must pass, whatever
 order they were posted in, so a CLEAN fence never overrides a BLOCKED one at

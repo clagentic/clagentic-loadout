@@ -1244,8 +1244,8 @@ def assert_prior_findings_resolved(verdict: ReviewerVerdict, reviewer_name: str)
     """Refuse the merge when this clean verdict itself still lists findings
     open.
 
-    An earlier fence's open findings do not refuse: the latest verdict per
-    reviewer at the head decides. They stay computed on the verdict
+    An earlier fence's open findings do not refuse: the reviewer's fences at
+    this head decide (every one must pass). They stay computed on the verdict
     (unresolved_prior_findings) and the merge verb reports them as a notice.
 
     Raises merge.errors.VerdictPriorFindingsOpenError naming each finding id.
