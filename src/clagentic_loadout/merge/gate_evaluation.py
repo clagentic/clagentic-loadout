@@ -179,6 +179,51 @@ def _unapplied_rulings_text(verdict: Verdict) -> tuple[str, ...]:
     return tuple(unapplied_ruling_line(entry) for entry in verdict.unapplied_rulings)
 
 
+def _expired_rulings_text(verdict: Verdict) -> list[str]:
+    return [
+        f"{entry['path']} {entry['rule_id']} ({entry['kind']}, expired {entry.get('expires')})"
+        for entry in verdict.expired_dispositions
+        if _from_registry(entry)
+    ]
+
+
+def _ruling_notices(
+    label: str,
+    where: str,
+    computed: Verdict,
+    applied_rulings: Sequence[str],
+    unapplied_rulings: Sequence[str],
+    *,
+    applied_already_named: bool = False,
+) -> tuple[str, ...]:
+    """Operator lines naming the registry's effect on this verdict, whatever its
+    outcome: rulings that cleared a finding, rulings that cleared nothing, and a
+    registry that was not used. Empty when a registry has nothing to say, which
+    is every verdict when none is configured."""
+    notices: list[str] = []
+    if applied_rulings and not applied_already_named:
+        notices.append(
+            f"{label} verdict ({where}): ruling(s) from the ruling registry cleared "
+            f"finding(s): {'; '.join(applied_rulings)}"
+        )
+    if unapplied_rulings:
+        notices.append(
+            f"{label} verdict ({where}): ruling(s) for this PR that cleared nothing: "
+            f"{'; '.join(unapplied_rulings)}"
+        )
+    expired = _expired_rulings_text(computed)
+    if expired:
+        notices.append(
+            f"{label} verdict ({where}): expired ruling(s), no longer applied: {'; '.join(expired)}"
+        )
+    ignored = [reason for reason in computed.degraded if reason.startswith(IGNORED_PREFIX)]
+    if ignored:
+        notices.append(
+            f"{label} verdict ({where}): the ruling registry was not used: {'; '.join(ignored)}"
+        )
+    return tuple(notices)
+
+
 def _expired_text(verdict: Verdict) -> list[str]:
     return [
         f"{'ruling ' if _from_registry(entry) else ''}{entry['path']} {entry['rule_id']} "
@@ -459,6 +504,11 @@ def evaluate_at_gate(
                 f"computes CLEAN: {'; '.join(applied_rulings)}. A ruling is read from the "
                 f"registry, which the PR under review cannot write"
             )
+        notices.extend(
+            _ruling_notices(
+                label, where, computed, applied_rulings, unapplied_rulings, applied_already_named=True
+            )
+        )
         return GateEvaluation(
             reviewer=reviewer_name,
             evaluated=True,
@@ -483,9 +533,18 @@ def evaluate_at_gate(
                 f"disposition that matches each finding it recorded:\n"
                 + _unmatched_text(state.findings_open, unmatched)
             )
+        if applied_rulings:
+            listing += "\nruling(s) that cleared a finding:\n" + "\n".join(
+                f"  - {line}" for line in applied_rulings
+            )
         if unapplied_rulings:
             listing += "\nruling(s) for this PR that cleared nothing:\n" + "\n".join(
                 f"  - {line}" for line in unapplied_rulings
+            )
+        expired_rulings = _expired_rulings_text(computed)
+        if expired_rulings:
+            listing += "\nexpired ruling(s), no longer applied:\n" + "\n".join(
+                f"  - {line}" for line in expired_rulings
             )
         ignored = [r for r in computed.degraded if r.startswith(IGNORED_PREFIX)]
         if ignored:
@@ -522,6 +581,7 @@ def evaluate_at_gate(
             notices=(
                 f"{label} verdict ({where}) is DEGRADED and merge.evaluator.allow_degraded is "
                 f"true for role {reviewer_name!r}; proceeding. Reasons: {'; '.join(reasons)}",
+                *_ruling_notices(label, where, computed, applied_rulings, unapplied_rulings),
             ),
         )
 
@@ -530,6 +590,7 @@ def evaluate_at_gate(
         evaluated=True,
         fence_outcome=fence_outcome,
         gate_outcome=gate_outcome,
+        notices=_ruling_notices(label, where, computed, applied_rulings, unapplied_rulings),
         **ruling_fields,
     )
 

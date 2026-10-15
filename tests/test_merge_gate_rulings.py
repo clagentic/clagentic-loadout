@@ -160,7 +160,10 @@ class TestRulingClearsAtTheGate:
         run = _gate(platform, _blocked(_finding(), other), repo, capsys, mode)
 
         assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
-        assert "src/a.py:20:R2" in run.err
+        # Only the unruled finding is still listed as blocking; the ruled one is gone.
+        assert run.err.count("(computed severity") == 1
+        assert "src/a.py:20:R2 (computed severity" in run.err
+        assert "src/a.py:10:R1 (computed severity" not in run.err
 
     @pytest.mark.parametrize("kind", ["by_design", "false_positive", "accepted_risk", "mitigated"])
     def test_it_never_clears_a_security_floor_finding(
@@ -193,6 +196,8 @@ class TestRulingClearsAtTheGate:
         run = _gate(platform, _blocked(_finding()), repo, capsys, mode)
 
         assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "expired" in run.err and "src/a.py" in run.err and "R1" in run.err
+        assert "2026-02-01" in run.err
 
     def test_a_registry_the_pull_request_could_write_applies_nothing_and_says_so(
         self, platform, mode, repo, tmp_path, monkeypatch, capsys
@@ -263,6 +268,39 @@ class TestCleanFenceAndRulingLifetime:
         run = _gate("forgejo", comments, repo, capsys)
 
         assert run.code == verb.EXIT_OK, run.err
+        assert "cleared finding(s)" in run.err and "src/a.py:10:R1" in run.err
+
+    def test_a_clean_verdict_names_a_ruling_that_cleared_nothing(self, repo, use_registry, capsys):
+        use_registry([ruling(fingerprint=OTHER_FP)])
+        comments = [_comment(1, _fence("CLEAN", findings=[]))]
+
+        run = _gate("forgejo", comments, repo, capsys)
+
+        assert run.code == verb.EXIT_OK, run.err
+        assert "cleared nothing" in run.err and "matched no kept finding" in run.err
+
+    def test_a_group_writable_registry_refuses_a_clean_fence_and_says_why(
+        self, repo, use_registry, capsys
+    ):
+        path = use_registry([ruling()])
+        os.chmod(path, 0o664)
+        comments = [_comment(1, _fence("CLEAN", findings=[]))]
+
+        run = _gate("forgejo", comments, repo, capsys)
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "rulings ignored" in run.err and "group" in run.err
+
+    def test_a_clean_verdict_with_no_registry_says_nothing_about_rulings(
+        self, repo, capsys, monkeypatch
+    ):
+        monkeypatch.delenv(rp.RULINGS_FILE_ENV_VAR, raising=False)
+        comments = [_comment(1, _fence("CLEAN", findings=[]))]
+
+        run = _gate("forgejo", comments, repo, capsys)
+
+        assert run.code == verb.EXIT_OK
+        assert "ruling" not in run.err
 
     def test_a_clean_fence_is_refused_once_the_ruling_that_cleared_it_is_gone(
         self, repo, use_registry, capsys
