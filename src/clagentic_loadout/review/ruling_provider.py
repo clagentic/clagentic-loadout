@@ -14,7 +14,16 @@ location the PR could reach:
 
   * a path inside a git work tree (a checkout the PR branch lives in);
   * a path inside the repository the evaluation was given;
-  * a registry file or directory anyone on the host can write.
+  * a registry file, or any directory above it up to the root, that is writable
+    by its group or by every user, or owned by someone other than this
+    process's owner or root (a sticky shared directory such as a system
+    temporary directory is allowed as an ancestor).
+
+These checks run on every read and every write, whether or not the reviewed
+repository is known. They do not stop code running as the same user as the
+reader: a pre-merge check that executes pull-request code under that user can
+write the registry unless the optional pre-checks sandbox is configured
+(``merge.pre_checks_sandbox``; see docs/merge-authority.md).
 
 A refused source applies no rulings and says why, which the evaluator reports
 as a DEGRADED input: the only effect of "no rulings" is that nothing is demoted.
@@ -63,6 +72,7 @@ CONFIG_KEY_REFERENCE_PATTERN = "reference_pattern"
 RULINGS_FILE_ENV_VAR = "CLAGENTIC_LOADOUT_RULINGS_FILE"
 
 _WORLD_WRITABLE = stat.S_IWOTH
+_GROUP_WRITABLE = stat.S_IWGRP
 
 
 #: Starts every degraded reason this module reports, so a reader that wants only
@@ -162,17 +172,35 @@ def untrusted_reason(path: Path, untrusted_roots: Sequence[Path] = ()) -> str | 
         base = Path(root).resolve()
         if resolved == base or base in resolved.parents:
             return f"it is inside {base}, a repository the pull request under review can write"
+    # Unconditional: holds whether or not the caller knows the reviewed repository.
     for parent in (resolved.parent, *resolved.parent.parents):
         if (parent / ".git").exists():
             return f"it is inside the git work tree at {parent}, which holds the pull request's branch"
-    try:
-        if resolved.exists() and resolved.stat().st_mode & _WORLD_WRITABLE:
-            return "the file is writable by every user on the host"
-        if resolved.parent.exists() and resolved.parent.stat().st_mode & _WORLD_WRITABLE:
-            return f"its directory {resolved.parent} is writable by every user on the host"
-    except OSError as exc:
-        return f"its permissions cannot be read: {exc}"
+    # The file and every directory above it: anyone who can replace one of them
+    # can replace the registry. A path component that does not exist yet (a
+    # first write) is skipped here and judged once it has been created.
+    me = os.geteuid()
+    for node in (resolved, *resolved.parents):
+        label = "the file" if node == resolved else f"its directory {node}"
+        try:
+            info = node.stat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f"its permissions cannot be read: {exc}"
+        if info.st_uid not in (0, me):
+            return f"{label} is owned by user id {info.st_uid}, neither this process's owner nor root"
+        if info.st_mode & _WORLD_WRITABLE and not _sticky_dir(info):
+            return f"{label} is writable by every user on the host"
+        if info.st_mode & _GROUP_WRITABLE and not _sticky_dir(info):
+            return f"{label} is writable by the members of its group"
     return None
+
+
+def _sticky_dir(info: os.stat_result) -> bool:
+    """A shared directory with the sticky bit (a system temporary directory):
+    other users can create entries there but cannot rename or remove ours."""
+    return stat.S_ISDIR(info.st_mode) and bool(info.st_mode & stat.S_ISVTX)
 
 
 class FileRulingProvider:

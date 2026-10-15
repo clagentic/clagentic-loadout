@@ -182,6 +182,58 @@ class TestReader:
 
         assert read.rulings == () and "directory" in read.degraded[0]
 
+    def test_a_group_writable_registry_is_refused(self, tmp_path):
+        path = write_registry(tmp_path, [ruling()])
+        os.chmod(path, 0o664)
+
+        read = rp.FileRulingProvider(path).rulings_for(REPO, 1)
+
+        assert read.rulings == () and "group" in read.degraded[0]
+
+    def test_a_group_writable_directory_is_refused(self, tmp_path):
+        path = write_registry(tmp_path, [ruling()])
+        os.chmod(path.parent, 0o775)
+
+        read = rp.FileRulingProvider(path).rulings_for(REPO, 1)
+
+        assert read.rulings == () and "group" in read.degraded[0]
+
+    def test_a_group_writable_ancestor_directory_is_refused(self, tmp_path):
+        path = write_registry(tmp_path, [ruling()])
+        os.chmod(tmp_path, 0o775)
+
+        read = rp.FileRulingProvider(path).rulings_for(REPO, 1)
+
+        assert read.rulings == ()
+        assert str(tmp_path) in read.degraded[0] and "group" in read.degraded[0]
+
+    def test_a_sticky_shared_ancestor_is_allowed(self, tmp_path):
+        path = write_registry(tmp_path, [ruling()])
+        os.chmod(tmp_path, 0o1777)
+
+        assert rp.FileRulingProvider(path).rulings_for(REPO, 1).degraded == ()
+
+    def test_a_registry_owned_by_someone_else_is_refused(self, tmp_path, monkeypatch):
+        path = write_registry(tmp_path, [ruling()])
+        if os.geteuid() == 0:
+            os.chown(path, 12345, -1)
+        else:
+            monkeypatch.setattr(rp.os, "geteuid", lambda: os.stat(path).st_uid + 1)
+
+        read = rp.FileRulingProvider(path).rulings_for(REPO, 1)
+
+        assert read.rulings == () and "owned by user id" in read.degraded[0]
+
+    def test_the_location_check_needs_no_reviewed_repository(self, tmp_path):
+        """Inside a git work tree is refused although no untrusted_roots were
+        passed: the check never depends on the optional argument."""
+        tree = tmp_path / "tree"
+        (tree / ".git").mkdir(parents=True)
+        path = write_registry(tree, [ruling()])
+
+        assert rp.untrusted_reason(path) is not None
+        assert rp.untrusted_reason(path, ()) is not None
+
     def test_a_malformed_registry_applies_nothing_and_says_why(self, tmp_path):
         path = write_registry(tmp_path, [ruling()])
         path.write_text("rulings: [not a mapping]\n", encoding="utf-8")
@@ -233,6 +285,52 @@ class TestWriter:
 
         with pytest.raises(UntrustedRegistryError, match="every user"):
             record_ruling(directory / "rulings.yaml", ruling(), today=TODAY)
+
+    def test_it_refuses_a_group_writable_directory(self, tmp_path):
+        directory = registry_dir(tmp_path)
+        os.chmod(directory, 0o775)
+
+        with pytest.raises(UntrustedRegistryError, match="group"):
+            record_ruling(directory / "rulings.yaml", ruling(), today=TODAY)
+        assert not (directory / "rulings.yaml").exists()
+
+    def test_it_refuses_a_group_writable_ancestor(self, tmp_path):
+        directory = registry_dir(tmp_path)
+        os.chmod(tmp_path, 0o775)
+
+        with pytest.raises(UntrustedRegistryError, match="group"):
+            record_ruling(directory / "rulings.yaml", ruling(), today=TODAY)
+
+    def test_it_refuses_a_destination_inside_a_git_work_tree_without_being_told_the_repository(
+        self, tmp_path
+    ):
+        tree = tmp_path / "tree"
+        (tree / ".git").mkdir(parents=True)
+        directory = registry_dir(tree)
+
+        with pytest.raises(UntrustedRegistryError, match="git work tree"):
+            record_ruling(directory / "rulings.yaml", ruling(), today=TODAY)
+        assert not (directory / "rulings.yaml").exists()
+
+    def test_it_refuses_a_write_that_would_exceed_the_readers_limit_and_leaves_the_file_alone(
+        self, tmp_path, monkeypatch
+    ):
+        from clagentic_loadout.review import ruling_store
+
+        path = registry_dir(tmp_path) / "rulings.yaml"
+        record_ruling(path, ruling(), today=TODAY)
+        before = path.read_bytes()
+        monkeypatch.setattr(ruling_store, "MAX_POLICY_BYTES", len(before) + 10)
+
+        with pytest.raises(ruling_store.RegistryFullError, match="limit"):
+            record_ruling(path, ruling(fingerprint=OTHER_FP), today=TODAY)
+        assert path.read_bytes() == before
+
+    def test_what_the_writer_accepts_the_reader_still_reads(self, tmp_path):
+        """The writer's limit is the reader's: both use the one constant."""
+        from clagentic_loadout.review import ruling_store
+
+        assert ruling_store.MAX_POLICY_BYTES == rp.MAX_POLICY_BYTES
 
     def test_it_will_not_append_to_a_registry_the_readers_would_reject(self, tmp_path):
         path = registry_dir(tmp_path) / "rulings.yaml"

@@ -46,6 +46,10 @@ class UntrustedRegistryError(RulingStoreError):
     """The destination is a location the pull request under review could write."""
 
 
+class RegistryFullError(RulingStoreError):
+    """The registry would exceed the size its readers accept."""
+
+
 class DuplicateRulingError(RulingStoreError):
     """An active ruling already covers this finding at this pull request."""
 
@@ -103,6 +107,14 @@ def record_ruling(
             payload = yaml.safe_dump(
                 rulings_document(stored), sort_keys=False, allow_unicode=True
             ).encode("utf-8")
+            if len(payload) > MAX_POLICY_BYTES:
+                # The readers refuse a larger file, so writing it would turn every
+                # ruling already on record into "registry unusable".
+                raise RegistryFullError(
+                    f"recording this ruling would make the registry {path} {len(payload)} bytes, "
+                    f"over the {MAX_POLICY_BYTES}-byte limit its readers accept; it was left "
+                    "unchanged. Remove expired rulings from the registry first"
+                )
             write_bytes_atomic(path, payload, mode=_FILE_MODE)
             os.chmod(path, _FILE_MODE)
         finally:
@@ -133,6 +145,7 @@ def _read(path: Path, reference_pattern: str | None) -> tuple[Ruling, ...]:
 
 __all__ = [
     "DuplicateRulingError",
+    "RegistryFullError",
     "RulingStoreError",
     "UntrustedRegistryError",
     "record_ruling",
