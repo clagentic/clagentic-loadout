@@ -1150,10 +1150,10 @@ output is read through a bounded tail, so memory stays flat however much it writ
 ### `loadout-ruling` — record and list per-PR rulings on kept findings
 
 ```
-loadout-ruling [--role ROLE] record --repo OWNER/REPO --pr N --findings FILE \
-  --fingerprint FP --rule-id RULE --path PATH --kind KIND --rationale TEXT \
-  --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM] [--repo-path DIR] \
-  [--head SHA]
+loadout-ruling [--role ROLE] record --platform github|forgejo --repo OWNER/REPO --pr N \
+  --fence-comment ID --fingerprint FP --kind KIND --rationale TEXT \
+  --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM] [--head SHA] \
+  [--repo-path DIR] [--git-host-base-url URL]
 loadout-ruling list [--repo OWNER/REPO] [--pr N]
 ```
 
@@ -1165,11 +1165,15 @@ role-to-verb mapping: the `roles:` mapping in the trusted user-level config file
 (it replaces the default), else the built-in default, which grants `ruling` to `merger`. There
 is no `--authorized-role` flag, and no checkout, repository or environment variable
 contributes. The mapping affects only this verb; see
-[review-evaluator.md](review-evaluator.md#who-may-record-a-ruling). A
-security-floor finding is refused (exit 50), as is a finding the `--findings` file does not
-hold (51), an untrusted registry location (52), no configured registry (53) and a duplicate
-(54). `list` is read-only and needs no role. The verb mints no credential and makes no
-network call. Full semantics, registry format and exit codes:
+[review-evaluator.md](review-evaluator.md#who-may-record-a-ruling). The finding is identified
+from the reviewer's posted verdict fence (`--fence-comment`), read through the host API with the
+caller's own role credential and accepted only when a required reviewer's login posted it for
+this pull request at its current head (or `--head`); see
+[review-evaluator.md](review-evaluator.md#where-the-finding-comes-from). A security-floor finding
+is refused (exit 50), as is a fingerprint the fence does not hold (51), a comment that is not an
+acceptable fence (32), an untrusted registry location (52), no configured registry (53) and a
+duplicate (54). `list` is read-only, needs no role and makes no network call. Full semantics,
+registry format and exit codes:
 [review-evaluator.md](review-evaluator.md#per-pr-rulings).
 
 ### `loadout-push` — bot-attributed commit push + PR open/update

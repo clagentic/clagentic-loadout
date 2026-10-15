@@ -27,7 +27,9 @@ from clagentic_loadout.review.evaluation import (
 )
 from clagentic_loadout.transport.attestation import SOURCE_CONFIGURED, Identity
 from tests._review_evaluate_support import HEAD, commit_files, make_repo
+from tests._ruling_host import FENCE_COMMENT, comment, fence_body, host_opener
 from tests._ruling_support import FLOOR, FP, NON_FLOOR, REPO, TODAY, ruled_finding, ruling, write_registry
+from tests._support.fakes import RecordingTokenProvider
 
 
 @pytest.fixture
@@ -174,23 +176,22 @@ class TestRecordedByTheVerbThenApplied:
     one the evaluator then applies: at its pull request and fingerprint only."""
 
     def test_the_round_trip(self, base, tmp_path, monkeypatch, capsys):
+        from clagentic_loadout.transport import provider_config
+
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "no-user-config")
         registry = tmp_path / "registry"
         registry.mkdir()
         registry.chmod(0o755)
         monkeypatch.setenv(rp.RULINGS_FILE_ENV_VAR, str(registry / "rulings.yaml"))
-        findings = tmp_path / "findings.json"
-        findings.write_text(
-            json.dumps({"owner": "some-owner", "repo": "some-repo", "pr_number": 1,
-                        "head_sha": HEAD, "findings": [ruled_finding(NON_FLOOR)]}),
-            encoding="utf-8",
-        )
+        fence = comment(FENCE_COMMENT, fence_body([ruled_finding(NON_FLOOR)], head=HEAD))
         identity = Identity("merger", SOURCE_CONFIGURED)
 
         code = ruling_verb.main(
-            ["--role", "merger", "record", "--repo", REPO, "--pr", "1", "--findings", str(findings),
-             "--fingerprint", FP, "--rule-id", "R1", "--path", "src/a.py", "--kind", "false_positive",
+            ["--role", "merger", "record", "--platform", "forgejo", "--repo", REPO, "--pr", "1",
+             "--fence-comment", str(FENCE_COMMENT), "--fingerprint", FP, "--kind", "false_positive",
              "--rationale", "reviewed", "--requested-by", "some-caller", "--source-ref", "note 1"],
             identity_provider=lambda: identity, today=TODAY,
+            token_provider=RecordingTokenProvider(), opener=host_opener([fence], head=HEAD),
         )
         provider = rp.resolve_ruling_provider(tmp_path / "c")
 

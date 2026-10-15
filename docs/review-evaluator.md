@@ -292,25 +292,48 @@ config alongside the other sections and never touch unrelated sections. `--repo-
 role policy. `--role` must match the attested identity, as for every
 other caller-bound verb. `--requested-by` records who asked, as the deployment names callers.
 
-The findings file must name the requested repository and pull request (`owner`, `repo`,
-`pr_number`, as `loadout-review run` writes them); a bare array names nothing and is
-refused. With `--head`, a file that records a head must record that one.
+### Where the finding comes from
+
+A reviewer's findings file lives in scratch that is gone by the time a ruling is asked for, and
+regenerating it would not reliably reproduce the finding. The finding is therefore identified
+from the reviewer's POSTED verdict fence, which is durable and which the host attributes to a
+login. `--fence-comment ID` names that comment; `record` reads it through the host API with the
+caller's own role credential (the credential provider the merge verb uses for `--role`) and
+accepts it only if all of these hold:
+
+- the comment is on the requested repository's requested pull request (a comment id that is not
+  among that pull request's comments is refused);
+- its author's login is the login of a required reviewer role, resolved as the merge gate
+  resolves it, where the required roles are the ones the repository's tracked gate declares at
+  the pull request's BASE commit, read through the host API: content the pull request cannot
+  change, and never a checkout or flag the caller supplies. A repository whose base declares no
+  required reviewer role, or a gate that cannot be read, attributes no fence;
+- it is a well-formed verdict fence for that reviewer, read by the merge gate's own fence reader,
+  for the requested pull request, at the pull request's current head (or the full SHA given with
+  `--head`);
+- it is an evaluated fence carrying its `evaluated_findings`, and one of them has `--fingerprint`
+  (the fingerprint is carried only when the reviewing deployment has a registry configured).
+
+The finding's rule, path and facts, and so its floor status, are taken from the fence, not from
+anything the caller types. `--findings`, `--rule-id` and `--path` no longer exist.
 
 ```
-loadout-ruling [--role ROLE] record --repo OWNER/REPO --pr N --findings FILE \
-  --fingerprint FP --rule-id RULE --path PATH \
+loadout-ruling [--role ROLE] record --platform github|forgejo --repo OWNER/REPO --pr N \
+  --fence-comment ID --fingerprint FP \
   --kind by_design|false_positive|accepted_risk|mitigated --rationale TEXT \
   --requested-by CALLER --source-ref REF [--expires YYYY-MM-DD] [--reference ITEM] \
-  [--repo-path DIR] [--head SHA]
+  [--head SHA] [--repo-path DIR] [--git-host-base-url URL]
 loadout-ruling list [--repo OWNER/REPO] [--pr N]
 ```
 
-`--findings` is the `loadout-review run` output that holds the finding: it proves the
-finding exists and is not a floor finding. Exit codes: `0` ok, `1` usage, `3` configuration,
-`7` identity mismatch, `21` role not authorized, `32` findings file unreadable, naming no pull
-request, or for another repository, pull request or head, `50` floor finding, `51` finding not found, `52` registry location untrusted,
-`53` no registry configured, `54` an unexpired ruling already covers the finding, `55`
-registry could not be written.
+Exit codes: `0` ok, `1` usage, `2` no credential for the caller's role, `3` configuration, `4`
+`--platform` does not match the backend, `7` identity mismatch, `21` role not authorized, `27`
+the host could not be read, `32` the comment is not an acceptable fence (not found, wrong
+author, malformed, another pull request or head, no evaluated findings, or no required reviewer
+can be established), `50` floor finding, `51` the fence holds no finding with the fingerprint,
+`52` registry location (or the user-level role mapping file) untrusted, `53` no registry
+configured, `54` an unexpired ruling already covers the finding, `55` registry could not be
+written.
 
 ### Migration
 
@@ -319,8 +342,9 @@ Additive. A deployment that configures no `rulings.path` sees no change. New: th
 `CLAGENTIC_LOADOUT_RULINGS_FILE`; `loadout-review evaluate --repo/--pr`; and the optional
 `fingerprint` on a fence's `evaluated_findings` entries, carried only when a registry is
 configured, so the merge gate can match a ruling to the same finding the evaluator did. No
-existing flag or exit code changes. `loadout-ruling` is deliberately not in the
-role-to-verb vocabulary: a role is granted it through the `merge` verb it already holds.
+existing flag or exit code changes. `ruling` is a verb label in the role-to-verb vocabulary
+and in the default `merger` set, so a generated `merger` allowlist fragment also names
+`loadout-ruling`.
 
 ## Outcomes
 

@@ -5,9 +5,10 @@ finding does not block that pull request (review.rulings). The evaluator and the
 merge gate read it from the ruling registry (review.ruling_provider), a file the
 pull request under review cannot write. This verb is the only writer.
 
-  loadout-ruling [--role ROLE] record --repo OWNER/REPO --pr N --findings FILE \\
-      --fingerprint FP --rule-id RULE --path PATH --kind KIND --rationale TEXT \\
-      --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM]
+  loadout-ruling [--role ROLE] record --platform PLATFORM --repo OWNER/REPO --pr N \\
+      --fence-comment ID --fingerprint FP --kind KIND --rationale TEXT \\
+      --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM] \\
+      [--head SHA] [--repo-path DIR] [--git-host-base-url URL]
   loadout-ruling list [--repo OWNER/REPO] [--pr N]
 
 WHO MAY RECORD. The attested caller's role must hold the ``ruling`` verb. No
@@ -23,24 +24,36 @@ power it lacks, which is why the built-in default names that role. Which agent
 holds the role is the deployment's concern, never this package's.
 ``--requested-by`` records who asked, as the deployment names callers.
 
-NON-FLOOR ONLY. The finding the ruling is for must appear in ``--findings`` with
-the given fingerprint, rule and path, and must not be a security-floor finding:
-a floor finding clears only through a dispositions entry on the base branch, or
-by being fixed. A finding that cannot be found, or whose floor status cannot be
-established, is refused. The evaluator applies the same rule when it reads the
-registry, so this check is early notice, not the only barrier.
+WHERE THE FINDING COMES FROM. ``--fence-comment`` is the id of the reviewer's
+posted verdict comment on the pull request. The verb reads it through the host API
+with the caller's own role credential and accepts it only under the conditions in
+review.ruling_fence: posted by the login of a required reviewer role, a well-formed
+fence for this pull request, at the pull request's current head (or ``--head``),
+carrying the findings its verdict was computed from. The finding's rule, path and
+facts are taken from that fence by ``--fingerprint``; nothing the caller types
+describes the finding.
+
+NON-FLOOR ONLY. The finding must not be a security-floor finding: a floor
+finding clears only through a dispositions entry on the base branch, or by being
+fixed. A finding whose floor status cannot be established is refused. The
+evaluator applies the same rule when it reads the registry, so this check is
+early notice, not the only barrier.
 
 Exit codes (the reserved range; no child-process code is passed through):
 
   0   ok
   1   usage error
+  2   no credential could be resolved for the caller's role
   3   the rulings configuration is invalid
+  4   --platform does not match the backend that can serve it
   7   --role does not match the attested invoking identity
   21  the attested role holds no ruling authority
-  32  the findings file is unreadable, or is not for this repository and pull
-      request (a file that names no pull request cannot be checked: refused)
+  27  the host could not be read (pull request, comments or repository gate)
+  32  the comment is not an acceptable fence: not found, not posted by a required
+      reviewer's login, malformed, for another pull request, at another head, or
+      carrying no evaluated findings; or no required reviewer can be established
   50  the finding is a security-floor finding
-  51  no finding in the findings file matches the fingerprint, rule and path
+  51  the fence holds no finding with the fingerprint
   52  the registry location, or the user-level file holding the role mapping, is
       one the pull request could write
   53  no ruling registry is configured
@@ -65,16 +78,26 @@ from clagentic_loadout.merge.authority import (
     StaticRoleAuthorityProvider,
     check_authority,
 )
-from clagentic_loadout.merge.errors import AuthorityDeniedError
+from clagentic_loadout.merge.errors import (
+    AuthorityDeniedError,
+    GateFactUnavailableError,
+    PlatformMismatchError,
+)
+from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.provisioning.roles import InvalidRoleConfigError
 from clagentic_loadout.review.dispositions import KINDS
+from clagentic_loadout.review.evaluate import is_floor_finding
 from clagentic_loadout.review.ruling_authority import (
     AUTHORIZING_VERB,
     UntrustedRolesSourceError,
     ruling_authorized_roles,
 )
-from clagentic_loadout.review.evaluate import is_floor_finding
-from clagentic_loadout.review.evaluate_verb import EvaluateError, load_findings_file
+from clagentic_loadout.review.ruling_fence import (
+    FenceFinding,
+    FenceRefusedError,
+    FindingNotInFenceError,
+    read_fence_finding,
+)
 from clagentic_loadout.review.ruling_provider import (
     FileRulingProvider,
     RulingsConfigError,
@@ -100,21 +123,28 @@ from clagentic_loadout.transport.caller_binding import (
     describe_omitted_caller_behavior,
     resolve_for_binding,
 )
-from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
+from clagentic_loadout.transport.credential_provider import (
+    DEFAULT_ROLE,
+    CredentialProviderError,
+    TokenProvider,
+)
+from clagentic_loadout.transport.git_host_api import resolve_git_host_base
 
 EXIT_OK = 0
 EXIT_USAGE = 1
+EXIT_TOKEN_FETCH_FAILED = 2
 EXIT_CONFIG_INVALID = 3
+EXIT_WRONG_PLATFORM = 4
 EXIT_CALLER_INVOKER_MISMATCH = 7
 EXIT_AUTHORITY_DENIED = 21
-EXIT_FINDINGS_INVALID = 32
+EXIT_HOST_UNAVAILABLE = 27
+EXIT_FENCE_INVALID = 32
 EXIT_FLOOR_REFUSED = 50
 EXIT_FINDING_NOT_FOUND = 51
 EXIT_REGISTRY_UNTRUSTED = 52
 EXIT_REGISTRY_NOT_CONFIGURED = 53
 EXIT_DUPLICATE = 54
 EXIT_REGISTRY_FAILED = 55
-
 
 
 class RulingVerbError(Exception):
@@ -144,16 +174,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Example:\n"
-            "  loadout-ruling record --repo some-owner/some-repo --pr 42 \\\n"
-            "    --findings /path/to/findings.json --fingerprint fp2:0123456789abcdef \\\n"
-            "    --rule-id some-rule --path src/handler.py --kind accepted_risk \\\n"
-            "    --rationale 'why this is acceptable' --requested-by some-caller \\\n"
-            "    --source-ref 'design note 4'\n"
+            "  loadout-ruling record --platform forgejo --repo some-owner/some-repo --pr 42 \\\n"
+            "    --fence-comment 1234 --fingerprint fp2:0123456789abcdef \\\n"
+            "    --kind accepted_risk --rationale 'why this is acceptable' \\\n"
+            "    --requested-by some-caller --source-ref 'design note 4'\n"
             "  loadout-ruling list --repo some-owner/some-repo --pr 42\n"
             "\n"
-            "Exit codes: 0 ok, 1 usage, 3 configuration, 7 identity mismatch, 21 not "
-            "authorized, 32 findings file, 50 floor finding, 51 finding not found, 52 "
-            "untrusted registry, 53 no registry, 54 duplicate, 55 write failed."
+            "Exit codes: 0 ok, 1 usage, 2 no credential, 3 configuration, 4 wrong platform, "
+            "7 identity mismatch, 21 not authorized, 27 host unreadable, 32 fence not "
+            "acceptable, 50 floor finding, 51 finding not in the fence, 52 untrusted "
+            "registry or role mapping, 53 no registry, 54 duplicate, 55 write failed."
         ),
     )
     parser.add_argument(
@@ -171,17 +201,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description="Record a ruling in the ruling registry.",
     )
     record.add_argument("--role", default=argparse.SUPPRESS, help=role_help)
+    record.add_argument(
+        "--platform",
+        required=True,
+        choices=(PLATFORM_GITHUB, PLATFORM_FORGEJO),
+        help="Platform hosting the pull request.",
+    )
     record.add_argument("--repo", required=True, help="owner/repo of the pull request.")
     record.add_argument("--pr", required=True, type=int, help="Pull request number.")
     record.add_argument(
-        "--findings",
+        "--fence-comment",
         required=True,
-        help="Findings file holding the finding being ruled on (a `loadout-review run` "
-        "output). The finding's facts decide whether it is a security-floor finding.",
+        type=int,
+        help="Id of the reviewer's verdict comment on the pull request. It must be posted "
+        "by the login of a required reviewer role, be a verdict fence for this pull request "
+        "at its current head (or --head), and carry the findings its verdict was computed "
+        "from. The finding, its rule, path and facts are taken from it.",
     )
-    record.add_argument("--fingerprint", required=True, help="The finding's fingerprint.")
-    record.add_argument("--rule-id", required=True, help="The finding's rule id.")
-    record.add_argument("--path", required=True, help="The finding's file path.")
+    record.add_argument(
+        "--fingerprint",
+        required=True,
+        help="Fingerprint of the finding in that fence's evaluated findings.",
+    )
     record.add_argument("--kind", required=True, choices=KINDS, help="The kind of ruling.")
     record.add_argument("--rationale", required=True, help="Why the finding does not block.")
     record.add_argument(
@@ -215,7 +256,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     record.add_argument(
         "--head",
         default=None,
-        help="Head commit the findings file must be for, when the file records one.",
+        help="Full SHA the fence must be for, instead of the pull request's current head.",
+    )
+    record.add_argument(
+        "--git-host-base-url",
+        default=None,
+        help="Forgejo API base URL, resolved as the other verbs resolve it. Ignored for GitHub.",
     )
 
     listing = sub.add_parser(
@@ -243,71 +289,46 @@ def _registry(config_root: str | Path | None):
     return config
 
 
-def _matching_findings(
-    findings: list[dict[str, Any]], *, fingerprint: str, rule_id: str, path: str
-) -> list[dict[str, Any]]:
-    wanted = path[2:] if path.startswith("./") else path
-    return [
-        f
-        for f in findings
-        if f.get("fingerprint") == fingerprint
-        and f.get("rule_id") == rule_id
-        and (f["file"][2:] if f["file"].startswith("./") else f["file"]) == wanted
-    ]
-
-
-def _check_findings_document(
-    path: str, owner: str, repo: str, pr: int, head: str | None
-) -> None:
-    """The findings file must name this repository and pull request (and this
-    head, when one was requested and the file records one). A shape that names
-    nothing, such as a bare array, cannot be checked and is refused."""
+def _fence_finding(
+    args: argparse.Namespace,
+    owner: str,
+    repo: str,
+    role: str,
+    *,
+    token_provider: TokenProvider | None,
+    opener,
+    config_root: str | Path | None,
+) -> FenceFinding:
+    """The finding the ruling is for, read from the posted fence, refused when it
+    is a security-floor finding."""
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RulingVerbError(f"cannot read findings file {path!r}: {exc}", EXIT_FINDINGS_INVALID) from exc
-    if not isinstance(data, dict):
-        raise RulingVerbError(
-            f"findings file {path!r} does not name the repository and pull request it is for "
-            f"(it is not an object), so it cannot be shown to be for {owner}/{repo}#{pr}; "
-            "use a `loadout-review run` output",
-            EXIT_FINDINGS_INVALID,
+        found = read_fence_finding(
+            platform=args.platform,
+            owner=owner,
+            repo=repo,
+            pr=args.pr,
+            comment_id=args.fence_comment,
+            fingerprint=args.fingerprint,
+            head=args.head,
+            role=role,
+            token_provider=token_provider,
+            git_host_base=resolve_git_host_base(
+                args.git_host_base_url,
+                config_root=str(config_root) if config_root is not None else None,
+            ),
+            opener=opener,
         )
-    named = f"{data.get('owner')}/{data.get('repo')}"
-    named_pr = data.get("pr_number")
-    pr_matches = isinstance(named_pr, int) and not isinstance(named_pr, bool) and named_pr == pr
-    if named.lower() != f"{owner}/{repo}".lower() or not pr_matches:
-        raise RulingVerbError(
-            f"findings file {path!r} is for {named}#{named_pr}, but "
-            f"{owner}/{repo}#{pr} was requested",
-            EXIT_FINDINGS_INVALID,
-        )
-    recorded_head = data.get("head_sha")
-    if head is not None and recorded_head is not None and str(recorded_head).lower() != head.lower():
-        raise RulingVerbError(
-            f"findings file {path!r} is for head {recorded_head!r}, but head {head!r} was requested",
-            EXIT_FINDINGS_INVALID,
-        )
-
-
-def _establish_non_floor(args: argparse.Namespace, owner: str, repo: str) -> None:
-    """Refuse unless the finding is in the findings file and is not a floor finding."""
-    _check_findings_document(args.findings, owner, repo, args.pr, args.head)
-    try:
-        _, findings, _ = load_findings_file(args.findings)
-    except EvaluateError as exc:
-        raise RulingVerbError(str(exc), EXIT_FINDINGS_INVALID) from exc
-    matched = _matching_findings(
-        findings, fingerprint=args.fingerprint, rule_id=args.rule_id, path=args.path
-    )
-    if not matched:
-        raise RulingVerbError(
-            f"no finding in {args.findings!r} has fingerprint {args.fingerprint!r}, rule "
-            f"{args.rule_id!r} and path {args.path!r}, so the ruling cannot be shown to be "
-            "for a non-floor finding",
-            EXIT_FINDING_NOT_FOUND,
-        )
-    floor = [f for f in matched if is_floor_finding(f)]
+    except PlatformMismatchError as exc:
+        raise RulingVerbError(str(exc), EXIT_WRONG_PLATFORM) from exc
+    except CredentialProviderError as exc:
+        raise RulingVerbError(f"token resolution FAILED -- {exc}", EXIT_TOKEN_FETCH_FAILED) from exc
+    except GateFactUnavailableError as exc:
+        raise RulingVerbError(str(exc), EXIT_HOST_UNAVAILABLE) from exc
+    except FindingNotInFenceError as exc:
+        raise RulingVerbError(str(exc), EXIT_FINDING_NOT_FOUND) from exc
+    except FenceRefusedError as exc:
+        raise RulingVerbError(str(exc), EXIT_FENCE_INVALID) from exc
+    floor = [f for f in found.matches if is_floor_finding(f)]
     if floor:
         raise RulingVerbError(
             f"{floor[0]['file']}:{floor[0]['line']}:{floor[0]['rule_id']} is a security-floor "
@@ -315,6 +336,7 @@ def _establish_non_floor(args: argparse.Namespace, owner: str, repo: str) -> Non
             "entry on the base branch, or by fixing it",
             EXIT_FLOOR_REFUSED,
         )
+    return found
 
 
 def _authorize(
@@ -351,6 +373,8 @@ def _record(
     *,
     identity_provider,
     authority_provider: AuthorityProvider | None,
+    token_provider: TokenProvider | None,
+    opener,
     config_root: str | Path | None,
     today: dt.date,
 ) -> int:
@@ -381,7 +405,10 @@ def _record(
             "configuration or CLAGENTIC_LOADOUT_RULINGS_FILE",
             EXIT_REGISTRY_NOT_CONFIGURED,
         )
-    _establish_non_floor(args, owner, repo)
+    found = _fence_finding(
+        args, owner, repo, role, token_provider=token_provider, opener=opener, config_root=config_root
+    )
+    finding = found.matches[0]
 
     try:
         pattern = compile_reference_pattern(config.reference_pattern)
@@ -389,8 +416,8 @@ def _record(
             repo=f"{owner}/{repo}",
             pr=args.pr,
             fingerprint=args.fingerprint,
-            rule_id=args.rule_id,
-            path=args.path,
+            rule_id=finding["rule_id"],
+            path=finding["file"],
             kind=args.kind,
             rationale=args.rationale,
             by=role,
@@ -470,13 +497,13 @@ def main(
 ) -> int:
     """CLI entrypoint. Returns the process exit code.
 
-    ``token_provider`` and ``opener`` are accepted so the verb can be driven
-    like every other caller-bound verb; it mints no credential and makes no
-    network call, so neither is used. ``identity_provider`` and
+    ``record`` reads the host through the caller's own role credential, so
+    ``token_provider`` (default: the platform's configured provider) and
+    ``opener`` (default: the hardened host opener) are the injection points for
+    that read; ``list`` makes no network call. ``identity_provider`` and
     ``authority_provider`` are the injection points for the attested identity
-    and the merge-authority seam; ``config_root`` and ``today`` are for tests
-    and embedding callers."""
-    del token_provider, opener
+    and the authority seam; ``config_root`` and ``today`` are for tests and
+    embedding callers."""
     if argv is None:
         argv = sys.argv[1:]
 
@@ -493,6 +520,8 @@ def main(
                 args,
                 identity_provider=identity_provider,
                 authority_provider=authority_provider,
+                token_provider=token_provider,
+                opener=opener,
                 config_root=config_root,
                 today=day,
             )

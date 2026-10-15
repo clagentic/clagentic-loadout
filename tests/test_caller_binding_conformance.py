@@ -441,10 +441,9 @@ _MINIMAL_ARGV_BY_SCRIPT: dict[str, list[str]] = {
     "loadout-acquire": ["--platform", "github", "some-owner/some-repo", "1"],
     "loadout-review": ["run", "--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1"],
     "loadout-ruling": [
-        "record", "--repo", "some-owner/some-repo", "--pr", "1",
-        "--findings", "/nonexistent-conformance-path/findings.json",
-        "--fingerprint", "fp2:0123456789abcdef", "--rule-id", "some-rule",
-        "--path", "src/a.py", "--kind", "accepted_risk", "--rationale", "conformance",
+        "record", "--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1",
+        "--fence-comment", "1", "--fingerprint", "fp2:0123456789abcdef",
+        "--kind", "accepted_risk", "--rationale", "conformance",
         "--requested-by", "some-caller", "--source-ref", "conformance",
     ],
     "loadout-merge": [
