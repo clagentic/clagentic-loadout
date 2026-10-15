@@ -231,9 +231,21 @@ rulings:
 - Base-revision dispositions apply first; a ruling applies only where they leave a finding
   blocking.
 - **Trust.** The registry is a file named by user-level configuration (or
-  `CLAGENTIC_LOADOUT_RULINGS_FILE`), never by repository configuration. It is refused, the
-  verdict is DEGRADED and the reason is named, when it sits inside a git work tree, inside the
-  checkout given as `--repo-path`, or in a file or directory any user can write.
+  `CLAGENTIC_LOADOUT_RULINGS_FILE`), never by repository configuration. One check, applied on
+  every read and every write, refuses it (on a read the verdict is DEGRADED and the reason is
+  named) when: it sits inside any git work tree, or inside the reviewed repository when that
+  is known; or the file, or any directory above it up to the root, is writable by its group or
+  by every user, or is owned by someone other than the process owner or root. A sticky shared
+  directory (a system temporary directory) is allowed as an ancestor. The location check does
+  not depend on any optional flag.
+- **Residual: code running as the same user.** These checks stop other users and a checkout.
+  They cannot stop code that runs as the same user as the reader or the writer, for example a
+  pull request's `pre_checks` executed at merge time, which can write the registry. Configure
+  the optional pre-checks sandbox (`merge.pre_checks_sandbox`, see
+  [merge-authority.md](merge-authority.md)) so that code does not run as that user, and keep
+  the registry under a directory only the recording role's user can write.
+- **Size.** A write that would grow the registry past the size its readers accept
+  (512 KiB) is refused (exit 55) and leaves the file unchanged; remove expired rulings first.
 - With no registry configured, nothing changes: output is identical to a build without the
   feature, and `EVALUATOR_VERSION` is unchanged.
 
@@ -246,31 +258,33 @@ rulings:
 
 ### Who may record a ruling
 
-`loadout-ruling record` is gated by role. The attested caller's role must be one the
-deployment's role-to-verb mapping (the `roles:` section, `provisioning.roles`) grants the
-`merge` verb, checked through the same merge-authority seam the merge verb uses. The default
-mapping names the `merger` role; a deployment that declares its own `roles:` section replaces
-it, and which agent holds a role is the deployment's configuration, never this package's.
-`--role` must match the attested identity, as for every other caller-bound verb.
-`--requested-by` records who asked, as the deployment names callers.
+`loadout-ruling record` is gated by role. The attested caller's role must hold merge
+authority, decided the way the merge verb decides it for itself: an injected authority
+provider, else the roles named with repeated `--authorized-role` flags (the merge verb's own
+flag, supplied by the deployment's launcher), else the roles the built-in role-to-verb mapping
+(`provisioning.roles`) grants the `merge` verb (default: `merger`). Which agent holds a role is
+the deployment's configuration, never this package's. The policy is never read from a
+checkout or path the caller selects: `--repo-path` scopes the ruling (a registry inside it is
+refused) and supplies no role policy. `--role` must match the attested identity, as for every
+other caller-bound verb. `--requested-by` records who asked, as the deployment names callers.
 
-Point `--repo-path` at a checkout of the base branch when the deployment declares `roles:`
-in repository configuration; a checkout of the pull request's branch is the wrong place to
-read who may merge from.
+The findings file must name the requested repository and pull request (`owner`, `repo`,
+`pr_number`, as `loadout-review run` writes them); a bare array names nothing and is
+refused. With `--head`, a file that records a head must record that one.
 
 ```
 loadout-ruling [--role ROLE] record --repo OWNER/REPO --pr N --findings FILE \
   --fingerprint FP --rule-id RULE --path PATH \
   --kind by_design|false_positive|accepted_risk|mitigated --rationale TEXT \
   --requested-by CALLER --source-ref REF [--expires YYYY-MM-DD] [--reference ITEM] \
-  [--repo-path DIR]
+  [--repo-path DIR] [--authorized-role ROLE ...] [--head SHA]
 loadout-ruling list [--repo OWNER/REPO] [--pr N]
 ```
 
 `--findings` is the `loadout-review run` output that holds the finding: it proves the
 finding exists and is not a floor finding. Exit codes: `0` ok, `1` usage, `3` configuration,
-`7` identity mismatch, `21` role not authorized, `32` findings file unreadable or for another
-pull request, `50` floor finding, `51` finding not found, `52` registry location untrusted,
+`7` identity mismatch, `21` role not authorized, `32` findings file unreadable, naming no pull
+request, or for another repository, pull request or head, `50` floor finding, `51` finding not found, `52` registry location untrusted,
 `53` no registry configured, `54` an unexpired ruling already covers the finding, `55`
 registry could not be written.
 

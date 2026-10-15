@@ -613,7 +613,17 @@ every fence that carries it.
   its kind, the rationale, the source reference and any work-item reference. A ruling for the
   PR that cleared nothing is named with the reason (`unapplied_rulings`). A registry that is
   untrusted or unusable makes the gate's computation DEGRADED and the refusal names it.
+- Every outcome, CLEAN and allowed-DEGRADED included, names the rulings that cleared a finding,
+  the ones that cleared nothing, expired ones, and a registry that was not used, in its
+  notices on stderr whenever a registry has something to report.
 - With no registry configured, the gate's output and result are unchanged.
+- **Registry trust and a documented residual.** The registry is refused on every read and write
+  when it is inside any git work tree or the reviewed repository, or when it or any directory
+  above it is group- or world-writable or owned by neither the process owner nor root. This
+  does not stop code running as the same user as the gate: a pull request's `pre_checks`
+  executed at merge time can write the registry unless the optional sandbox
+  (`merge.pre_checks_sandbox`) is configured. Configure the sandbox for any deployment that
+  uses a ruling registry.
 
 ### Decision table
 
