@@ -42,12 +42,14 @@ from clagentic_loadout.review.evaluate import (
 )
 from clagentic_loadout.review.evaluate_verb import load_evaluator_config
 from clagentic_loadout.review.facts import KEY_FACTS
+from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
 from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader
 from clagentic_loadout.review.policy_source import PolicySource, read_policy_from
 from clagentic_loadout.review.ruling_provider import (
     RulingProvider,
     RulingRead,
     RulingScope,
+    read_scope_rulings,
     resolve_ruling_provider,
 )
 from clagentic_loadout.review.rubric import DEFAULT_BLOCK_AT
@@ -102,9 +104,6 @@ class EvaluationContext:
     #: that cannot be tied to this pull request must not clear anything.
     ruling_provider: RulingProvider | None = None
     ruling_scope: RulingScope | None = None
-    #: Directories the pull request under review can write; a ruling registry
-    #: inside one is refused.
-    ruling_untrusted_roots: tuple[Path, ...] = ()
 
     @property
     def effective_visibility(self) -> str:
@@ -146,12 +145,7 @@ def _policy(context: EvaluationContext) -> PolicySource:
 def _rulings(context: EvaluationContext) -> RulingRead:
     """The rulings on record for the context's pull request. None are applied
     when no registry is configured or the scope is not known."""
-    provider, scope = context.ruling_provider, context.ruling_scope
-    if provider is None or scope is None:
-        return RulingRead()
-    return provider.rulings_for(
-        scope.repo, scope.pr, untrusted_roots=context.ruling_untrusted_roots
-    )
+    return read_scope_rulings(context.ruling_provider, context.ruling_scope)
 
 
 def evaluate_findings(
@@ -251,19 +245,25 @@ def fence_evaluation_fields(verdict: Verdict, context: EvaluationContext) -> dic
     return fields
 
 
-def evaluated_findings_for_fence(findings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+def evaluated_findings_for_fence(
+    findings: Sequence[Mapping[str, Any]], *, with_fingerprint: bool = False
+) -> list[dict[str, Any]]:
     """The findings *as given to the evaluator*, reduced to the fields the
     verdict depends on, for the fence to carry. The merge gate evaluates these
     again; carrying what the evaluator saw (not what was posted as prose) is
     what lets the two computations agree on identical policy.
 
-    A finding's fingerprint is deliberately not carried: it is a link hint that
-    is never posted. The gate therefore cannot apply a disposition's
-    fingerprint narrowing, and merge.gate_evaluation refuses to let such a
-    disposition demote a block."""
+    A finding's fingerprint is a link hint that is not posted, so it is not
+    carried by default; the gate then cannot apply a disposition's fingerprint
+    narrowing, and merge.gate_evaluation refuses to let such a disposition
+    demote a block. With *with_fingerprint* (set only when a ruling registry is
+    configured) it is carried when well formed, because a ruling is keyed to it
+    and the gate must be able to match the same ruling the evaluator did."""
     carried: list[dict[str, Any]] = []
     for finding in findings:
         item: dict[str, Any] = {key: finding[key] for key in ("file", "line", "rule_id", "message")}
+        if with_fingerprint and is_fingerprint(finding.get(KEY_FINGERPRINT)):
+            item[KEY_FINGERPRINT] = finding[KEY_FINGERPRINT]
         if finding.get(KEY_FACTS) is not None:
             item[KEY_FACTS] = finding[KEY_FACTS]
         if finding.get("severity") == _PRAISE:

@@ -24,11 +24,15 @@ User-level configuration (``config.yaml`` under the loadout config root)::
     rulings:
       path: /var/lib/loadout/rulings.yaml   # absolute; omit to configure no registry
       reference_pattern: '^[A-Z]+-[0-9]+$'  # optional; work-item reference grammar
-      authorized_roles: [lead]              # roles the write verb accepts; default lead
 
 ``CLAGENTIC_LOADOUT_RULINGS_FILE`` overrides ``path``, for hosts whose per-spawn
 home directory hides the user-level file. With no path configured there is no
 registry and behaviour is exactly as it is without this feature.
+
+Which role may WRITE the registry is not configured here: the write verb
+(review.ruling_verb) authorizes the roles the deployment's own role-to-verb
+mapping (provisioning.roles) grants the merge verb, through the same
+merge-authority seam the merge verb uses.
 """
 
 from __future__ import annotations
@@ -56,11 +60,14 @@ from clagentic_loadout.transport.provider_config import load_user_config_section
 CONFIG_SECTION_RULINGS = "rulings"
 CONFIG_KEY_PATH = "path"
 CONFIG_KEY_REFERENCE_PATTERN = "reference_pattern"
-CONFIG_KEY_AUTHORIZED_ROLES = "authorized_roles"
 RULINGS_FILE_ENV_VAR = "CLAGENTIC_LOADOUT_RULINGS_FILE"
-DEFAULT_AUTHORIZED_ROLES = ("lead",)
 
 _WORLD_WRITABLE = stat.S_IWOTH
+
+
+#: Starts every degraded reason this module reports, so a reader that wants only
+#: the ruling-related reasons out of a verdict's degraded list can pick them out.
+IGNORED_PREFIX = "rulings ignored"
 
 
 class RulingsConfigError(ValueError):
@@ -70,10 +77,13 @@ class RulingsConfigError(ValueError):
 
 @dataclass(frozen=True)
 class RulingScope:
-    """The one repository and pull request an evaluation is for."""
+    """The one repository and pull request an evaluation is for, and the
+    directories the pull request under review can write (a registry inside one
+    is refused)."""
 
     repo: str
     pr: int
+    untrusted_roots: tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -143,23 +153,6 @@ def load_rulings_config(
     return RulingsConfig(path=path, reference_pattern=pattern)
 
 
-def load_authorized_roles(config_root: str | Path | None = None) -> tuple[str, ...]:
-    """The roles allowed to record a ruling (default: the lead role only)."""
-    roles = _section(config_root).get(CONFIG_KEY_AUTHORIZED_ROLES)
-    if roles is None:
-        return DEFAULT_AUTHORIZED_ROLES
-    if (
-        not isinstance(roles, list)
-        or not roles
-        or not all(isinstance(r, str) and r.strip() for r in roles)
-    ):
-        raise RulingsConfigError(
-            f"{CONFIG_SECTION_RULINGS}.{CONFIG_KEY_AUTHORIZED_ROLES} must be a non-empty list "
-            f"of role names, got {roles!r}"
-        )
-    return tuple(r.strip() for r in roles)
-
-
 def untrusted_reason(path: Path, untrusted_roots: Sequence[Path] = ()) -> str | None:
     """Why *path* is not a source the pull request cannot write, or None when it
     is acceptable. Judged on the resolved path, so a link does not hide a
@@ -199,7 +192,11 @@ class FileRulingProvider:
         reason = untrusted_reason(self._path, untrusted_roots)
         if reason is not None:
             return RulingRead(
-                (), (f"rulings ignored: the registry {self._path} is not a trusted source: {reason}",)
+                (),
+                (
+                    f"{IGNORED_PREFIX}: the registry {self._path} is not a trusted source: "
+                    f"{reason}",
+                ),
             )
         if not self._path.exists():
             return RulingRead()
@@ -212,7 +209,9 @@ class FileRulingProvider:
                 reference_pattern=compile_reference_pattern(self._reference_pattern),
             )
         except (OSError, UnicodeDecodeError, yaml.YAMLError, RulingFormatError) as exc:
-            return RulingRead((), (f"rulings ignored: the registry {self._path} is unusable: {exc}",))
+            return RulingRead(
+                (), (f"{IGNORED_PREFIX}: the registry {self._path} is unusable: {exc}",)
+            )
         return RulingRead(parsed)
 
     def rulings_for(
@@ -232,7 +231,7 @@ class _UnavailableProvider:
     def rulings_for(
         self, repo: str, pr_number: int, *, untrusted_roots: Sequence[Path] = ()
     ) -> RulingRead:
-        return RulingRead((), (f"rulings ignored: {self._reason}",))
+        return RulingRead((), (f"{IGNORED_PREFIX}: {self._reason}",))
 
 
 def resolve_ruling_provider(
@@ -248,9 +247,19 @@ def resolve_ruling_provider(
     return FileRulingProvider(config.path, reference_pattern=config.reference_pattern)
 
 
+def read_scope_rulings(provider: RulingProvider | None, scope: RulingScope | None) -> RulingRead:
+    """The rulings on record for *scope*. None are applied when no registry is
+    configured or the scope is not known: a ruling that cannot be tied to one
+    repository and pull request must not clear anything."""
+    if provider is None or scope is None:
+        return RulingRead()
+    return provider.rulings_for(scope.repo, scope.pr, untrusted_roots=scope.untrusted_roots)
+
+
 __all__ = [
+    "IGNORED_PREFIX",
+    "read_scope_rulings",
     "CONFIG_SECTION_RULINGS",
-    "DEFAULT_AUTHORIZED_ROLES",
     "RULINGS_FILE_ENV_VAR",
     "FileRulingProvider",
     "RulingProvider",
@@ -258,7 +267,6 @@ __all__ = [
     "RulingScope",
     "RulingsConfig",
     "RulingsConfigError",
-    "load_authorized_roles",
     "load_rulings_config",
     "resolve_ruling_provider",
     "untrusted_reason",

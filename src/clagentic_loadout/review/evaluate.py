@@ -172,12 +172,24 @@ def _finding_id(finding: Mapping[str, Any]) -> str:
     return f"{finding['file']}:{finding['line']}:{finding['rule_id']}"
 
 
+def _in_floor(parsed: ParsedFacts) -> bool:
+    """Whether the facts put a finding in the security floor: a floor category,
+    or no category stated at all (unknown counts at its worst case)."""
+    category = parsed.facts.category
+    return category is None or category in FLOOR_CATEGORIES
+
+
+def is_floor_finding(finding: Mapping[str, Any]) -> bool:
+    """Whether *finding* is a security-floor finding, by the one definition the
+    evaluator itself scores with."""
+    return _in_floor(parse_facts(finding.get(KEY_FACTS)))
+
+
 def _assess(finding: Mapping[str, Any], stakes: Stakes, source: int = 0) -> _Assessed:
     parsed = parse_facts(finding.get(KEY_FACTS))
     path_stakes = stakes.for_path(finding["file"])
     computed = score(parsed.facts, path_stakes)
-    category = parsed.facts.category
-    floor_category = category is None or category in FLOOR_CATEGORIES
+    floor_category = _in_floor(parsed)
     return _Assessed(
         finding,
         parsed,
@@ -226,21 +238,24 @@ def _merge_identical(assessed: Iterable[_Assessed], threshold: int) -> list[_Ass
     return merged
 
 
-#: What a ruling that matched a finding came to: it cleared it, or the security
-#: floor refused it.
+#: What a ruling that matched a finding came to: it cleared it, the security
+#: floor refused it, or an earlier entry had already cleared the finding.
 _USE_APPLIED = "applied"
 _USE_REFUSED = "refused"
+_USE_SUPERSEDED = "superseded"
 
-_FLOOR_ALTERNATIVES = (
-    "accepted_risk (expires, default 30 days), false_positive or mitigated"
+_FLOOR_ROUTE = (
+    "a security-floor finding clears only through a dispositions entry on the base "
+    "branch, or by fixing it"
 )
 
 
 def _floor_refusal(entry: disp.Disposition, finding_id: str) -> tuple[str, bool]:
-    """Why a by_design entry did not clear a security-floor finding, and whether
-    that text is specific to the finding. A ruling's refusal names the finding
-    and the kinds that can still clear it; a base-revision disposition's keeps
-    its established wording, which the general floor sentence completes."""
+    """Why an entry did not clear a security-floor finding, and whether that text
+    is specific to the finding. A ruling is never applied to a floor finding,
+    whatever its kind, and its refusal names the finding and the one route that
+    can clear it. A base-revision by_design disposition keeps its established
+    wording, which the general floor sentence completes."""
     if not is_ruling(entry):
         return (
             f"a by_design disposition ({entry.path}, {entry.rule_id}) cannot clear a "
@@ -248,8 +263,8 @@ def _floor_refusal(entry: disp.Disposition, finding_id: str) -> tuple[str, bool]
             False,
         )
     return (
-        f"a by_design ruling by {entry.by} cannot clear a security-floor finding: "
-        f"{finding_id} stays blocking. Kinds that can still clear it: {_FLOOR_ALTERNATIVES}",
+        f"a {entry.kind} ruling by {entry.by} (requested by {entry.requested_by}) is not applied "
+        f"to {finding_id}, which is a security-floor finding: {_FLOOR_ROUTE}",
         True,
     )
 
@@ -258,14 +273,16 @@ def _apply_dispositions(
     item: _Assessed,
     entries: Sequence[disp.Disposition],
     today: dt.date,
-    used: dict[int, str] | None = None,
+    used: dict[int, tuple[str, str]] | None = None,
 ) -> tuple[disp.Disposition | None, str | None, bool]:
     """The disposition that clears *item*, separately the reason a matching one
-    was refused, and whether that reason is specific to the finding. A
-    security-floor finding cannot be cleared by by_design. When *used* is given
-    it records, by entry identity, which entries cleared a finding and which the
-    floor refused."""
+    was refused, and whether that reason is specific to the finding.
+
+    A security-floor finding cannot be cleared by a by_design disposition, and
+    cannot be cleared by a ruling of any kind. When *used* is given it records,
+    by entry identity, what each matching ruling came to and for which finding."""
     f = item.finding
+    finding_id = _finding_id(f)
     applied: disp.Disposition | None = None
     refused: str | None = None
     specific = False
@@ -276,34 +293,44 @@ def _apply_dispositions(
             or not entry.matches(f["file"], f["rule_id"], f.get("fingerprint"))
         ):
             continue
-        if entry.kind == disp.BY_DESIGN and item.floor_category:
-            if refused is None:
-                refused, specific = _floor_refusal(entry, _finding_id(f))
-            if used is not None:
-                used.setdefault(id(entry), _USE_REFUSED)
+        ruling = is_ruling(entry)
+        if applied is not None:
+            if ruling and used is not None:
+                used.setdefault(id(entry), (_USE_SUPERSEDED, finding_id))
+            continue
+        if item.floor_category and (ruling or entry.kind == disp.BY_DESIGN):
+            if refused is None or (ruling and not specific):
+                refused, specific = _floor_refusal(entry, finding_id)
+            if ruling and used is not None:
+                used.setdefault(id(entry), (_USE_REFUSED, finding_id))
             continue
         applied = entry
-        if used is not None:
-            used[id(entry)] = _USE_APPLIED
-        break
+        if ruling and used is not None:
+            used[id(entry)] = (_USE_APPLIED, finding_id)
     return applied, refused, specific
 
 
+def _unapplied_reason(status: str | None, finding_id: str | None) -> str:
+    if status == _USE_REFUSED:
+        return f"refused: {finding_id} is a security-floor finding; {_FLOOR_ROUTE}"
+    if status == _USE_SUPERSEDED:
+        return f"{finding_id} was already cleared by an earlier entry"
+    return "matched no kept finding"
+
+
 def _unapplied_rulings(
-    entries: Sequence[disp.Disposition], today: dt.date, used: Mapping[int, str]
+    entries: Sequence[disp.Disposition], today: dt.date, used: Mapping[int, tuple[str, str]]
 ) -> tuple[dict[str, Any], ...]:
     """The unexpired rulings that cleared nothing, each with why. An expired one
     is reported as expired instead."""
     out = []
     for entry in entries:
-        if not is_ruling(entry) or entry.is_expired(today) or used.get(id(entry)) == _USE_APPLIED:
+        if not is_ruling(entry) or entry.is_expired(today):
             continue
-        reason = (
-            "refused: the security floor forbids by_design for the finding it matched"
-            if used.get(id(entry)) == _USE_REFUSED
-            else "matched no kept finding"
-        )
-        out.append({**entry.as_dict(), "unapplied_reason": reason})
+        status, finding_id = used.get(id(entry), (None, None))
+        if status == _USE_APPLIED:
+            continue
+        out.append({**entry.as_dict(), "unapplied_reason": _unapplied_reason(status, finding_id)})
     return tuple(out)
 
 
@@ -375,7 +402,7 @@ def evaluate(
 
     evaluated: list[EvaluatedFinding] = []
     degraded = list(degraded_reasons)
-    used: dict[int, str] = {}
+    used: dict[int, tuple[str, str]] = {}
     for position, item in enumerate(merged, start=1):
         f = item.finding
         blocking = _blocks_before_dispositions(item, threshold)
@@ -454,4 +481,5 @@ __all__ = [
     "EvaluatedFinding",
     "Verdict",
     "evaluate",
+    "is_floor_finding",
 ]

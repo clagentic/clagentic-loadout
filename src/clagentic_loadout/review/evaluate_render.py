@@ -37,10 +37,17 @@ def cleared_line(d: dict) -> str:
     named as one, never as a base-revision disposition."""
     if d.get("source") != SOURCE_RULING:
         return f"cleared by {d['kind']} disposition ({d['by']}, {d['at']}): {d['rationale']}"
+    return f"cleared by {d['kind']} ruling {ruling_provenance(d)} at {d['repo']}#{d['pr']}: {d['rationale']}"
+
+
+def ruling_provenance(d: dict) -> str:
+    """Who recorded a ruling, for whom, when, where the decision came from and,
+    for a deferral, the work-item reference: the one wording shared by the
+    evaluator and the merge gate."""
     deferral = f", deferred to {d['reference']}" if d.get("reference") else ""
     return (
-        f"cleared by {d['kind']} ruling ({d['by']}, {d['at']}{deferral}) at "
-        f"{d['repo']}#{d['pr']}: {d['rationale']}"
+        f"(by {d['by']}, requested by {d['requested_by']}, {d['at']}, "
+        f"source {d['source_ref']}{deferral})"
     )
 
 
@@ -49,11 +56,10 @@ def _expired_line(entry: dict) -> str:
     return f"{label}{entry['path']} {entry['rule_id']} ({entry['kind']}, expired {entry['expires']})"
 
 
-def _unapplied_line(entry: dict) -> str:
-    deferral = f", deferred to {entry['reference']}" if entry.get("reference") else ""
+def unapplied_ruling_line(entry: dict) -> str:
     return (
-        f"{entry['path']} {entry['rule_id']} ({entry['kind']}, ruled by {entry['by']} on "
-        f"{entry['at']}{deferral}): {entry['unapplied_reason']}"
+        f"{entry['path']} {entry['rule_id']} ({entry['kind']}) {ruling_provenance(entry)}: "
+        f"{entry['unapplied_reason']}"
     )
 
 
@@ -177,7 +183,7 @@ def render_text(verdict: Verdict) -> str:
     if verdict.unapplied_rulings:
         lines.append(f"Rulings for this pull request that cleared nothing ({len(verdict.unapplied_rulings)}):")
         for entry in verdict.unapplied_rulings:
-            lines.append(f"  - {_unapplied_line(entry)}")
+            lines.append(f"  - {unapplied_ruling_line(entry)}")
     return "\n".join(lines)
 
 

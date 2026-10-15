@@ -1,13 +1,18 @@
-"""review.rulings — per-PR rulings on kept findings, recorded by the lead role.
+"""review.rulings — per-PR rulings on kept findings, recorded by an authorized role.
 
-A ruling covers a kept finding exactly as a base-revision disposition entry does
+A ruling covers a kept finding the way a base-revision disposition entry does
 (review.dispositions): the same kinds (by_design, false_positive, accepted_risk,
 mitigated), the same expiry rules (an accepted_risk ruling expires 30 days after
-it was made unless it names a date), the same security floor (by_design cannot
-clear a floor finding; the other kinds can), and the same demotion to advisory.
-Nothing is deleted; a cleared finding is annotated with the ruling.
+it was made unless it names a date) and the same demotion to advisory. Nothing
+is deleted; a cleared finding is annotated with the ruling.
 
-What differs is scope and source:
+One thing is stricter than a base-revision entry: a ruling NEVER clears a
+security-floor finding, whatever its kind. A floor finding clears only through a
+base-revision disposition entry (a reviewed change to the base branch) or by
+being fixed. The evaluator enforces this when it reads the registry, and the
+write verb refuses a floor finding when it records one.
+
+What differs from a disposition is scope and source:
 
   * A ruling belongs to ONE repository and ONE pull request, and matches a
     finding by its fingerprint, with rule id and path as checks. It never
@@ -28,7 +33,9 @@ Registry file format (``rulings.yaml``)::
         path: src/handler.py            # exact file path of the finding
         kind: accepted_risk             # by_design | false_positive | accepted_risk | mitigated
         rationale: "why this is acceptable"
-        by: the-lead-role               # the attested caller that recorded it
+        by: some-role                   # the attested role that recorded it
+        requested_by: some-caller       # who asked for it, as the deployment names callers
+        source_ref: "design note 4"     # opaque reference to where the decision was made
         at: 2026-09-01
         expires: 2026-10-01             # optional; accepted_risk defaults to 30 days after ``at``
         reference: ABC-123              # optional deferral; requires ``expires``
@@ -68,12 +75,26 @@ _ENTRY_KEYS = frozenset(
         "kind",
         "rationale",
         "by",
+        "requested_by",
+        "source_ref",
         "at",
         "expires",
         "reference",
     }
 )
-_REQUIRED_KEYS = ("repo", "pr", "fingerprint", "rule_id", "path", "kind", "rationale", "by", "at")
+_REQUIRED_KEYS = (
+    "repo",
+    "pr",
+    "fingerprint",
+    "rule_id",
+    "path",
+    "kind",
+    "rationale",
+    "by",
+    "requested_by",
+    "source_ref",
+    "at",
+)
 
 
 class RulingFormatError(DispositionsFormatError):
@@ -90,6 +111,11 @@ class Ruling(Disposition):
 
     repo: str = ""
     pr: int = 0
+    #: Who asked for the ruling, as the deployment names callers; ``by`` is the
+    #: attested role that wrote it.
+    requested_by: str = ""
+    #: Opaque pointer to where the decision was made, for the audit trail.
+    source_ref: str = ""
     reference: str | None = None
     source: str = SOURCE_RULING
 
@@ -105,20 +131,21 @@ class Ruling(Disposition):
             and self.path == normalized
         )
 
-    def as_dict(self) -> dict[str, Any]:
+    def as_entry(self) -> dict[str, Any]:
+        """This ruling as a registry entry (the stored form, without ``source``)."""
         entry = super().as_dict()
-        entry.update(source=self.source, repo=self.repo, pr=self.pr)
+        entry.update(
+            repo=self.repo,
+            pr=self.pr,
+            requested_by=self.requested_by,
+            source_ref=self.source_ref,
+        )
         if self.reference is not None:
             entry["reference"] = self.reference
         return entry
 
-    def as_entry(self) -> dict[str, Any]:
-        """This ruling as a registry entry (the stored form, without ``source``)."""
-        entry = super().as_dict()
-        entry.update(repo=self.repo, pr=self.pr)
-        if self.reference is not None:
-            entry["reference"] = self.reference
-        return entry
+    def as_dict(self) -> dict[str, Any]:
+        return {**self.as_entry(), "source": self.source}
 
 
 def is_ruling(entry: Any) -> bool:
@@ -157,6 +184,8 @@ def build_ruling(
     kind: str,
     rationale: str,
     by: str,
+    requested_by: str,
+    source_ref: str,
     at: Any,
     expires: Any = None,
     reference: str | None = None,
@@ -179,8 +208,9 @@ def build_ruling(
             raise RulingFormatError(
                 f"{where}.reference records a deferral, which needs {where}.expires"
             )
-        ref = check_reference(reference, reference_pattern or compile_reference_pattern(None),
-                              f"{where}.reference")
+        ref = check_reference(
+            reference, reference_pattern or compile_reference_pattern(None), f"{where}.reference"
+        )
     return Ruling(
         path=text_field(path, f"{where}.path"),
         rule_id=text_field(rule_id, f"{where}.rule_id"),
@@ -192,6 +222,8 @@ def build_ruling(
         fingerprint=text_field(fingerprint, f"{where}.fingerprint"),
         repo=text_field(repo, f"{where}.repo"),
         pr=pr,
+        requested_by=text_field(requested_by, f"{where}.requested_by"),
+        source_ref=text_field(source_ref, f"{where}.source_ref"),
         reference=ref,
     )
 
@@ -236,6 +268,8 @@ def parse_rulings(
                     kind=entry["kind"],
                     rationale=entry["rationale"],
                     by=entry["by"],
+                    requested_by=entry["requested_by"],
+                    source_ref=entry["source_ref"],
                     at=entry["at"],
                     expires=entry.get("expires"),
                     reference=entry.get("reference"),
