@@ -286,8 +286,8 @@ key is absent. It decides nothing but who may use `loadout-ruling record`: provi
 `loadout-doctor`, model routing and every other verb keep their own sources. The file is read
 only if it passes the registry's location check (not inside a git work tree, and neither the
 file nor any directory above it writable by a group or by everyone or owned by another user);
-otherwise `record` is refused with exit 52 and names the file. A malformed `roles:` value is
-exit 3. A deployment owns the whole `roles:` key: an installer should merge it into the user
+otherwise `record` is refused with exit 52 and names the file. A present `roles:` key whose value is
+empty, `null` or not a mapping is malformed, exit 3, never the default. A deployment owns the whole `roles:` key: an installer should merge it into the user
 config alongside the other sections and never touch unrelated sections. `--repo-path` scopes the ruling (a registry inside it is refused) and supplies no
 role policy. `--role` must match the attested identity, as for every
 other caller-bound verb. `--requested-by` records who asked, as the deployment names callers.
