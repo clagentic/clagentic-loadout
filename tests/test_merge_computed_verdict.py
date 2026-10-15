@@ -211,11 +211,12 @@ class TestBlocked:
         assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
         assert "security floor forbids" in run.err
 
-    def test_a_blocked_fence_then_a_clean_fence_at_the_same_head_merges(self, tmp_path, capsys):
+    def test_a_blocked_fence_then_a_clean_fence_at_the_same_head_refuses(self, tmp_path, capsys):
         repo = _repo(tmp_path)
         blocked = [_finding()]
-        # The later fence clears what the earlier one held open, as the
-        # prior-findings gate requires of any later clean verdict.
+        # A role's verdict at a head is the union of its fences there: the
+        # later fence's claim to clear what the earlier one kept does not
+        # cover it; only a base-branch disposition does.
         cleared = [
             {"id": entry["id"], "head": HEAD, "evidence": "fixed in the follow-up commit"}
             for entry in _open_entries(blocked)
@@ -226,7 +227,9 @@ class TestBlocked:
         ]
         run = _merge(comments, repo, capsys)
 
-        assert run.code == verb.EXIT_OK, run.err
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED, run.err
+        assert "src/a.py:10:R1" in run.err
+        assert "comment #1" in run.err
 
     def test_a_clean_fence_whose_poster_asked_for_blocking_still_refuses(self, tmp_path, capsys):
         repo = _repo(tmp_path)

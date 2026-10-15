@@ -1849,9 +1849,18 @@ rendered inside the fence, never as body text, and a fence that lands without
 them fails the readback. A hand-authored fence is refused as it always was.
 At the gate, the reviewer's earlier fences are walked in order: a finding an
 earlier fence held open that the current verdict neither clears at its own
-head (with evidence) nor re-raises does not refuse the merge: the latest
-verdict at the head decides, and the merge prints a NOTICE naming each such
-finding id. A clean verdict that itself lists `findings_open` still refuses. A
+head (with evidence) nor re-raises does not refuse the merge: the verdict at
+the head decides, and the merge prints a NOTICE naming each such finding id.
+A required role's verdict at the PR head is the union of every fence the role
+posted at that head: each runs the full chain and each must pass, whatever
+order they were posted in, so a CLEAN fence never overrides a BLOCKED one at
+the same head and a later BLOCKED one is never ignored. Another fence dropping
+a finding never covers one a fence kept; only a disposition on the base branch
+does. A fence for another head is skipped and does not end the evaluation; a
+role whose newest fence is for another head is still refused as stale. With one
+fence at the head the result and output are the single-fence ones; with
+several, the merge prints a NOTICE naming the comments and each fence's
+notices carry its comment id. A clean verdict that itself lists `findings_open` still refuses. A
 clean verdict reporting a `merge.required_scanners` scanner as `failed`
 refuses, as does one that records no scanner outcomes for a role that has
 required scanners; a scanner name listed twice in a fence is malformed. Each
@@ -2591,7 +2600,8 @@ pre-existing reference scripts — is tracked per verb.
 `loadout-merge`: gate-chain parity is covered by synthetic tests in
 `tests/test_merge_verb.py` (stale SHA, diff-scope, title, blocking verdict,
 CI-status failing, pending, unreachable and empty-evidence cases) and
-`tests/test_merge_verdict.py` (latest fenced verdict wins).
+`tests/test_merge_verdict.py` and `tests/test_merge_fence_union.py` (every
+same-role fence at the head must pass).
 `.clagentic/loadout/config.yaml`'s `merge.post_merge_steps` is
 already configured so a `loadout-merge --repo-path <this-checkout>` invocation
 self-installs the merged build. The remaining step — pointing the live
