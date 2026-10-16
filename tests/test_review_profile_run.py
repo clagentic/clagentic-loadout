@@ -18,7 +18,7 @@ from clagentic_loadout.review.evaluation import context_from_config
 from clagentic_loadout.review.policy_source import PROFILE_PATH
 from clagentic_loadout.review.profile_settings import ProfileSettings
 from clagentic_loadout.transport import provider_config
-from tests._review_cli_support import Env, write_stub
+from tests._review_cli_support import Env, prompts, write_stub
 from tests._review_evaluate_support import commit_files
 
 HOST = "host-one.example.test"
@@ -226,6 +226,18 @@ def test_malformed_deployment_settings_stop_run_before_any_model_is_called(
 
     assert code == review_cli.EXIT_PROFILE_INVALID
     assert key_path in err
+    # The stub logs every prompt it is handed, so an empty log means the model
+    # was never called, not merely that its reply was ignored.
+    assert prompts(env.stubs, "carrier") == []
+
+
+def test_a_valid_deployment_setting_does_reach_the_model(env, capsys):
+    _configure(env, deny={"hosts": [HOST]})
+
+    code, _ = env.run(capsys=capsys)
+
+    assert code == 0
+    assert len(prompts(env.stubs, "carrier")) >= 1
 
 
 def test_malformed_settings_cannot_reach_the_evaluator_setup_the_merge_gate_uses(env):
