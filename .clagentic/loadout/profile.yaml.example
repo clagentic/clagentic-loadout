@@ -1,0 +1,25 @@
+# Example repo profile. Copy to .clagentic/loadout/profile.yaml in your repository, or
+# run `loadout-profile init` to draft one from the file tree. Commit it to the base branch:
+# review reads it from the base revision, so it applies to changes made after it lands.
+# Reference: docs/repo-profile.md
+
+# released-tool: the tree ships to people outside your deployment.
+# internal:      the tree stays inside your deployment.
+class: released-tool
+
+# Paths that are not what ships, or that follow a different class. A later match wins.
+paths:
+  "tests/fixtures/**": {class: internal}
+  ".agent-state/**": {class: internal}
+
+# Values this repository forbids, on top of your deployment's own denial list
+# (review.repo_profile.deny in the user-level config). Released-tool paths only.
+deny:
+  names: [some-agent-name]
+  hosts: [host.example.test]
+  users: [some-username]
+
+# Internal paths only: packages of tools this repository consumes. Nothing is checked
+# mechanically; the list is given to the reviewer, who judges whether code reaches into
+# their internal modules instead of their documented interface.
+# tool_packages: [some_tool]

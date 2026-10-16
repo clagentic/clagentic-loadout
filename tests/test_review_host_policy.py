@@ -80,7 +80,10 @@ def test_a_disposition_at_the_base_demotes_a_finding_without_a_local_checkout(en
 
     payload, document = _run(env, capsys, base_files=files)
 
-    (finding,) = document["findings"]
+    # The tree built in this test carries no profile, so the review also states
+    # the advisory missing-profile finding.
+    (finding,) = [f for f in document["findings"] if f["rule_id"] == "R1"]
+    assert [f["rule_id"] for f in document["findings"] if f is not finding] == ["repo-profile.missing"]
     assert finding["blocking"] is False
     assert finding["disposition"]["kind"] == "false_positive"
     assert document["verdict_outcome"] == "CLEAN"

@@ -59,11 +59,13 @@ from clagentic_loadout.review.evaluation import (
     EvaluationContext,
     annotate_findings,
     evaluate_findings,
+    read_context_policy,
     verdict_document_fields,
 )
 from clagentic_loadout.review.finding_identity import with_fingerprints
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
+from clagentic_loadout.review.profile_rules import profile_findings
 from clagentic_loadout.sha import FULL_SHA_RE
 
 EXIT_COMPLETE = 0
@@ -609,13 +611,19 @@ def run_review(
         left_open = accounting.left_open
         prior_open = delta.prior_open_count
         per_chunk.append((0, carried + left_open))
+    # Policy is read once: the repo profile it holds states findings about this
+    # diff here, and the evaluator below judges all findings under the same read.
+    context = evaluation if evaluation is not None else EvaluationContext()
+    policy = read_context_policy(context)
+    rule_findings = profile_findings(policy, chunks, context.profile_settings)
+    if rule_findings:
+        per_chunk.append((0, rule_findings))
     merged_findings = merge_findings(per_chunk)
     _mark_prior_locations(merged_findings, kept)
     # Severity and blocking are computed here, after the merge and the accounting
     # of prior findings, so a kept prior finding is judged again under the policy
     # of this run's base revision rather than carried with its old standing.
-    context = evaluation if evaluation is not None else EvaluationContext()
-    verdict = evaluate_findings(merged_findings, acquired.head_sha, context)
+    verdict = evaluate_findings(merged_findings, acquired.head_sha, context, policy=policy)
     findings = annotate_findings(merged_findings, verdict)
     findings_path = run_dir / FINDINGS_FILENAME
     document = {

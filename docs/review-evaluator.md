@@ -418,6 +418,12 @@ above), and the reply contract changes accordingly:
   the worst case: it blocks, and the verdict is DEGRADED naming the finding. There is no
   lenient path.
 
+`run` also states the findings of the repo profile read from the same base revision (a diff
+that breaks the repository's class rules, an invalid profile, and a missing one when the
+deployment asks for it), with facts, beside the reviewer's; see
+[repo-profile.md](repo-profile.md). They are scored like any other finding
+and never hold a merge on their own.
+
 `run` evaluates after the chunks are merged and, in delta mode, after prior findings are
 accounted for. Policy is read from the PR's base revision (not the last reviewed head) through
 the host API, or from the repository at `--repo-path` when that is given explicitly;

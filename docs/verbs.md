@@ -1176,6 +1176,22 @@ duplicate (54). `list` is read-only, needs no role and makes no network call. Fu
 registry format and exit codes:
 [review-evaluator.md](review-evaluator.md#per-pr-rulings).
 
+### `loadout-profile` — validate a repo profile, or draft one
+
+```
+loadout-profile check [--repo-path DIR] [--ref REV]
+loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
+```
+
+The repo profile (`.clagentic/loadout/profile.yaml`) states a repository's class,
+`released-tool` or `internal`, and optional per-path overrides. `check` validates it with the
+loader the review uses (working tree by default, a revision with `--ref`) and prints its class,
+rules and overrides as JSON. `init` drafts a profile from the file tree for a repository that
+has none and never overwrites without `--force`. Both are local, need no credential and bind no
+caller. Exit codes: `0` ok, `1` usage, `60` no profile, `61` invalid, `62` unreadable or
+unwritable, `63` already exists. The file format, the findings `loadout-review run` states from
+it, and the deployment's denial list: [repo-profile.md](repo-profile.md).
+
 ### `loadout-push` — bot-attributed commit push + PR open/update
 
 `clagentic_loadout.push.verb`. Pushes a branch's commits (re-authored to

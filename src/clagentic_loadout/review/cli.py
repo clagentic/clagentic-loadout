@@ -84,6 +84,8 @@ from clagentic_loadout.review.findings_contract import (
 )
 from clagentic_loadout.review.policy_reader import GitPolicyReader, HostPolicyReader, PolicyReader
 from clagentic_loadout.review.pr_record import write_pr_record
+from clagentic_loadout.review.profile_settings import load_profile_settings
+from clagentic_loadout.review.repo_profile import ProfileFormatError
 from clagentic_loadout.review.resolutions import (
     BY_CALLER,
     Resolution,
@@ -523,7 +525,12 @@ def _run_command(
     # Read before any model is called, so a bad evaluator setting costs nothing.
     try:
         evaluation = context_from_config(config_root)
-    except EvaluateError as exc:
+        # Only `run` states repo profile findings, so only `run` reads these
+        # settings: a malformed one must never reach the merge gate's evaluator setup.
+        evaluation = dataclasses.replace(
+            evaluation, profile_settings=load_profile_settings(config_root)
+        )
+    except (EvaluateError, ProfileFormatError) as exc:
         _fail(str(exc), EXIT_PROFILE_INVALID)
 
     backend = _build_acquire_backend(
