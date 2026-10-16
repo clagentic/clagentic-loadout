@@ -23,7 +23,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +45,7 @@ from clagentic_loadout.review.facts import KEY_FACTS
 from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
 from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader
 from clagentic_loadout.review.policy_source import PolicySource, read_policy_from
+from clagentic_loadout.review.profile_settings import ProfileSettings
 from clagentic_loadout.review.ruling_provider import (
     RulingProvider,
     RulingRead,
@@ -104,6 +105,9 @@ class EvaluationContext:
     #: that cannot be tied to this pull request must not clear anything.
     ruling_provider: RulingProvider | None = None
     ruling_scope: RulingScope | None = None
+    #: The deployment's own repo profile settings (review.profile_settings). Used
+    #: only by `run`, to state repo profile findings.
+    profile_settings: ProfileSettings = field(default_factory=ProfileSettings)
 
     @property
     def effective_visibility(self) -> str:
@@ -123,7 +127,9 @@ def context_from_config(
     return EvaluationContext(block_at=block_at, required_scanners=tuple(required), **fields)
 
 
-def _policy(context: EvaluationContext) -> PolicySource:
+def read_context_policy(context: EvaluationContext) -> PolicySource:
+    """The policy *context* describes, read once. Hand the result to
+    ``evaluate_findings(policy=...)`` to evaluate under it without a second read."""
     visibility = context.effective_visibility
     if context.policy_base_sha is None:
         reason = "the policy base revision is not known, so no policy was read"
@@ -156,9 +162,13 @@ def evaluate_findings(
     expected_head: str | None = None,
     scanners_run: Sequence[Mapping[str, Any]] | None = None,
     today: dt.date | None = None,
+    policy: PolicySource | None = None,
 ) -> Verdict:
-    """The Verdict for *findings* produced for *head_sha*, under *context*."""
-    policy = _policy(context)
+    """The Verdict for *findings* produced for *head_sha*, under *context*.
+    *policy*, when given, is the already-read policy for that context
+    (read_context_policy); otherwise it is read here."""
+    if policy is None:
+        policy = read_context_policy(context)
     ruled = _rulings(context)
     degraded = [*policy.degraded, *ruled.degraded]
     if context.visibility not in VISIBILITIES:
@@ -327,6 +337,7 @@ __all__ = [
     "finding_state_id",
     "findings_open_from_verdict",
     "is_unsafe_status",
+    "read_context_policy",
     "verdict_document_fields",
     "verdict_reasons",
 ]
