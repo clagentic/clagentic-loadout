@@ -75,7 +75,7 @@ _KIND_LABEL = {
 #: kept out is added to its ``hosts`` list as a literal prefix.
 _HOME_PATH_RE = re.compile(
     r"(?<![\w.~$/-])(?:/(?:home|Users)/(?P<user>[A-Za-z0-9_.-]+)"
-    r"|[A-Za-z]:\\Users\\(?P<winuser>[^\\\s]+))"
+    r"|[A-Za-z]:\\Users\\(?P<winuser>[A-Za-z0-9_.-]+))"
 )
 #: Account names that stand for "some user" in documentation and fixtures, not
 #: for anyone's identity.

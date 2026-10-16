@@ -22,6 +22,9 @@ from clagentic_loadout.review.policy_source import (
 NAME = "agent-alpha"
 HOST = "host-one.example.test"
 USER = "someone-local"
+#: An account name that is not a placeholder. The test lines below spell home
+#: paths with it through a variable, so this file carries no literal home path.
+ACCOUNT = "dana"
 
 
 def _diff(files: dict[str, list[str]]) -> str:
@@ -108,9 +111,9 @@ class TestReleasedTool:
     @pytest.mark.parametrize(
         "line",
         [
-            "root = '/home/dana/project'",
-            "p = /Users/dana/Library",
-            "C:\\Users\\dana\\src",
+            f"root = '/home/{ACCOUNT}/project'",
+            f"p = /Users/{ACCOUNT}/Library",
+            f"C:\\Users\\{ACCOUNT}\\src",
         ],
     )
     def test_an_absolute_home_path_is_reported(self, line):
@@ -129,6 +132,8 @@ class TestReleasedTool:
             "path = '/home/user/project'",
             "/home/username/x",
             "/home/someone/x",
+            "/home/<user>/x",
+            "/home/${USER}/x",
             "/Users/Alice/x",
             "/root/work",
             "~/home/dana",
@@ -245,7 +250,7 @@ class TestInternal:
         profile = rp.RepoProfile(
             repo_class=rp.CLASS_INTERNAL, deny=rp.ProfileDeny(names=(NAME,))
         )
-        assert _findings({"a.txt": [NAME, "/home/dana/x"]}, profile) == []
+        assert _findings({"a.txt": [NAME, f"/home/{ACCOUNT}/x"]}, profile) == []
 
 
 class TestMissingAndInvalid:
@@ -292,7 +297,8 @@ class TestFacts:
     def test_every_finding_states_complete_facts(self):
         found = [
             *_findings(
-                {"a.txt": [NAME, "/home/dana/x"]}, _released(deny=rp.ProfileDeny(names=(NAME,)))
+                {"a.txt": [NAME, f"/home/{ACCOUNT}/x"]},
+                _released(deny=rp.ProfileDeny(names=(NAME,))),
             ),
             *_findings(
                 {"x.py": ["import tool_one.guard"]},
