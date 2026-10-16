@@ -14,6 +14,7 @@ from pathlib import Path
 
 import yaml
 
+from clagentic_loadout.review.policy_source import PROFILE_PATH
 from clagentic_loadout.transport import attestation
 from tests._review_evaluate_support import commit_files, make_repo
 from tests._support.host_fakes import forgejo_tree_page
@@ -176,14 +177,20 @@ class Env:
     """One synthetic deployment: user config root, stub engines, run root,
     an empty repo-path, and a fake host API serving `diff` for PR 42."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, seed_profile: bool = True) -> None:
         self.cfg = root / "cfg"
         self.stubs = root / "stubs"
         self.runs = root / "runs"
         # A real repository with one commit: policy is read from the PR's base
-        # revision, so the fake host reports that commit as the base.
+        # revision, so the fake host reports that commit as the base. The commit
+        # carries a repo profile unless a test is about a repository without one:
+        # a missing profile is always a finding, and a test about something else
+        # should not have to list it.
         self.repo = make_repo(root)
-        self.base_sha = commit_files(self.repo, {"README.md": "base\n"})
+        files = {"README.md": "base\n"}
+        if seed_profile:
+            files[PROFILE_PATH] = "class: internal\n"
+        self.base_sha = commit_files(self.repo, files)
         self.diff = make_diff({"a.py": 4})
         self.token_provider = RecordingTokenProvider()
         self.opener_state: dict = {}

@@ -1,12 +1,11 @@
 """review.profile_settings — the deployment's own repo profile settings.
 
-Two settings belong to the deployment that reviews a repository, not to the
-repository, so they live in the USER-LEVEL config and are never read from the
+The setting belongs to the deployment that reviews a repository, not to the
+repository, so it lives in the USER-LEVEL config and is never read from the
 repo::
 
     review:
       repo_profile:
-        require: true             # a repository with no profile gets a finding
         deny:                     # values a released-tool tree must not carry
           names: [some-agent-name]
           hosts: [host.example.test]
@@ -18,10 +17,9 @@ exactly the place they must not be written down. The list is merged with
 whatever a repository's profile adds (review.repo_profile), and a repository
 cannot remove an entry from it.
 
-``require``: off by default, so a deployment that configures nothing sees the
-review's output exactly as it was. When on, a repository whose base revision has
-no profile gets one advisory finding saying so. A profile that is present but
-invalid is always reported, because the file is there and is being ignored.
+A repository whose base revision has no profile always gets one advisory
+finding saying so, and so does a profile that is present but invalid; neither
+is configurable.
 
 This module learns no name of its own.
 """
@@ -37,13 +35,11 @@ from clagentic_loadout.transport.provider_config import load_user_config_section
 CONFIG_SECTION_REVIEW = "review"
 CONFIG_KEY_REPO_PROFILE = "repo_profile"
 CONFIG_KEY_DENY = "deny"
-CONFIG_KEY_REQUIRE = "require"
 
 
 @dataclass(frozen=True)
 class ProfileSettings:
     deny: ProfileDeny = field(default_factory=ProfileDeny)
-    require: bool = False
 
 
 def load_profile_settings(config_root: str | Path | None = None) -> ProfileSettings:
@@ -56,15 +52,10 @@ def load_profile_settings(config_root: str | Path | None = None) -> ProfileSetti
     where = f"{CONFIG_SECTION_REVIEW}.{CONFIG_KEY_REPO_PROFILE}"
     if not isinstance(block, dict):
         raise ProfileFormatError(f"{where} must be a mapping")
-    unknown = sorted(str(k) for k in block if k not in (CONFIG_KEY_DENY, CONFIG_KEY_REQUIRE))
+    unknown = sorted(str(k) for k in block if k != CONFIG_KEY_DENY)
     if unknown:
         raise ProfileFormatError("unknown key: " + ", ".join(f"{where}.{key}" for key in unknown))
-    require = block.get(CONFIG_KEY_REQUIRE, False)
-    if not isinstance(require, bool):
-        raise ProfileFormatError(f"{where}.{CONFIG_KEY_REQUIRE} must be true or false, got {require!r}")
-    return ProfileSettings(
-        deny=parse_deny(block.get(CONFIG_KEY_DENY), f"{where}.{CONFIG_KEY_DENY}"), require=require
-    )
+    return ProfileSettings(deny=parse_deny(block.get(CONFIG_KEY_DENY), f"{where}.{CONFIG_KEY_DENY}"))
 
 
 __all__ = ["ProfileSettings", "load_profile_settings"]

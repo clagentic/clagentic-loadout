@@ -254,22 +254,15 @@ class TestInternal:
 
 
 class TestMissingAndInvalid:
-    REQUIRE = ProfileSettings(require=True)
-
-    def test_a_missing_profile_is_one_finding_on_the_profile_path_when_required(self):
-        found = pr.profile_findings(
-            _policy(None, PROFILE_MISSING), plan_chunks(_diff({"a": ["x"]})), self.REQUIRE
-        )
-        assert _rules(found) == [(pr.RULE_MISSING, pr.PROFILE_PATH, 1)]
-        assert "loadout-profile init" in found[0]["message"]
-
-    def test_a_missing_profile_is_not_reported_unless_the_deployment_asks(self):
+    def test_a_missing_profile_is_one_finding_on_the_profile_path_by_default(self):
         chunks = plan_chunks(_diff({"a": ["x"]}))
-        assert pr.profile_findings(_policy(None, PROFILE_MISSING), chunks) == []
-        assert pr.profile_findings(_policy(None, PROFILE_MISSING), chunks, ProfileSettings()) == []
+        for settings in (None, ProfileSettings()):
+            found = pr.profile_findings(_policy(None, PROFILE_MISSING), chunks, settings)
+            assert _rules(found) == [(pr.RULE_MISSING, pr.PROFILE_PATH, 1)]
+            assert "loadout-profile init" in found[0]["message"]
 
-    def test_an_invalid_profile_is_one_finding_naming_the_problem_whether_or_not_required(self):
-        for settings in (None, ProfileSettings(), self.REQUIRE):
+    def test_an_invalid_profile_is_one_finding_naming_the_problem_for_any_settings(self):
+        for settings in (None, ProfileSettings()):
             found = pr.profile_findings(
                 _policy(None, PROFILE_INVALID, "class is required"),
                 plan_chunks(_diff({"a": ["x"]})),
@@ -280,10 +273,10 @@ class TestMissingAndInvalid:
 
     def test_an_unread_policy_states_nothing_because_it_is_already_degraded(self):
         chunks = plan_chunks(_diff({"a": ["x"]}))
-        assert pr.profile_findings(_policy(None, PROFILE_UNREAD), chunks, self.REQUIRE) == []
+        assert pr.profile_findings(_policy(None, PROFILE_UNREAD), chunks) == []
 
     def test_a_missing_profile_reports_even_for_a_diff_with_no_added_lines(self):
-        assert pr.profile_findings(_policy(None, PROFILE_MISSING), [], self.REQUIRE) != []
+        assert pr.profile_findings(_policy(None, PROFILE_MISSING), []) != []
 
 
 class TestFacts:

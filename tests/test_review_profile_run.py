@@ -27,7 +27,7 @@ NAME = "agent-alpha"
 
 @pytest.fixture
 def env(tmp_path, monkeypatch) -> Env:
-    environment = Env(tmp_path)
+    environment = Env(tmp_path, seed_profile=False)
     monkeypatch.setenv("STUB_DIR", str(environment.stubs))
     monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
     monkeypatch.delenv(review_cli.RUN_ROOT_ENV_VAR, raising=False)
@@ -48,18 +48,13 @@ def _added(name: str, *lines: str) -> str:
     ) + "\n"
 
 
-def _configure(
-    env: Env, *, deny=None, require=None, evaluator=None, carrier_mode="empty"
-) -> None:
+def _configure(env: Env, *, deny=None, evaluator=None, carrier_mode="empty") -> None:
     """The user-level config: a stub carrier, and optionally the deployment's
     repo profile settings and evaluator threshold."""
     carrier = write_stub(env.stubs, "carrier", carrier_mode)
     review: dict = {"profiles": {"reviewer": {"carrier": carrier, "parallel": 1, "timeout_seconds": 10}}}
-    settings = {
-        key: value for key, value in (("deny", deny), ("require", require)) if value is not None
-    }
-    if settings:
-        review["repo_profile"] = settings
+    if deny is not None:
+        review["repo_profile"] = {"deny": deny}
     if evaluator is not None:
         review["evaluator"] = evaluator
     env.cfg.mkdir(parents=True, exist_ok=True)
@@ -75,7 +70,7 @@ def _rules(document: dict) -> list[tuple[str, str, int]]:
 
 
 def test_a_repo_without_a_profile_gets_a_missing_profile_finding_that_does_not_block(env, capsys):
-    _configure(env, require=True)
+    _configure(env)
 
     code, payload = env.run(capsys=capsys)
 
@@ -88,17 +83,8 @@ def test_a_repo_without_a_profile_gets_a_missing_profile_finding_that_does_not_b
     assert payload["blocking_count"] == 0
 
 
-def test_a_deployment_that_does_not_ask_sees_no_finding_for_a_repo_without_a_profile(env, capsys):
-    _configure(env)
-
-    _, payload = env.run(capsys=capsys)
-
-    assert _document(payload)["findings"] == []
-    assert payload["verdict_outcome"] == "CLEAN"
-
-
 def test_the_missing_profile_finding_is_posted_and_the_posted_verdict_is_clean(env, capsys):
-    _configure(env, require=True)
+    _configure(env)
     _, payload = env.run(capsys=capsys)
 
     code, posted = env.post("--findings", payload["findings_file"], "--status", "clean", capsys=capsys)
@@ -113,7 +99,6 @@ def test_the_missing_profile_finding_is_posted_and_the_posted_verdict_is_clean(e
 
 
 def test_an_invalid_profile_is_a_finding_naming_the_problem_and_does_not_block(env, capsys):
-    # Reported without `require`: the file is there and is being ignored.
     _configure(env)
     base = commit_files(env.repo, {PROFILE_PATH: "class: not-a-class\n"})
 
@@ -136,7 +121,7 @@ def test_a_valid_profile_with_a_clean_diff_has_no_profile_finding(env, capsys):
 
 
 def test_a_profile_added_only_in_the_change_under_review_does_not_apply(env, capsys):
-    _configure(env, require=True)
+    _configure(env)
     commit_files(env.repo, {PROFILE_PATH: "class: released-tool\n"})
 
     _, payload = env.run(capsys=capsys)
@@ -224,10 +209,10 @@ def test_an_unreadable_base_revision_is_degraded_and_states_no_profile_finding(e
     "settings, key_path",
     [
         ({"deny": {"names": "not-a-list"}}, "review.repo_profile.deny.names"),
-        ({"require": "yes-please"}, "review.repo_profile.require"),
+        ({"require": True}, "review.repo_profile.require"),
         ({"strict": True}, "review.repo_profile.strict"),
     ],
-    ids=["deny", "require", "unknown"],
+    ids=["deny", "removed-require", "unknown"],
 )
 def test_malformed_deployment_settings_stop_run_before_any_model_is_called(
     env, capsys, settings, key_path
@@ -244,7 +229,7 @@ def test_malformed_deployment_settings_stop_run_before_any_model_is_called(
 
 
 def test_malformed_settings_cannot_reach_the_evaluator_setup_the_merge_gate_uses(env):
-    _configure(env, deny={"names": "not-a-list"}, require="yes-please")
+    _configure(env, deny={"names": "not-a-list"})
 
     context = context_from_config(env.cfg)
 

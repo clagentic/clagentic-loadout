@@ -18,15 +18,13 @@ def test_nothing_configured_is_the_defaults(tmp_path):
     assert load_profile_settings(tmp_path / "absent") == ProfileSettings()
     _config(tmp_path, {"profiles": {}})
     assert load_profile_settings(tmp_path) == ProfileSettings()
-    assert ProfileSettings().require is False
 
 
-def test_a_denial_list_and_require_are_read(tmp_path):
+def test_a_denial_list_is_read(tmp_path):
     _config(
         tmp_path,
         {
             "repo_profile": {
-                "require": True,
                 "deny": {"names": ["agent-alpha"], "hosts": ["host-one.example.test"]},
             }
         },
@@ -34,7 +32,6 @@ def test_a_denial_list_and_require_are_read(tmp_path):
 
     settings = load_profile_settings(tmp_path)
 
-    assert settings.require is True
     assert settings.deny == rp.ProfileDeny(
         names=("agent-alpha",), hosts=("host-one.example.test",)
     )
@@ -57,8 +54,7 @@ def test_a_repository_config_is_never_a_source(tmp_path):
     [
         ("text", "review.repo_profile must be a mapping"),
         ({"strict": True}, "review.repo_profile.strict"),
-        ({"require": "yes"}, "review.repo_profile.require must be true or false"),
-        ({"require": 1}, "review.repo_profile.require must be true or false"),
+        ({"require": True}, "review.repo_profile.require"),
         ({"deny": ["a"]}, "review.repo_profile.deny must be a mapping"),
         ({"deny": {"names": [""]}}, "review.repo_profile.deny.names[0]"),
         ({"deny": {"emails": ["a"]}}, "review.repo_profile.deny.emails"),

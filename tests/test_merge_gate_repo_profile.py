@@ -31,7 +31,7 @@ _DIFF = (
 def _review_findings(repo) -> list[dict]:
     """What `loadout-review run` states for _DIFF against *repo*'s tip."""
     return pr.profile_findings(
-        read_policy(repo, _tip(repo)), plan_chunks(_DIFF), ProfileSettings(require=True)
+        read_policy(repo, _tip(repo)), plan_chunks(_DIFF), ProfileSettings()
     )
 
 

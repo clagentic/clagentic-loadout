@@ -199,8 +199,8 @@ loadout-profile check --repo-path .     # validates it with the loader the revie
 
 Review reads the profile from the PR's base revision, so commit it to the base branch first.
 `loadout-review run` then reports a change that breaks the class rules as findings with facts,
-and reports an invalid profile as a finding too, and a missing one when your deployment sets
-`review.repo_profile.require`. None of these ever blocks a merge by itself. The names to keep
+and reports an invalid or a missing profile as a finding too. None of these ever blocks a merge
+by itself. The names to keep
 out of released tools are your deployment's, so they go in the user-level config
 (`review.repo_profile.deny`), not in the repository. Start from
 [`.clagentic/loadout/profile.yaml.example`](.clagentic/loadout/profile.yaml.example); the full

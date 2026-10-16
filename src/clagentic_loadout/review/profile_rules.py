@@ -17,10 +17,9 @@ What is checked mechanically:
 Rules that need judgement (other tools stay optional and pluggable) are stated
 in repo_profile.CLASS_RULES for the reviewer and are not guessed at here.
 
-An invalid profile is itself reported, and so is a missing one when the
-deployment asks for it (``require``, off by default so that a deployment that
-configures nothing sees the review's output unchanged). Each is a finding that
-scores ``none``: it cannot block at any threshold, so it can never hold a merge.
+An invalid profile is itself reported, and so is a missing one, always. Each is
+a finding that scores ``none``: it cannot block at any threshold, so it can
+never hold a merge.
 
 The facts these findings state say ``reachable: no``. That is true to the rule:
 a shape violation is not an attack path, and the evaluator holds an unreachable
@@ -236,12 +235,12 @@ def profile_findings(
 ) -> list[dict[str, Any]]:
     """The findings the repo profile at the base revision yields for the diff
     held in *chunks*. *settings* are the deployment's own (review.profile_settings):
-    its denial list, and whether a repository with no profile is reported.
+    its denial list.
     Empty when the policy could not be read at all, which is reported elsewhere
     as a degraded input."""
     settings = settings or ProfileSettings()
     if policy.profile_state == PROFILE_MISSING:
-        return [_missing_finding()] if settings.require else []
+        return [_missing_finding()]
     if policy.profile_state == PROFILE_INVALID:
         return [_invalid_finding(policy.profile_problem)]
     profile = policy.repo_profile

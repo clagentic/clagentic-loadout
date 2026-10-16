@@ -60,7 +60,7 @@ other finding; no severity is named by the rule.
 | `repo-profile.denied-value` | An added line in a `released-tool` path contains a denied name, host or username. |
 | `repo-profile.host-path` | An added line in a `released-tool` path contains a `/home/<user>`, `/Users/<user>` or `C:\Users\<user>` path. Placeholder users (`user`, `username`, `you`, `example`, `someone`, `x`, `foo`, `alice`, `bob`, `test` and a few like them) are ignored. |
 | `repo-profile.tool-internals` | An added Python import in an `internal` path reaches into a submodule of a `tool_packages` entry. |
-| `repo-profile.missing` | The base revision has no profile and the deployment has set `review.repo_profile.require: true` (below). |
+| `repo-profile.missing` | The base revision has no profile. Always reported, with no setting to turn it off; it is advisory and scores `none`. |
 | `repo-profile.invalid` | The base revision has a profile that is not valid; the message names the problem. Always reported: the file is there and is being ignored. |
 | `repo-profile.more` | More than 100 rule hits in one diff; the rest are counted here. |
 
@@ -77,18 +77,17 @@ states no impact at all and scores `none`, so it cannot block at any threshold.
 **Never a merge refusal.** A missing or invalid profile is reported as a finding and nowhere
 else. It is not a degraded input, and the merge gate has no code path that reads the profile:
 the gate computes its outcome from the findings a verdict fence carries, and these findings are
-advisory. A repository with no profile merges exactly as it did before.
+advisory. A repository with no profile still merges; it only carries the finding.
 
 ## The deployment's settings
 
-Two settings belong to the deployment that reviews a repository, not to the repository, so
-they live in the user-level config (`~/.config/clagentic/loadout/config.yaml`) and are never
+One setting belongs to the deployment that reviews a repository, not to the repository, so
+it lives in the user-level config (`~/.config/clagentic/loadout/config.yaml`) and is never
 read from the repo:
 
 ```yaml
 review:
   repo_profile:
-    require: true               # a repository with no profile gets a finding
     deny:                       # values a released-tool tree must not carry
       names: [some-agent-name]
       hosts: [host.example.test]
@@ -98,9 +97,6 @@ review:
 - **`deny`** is the denial list. The names a released tool must not carry are specific to the
   deployment, and the tool is the one place they must not be written down. `loadout-review run`
   merges this list with the profile's own `deny`.
-- **`require`** (default `false`). Off, the review's output for a repository with no profile is
-  exactly what it was before this feature existed. On, such a repository gets a
-  `repo-profile.missing` finding, so a deployment can ask for a profile everywhere it reviews.
 
 A malformed `review.repo_profile` stops `run` with exit 3 before any model is called; the merge
 gate never reads it.
