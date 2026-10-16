@@ -60,6 +60,12 @@ def _ruling_main(argv: list[str]) -> int:
     return ruling_main(argv)
 
 
+def _profile_main(argv: list[str]) -> int:
+    from clagentic_loadout.review.profile_verb import main as profile_main
+
+    return profile_main(argv)
+
+
 def _merge_main(argv: list[str]) -> int:
     from clagentic_loadout.merge.verb import main as merge_main
 
@@ -142,6 +148,7 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         _pr_review_main,
     ),
     "ruling": ("Record and list per-PR rulings on kept findings.", _ruling_main),
+    "profile": ("Validate a repo profile, or draft one for a repo with none.", _profile_main),
     "merge": ("Run the merge-gate chain, then merge a PR.", _merge_main),
     "reviewer-login": (
         "Print the platform login each named reviewer posts under.",
