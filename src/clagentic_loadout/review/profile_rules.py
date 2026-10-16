@@ -1,0 +1,292 @@
+"""review.profile_rules — the repo profile's class rules, applied as findings.
+
+Given the profile read from the base revision (review.policy_source) and the
+diff under review, this module states what the class rules say about the diff as
+ordinary findings with FACTS, which the evaluator then scores like any other
+(review.evaluate). It never names a severity and never decides a verdict.
+
+What is checked mechanically:
+
+  released-tool files  an added line that contains a denied name, host or
+                       username (from the deployment's list,
+                       review.profile_settings, plus the profile's own), or an
+                       absolute host path under a home directory;
+  internal files       an added Python import of a submodule of a package the
+                       profile lists in ``tool_packages``.
+
+Rules that need judgement (other tools stay optional and pluggable) are stated
+in repo_profile.CLASS_RULES for the reviewer and are not guessed at here.
+
+An invalid profile is itself reported, and so is a missing one when the
+deployment asks for it (``require``, off by default so that a deployment that
+configures nothing sees the review's output unchanged). Each is a finding that
+scores ``none``: it cannot block at any threshold, so it can never hold a merge.
+
+The facts these findings state say ``reachable: no``. That is true to the rule:
+a shape violation is not an attack path, and the evaluator holds an unreachable
+finding at ``low``. A deployment that wants these to block sets the evaluator
+threshold to ``low``.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Iterator, Sequence
+from typing import Any
+
+from clagentic_loadout.review.chunking import Chunk
+from clagentic_loadout.review.finding_identity import with_fingerprints
+from clagentic_loadout.review.policy_source import (
+    PROFILE_INVALID,
+    PROFILE_MISSING,
+    PROFILE_OK,
+    PROFILE_PATH,
+    PolicySource,
+)
+from clagentic_loadout.review.profile_settings import ProfileSettings
+from clagentic_loadout.review.repo_profile import (
+    CLASS_INTERNAL,
+    CLASS_RELEASED_TOOL,
+    DENY_HOSTS,
+    DENY_NAMES,
+    DENY_USERS,
+    RepoProfile,
+)
+
+RULE_MISSING = "repo-profile.missing"
+RULE_INVALID = "repo-profile.invalid"
+RULE_DENIED = "repo-profile.denied-value"
+RULE_HOST_PATH = "repo-profile.host-path"
+RULE_TOOL_INTERNALS = "repo-profile.tool-internals"
+RULE_MORE = "repo-profile.more"
+
+#: Most rule findings reported for one diff; the rest are counted in one finding.
+MAX_RULE_FINDINGS = 100
+
+_MAX_SHOWN_CHARS = 60
+_KIND_LABEL = {
+    DENY_NAMES: "agent or deployment name",
+    DENY_HOSTS: "host or domain",
+    DENY_USERS: "username",
+}
+
+#: A home-directory path names a person's account on a machine. Only these
+#: shapes are recognised on their own; any other host path a deployment wants
+#: kept out is added to its ``hosts`` list as a literal prefix.
+_HOME_PATH_RE = re.compile(
+    r"(?<![\w.~$/-])(?:/(?:home|Users)/(?P<user>[A-Za-z0-9_.-]+)"
+    r"|[A-Za-z]:\\Users\\(?P<winuser>[^\\\s]+))"
+)
+#: Account names that stand for "some user" in documentation and fixtures, not
+#: for anyone's identity.
+PLACEHOLDER_USERS = frozenset(
+    {
+        "user", "username", "you", "yourname", "me", "name", "example", "someone",
+        "somebody", "x", "foo", "bar", "baz", "alice", "bob", "test",
+    }
+)
+
+
+def _facts(category: str, *, confidentiality: str = "none", integrity: str = "none") -> dict[str, Any]:
+    return {
+        "category": category,
+        "reachable": "no",
+        "attacker_precondition": "none",
+        "impact": {
+            "confidentiality": confidentiality,
+            "integrity": integrity,
+            "availability": "none",
+        },
+        "durability": "durable",
+    }
+
+
+def _finding(file: str, line: int, rule_id: str, message: str, facts: dict[str, Any]) -> dict[str, Any]:
+    return {"file": file, "line": line, "rule_id": rule_id, "message": message, "facts": facts}
+
+
+def _shown(text: str) -> str:
+    return text if len(text) <= _MAX_SHOWN_CHARS else text[: _MAX_SHOWN_CHARS - 3] + "..."
+
+
+def _missing_finding() -> dict[str, Any]:
+    return _finding(
+        PROFILE_PATH,
+        1,
+        RULE_MISSING,
+        f"The base revision has no repo profile at {PROFILE_PATH}, so no class rule is applied. "
+        "Run `loadout-profile init` to draft one.",
+        _facts("maintainability"),
+    )
+
+
+def _invalid_finding(problem: str | None) -> dict[str, Any]:
+    detail = _shown(problem or "it could not be read")
+    return _finding(
+        PROFILE_PATH,
+        1,
+        RULE_INVALID,
+        f"The repo profile at {PROFILE_PATH} is invalid, so no class rule is applied: {detail}",
+        _facts("maintainability"),
+    )
+
+
+def _token_regex(value: str) -> re.Pattern[str]:
+    """*value* as a whole token, case-insensitive. ``_`` and ``-`` end a token, so
+    a name inside an identifier or a hyphenated word is found, while a longer
+    word that merely contains it is not. A boundary is required only at an edge
+    that is a letter or digit, so a literal such as a path prefix matches
+    wherever it starts a path."""
+    before = r"(?<![A-Za-z0-9])" if value[:1].isalnum() else ""
+    after = r"(?![A-Za-z0-9])" if value[-1:].isalnum() else ""
+    return re.compile(before + re.escape(value) + after, re.IGNORECASE)
+
+
+def _added_rows(chunk: Chunk, file: str) -> Iterator[tuple[int, str]]:
+    for hunk in chunk.hunk_rows(file):
+        for row in hunk.rows:
+            if row.new_number is not None and row.old_number is None:
+                yield row.new_number, row.text
+
+
+def _released_tool_hits(
+    text: str, denied: Sequence[tuple[str, re.Pattern[str], str]]
+) -> Iterator[tuple[str, str, str]]:
+    """``(rule_id, message, category)`` for each rule one added line of a
+    released-tool file breaks."""
+    for kind, pattern, value in denied:
+        if pattern.search(text):
+            yield (
+                RULE_DENIED,
+                f"{_KIND_LABEL[kind].capitalize()} {_shown(value)!r} appears in a released-tool "
+                "file; the profile class forbids it in the shipped tree.",
+                "data_exposure",
+            )
+    for match in _HOME_PATH_RE.finditer(text):
+        user = match.group("user") or match.group("winuser")
+        if user.lower() in PLACEHOLDER_USERS:
+            continue
+        yield (
+            RULE_HOST_PATH,
+            f"Absolute host path {_shown(match.group(0))!r} appears in a released-tool file; "
+            "the profile class forbids host paths in the shipped tree.",
+            "data_exposure",
+        )
+
+
+def _import_regex(packages: Sequence[str]) -> re.Pattern[str] | None:
+    if not packages:
+        return None
+    alternation = "|".join(re.escape(name) for name in packages)
+    return re.compile(
+        rf"^\s*(?:from\s+(?P<from>{alternation})\.(?P<fsub>[A-Za-z_][\w.]*)\s+import\b"
+        rf"|import\s+(?P<imp>{alternation})\.(?P<isub>[A-Za-z_][\w.]*))"
+    )
+
+
+def _internal_hit(text: str, pattern: re.Pattern[str] | None) -> tuple[str, str] | None:
+    if pattern is None:
+        return None
+    match = pattern.match(text)
+    if match is None:
+        return None
+    package = match.group("from") or match.group("imp")
+    module = match.group("fsub") or match.group("isub")
+    return (
+        RULE_TOOL_INTERNALS,
+        f"{package} is imported through its internal module {_shown(module)!r}; an internal "
+        "repo uses a tool only through its documented interface.",
+    )
+
+
+def _scan_chunk(
+    chunk: Chunk,
+    profile: RepoProfile,
+    denied: Sequence[tuple[str, re.Pattern[str], str]],
+    imports: re.Pattern[str] | None,
+) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for file in chunk.files:
+        if file == PROFILE_PATH:
+            # The profile may list the very values it forbids.
+            continue
+        file_class = profile.class_for(file)
+        for line, text in _added_rows(chunk, file):
+            if file_class == CLASS_RELEASED_TOOL:
+                for rule_id, message, category in _released_tool_hits(text, denied):
+                    found.append(
+                        _finding(
+                            file, line, rule_id, message,
+                            _facts(category, confidentiality="partial"),
+                        )
+                    )
+            elif file_class == CLASS_INTERNAL and file.endswith(".py"):
+                hit = _internal_hit(text, imports)
+                if hit is not None:
+                    found.append(
+                        _finding(file, line, hit[0], hit[1], _facts("maintainability", integrity="partial"))
+                    )
+    return found
+
+
+def profile_findings(
+    policy: PolicySource,
+    chunks: Sequence[Chunk],
+    settings: ProfileSettings | None = None,
+) -> list[dict[str, Any]]:
+    """The findings the repo profile at the base revision yields for the diff
+    held in *chunks*. *settings* are the deployment's own (review.profile_settings):
+    its denial list, and whether a repository with no profile is reported.
+    Empty when the policy could not be read at all, which is reported elsewhere
+    as a degraded input."""
+    settings = settings or ProfileSettings()
+    if policy.profile_state == PROFILE_MISSING:
+        return [_missing_finding()] if settings.require else []
+    if policy.profile_state == PROFILE_INVALID:
+        return [_invalid_finding(policy.profile_problem)]
+    profile = policy.repo_profile
+    if policy.profile_state != PROFILE_OK or profile is None:
+        return []
+
+    deny = profile.deny.merged(settings.deny)
+    denied = [(kind, _token_regex(value), value) for kind, value in deny.entries()]
+    imports = _import_regex(profile.tool_packages)
+
+    findings: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    suppressed = 0
+    for chunk in chunks:
+        fresh = []
+        for item in _scan_chunk(chunk, profile, denied, imports):
+            key = (item["file"], item["line"], item["rule_id"], item["message"])
+            if key in seen:
+                continue
+            seen.add(key)
+            if len(findings) + len(fresh) >= MAX_RULE_FINDINGS:
+                suppressed += 1
+                continue
+            fresh.append(item)
+        findings.extend(with_fingerprints(fresh, chunk))
+    if suppressed and findings:
+        first = findings[0]
+        findings.append(
+            _finding(
+                first["file"], first["line"], RULE_MORE,
+                f"{suppressed} further repo profile rule hits in this diff are not listed.",
+                _facts("maintainability"),
+            )
+        )
+    return findings
+
+
+__all__ = [
+    "MAX_RULE_FINDINGS",
+    "PLACEHOLDER_USERS",
+    "RULE_DENIED",
+    "RULE_HOST_PATH",
+    "RULE_INVALID",
+    "RULE_MISSING",
+    "RULE_MORE",
+    "RULE_TOOL_INTERNALS",
+    "profile_findings",
+]

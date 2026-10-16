@@ -7,8 +7,10 @@ and never from the PR head. An entry first introduced in the diff being gated
 therefore cannot apply to that diff: the base does not contain it. That is
 structural, not a check that could be skipped.
 
-Also read from the base tree: exposure markers (see stakes.EXPOSURE_MARKER_GLOBS)
-and CODEOWNERS. The one host-derived input, repository visibility, is passed in
+Also read from the base tree: exposure markers (see stakes.EXPOSURE_MARKER_GLOBS),
+CODEOWNERS, and the repo profile (``profile.yaml``, see review.repo_profile). A
+missing or invalid profile is carried as state, never as a degraded reason: it is
+reported as a finding and must not hold a merge. The one host-derived input, repository visibility, is passed in
 by the caller, which already fetched the repository record.
 
 Failure posture: a file that is absent is simply no policy. A file that cannot
@@ -27,11 +29,22 @@ import yaml
 
 from clagentic_loadout.review import dispositions as disp
 from clagentic_loadout.review import stakes as stk
+from clagentic_loadout.review import repo_profile as rp
 from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader, PolicyReadError
 from clagentic_loadout.sha import FULL_SHA_RE
 
 DISPOSITIONS_PATH = ".clagentic/loadout/dispositions.yaml"
 STAKES_PATH = ".clagentic/loadout/stakes.yaml"
+PROFILE_PATH = ".clagentic/loadout/profile.yaml"
+
+#: What reading the repo profile came to. ``unread`` means the base revision's
+#: tree could not be read at all, which is already reported as a degraded input;
+#: a profile problem is never reported through ``degraded``, because a missing or
+#: invalid profile is a finding and must not hold a merge.
+PROFILE_OK = "ok"
+PROFILE_MISSING = "missing"
+PROFILE_INVALID = "invalid"
+PROFILE_UNREAD = "unread"
 
 
 @dataclass(frozen=True)
@@ -41,6 +54,9 @@ class PolicySource:
     dispositions: tuple[disp.Disposition, ...]
     stakes: stk.Stakes
     degraded: tuple[str, ...]
+    repo_profile: rp.RepoProfile | None = None
+    profile_state: str = PROFILE_UNREAD
+    profile_problem: str | None = None
 
 
 def _yaml(text: str, path: str) -> Any:
@@ -126,9 +142,44 @@ def read_policy_from(
     tree = stk.TreeStakes(
         exposed_dirs=stk.exposed_dirs_from_paths(paths), codeowners=codeowners
     )
+    repo_profile, profile_state, profile_problem = read_repo_profile(reader, base, present)
     return PolicySource(
-        dispositions, stk.Stakes(profile=selected, tree=tree, visibility=visibility), tuple(reasons)
+        dispositions,
+        stk.Stakes(profile=selected, tree=tree, visibility=visibility),
+        tuple(reasons),
+        repo_profile,
+        profile_state,
+        profile_problem,
     )
 
 
-__all__ = ["DISPOSITIONS_PATH", "STAKES_PATH", "PolicySource", "read_policy", "read_policy_from"]
+def read_repo_profile(
+    reader: PolicyReader, base: str, present: set[str]
+) -> tuple[rp.RepoProfile | None, str, str | None]:
+    """``(profile, state, problem)`` for the repo profile at *base*, where
+    *present* is the set of paths in that tree. Never raises: a file that cannot
+    be read or parsed is state ``invalid`` with the reason, and no class rule
+    applies from it. Shared with ``loadout-profile check`` so the verb and the
+    review agree on what a valid profile is."""
+    if PROFILE_PATH not in present:
+        return None, PROFILE_MISSING, None
+    try:
+        profile = rp.parse_profile_document(_yaml(reader.read_text(base, PROFILE_PATH), PROFILE_PATH))
+    except (PolicyReadError, rp.ProfileFormatError) as exc:
+        return None, PROFILE_INVALID, str(exc)
+    return profile, PROFILE_OK, None
+
+
+__all__ = [
+    "DISPOSITIONS_PATH",
+    "PROFILE_INVALID",
+    "PROFILE_MISSING",
+    "PROFILE_OK",
+    "PROFILE_PATH",
+    "PROFILE_UNREAD",
+    "STAKES_PATH",
+    "PolicySource",
+    "read_policy",
+    "read_policy_from",
+    "read_repo_profile",
+]
