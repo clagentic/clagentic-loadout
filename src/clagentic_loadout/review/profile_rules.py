@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.review.chunking import Chunk
@@ -173,36 +174,61 @@ def _released_tool_hits(
         )
 
 
-def _import_regex(packages: Sequence[str]) -> re.Pattern[str] | None:
+@dataclass(frozen=True)
+class _ImportPatterns:
+    """The two import statement shapes, for the listed packages. ``import`` takes
+    a comma-separated list of names, each of which is checked on its own."""
+
+    from_import: re.Pattern[str]
+    package_submodule: re.Pattern[str]
+
+
+def _import_patterns(packages: Sequence[str]) -> _ImportPatterns | None:
     if not packages:
         return None
     alternation = "|".join(re.escape(name) for name in packages)
-    return re.compile(
-        rf"^\s*(?:from\s+(?P<from>{alternation})\.(?P<fsub>[A-Za-z_][\w.]*)\s+import\b"
-        rf"|import\s+(?P<imp>{alternation})\.(?P<isub>[A-Za-z_][\w.]*))"
+    return _ImportPatterns(
+        from_import=re.compile(
+            rf"\s*from\s+(?P<package>{alternation})\.(?P<module>[A-Za-z_][\w.]*)\s+import\b"
+        ),
+        package_submodule=re.compile(rf"(?P<package>{alternation})\.(?P<module>[A-Za-z_][\w.]*)\Z"),
     )
 
 
-def _internal_hit(text: str, pattern: re.Pattern[str] | None) -> tuple[str, str] | None:
-    if pattern is None:
-        return None
-    match = pattern.match(text)
-    if match is None:
-        return None
-    package = match.group("from") or match.group("imp")
-    module = match.group("fsub") or match.group("isub")
-    return (
-        RULE_TOOL_INTERNALS,
-        f"{package} is imported through its internal module {_shown(module)!r}; an internal "
-        "repo uses a tool only through its documented interface.",
-    )
+def _imported_internals(text: str, patterns: _ImportPatterns) -> Iterator[tuple[str, str]]:
+    """``(package, module)`` for every internal module one source line imports.
+    A line may hold several statements (``;``) and one ``import`` several names."""
+    for statement in text.split("#", 1)[0].split(";"):
+        from_match = patterns.from_import.match(statement)
+        if from_match is not None:
+            yield from_match.group("package"), from_match.group("module")
+            continue
+        head = re.match(r"\s*import\s+(?P<names>.+)", statement)
+        if head is None:
+            continue
+        for name in head.group("names").split(","):
+            target = re.split(r"\s+as\s+", name.strip(), maxsplit=1)[0].strip()
+            sub = patterns.package_submodule.match(target)
+            if sub is not None:
+                yield sub.group("package"), sub.group("module")
+
+
+def _internal_hits(text: str, patterns: _ImportPatterns | None) -> Iterator[tuple[str, str]]:
+    if patterns is None:
+        return
+    for package, module in _imported_internals(text, patterns):
+        yield (
+            RULE_TOOL_INTERNALS,
+            f"{package} is imported through its internal module {_shown(module)!r}; an internal "
+            "repo uses a tool only through its documented interface.",
+        )
 
 
 def _scan_chunk(
     chunk: Chunk,
     profile: RepoProfile,
     denied: Sequence[tuple[str, re.Pattern[str], str]],
-    imports: re.Pattern[str] | None,
+    imports: _ImportPatterns | None,
 ) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     for file in chunk.files:
@@ -220,8 +246,7 @@ def _scan_chunk(
                         )
                     )
             elif file_class == CLASS_INTERNAL and file.endswith(".py"):
-                hit = _internal_hit(text, imports)
-                if hit is not None:
+                for hit in _internal_hits(text, imports):
                     found.append(
                         _finding(file, line, hit[0], hit[1], _facts("maintainability", integrity="partial"))
                     )
@@ -249,7 +274,7 @@ def profile_findings(
 
     deny = profile.deny.merged(settings.deny)
     denied = [(kind, _token_regex(value), value) for kind, value in deny.entries()]
-    imports = _import_regex(profile.tool_packages)
+    imports = _import_patterns(profile.tool_packages)
 
     findings: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
