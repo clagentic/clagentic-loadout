@@ -83,6 +83,42 @@ def test_anything_outside_the_documented_shape_is_refused_naming_the_key_path(do
     assert key_path in str(caught.value)
 
 
+@pytest.mark.parametrize(
+    "document, key_path",
+    [
+        ("class: internal\ndeny: {names: [a]}\n", "deny is for released-tool paths only"),
+        (
+            "class: internal\npaths:\n  a/**: {class: internal}\ndeny: {hosts: [h]}\n",
+            "deny is for released-tool paths only",
+        ),
+        ("class: released-tool\ntool_packages: [a]\n", "tool_packages is for internal paths only"),
+        (
+            "class: released-tool\npaths:\n  a/**: {class: released-tool}\ntool_packages: [a]\n",
+            "tool_packages is for internal paths only",
+        ),
+    ],
+)
+def test_a_field_under_a_class_that_never_applies_is_refused_naming_the_key(document, key_path):
+    with pytest.raises(rp.ProfileFormatError) as caught:
+        rp.parse_profile_document(yaml.safe_load(document))
+    assert key_path in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "class: released-tool\ndeny: {names: [a]}\n",
+        "class: internal\ntool_packages: [a]\n",
+        "class: internal\npaths:\n  a/**: {class: released-tool}\ndeny: {names: [a]}\n",
+        "class: released-tool\npaths:\n  a/**: {class: internal}\ntool_packages: [a]\n",
+        "class: internal\ndeny: {}\n",
+        "class: released-tool\ntool_packages: []\n",
+    ],
+)
+def test_a_field_is_accepted_where_its_class_is_in_effect_or_it_is_empty(document):
+    assert rp.parse_profile_document(yaml.safe_load(document)) is not None
+
+
 def test_a_denial_entry_may_not_span_lines_or_run_long():
     for bad in ("a\nb", "x" * 201):
         with pytest.raises(rp.ProfileFormatError):

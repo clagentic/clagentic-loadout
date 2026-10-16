@@ -38,6 +38,10 @@ list entry that is not a one-line string makes the whole file invalid, and the e
 key path (for example `paths.tests/fixtures/**.class`). A half-understood file is never
 half-applied.
 
+A field is also refused where its class never applies: `deny` needs at least one
+`released-tool` path (the top-level class or a `paths` override), and `tool_packages` needs at
+least one `internal` path. Both are valid in a profile whose classes are mixed.
+
 - **`class`** is the class of every path that no `paths` entry overrides.
 - **`paths`** maps a path glob to `{class: ...}`. `*` and `?` stay inside one path segment and
   `**` spans segments. Use it for the parts of a tree that are not what ships, such as tool state

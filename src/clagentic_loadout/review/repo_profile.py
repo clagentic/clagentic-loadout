@@ -15,7 +15,9 @@ Classes:
   internal       The tree stays inside a deployment. It consumes other tools
                  only through their documented interfaces.
 
-Schema (strict: an unknown or misplaced key makes the whole file invalid)::
+Schema (strict: an unknown or misplaced key makes the whole file invalid, and so
+does ``deny`` in a profile with no released-tool path or ``tool_packages`` in one
+with no internal path)::
 
     class: released-tool            # required: released-tool | internal
     paths:                          # optional; applied in order, a later match wins
@@ -226,12 +228,22 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         raise ProfileFormatError(f"unknown or misplaced key: {', '.join(unknown)}")
     if "class" not in doc:
         raise ProfileFormatError("class is required")
-    return RepoProfile(
-        repo_class=_class_value(doc["class"], "class"),
-        paths=_path_overrides(doc.get("paths")),
-        deny=parse_deny(doc.get("deny")),
-        tool_packages=_tool_packages(doc.get("tool_packages")),
-    )
+    repo_class = _class_value(doc["class"], "class")
+    paths = _path_overrides(doc.get("paths"))
+    deny = parse_deny(doc.get("deny"))
+    tool_packages = _tool_packages(doc.get("tool_packages"))
+    # A field only means something where its class is in effect: the top-level
+    # class or a path override. Anywhere else it would be silently ignored.
+    classes_in_effect = {repo_class, *(value for _, value in paths)}
+    if deny.entries() and CLASS_RELEASED_TOOL not in classes_in_effect:
+        raise ProfileFormatError(
+            f"deny is for {CLASS_RELEASED_TOOL} paths only, and no path of this profile has that class"
+        )
+    if tool_packages and CLASS_INTERNAL not in classes_in_effect:
+        raise ProfileFormatError(
+            f"tool_packages is for {CLASS_INTERNAL} paths only, and no path of this profile has that class"
+        )
+    return RepoProfile(repo_class=repo_class, paths=paths, deny=deny, tool_packages=tool_packages)
 
 
 @dataclass(frozen=True)
