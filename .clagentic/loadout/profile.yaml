@@ -1,0 +1,10 @@
+# Repo profile: the shape this repository must keep. See docs/repo-profile.md.
+# This repository ships as a released tool, so no environment-specific values
+# (agent or deployment names, hosts, usernames, absolute host paths) may appear
+# in it. The deployment's own denial list is user-level configuration and is
+# deliberately not written here.
+class: released-tool
+paths:
+  # Deployment config that ships as disaster-recovery data and carries its own
+  # cast identifiers by design.
+  ".crew/**": {class: internal}

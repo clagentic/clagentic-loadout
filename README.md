@@ -61,6 +61,10 @@ Landed today (see [docs/verbs.md](docs/verbs.md) for the full description of eac
   global, all-verbs list) from a repo's `.clagentic/loadout/config.yaml` role declaration,
   so a consuming agent can actually invoke its verbs without a permission-prompt wall. See
   [docs/provisioning.md](docs/provisioning.md) for the full integrator workflow.
+- **`profile`** — validates a repository's profile (`.clagentic/loadout/profile.yaml`, its
+  `released-tool` or `internal` class) and drafts one from the file tree for a repository
+  that has none; `review` applies the class rules to a diff. See
+  [docs/repo-profile.md](docs/repo-profile.md).
 - **`doctor`** — the deployment-conformance check suite: a read-only, safe-to-repeat verb
   (including in CI) that verifies credentials, attestation-source, builder-identity, and
   repo-schema configuration are actually wired up correctly. This is the integrator's
@@ -180,6 +184,28 @@ steps) is per-deployment and never committed. Copy
 edit it, or run `/loadout-init` for a guided walkthrough — see
 [docs/loadout-init.md](docs/loadout-init.md).
 
+### Repo profile
+
+Every repository states the shape it must keep in one committed file,
+`.clagentic/loadout/profile.yaml`: its class, `released-tool` (ships to people outside your
+deployment: no agent or deployment names, hosts, domains, usernames or absolute host paths) or
+`internal` (stays inside it: consumes other tools only through their documented interfaces),
+plus optional per-path overrides. Draft one for a repository that has none, then check it:
+
+```sh
+loadout-profile init --repo-path .      # drafts .clagentic/loadout/profile.yaml from the file tree
+loadout-profile check --repo-path .     # validates it with the loader the review uses
+```
+
+Review reads the profile from the PR's base revision, so commit it to the base branch first.
+`loadout-review run` then reports a change that breaks the class rules as findings with facts,
+and reports an invalid profile as a finding too, and a missing one when your deployment sets
+`review.repo_profile.require`. None of these ever blocks a merge by itself. The names to keep
+out of released tools are your deployment's, so they go in the user-level config
+(`review.repo_profile.deny`), not in the repository. Start from
+[`.clagentic/loadout/profile.yaml.example`](.clagentic/loadout/profile.yaml.example); the full
+reference is [docs/repo-profile.md](docs/repo-profile.md).
+
 ## Credential provider seam
 
 clagentic: loadout does not require any external credential-minting service. Every verb
@@ -245,6 +271,7 @@ inline:
 | [docs/provisioning.md](docs/provisioning.md) | The per-role permission-allowlist side: declaring which verbs a role may invoke and generating its allowlist fragment. |
 | [docs/loadout-init.md](docs/loadout-init.md) | The guided `/loadout-init` workflow for scaffolding a repo's `.clagentic/loadout/config.yaml`. |
 | [docs/guard-policy.md](docs/guard-policy.md) | The `clagentic_loadout.guard` policy contract: every guard category, its API, its config shape. |
+| [docs/repo-profile.md](docs/repo-profile.md) | The repo profile: the `released-tool` and `internal` classes, their rules, the findings review states from them, and `loadout-profile check` / `init`. |
 
 ## Support
 
