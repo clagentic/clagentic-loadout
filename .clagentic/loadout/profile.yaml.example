@@ -19,6 +19,7 @@ deny:
   hosts: [host.example.test]
   users: [some-username]
 
-# Internal paths only: importing a submodule of one of these packages is reported;
-# importing the package itself is its documented interface.
+# Internal paths only: packages of tools this repository consumes. Nothing is checked
+# mechanically; the list is given to the reviewer, who judges whether code reaches into
+# their internal modules instead of their documented interface.
 # tool_packages: [some_tool]

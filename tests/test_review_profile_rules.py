@@ -210,42 +210,6 @@ class TestReleasedTool:
 
 
 class TestInternal:
-    PROFILE = rp.RepoProfile(repo_class=rp.CLASS_INTERNAL, tool_packages=("tool_one",))
-
-    @pytest.mark.parametrize(
-        "line",
-        [
-            "from tool_one.guard import check",
-            "import tool_one.guard",
-            "    from tool_one.a.b import c",
-            "import tool_one.guard as g",
-        ],
-    )
-    def test_an_import_of_a_listed_packages_submodule_is_reported(self, line):
-        found = _findings({"x/a.py": [line]}, self.PROFILE)
-        assert _rules(found) == [(pr.RULE_TOOL_INTERNALS, "x/a.py", 1)]
-
-    @pytest.mark.parametrize(
-        "line",
-        [
-            "import tool_one",
-            "from tool_one import check",
-            "import tool_two.guard",
-            "# from tool_one.guard import check",
-            "x = 'from tool_one.guard import y'",
-            "import tool_oneextra.guard",
-        ],
-    )
-    def test_the_documented_top_level_and_other_packages_are_not_reported(self, line):
-        assert _findings({"x/a.py": [line]}, self.PROFILE) == []
-
-    def test_only_python_files_are_checked(self):
-        assert _findings({"x/a.txt": ["from tool_one.guard import check"]}, self.PROFILE) == []
-
-    def test_without_listed_packages_nothing_is_checked(self):
-        profile = rp.RepoProfile(repo_class=rp.CLASS_INTERNAL)
-        assert _findings({"x/a.py": ["from tool_one.guard import check"]}, profile) == []
-
     def test_released_tool_rules_do_not_apply_to_an_internal_tree(self):
         profile = rp.RepoProfile(
             repo_class=rp.CLASS_INTERNAL, deny=rp.ProfileDeny(names=(NAME,))
@@ -293,14 +257,10 @@ class TestFacts:
                 {"a.txt": [NAME, f"/home/{ACCOUNT}/x"]},
                 _released(deny=rp.ProfileDeny(names=(NAME,))),
             ),
-            *_findings(
-                {"x.py": ["import tool_one.guard"]},
-                rp.RepoProfile(repo_class=rp.CLASS_INTERNAL, tool_packages=("tool_one",)),
-            ),
             pr._missing_finding(),
             pr._invalid_finding("bad"),
         ]
-        assert len(found) == 5
+        assert len(found) == 4
         for item in found:
             assert parse_facts(item["facts"]).state == STATE_COMPLETE
 

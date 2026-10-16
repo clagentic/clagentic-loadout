@@ -10,12 +10,13 @@ What is checked mechanically:
   released-tool files  an added line that contains a denied name, host or
                        username (from the deployment's list,
                        review.profile_settings, plus the profile's own), or an
-                       absolute host path under a home directory;
-  internal files       an added Python import of a submodule of a package the
-                       profile lists in ``tool_packages``.
+                       absolute host path under a home directory.
 
-Rules that need judgement (other tools stay optional and pluggable) are stated
-in repo_profile.CLASS_RULES for the reviewer and are not guessed at here.
+Nothing is checked mechanically for the internal class. Rules that need
+judgement (other tools stay optional and pluggable; an internal tree uses a tool
+only through its documented interface) are stated in repo_profile.CLASS_RULES
+for the reviewer, and ``rule_statements`` adds the profile's ``tool_packages``
+list to the statements so the reviewer judges against it.
 
 An invalid profile is itself reported, and so is a missing one, always. Each is
 a finding that scores ``none``: it cannot block at any threshold, so it can
@@ -31,7 +32,6 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.review.chunking import Chunk
@@ -45,8 +45,8 @@ from clagentic_loadout.review.policy_source import (
 )
 from clagentic_loadout.review.profile_settings import ProfileSettings
 from clagentic_loadout.review.repo_profile import (
-    CLASS_INTERNAL,
     CLASS_RELEASED_TOOL,
+    CLASS_RULES,
     DENY_HOSTS,
     DENY_NAMES,
     DENY_USERS,
@@ -57,7 +57,6 @@ RULE_MISSING = "repo-profile.missing"
 RULE_INVALID = "repo-profile.invalid"
 RULE_DENIED = "repo-profile.denied-value"
 RULE_HOST_PATH = "repo-profile.host-path"
-RULE_TOOL_INTERNALS = "repo-profile.tool-internals"
 RULE_MORE = "repo-profile.more"
 
 #: Most rule findings reported for one diff; the rest are counted in one finding.
@@ -174,61 +173,10 @@ def _released_tool_hits(
         )
 
 
-@dataclass(frozen=True)
-class _ImportPatterns:
-    """The two import statement shapes, for the listed packages. ``import`` takes
-    a comma-separated list of names, each of which is checked on its own."""
-
-    from_import: re.Pattern[str]
-    package_submodule: re.Pattern[str]
-
-
-def _import_patterns(packages: Sequence[str]) -> _ImportPatterns | None:
-    if not packages:
-        return None
-    alternation = "|".join(re.escape(name) for name in packages)
-    return _ImportPatterns(
-        from_import=re.compile(
-            rf"\s*from\s+(?P<package>{alternation})\.(?P<module>[A-Za-z_][\w.]*)\s+import\b"
-        ),
-        package_submodule=re.compile(rf"(?P<package>{alternation})\.(?P<module>[A-Za-z_][\w.]*)\Z"),
-    )
-
-
-def _imported_internals(text: str, patterns: _ImportPatterns) -> Iterator[tuple[str, str]]:
-    """``(package, module)`` for every internal module one source line imports.
-    A line may hold several statements (``;``) and one ``import`` several names."""
-    for statement in text.split("#", 1)[0].split(";"):
-        from_match = patterns.from_import.match(statement)
-        if from_match is not None:
-            yield from_match.group("package"), from_match.group("module")
-            continue
-        head = re.match(r"\s*import\s+(?P<names>.+)", statement)
-        if head is None:
-            continue
-        for name in head.group("names").split(","):
-            target = re.split(r"\s+as\s+", name.strip(), maxsplit=1)[0].strip()
-            sub = patterns.package_submodule.match(target)
-            if sub is not None:
-                yield sub.group("package"), sub.group("module")
-
-
-def _internal_hits(text: str, patterns: _ImportPatterns | None) -> Iterator[tuple[str, str]]:
-    if patterns is None:
-        return
-    for package, module in _imported_internals(text, patterns):
-        yield (
-            RULE_TOOL_INTERNALS,
-            f"{package} is imported through its internal module {_shown(module)!r}; an internal "
-            "repo uses a tool only through its documented interface.",
-        )
-
-
 def _scan_chunk(
     chunk: Chunk,
     profile: RepoProfile,
     denied: Sequence[tuple[str, re.Pattern[str], str]],
-    imports: _ImportPatterns | None,
 ) -> list[dict[str, Any]]:
     found: list[dict[str, Any]] = []
     for file in chunk.files:
@@ -245,12 +193,20 @@ def _scan_chunk(
                             _facts(category, confidentiality="partial"),
                         )
                     )
-            elif file_class == CLASS_INTERNAL and file.endswith(".py"):
-                for hit in _internal_hits(text, imports):
-                    found.append(
-                        _finding(file, line, hit[0], hit[1], _facts("maintainability", integrity="partial"))
-                    )
     return found
+
+
+def rule_statements(profile: RepoProfile) -> list[str]:
+    """The class rules as statements for the reviewer. When the profile lists
+    ``tool_packages``, a statement naming them is added; it produces no finding."""
+    statements = list(CLASS_RULES[profile.repo_class])
+    if profile.tool_packages:
+        statements.append(
+            "Tool packages this repository consumes: "
+            + ", ".join(profile.tool_packages)
+            + ". In internal paths, judge whether code reaches into their internal modules."
+        )
+    return statements
 
 
 def profile_findings(
@@ -274,14 +230,13 @@ def profile_findings(
 
     deny = profile.deny.merged(settings.deny)
     denied = [(kind, _token_regex(value), value) for kind, value in deny.entries()]
-    imports = _import_patterns(profile.tool_packages)
 
     findings: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
     suppressed = 0
     for chunk in chunks:
         fresh = []
-        for item in _scan_chunk(chunk, profile, denied, imports):
+        for item in _scan_chunk(chunk, profile, denied):
             key = (item["file"], item["line"], item["rule_id"], item["message"])
             if key in seen:
                 continue
@@ -311,6 +266,6 @@ __all__ = [
     "RULE_INVALID",
     "RULE_MISSING",
     "RULE_MORE",
-    "RULE_TOOL_INTERNALS",
     "profile_findings",
+    "rule_statements",
 ]

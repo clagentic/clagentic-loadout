@@ -48,10 +48,10 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
   or fixtures.
 - **`deny`** adds values to the deployment's own denial list (below) for this repository. It
   can only add: nothing in a profile removes an entry from the deployment's list.
-- **`tool_packages`** lists top-level Python packages of tools this repository consumes. In an
-  `internal` path, importing a submodule of one (`from tool_one.guard import x`,
-  `import tool_one.guard`) is reported; importing the package itself (`import tool_one`,
-  `from tool_one import x`) is the documented interface and is not.
+- **`tool_packages`** lists top-level Python packages of tools this repository consumes. No
+  import is checked mechanically. The list is added to the rule statements the reviewer reads
+  (and that `loadout-profile check` prints), so the reviewer judges whether code in an
+  `internal` path reaches into their internal modules rather than the documented interface.
 
 ## What review does with it
 
@@ -63,14 +63,14 @@ other finding; no severity is named by the rule.
 |---|---|
 | `repo-profile.denied-value` | An added line in a `released-tool` path contains a denied name, host or username. |
 | `repo-profile.host-path` | An added line in a `released-tool` path contains a `/home/<user>`, `/Users/<user>` or `C:\Users\<user>` path. Placeholder users (`user`, `username`, `you`, `example`, `someone`, `x`, `foo`, `alice`, `bob`, `test` and a few like them) are ignored. |
-| `repo-profile.tool-internals` | An added Python import in an `internal` path reaches into a submodule of a `tool_packages` entry. |
 | `repo-profile.missing` | The base revision has no profile. Always reported, with no setting to turn it off; it is advisory and scores `none`. |
 | `repo-profile.invalid` | The base revision has a profile that is not valid; the message names the problem. Always reported: the file is there and is being ignored. |
 | `repo-profile.more` | More than 100 rule hits in one diff; the rest are counted here. |
 
 Only added lines are checked, and the profile file itself is never checked (it may list the
-values it forbids). Rules that need judgement, such as "other tools stay optional", are stated
-for the reviewer and are not guessed at mechanically.
+values it forbids). Nothing is checked mechanically for the `internal` class. Rules that need
+judgement, such as "other tools stay optional" or "use a tool only through its documented
+interface", are stated for the reviewer and are not guessed at mechanically.
 
 **How severe.** A rule hit states `reachable: no`: a shape violation is not an attack path, so
 the evaluator holds it at `low`. At the default threshold (`block_at: high`) it is advisory; a
