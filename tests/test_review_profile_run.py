@@ -248,6 +248,38 @@ def test_malformed_settings_cannot_reach_the_evaluator_setup_the_merge_gate_uses
     assert context.profile_settings == ProfileSettings()
 
 
+def test_a_delta_run_states_profile_findings_for_the_new_commits_beside_carried_ones(
+    env, tmp_path, capsys
+):
+    _configure(env, deny={"hosts": [HOST]})
+    base = commit_files(env.repo, {PROFILE_PATH: "class: released-tool\n"})
+    prior = tmp_path / "prior.json"
+    prior.write_text(
+        json.dumps(
+            {
+                "owner": "some-owner", "repo": "some-repo", "pr_number": 42,
+                "head_sha": "c" * 40,
+                "findings": [
+                    {"file": "kept.py", "line": 3, "rule_id": "R1", "severity": "blocking",
+                     "message": "earlier finding"}
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    delta = _added("src/client.py", f"URL = 'https://{HOST}/api'")
+
+    _, payload = env.run(
+        "--prior-findings", str(prior), capsys=capsys, base_sha=base,
+        compare={"status": "ahead", "diff": delta},
+    )
+
+    assert sorted(_rules(_document(payload))) == [
+        ("R1", "kept.py", 3),
+        (pr.RULE_DENIED, "src/client.py", 1),
+    ]
+
+
 def test_a_resumed_run_states_the_same_profile_findings(env, tmp_path, capsys):
     _configure(env, deny={"hosts": [HOST]})
     base = commit_files(env.repo, {PROFILE_PATH: "class: released-tool\n"})
