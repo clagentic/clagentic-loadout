@@ -611,6 +611,18 @@ every fence that carries it.
   configured; a ruling is keyed to it, so a fence without fingerprints cannot be ruled on.
   Unlike a disposition that narrows by fingerprint (which never counts here), a ruling
   matches only a finding that carries the very fingerprint it names, so its match is shown.
+- **One roster for the gate and the ruling verb.** The reviewer roles a merge requires are the
+  roles the tracked gate file declares at the pull request's base commit (a floor) plus the
+  `--required-reviewer` values the merge is given. `loadout-ruling record` resolves them with
+  the same function (`merge.required_reviewers`), taking the flag as bare role names, so a
+  role the gate enforces is a role whose fences a ruling can be attributed to. With no tracked
+  gate file the floor is empty and the flags alone decide, on both verbs. The flag on
+  `loadout-ruling` decides only whose comment counts as a role's verdict: who may record a
+  ruling is unchanged, the flag never removes a declared role, a `name:login` pair is refused
+  (a ruling is matched by fingerprint, rule and path, so a typed login would let any account's
+  comment supply the fingerprint), and a role in neither the floor nor the flags is refused.
+  A clean fence still never hides a blocked one at the same head; a recorded ruling is the
+  only way to clear its finding, and the merge names it in `applied_rulings`.
 - A ruling never clears a security-floor finding. The refusal names the finding and says it
   clears only through a dispositions entry on the base branch, or by fixing it.
 - Every ruling that cleared a finding is named on stderr, in the merge result
