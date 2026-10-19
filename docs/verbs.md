@@ -1153,7 +1153,7 @@ output is read through a bounded tail, so memory stays flat however much it writ
 loadout-ruling [--role ROLE] record --platform github|forgejo --repo OWNER/REPO --pr N \
   --fence-comment ID --fingerprint FP --kind KIND --rationale TEXT \
   --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM] [--head SHA] \
-  [--repo-path DIR] [--git-host-base-url URL]
+  [--required-reviewer ROLE]... [--repo-path DIR] [--git-host-base-url URL]
 loadout-ruling list [--repo OWNER/REPO] [--pr N]
 ```
 
@@ -1169,7 +1169,12 @@ contributes. The mapping affects only this verb; see
 from the reviewer's posted verdict fence (`--fence-comment`), read through the host API with the
 caller's own role credential and accepted only when a required reviewer's login posted it for
 this pull request at its current head (or `--head`); see
-[review-evaluator.md](review-evaluator.md#where-the-finding-comes-from). A security-floor finding
+[review-evaluator.md](review-evaluator.md#where-the-finding-comes-from). The required reviewer
+roles are the ones `loadout-merge` enforces, resolved by the same function: the roles the tracked
+gate file declares at the pull request's base commit, plus each bare role given as
+`--required-reviewer` (the merge's own flag). In a repository with no tracked gate file the flags
+alone decide. The flag adds roles and never removes one, takes no `name:login` pair (exit 1), and
+widens only whose comment counts as a role's verdict, never who may record. A security-floor finding
 is refused (exit 50), as is a fingerprint the fence does not hold (51), a comment that is not an
 acceptable fence (32), an untrusted registry location (52), no configured registry (53) and a
 duplicate (54). `list` is read-only, needs no role and makes no network call. Full semantics,

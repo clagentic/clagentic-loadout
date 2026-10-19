@@ -305,10 +305,15 @@ accepts it only if all of these hold:
 - the comment is on the requested repository's requested pull request (a comment id that is not
   among that pull request's comments is refused);
 - its author's login is the login of a required reviewer role, resolved as the merge gate
-  resolves it, where the required roles are the ones the repository's tracked gate declares at
-  the pull request's BASE commit, read through the host API: content the pull request cannot
-  change, and never a checkout or flag the caller supplies. A repository whose base declares no
-  required reviewer role, or a gate that cannot be read, attributes no fence;
+  resolves it, where the required roles are the ones the merge enforces (one shared resolution,
+  `merge.required_reviewers`): the roles the repository's tracked gate declares at the pull
+  request's BASE commit, read through the host API (content the pull request cannot change, and
+  never a checkout the caller supplies), plus the bare roles named with `--required-reviewer`,
+  whose logins the tool derives. The flag adds roles and never removes a declared one; it takes
+  no `name:login` pair, because a ruling is matched by fingerprint, rule and path and not by
+  the login that posted the fence. It decides only whose comment counts as a role's verdict,
+  never who may record. A repository whose base declares no required reviewer role and a call
+  with no `--required-reviewer`, or a gate that cannot be read and no flag, attributes no fence;
 - it is a well-formed verdict fence for that reviewer, read by the merge gate's own fence reader,
   for the requested pull request, at the pull request's current head (or the full SHA given with
   `--head`);
@@ -323,7 +328,7 @@ loadout-ruling [--role ROLE] record --platform github|forgejo --repo OWNER/REPO 
   --fence-comment ID --fingerprint FP \
   --kind by_design|false_positive|accepted_risk|mitigated --rationale TEXT \
   --requested-by CALLER --source-ref REF [--expires YYYY-MM-DD] [--reference ITEM] \
-  [--head SHA] [--repo-path DIR] [--git-host-base-url URL]
+  [--head SHA] [--required-reviewer ROLE]... [--repo-path DIR] [--git-host-base-url URL]
 loadout-ruling list [--repo OWNER/REPO] [--pr N]
 ```
 

@@ -18,12 +18,16 @@ import yaml
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.gate_evaluation import unmatched_recorded_blocks
 from clagentic_loadout.merge.verdict import build_verdict_block
-from clagentic_loadout.review.evaluate import EVALUATOR_VERSION
 from clagentic_loadout.review.evaluation import finding_state_id
 from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
 from clagentic_loadout.transport import provider_config
-from tests._gate_repo import commit_files, git, init_gate_repo
+from tests._gate_repo import commit_files, git
 from tests._review_evaluate_support import facts
+from tests._ruling_support import HEAD, NAME
+from tests._ruling_support import fence as _fence
+from tests._ruling_support import gate_repo as _repo
+from tests._ruling_support import open_entries as _open_entries
+from tests._ruling_support import tip as _tip
 from tests._support.fakes import FakeResponse
 from tests._support.merge_verb import (
     AllowingAuthorityProvider,
@@ -32,10 +36,8 @@ from tests._support.merge_verb import (
     make_opener,
 )
 
-HEAD = "b" * 40
 OTHER_HEAD = "c" * 40
 LOGIN = "reviewer-login"
-NAME = "some-reviewer"
 PATH = "src/a.py"
 
 #: Critical on the worst-case stakes every unstated path resolves to.
@@ -64,55 +66,6 @@ def _disposition_file(*, kind="false_positive", expires="2999-01-01", rule="R1",
         "by": "a-maintainer", "at": "2026-01-01", "expires": expires,
     }
     return yaml.safe_dump({"dispositions": [entry]})
-
-
-def _repo(tmp_path: Path, *, dispositions: str | None = None, **merge_gate) -> Path:
-    """A repo whose main tip carries the tracked gate (and dispositions)."""
-    path = tmp_path / "repo"
-    init_gate_repo(path, tracked_gate={"required_reviewer_roles": [], **merge_gate})
-    if dispositions is not None:
-        commit_files(path, {DISPOSITIONS_PATH: dispositions}, "chore: add dispositions")
-    return path
-
-
-def _tip(repo: Path) -> str:
-    return git(repo, "rev-parse", "main")
-
-
-_DERIVE = object()
-
-
-def _open_entries(findings):
-    """findings_open as the post path writes it: one entry per distinct id."""
-    entries = {}
-    for item in findings:
-        state_id = finding_state_id(item["file"], item["line"], item["rule_id"])
-        entries.setdefault(state_id, {"id": state_id, "rule_id": item["rule_id"], "head": HEAD})
-    return list(entries.values())
-
-
-def _fence(
-    outcome, *, findings=(), status=None, head=HEAD, reasons=None, base=None, keep_findings=True,
-    opened=_DERIVE, **more,
-):
-    """A fence of *outcome*. A BLOCKED fence records every finding as blocking
-    unless *opened* names the entries (None leaves findings_open out)."""
-    state = {
-        "verdict_outcome": outcome,
-        "verdict_reasons": reasons if reasons is not None else ([] if outcome == "CLEAN" else ["recorded"]),
-        "evaluator_version": EVALUATOR_VERSION,
-        **more,
-    }
-    if opened is _DERIVE:
-        opened = _open_entries(findings) if outcome == "BLOCKED" else None
-    if opened is not None:
-        state["findings_open"] = opened
-    if keep_findings:
-        state["evaluated_findings"] = list(findings)
-    if base:
-        state["policy_base_sha"] = base
-    status = status or ("clean" if outcome == "CLEAN" else "blocking")
-    return build_verdict_block(NAME, status, head, 1, findings_state=state)
 
 
 def _comment(comment_id, body):

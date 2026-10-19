@@ -8,10 +8,13 @@ is accepted only if every one of these holds:
   * it is a comment on the requested pull request of the requested repository;
   * its author's login is the login of a required reviewer role, resolved by the
     merge gate's own path (``merge.reviewer_login``), where the required roles are
-    the ones the repository's tracked gate declares at the pull request's BASE
-    commit (``merge.repo_gate_runtime``): content the pull request under review
-    cannot change, read through the host API, never from a checkout the caller
-    names;
+    the ones the merge gate enforces (``merge.required_reviewers``): the roles the
+    repository's tracked gate declares at the pull request's BASE commit
+    (``merge.repo_gate_runtime``), content the pull request under review cannot
+    change, read through the host API, never from a checkout the caller names,
+    plus the bare roles the caller names, whose logins the tool derives. The
+    caller's roles add attribution, never authority, and never remove a declared
+    role;
   * it carries a well-formed verdict fence for that reviewer, read by the merge
     gate's own fence reader (``merge.verdict.read_reviewer_verdict``), for the
     requested pull request, at the pull request's current head (or the head the
@@ -39,14 +42,8 @@ from clagentic_loadout.merge.errors import (
     VerdictRoleMismatchError,
     VerdictStaleError,
 )
-from clagentic_loadout.merge.repo_gate_runtime import (
-    gate_from_tracked_text,
-    with_resolvable_reviewer_roles,
-)
-from clagentic_loadout.merge.reviewer_login import (
-    ReviewerLoginNotConfiguredError,
-    resolve_reviewer_login,
-)
+from clagentic_loadout.merge.repo_gate_runtime import gate_from_tracked_text
+from clagentic_loadout.merge.required_reviewers import resolve_required_reviewers
 from clagentic_loadout.merge.tree_sync import resolve_base_sha
 from clagentic_loadout.merge.verdict import read_reviewer_verdict
 from clagentic_loadout.platform_detect import PLATFORM_GITHUB
@@ -107,10 +104,15 @@ def _read_host(
     return _Host(pr_info, comments, HostPolicyReader(files, owner=owner, repo=repo))
 
 
-def _required_reviewer_logins(host: _Host, platform: str, owner: str, repo: str) -> dict[str, str]:
-    """``{reviewer name: expected login}`` for the roles the repository's tracked
-    gate requires at the pull request's base commit. Empty when none is declared
-    or the declaration cannot be read: a fence is then not attributable."""
+def _required_reviewer_logins(
+    host: _Host, platform: str, owner: str, repo: str, flagged: Mapping[str, str]
+) -> dict[str, str]:
+    """``{reviewer name: expected login}`` for the roles the merge gate requires:
+    the roles the repository's tracked gate declares at the pull request's base
+    commit, plus *flagged* (bare roles the caller named, logins derived by the
+    tool). Both go through ``merge.required_reviewers``, the resolution the merge
+    verb itself uses. Refused when neither yields a role: a fence is then not
+    attributable."""
     base_sha = resolve_base_sha(dict(host.pr_info))
     if not base_sha:
         raise FenceRefusedError(
@@ -125,23 +127,21 @@ def _required_reviewer_logins(host: _Host, platform: str, owner: str, repo: str)
         )
     except PolicyReadError as exc:
         raise GateFactUnavailableError(f"cannot read the repository gate: {exc}") from exc
-    gate = with_resolvable_reviewer_roles(
+    resolved = resolve_required_reviewers(
         gate_from_tracked_text(text, source=f"{owner}/{repo}@{base_sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"),
         platform,
+        flagged,
     )
-    logins: dict[str, str] = {}
-    for name in gate.reviewer_roles:
-        try:
-            logins[name] = resolve_reviewer_login(name, platform)
-        except ReviewerLoginNotConfiguredError:
-            continue
-    if not logins:
-        reasons = "; ".join(gate.warnings) or f"{TRACKED_GATE_RELATIVE_PATH} declares none"
+    resolved.require_reachable_scanners(overridable=False)
+    if not resolved.reviewers:
+        reasons = "; ".join(resolved.gate.warnings) or (
+            f"{TRACKED_GATE_RELATIVE_PATH} declares none and no --required-reviewer was given"
+        )
         raise FenceRefusedError(
             f"no required reviewer role can be established for {owner}/{repo} at base "
             f"{base_sha[:12]} ({reasons}), so no comment can be shown to be a reviewer's verdict"
         )
-    return logins
+    return resolved.reviewers
 
 
 def read_fence_finding(
@@ -157,14 +157,19 @@ def read_fence_finding(
     token_provider: TokenProvider | None,
     git_host_base: str,
     opener=None,
+    required_reviewers: Mapping[str, str] | None = None,
 ) -> FenceFinding:
     """The finding with *fingerprint* in the verdict comment *comment_id*.
+
+    *required_reviewers* is ``{bare role: derived login}`` for the roles the
+    caller says the merge requires, added to the gate's own.
 
     Raises PlatformMismatchError before any credential is resolved,
     CredentialProviderError when the caller's role has no credential,
     GateFactUnavailableError when the host cannot be read, FenceRefusedError
     when the comment is not an acceptable fence, FindingNotInFenceError when it
-    holds no such finding."""
+    holds no such finding, MergeUsageError when the gate declares scanners for a
+    role that is not required."""
     if platform == PLATFORM_GITHUB:
         github_backend.assert_platform_is_github(owner, repo, explicit_platform=platform)
     else:
@@ -186,7 +191,7 @@ def read_fence_finding(
             "shown to be for the current head"
         )
 
-    logins = _required_reviewer_logins(host, platform, owner, repo)
+    logins = _required_reviewer_logins(host, platform, owner, repo, required_reviewers or {})
     comment = next((c for c in host.comments if str(c.get("id")) == str(comment_id)), None)
     if comment is None:
         raise FenceRefusedError(f"{owner}/{repo}#{pr} has no comment with id {comment_id}")
