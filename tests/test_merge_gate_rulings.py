@@ -16,31 +16,19 @@ from clagentic_loadout.merge.gate_config import EvaluatorGate
 from clagentic_loadout.merge.verdict import read_reviewer_verdict
 from clagentic_loadout.review import ruling_provider as rp
 from clagentic_loadout.review.ruling_provider import RulingScope
+from tests._ruling_host import PLATFORMS
 from tests._ruling_support import (
     FLOOR,
-    FP,
-    NON_FLOOR,
     OTHER_FP,
     REPO,
-    ruled_finding,
     ruling,
     write_registry,
 )
+from tests._ruling_support import evaluated_finding as _finding
 from tests._support.merge_verb import AllowingAuthorityProvider, RecordingTokenProvider, base_args
 from tests.test_merge_computed_verdict import HEAD, LOGIN, NAME, _fence, _repo, _tip
-from tests.test_merge_verb_platform_dispatch import _forgejo_opener, _github_opener
 
-_PLATFORMS = {"forgejo": _forgejo_opener, "github": _github_opener}
 _MODES = [pytest.param([], id="merge"), pytest.param(["--report-only"], id="report-only")]
-
-
-def _finding(fact=NON_FLOOR, *, fingerprint=FP, **extra):
-    """A finding as the evaluated_findings of a fence carries it."""
-    item = {k: v for k, v in ruled_finding(fact, fingerprint=fingerprint, **extra).items()
-            if k in ("file", "line", "rule_id", "message", "facts", "fingerprint")}
-    if fingerprint is None:
-        del item["fingerprint"]
-    return item
 
 
 def _comment(comment_id, body):
@@ -67,7 +55,7 @@ def _gate(platform, comments, repo, capsys, mode=()):
         "title": "feat: x",
         "base": {"ref": "main", "sha": _tip(repo), "repo": {"private": True, "visibility": "private"}},
     }
-    opener = _PLATFORMS[platform](pr_info=info, comments=comments)
+    opener = PLATFORMS[platform](pr_info=info, comments=comments)
     argv = base_args(
         **{
             "--platform": platform,
@@ -106,7 +94,7 @@ def _blocked(*findings):
 
 
 @pytest.mark.parametrize("mode", _MODES)
-@pytest.mark.parametrize("platform", sorted(_PLATFORMS))
+@pytest.mark.parametrize("platform", sorted(PLATFORMS))
 class TestRulingClearsAtTheGate:
     def test_a_ruling_at_this_pr_clears_a_kept_non_floor_blocking_finding(
         self, platform, mode, repo, use_registry, capsys
@@ -222,7 +210,7 @@ class TestRulingClearsAtTheGate:
         assert "writable by every user" in run.err
 
 
-@pytest.mark.parametrize("platform", sorted(_PLATFORMS))
+@pytest.mark.parametrize("platform", sorted(PLATFORMS))
 class TestWithoutARegistry:
     def test_a_blocked_fence_refuses_exactly_as_it_always_did(self, platform, repo, capsys, monkeypatch):
         monkeypatch.delenv(rp.RULINGS_FILE_ENV_VAR, raising=False)
@@ -315,7 +303,7 @@ class TestCleanFenceAndRulingLifetime:
 
 
 @pytest.mark.parametrize("mode", _MODES)
-@pytest.mark.parametrize("platform", sorted(_PLATFORMS))
+@pytest.mark.parametrize("platform", sorted(PLATFORMS))
 class TestRulingAppliesInEverySameRoleFenceAtTheHead:
     """Under the fence union every fence a role posted at the head runs the
     full chain, so a ruling is applied in each fence that carries its finding."""

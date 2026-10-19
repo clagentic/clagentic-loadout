@@ -59,3 +59,12 @@ def write_registry(root: Path, rulings: list[Ruling]) -> Path:
 
 def ruled_finding(fact=NON_FLOOR, *, fingerprint=FP, **extra) -> dict:
     return finding(fact=fact, fingerprint=fingerprint, **extra)
+
+
+def evaluated_finding(fact=NON_FLOOR, *, fingerprint=FP, **extra) -> dict:
+    """A finding as the evaluated_findings of a fence carries it."""
+    item = {k: v for k, v in ruled_finding(fact, fingerprint=fingerprint, **extra).items()
+            if k in ("file", "line", "rule_id", "message", "facts", "fingerprint")}
+    if fingerprint is None:
+        del item["fingerprint"]
+    return item

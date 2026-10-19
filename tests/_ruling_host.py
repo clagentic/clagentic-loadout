@@ -19,6 +19,10 @@ from clagentic_loadout.review.evaluate import EVALUATOR_VERSION
 from clagentic_loadout.review.evaluation import evaluated_findings_for_fence
 from tests._support.fakes import FakeResponse
 from tests._support.merge_verb import make_opener
+from tests.test_merge_verb_platform_dispatch import _forgejo_opener, _github_opener
+
+#: Platform name to the per-platform host opener factory the merge-gate tests share.
+PLATFORMS = {"forgejo": _forgejo_opener, "github": _github_opener}
 
 HEAD = "b" * 40
 BASE = "d" * 40

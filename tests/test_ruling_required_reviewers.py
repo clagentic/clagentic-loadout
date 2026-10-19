@@ -25,8 +25,9 @@ from clagentic_loadout.review import ruling_verb as ruling
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.attestation import SOURCE_CONFIGURED, Identity
 from tests._gate_repo import init_gate_repo
-from tests._ruling_host import FENCE_COMMENT, host_opener
+from tests._ruling_host import FENCE_COMMENT, PLATFORMS, host_opener
 from tests._ruling_support import FP, REPO, TODAY, registry_dir
+from tests._ruling_support import evaluated_finding as _finding
 from tests._support.merge_verb import (
     AllowingAuthorityProvider,
     RecordingTokenProvider,
@@ -35,7 +36,6 @@ from tests._support.merge_verb import (
     make_opener,
 )
 from tests.test_merge_computed_verdict import HEAD, NAME, _fence, _tip
-from tests.test_merge_gate_rulings import _PLATFORMS, _finding
 
 OTHER_ROLE = "another-reviewer"
 EARLIER_HEAD = "a" * 40
@@ -105,7 +105,7 @@ def _merge(platform, comments, repo, capsys, *extra):
         [*argv, *extra],
         token_provider=RecordingTokenProvider(),
         authority_provider=AllowingAuthorityProvider(),
-        opener=_PLATFORMS[platform](pr_info=info, comments=comments),
+        opener=PLATFORMS[platform](pr_info=info, comments=comments),
     )
     captured = capsys.readouterr()
     return code, captured.out, captured.err
@@ -118,7 +118,7 @@ def ungated_repo(tmp_path):
     return tmp_path / "repo"
 
 
-@pytest.mark.parametrize("platform", sorted(_PLATFORMS))
+@pytest.mark.parametrize("platform", sorted(PLATFORMS))
 class TestRepositoryWithoutAGateFile:
     def test_a_role_the_merge_enforces_through_the_flag_is_one_the_ruling_can_attribute(
         self, platform, registry
@@ -177,7 +177,7 @@ class TestRepositoryWithoutAGateFile:
             assert "src/a.py:10:R1" in evaluation["applied_rulings"][0]
 
 
-@pytest.mark.parametrize("platform", sorted(_PLATFORMS))
+@pytest.mark.parametrize("platform", sorted(PLATFORMS))
 class TestRepositoryWithAGateFile:
     def test_a_gate_declared_role_is_attributed_as_before(self, platform, registry):
         comments = [_blocked_comment(platform)]

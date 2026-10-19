@@ -37,7 +37,7 @@ from clagentic_loadout.review import ruling_verb as ruling
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.attestation import SOURCE_CONFIGURED, Identity
 from tests._gate_repo import git, init_gate_repo
-from tests._ruling_host import host_opener
+from tests._ruling_host import PLATFORMS, host_opener
 from tests._ruling_support import REPO, TODAY, registry_dir
 from tests._support.merge_verb import (
     AllowingAuthorityProvider,
@@ -47,7 +47,6 @@ from tests._support.merge_verb import (
 )
 from tests._support.unresolvable_roles import make_roles_unresolvable
 from tests.test_anonymization_guard import PRODUCT_CODE_PATTERNS
-from tests.test_merge_gate_rulings import _PLATFORMS
 
 PAYLOADS = Path(__file__).parent / "real_payloads"
 BLOCKED_ROLE = "reviewer-one"
@@ -172,7 +171,7 @@ def _merge(capture: Capture, roster: Roster, repo: Path, mode, capsys):
         [*argv, *roster.argv(), *mode],
         token_provider=RecordingTokenProvider(),
         authority_provider=AllowingAuthorityProvider(),
-        opener=_PLATFORMS[capture.platform](pr_info=pull, comments=capture.comments),
+        opener=PLATFORMS[capture.platform](pr_info=pull, comments=capture.comments),
     )
     captured = capsys.readouterr()
     return code, captured.out, captured.err
