@@ -8,7 +8,7 @@ pull request under review cannot write. This verb is the only writer.
   loadout-ruling [--role ROLE] record --platform PLATFORM --repo OWNER/REPO --pr N \\
       --fence-comment ID --fingerprint FP --kind KIND --rationale TEXT \\
       --requested-by CALLER --source-ref REF [--expires DATE] [--reference ITEM] \\
-      [--head SHA] [--repo-path DIR] [--git-host-base-url URL]
+      [--required-reviewer ROLE]... [--head SHA] [--repo-path DIR] [--git-host-base-url URL]
   loadout-ruling list [--repo OWNER/REPO] [--pr N]
 
 WHO MAY RECORD. The attested caller's role must hold the ``ruling`` verb. No
@@ -32,6 +32,15 @@ fence for this pull request, at the pull request's current head (or ``--head``),
 carrying the findings its verdict was computed from. The finding's rule, path and
 facts are taken from that fence by ``--fingerprint``; nothing the caller types
 describes the finding.
+
+WHICH ROLES ARE REQUIRED. The same ones the merge enforces, resolved by
+merge.required_reviewers: the roles the repository's tracked gate declares at the
+pull request's base commit, plus the bare roles given as ``--required-reviewer``
+(the merge's own flag, repeatable). With no tracked gate file the flags alone decide.
+The flag widens only which comment counts as a required role's verdict. It cannot
+widen who may record a ruling, it never removes a declared role, and it takes no
+``name:login`` pair: a ruling is matched by fingerprint, rule and path, so a login
+typed by the caller would let any account's comment supply the fingerprint.
 
 NON-FLOOR ONLY. The finding must not be a security-floor finding: a floor
 finding clears only through a dispositions entry on the base branch, or by being
@@ -81,8 +90,10 @@ from clagentic_loadout.merge.authority import (
 from clagentic_loadout.merge.errors import (
     AuthorityDeniedError,
     GateFactUnavailableError,
+    MergeUsageError,
     PlatformMismatchError,
 )
+from clagentic_loadout.merge.required_reviewers import parse_required_reviewers
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.provisioning.roles import InvalidRoleConfigError
 from clagentic_loadout.review.dispositions import KINDS
@@ -248,6 +259,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "Opaque; it must match the configured reference pattern.",
     )
     record.add_argument(
+        "--required-reviewer",
+        action="append",
+        dest="required_reviewers",
+        default=None,
+        help="A reviewer role the merge of this pull request requires (repeatable), as "
+        "loadout-merge is given it. A BARE role name only: its login is derived from "
+        "the role, and a 'name:login' pair is refused. Added to the roles the "
+        "repository's tracked gate declares at the pull request's base commit; it "
+        "never removes one. It decides only whose comment counts as that role's verdict, "
+        "not who may record a ruling. Needed when the repository has no tracked gate "
+        "file and the merge names its reviewers on its own command line.",
+    )
+    record.add_argument(
         "--repo-path",
         default=None,
         help="Checkout of the reviewed repository. A ruling registry inside it is refused. "
@@ -298,6 +322,7 @@ def _fence_finding(
     token_provider: TokenProvider | None,
     opener,
     config_root: str | Path | None,
+    required_reviewers: dict[str, str],
 ) -> FenceFinding:
     """The finding the ruling is for, read from the posted fence, refused when it
     is a security-floor finding."""
@@ -317,7 +342,10 @@ def _fence_finding(
                 config_root=str(config_root) if config_root is not None else None,
             ),
             opener=opener,
+            required_reviewers=required_reviewers,
         )
+    except MergeUsageError as exc:
+        raise RulingVerbError(str(exc), EXIT_USAGE) from exc
     except PlatformMismatchError as exc:
         raise RulingVerbError(str(exc), EXIT_WRONG_PLATFORM) from exc
     except CredentialProviderError as exc:
@@ -381,6 +409,12 @@ def _record(
     owner, repo = _split_repo(args.repo)
     if args.pr < 1:
         raise RulingVerbError(f"--pr must be a positive integer, got: {args.pr!r}", EXIT_USAGE)
+    try:
+        required_reviewers = parse_required_reviewers(
+            args.required_reviewers, args.platform, bare_only=True
+        )
+    except MergeUsageError as exc:
+        raise RulingVerbError(str(exc), EXIT_USAGE) from exc
 
     resolve_identity = identity_provider if identity_provider is not None else _resolve_identity
     try:
@@ -406,7 +440,14 @@ def _record(
             EXIT_REGISTRY_NOT_CONFIGURED,
         )
     found = _fence_finding(
-        args, owner, repo, role, token_provider=token_provider, opener=opener, config_root=config_root
+        args,
+        owner,
+        repo,
+        role,
+        token_provider=token_provider,
+        opener=opener,
+        config_root=config_root,
+        required_reviewers=required_reviewers,
     )
     finding = found.matches[0]
 

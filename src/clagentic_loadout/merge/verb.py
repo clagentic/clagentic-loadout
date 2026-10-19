@@ -591,13 +591,13 @@ from clagentic_loadout.merge.pre_checks_sandbox import (
 from clagentic_loadout.merge.repo_gate_runtime import (
     load_repo_gate_at_base,
     resolve_gate_git_tree,
-    with_resolvable_reviewer_roles,
 )
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
-from clagentic_loadout.merge.reviewer_login import (
-    ReviewerLoginNotConfiguredError,
-    resolve_reviewer_login,
+from clagentic_loadout.merge.required_reviewers import (
+    parse_required_reviewers,
+    resolve_required_reviewers,
 )
+from clagentic_loadout.merge.reviewer_login import resolve_reviewer_login
 from clagentic_loadout.merge.stale_sha import check_stale_head_sha
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
@@ -1258,49 +1258,10 @@ def _describe_ci_disposition(ci_result: ci_status.CiStatusResult) -> str:
 
 
 def _parse_required_reviewers(raw: list[str] | None, platform: str) -> dict[str, str]:
-    """Parse repeated --required-reviewer values into a {name: login} dict.
-
-    Each entry is either:
-      - an explicit 'reviewer_name:git_host_login' pair (override/back-compat
-        path) — the login is used verbatim, exactly as before lr-2f1378.
-      - a BARE reviewer name (no ':' separator) — its expected login is
-        DERIVED platform-aware via merge.reviewer_login.resolve_reviewer_login
-        (lr-2f1378): the bare name itself on Forgejo, or the deployment's
-        configured GitHub App slug + '[bot]' on GitHub. The derived login
-        stays TOOL-AUTHORITATIVE (resolved from config), never trusted from
-        a PR comment's claimed identity — see that module's docstring for
-        the anti-spoof invariant this preserves (lr-2b3f).
-
-    Raises MergeUsageError on a malformed explicit entry (empty name/login
-    around a ':' separator) or when a bare name has no derivable login on
-    the target platform (e.g. no github_app.slugs entry configured) — both
-    checked BEFORE any network call.
-    """
-    if not raw:
-        return {}
-    result: dict[str, str] = {}
-    for entry in raw:
-        if ":" in entry:
-            name, login = entry.split(":", 1)
-            name, login = name.strip(), login.strip()
-            if not name or not login:
-                raise MergeUsageError(
-                    f"--required-reviewer {entry!r} must be 'reviewer_name:git_host_login' "
-                    f"with both parts non-empty."
-                )
-            result[name] = login
-            continue
-        name = entry.strip()
-        if not name:
-            raise MergeUsageError(
-                f"--required-reviewer {entry!r} must be a non-empty reviewer "
-                f"name, or 'reviewer_name:git_host_login'."
-            )
-        try:
-            result[name] = resolve_reviewer_login(name, platform)
-        except ReviewerLoginNotConfiguredError as exc:
-            raise MergeUsageError(str(exc)) from exc
-    return result
+    """Parse repeated --required-reviewer values (merge.required_reviewers owns
+    the rules). The login derivation is looked up here at call time, which is
+    the seam this module's tests substitute."""
+    return parse_required_reviewers(raw, platform, resolve_login=resolve_reviewer_login)
 
 
 # ---------------------------------------------------------------------------
@@ -1503,14 +1464,21 @@ def _run(
         base_sha=resolve_base_sha(pr_info),
         base_branch=resolve_base_branch(pr_info),
     )
-    repo_gate = with_resolvable_reviewer_roles(
-        repo_gate, args.platform, flagged_roles=required_reviewers
+    # The same resolution loadout-ruling uses to attribute a fence to a required
+    # role (merge.required_reviewers).
+    resolved_reviewers = resolve_required_reviewers(
+        repo_gate,
+        args.platform,
+        required_reviewers,
+        ignore_repo_gate=args.ignore_repo_gate,
     )
+    repo_gate = resolved_reviewers.gate
+    required_reviewers = resolved_reviewers.reviewers
+    floor_only_reviewers = resolved_reviewers.floor_only
     for warning in repo_gate.warnings:
         print(f"merge: WARNING -- {warning}", file=sys.stderr)
     for notice in repo_gate.notices:
         print(f"merge: NOTICE -- {notice}", file=sys.stderr)
-    floor_only_reviewers: dict[str, str] = {}
     if args.ignore_repo_gate:
         print(
             f"merge: merge.required_reviewer_roles and merge.required_scanners IGNORED "
@@ -1520,23 +1488,6 @@ def _run(
             f"only --required-reviewer applies",
             file=sys.stderr,
         )
-    else:
-        undeclared = [r for r in repo_gate.reviewer_roles if r not in required_reviewers]
-        # Every declared role resolves here: an unresolvable one was already
-        # dropped, with its scanners, in with_resolvable_reviewer_roles.
-        floor_only_reviewers = _parse_required_reviewers(undeclared, args.platform)
-        required_reviewers = {**required_reviewers, **floor_only_reviewers}
-        unreachable = repo_gate.unreachable_scanner_roles(required_reviewers)
-        if unreachable:
-            raise MergeUsageError(
-                f"merge.required_scanners declares scanners for role(s) {unreachable!r}, "
-                f"which are not required reviewers (required: {sorted(required_reviewers)!r}). "
-                f"Scanners are checked on a required reviewer's verdict, so this "
-                f"declaration could never gate anything. Add the role to "
-                f"merge.required_reviewer_roles or --required-reviewer, or remove it from "
-                f"merge.required_scanners; --ignore-repo-gate overrides it (logged and "
-                f"attested)."
-            )
 
     # 5. Reviewer-verdict fences — for each required reviewer.
     gate_evaluations: list[GateEvaluation] = []
