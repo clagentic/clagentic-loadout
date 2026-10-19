@@ -1488,6 +1488,10 @@ def _run(
             f"only --required-reviewer applies",
             file=sys.stderr,
         )
+    else:
+        # After the warnings and notices above, as before the resolution moved
+        # into merge.required_reviewers: they explain why a role was dropped.
+        resolved_reviewers.require_reachable_scanners()
 
     # 5. Reviewer-verdict fences — for each required reviewer.
     gate_evaluations: list[GateEvaluation] = []

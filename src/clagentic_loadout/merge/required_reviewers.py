@@ -50,6 +50,32 @@ class RequiredReviewers:
     gate: RepoGate
     #: The roles only the floor requires (no flag named them).
     floor_only: dict[str, str]
+    #: Roles the gate declares scanners for that no source requires. Empty when
+    #: the gate is ignored.
+    unreachable_scanner_roles: tuple[str, ...] = ()
+
+    def require_reachable_scanners(self, *, overridable: bool = True) -> None:
+        """Refuse when the gate declares scanners for a role that is not required,
+        since such a declaration could never gate anything. *overridable* names
+        whether the caller offers ``--ignore-repo-gate``, so the refusal does
+        not point at a flag it lacks.
+
+        A separate step from the resolution so the merge verb can print the
+        gate's warnings and notices before it refuses, as it always has.
+
+        Raises MergeUsageError."""
+        if not self.unreachable_scanner_roles:
+            return
+        remedy = "; --ignore-repo-gate overrides it (logged and attested)." if overridable else "."
+        raise MergeUsageError(
+            f"merge.required_scanners declares scanners for role(s) "
+            f"{list(self.unreachable_scanner_roles)!r}, which are not required reviewers "
+            f"(required: {sorted(self.reviewers)!r}). "
+            f"Scanners are checked on a required reviewer's verdict, so this "
+            f"declaration could never gate anything. Add the role to "
+            f"merge.required_reviewer_roles or --required-reviewer, or remove it from "
+            f"merge.required_scanners{remedy}"
+        )
 
 
 def parse_required_reviewers(
@@ -115,16 +141,14 @@ def resolve_required_reviewers(
     flagged: Mapping[str, str],
     *,
     ignore_repo_gate: bool = False,
-    overridable: bool = True,
 ) -> RequiredReviewers:
     """The roles required for a merge: *repo_gate*'s declared roles (the floor)
     plus *flagged* (already parsed by ``parse_required_reviewers``).
 
-    With *ignore_repo_gate* only *flagged* applies. *overridable* names whether
-    the caller offers that flag, so a refusal does not point at one it lacks.
-
-    Raises MergeUsageError when the gate declares scanners for a role that is not
-    required, since such a declaration could never gate anything.
+    With *ignore_repo_gate* only *flagged* applies. Scanners the gate declares for
+    a role nobody requires are reported on the result, not refused here: the
+    caller prints the gate's warnings first and then calls
+    ``RequiredReviewers.require_reachable_scanners``.
     """
     gate = with_resolvable_reviewer_roles(repo_gate, platform, flagged_roles=flagged)
     if ignore_repo_gate:
@@ -134,18 +158,8 @@ def resolve_required_reviewers(
     # with its scanners, in with_resolvable_reviewer_roles.
     floor_only = parse_required_reviewers(undeclared, platform)
     reviewers = {**flagged, **floor_only}
-    unreachable = gate.unreachable_scanner_roles(reviewers)
-    if unreachable:
-        remedy = "; --ignore-repo-gate overrides it (logged and attested)." if overridable else "."
-        raise MergeUsageError(
-            f"merge.required_scanners declares scanners for role(s) {unreachable!r}, "
-            f"which are not required reviewers (required: {sorted(reviewers)!r}). "
-            f"Scanners are checked on a required reviewer's verdict, so this "
-            f"declaration could never gate anything. Add the role to "
-            f"merge.required_reviewer_roles or --required-reviewer, or remove it from "
-            f"merge.required_scanners{remedy}"
-        )
-    return RequiredReviewers(reviewers, gate, floor_only)
+    unreachable = tuple(gate.unreachable_scanner_roles(reviewers))
+    return RequiredReviewers(reviewers, gate, floor_only, unreachable)
 
 
 __all__ = ["RequiredReviewers", "parse_required_reviewers", "resolve_required_reviewers"]

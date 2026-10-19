@@ -307,11 +307,28 @@ class TestSharedResolution:
     def test_scanners_for_a_role_that_is_not_required_are_refused(self, overridable, mentions_override):
         gate = RepoGate(required_scanners={"orphan-role": ("scanner",)})
 
+        resolved = resolve_required_reviewers(gate, "forgejo", {})
+
+        assert resolved.unreachable_scanner_roles == ("orphan-role",)
         with pytest.raises(MergeUsageError) as caught:
-            resolve_required_reviewers(gate, "forgejo", {}, overridable=overridable)
+            resolved.require_reachable_scanners(overridable=overridable)
 
         assert "'orphan-role'" in str(caught.value)
         assert ("--ignore-repo-gate" in str(caught.value)) is mentions_override
+
+    def test_resolving_reports_unreachable_scanners_without_refusing(self):
+        gate = RepoGate(required_scanners={"orphan-role": ("scanner",)})
+
+        resolved = resolve_required_reviewers(gate, "forgejo", {"flag-role": "flag-login"})
+
+        assert resolved.unreachable_scanner_roles == ("orphan-role",)
+
+    def test_ignoring_the_gate_leaves_nothing_to_refuse(self):
+        gate = RepoGate(required_scanners={"orphan-role": ("scanner",)})
+
+        resolved = resolve_required_reviewers(gate, "forgejo", {}, ignore_repo_gate=True)
+
+        resolved.require_reachable_scanners()
 
     def test_bare_only_refuses_a_pair_and_names_it(self):
         with pytest.raises(MergeUsageError, match="some-role:some-login"):

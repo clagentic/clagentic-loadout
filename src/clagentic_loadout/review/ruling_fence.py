@@ -131,8 +131,8 @@ def _required_reviewer_logins(
         gate_from_tracked_text(text, source=f"{owner}/{repo}@{base_sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"),
         platform,
         flagged,
-        overridable=False,
     )
+    resolved.require_reachable_scanners(overridable=False)
     if not resolved.reviewers:
         reasons = "; ".join(resolved.gate.warnings) or (
             f"{TRACKED_GATE_RELATIVE_PATH} declares none and no --required-reviewer was given"
