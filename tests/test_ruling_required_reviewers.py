@@ -26,8 +26,10 @@ from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.attestation import SOURCE_CONFIGURED, Identity
 from tests._gate_repo import init_gate_repo
 from tests._ruling_host import FENCE_COMMENT, PLATFORMS, host_opener
-from tests._ruling_support import FP, REPO, TODAY, registry_dir
+from tests._ruling_support import FP, HEAD, NAME, REPO, TODAY, registry_dir
 from tests._ruling_support import evaluated_finding as _finding
+from tests._ruling_support import fence as _fence
+from tests._ruling_support import tip as _tip
 from tests._support.merge_verb import (
     AllowingAuthorityProvider,
     RecordingTokenProvider,
@@ -35,7 +37,6 @@ from tests._support.merge_verb import (
     base_args,
     make_opener,
 )
-from tests.test_merge_computed_verdict import HEAD, NAME, _fence, _tip
 
 OTHER_ROLE = "another-reviewer"
 EARLIER_HEAD = "a" * 40

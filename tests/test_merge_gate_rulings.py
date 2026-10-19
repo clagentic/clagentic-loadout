@@ -19,14 +19,19 @@ from clagentic_loadout.review.ruling_provider import RulingScope
 from tests._ruling_host import PLATFORMS
 from tests._ruling_support import (
     FLOOR,
+    HEAD,
+    NAME,
     OTHER_FP,
     REPO,
     ruling,
     write_registry,
 )
 from tests._ruling_support import evaluated_finding as _finding
+from tests._ruling_support import fence as _fence
+from tests._ruling_support import gate_repo as _repo
+from tests._ruling_support import tip as _tip
 from tests._support.merge_verb import AllowingAuthorityProvider, RecordingTokenProvider, base_args
-from tests.test_merge_computed_verdict import HEAD, LOGIN, NAME, _fence, _repo, _tip
+from tests.test_merge_computed_verdict import LOGIN
 
 _MODES = [pytest.param([], id="merge"), pytest.param(["--report-only"], id="report-only")]
 
