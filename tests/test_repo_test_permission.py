@@ -221,8 +221,8 @@ def _write_script(path: Path, *lines: str) -> Path:
     "python",
     [
         "/opt/tools/venv/bin/python",
-        "/home/u/.local/share/pipx/venvs/clagentic-loadout/bin/python",
-        "/home/u/.local/share/uv/tools/clagentic-loadout/bin/python",
+        "/srv/data/pipx/venvs/clagentic-loadout/bin/python",
+        "/srv/data/uv/tools/clagentic-loadout/bin/python",
         "/opt/my tools/venv/bin/python",
     ],
 )
@@ -239,12 +239,12 @@ def test_a_shebang_yields_the_whole_interpreter_path(tmp_path: Path, python: str
         ("'''exec' \"/opt/my tools/venv/bin/python\" \"$0\" \"$@\"", "/opt/my tools/venv/bin/python"),
         ("'''exec' '/opt/my tools/venv/bin/python' \"$0\" \"$@\"", "/opt/my tools/venv/bin/python"),
         (
-            "'''exec' \"/home/u/.local/share/pipx/venvs/x y/bin/python\" \"$0\" \"$@\"",
-            "/home/u/.local/share/pipx/venvs/x y/bin/python",
+            "'''exec' \"/srv/data/pipx/venvs/x y/bin/python\" \"$0\" \"$@\"",
+            "/srv/data/pipx/venvs/x y/bin/python",
         ),
         (
-            "'''exec' \"/home/u/.local/share/uv/tools/x y/bin/python\" \"$0\" \"$@\"",
-            "/home/u/.local/share/uv/tools/x y/bin/python",
+            "'''exec' \"/srv/data/uv/tools/x y/bin/python\" \"$0\" \"$@\"",
+            "/srv/data/uv/tools/x y/bin/python",
         ),
     ],
 )
@@ -261,10 +261,13 @@ def test_a_wrapper_without_an_exec_line_yields_nothing_so_the_installer_fails_cl
 
 
 def test_installer_registers_the_rule_when_the_install_path_contains_a_space(
-    tmp_path: Path,
+    tmp_path: Path, shared_venv_data_dir: Path  # noqa: F811
 ) -> None:
     settings = tmp_path / "settings.json"
+    # A symlink to the shared data dir gives the installer a spaced path while the
+    # fixture's lock still serialises the in-tree pip build across workers.
     spaced = tmp_path / "data dir"
+    spaced.symlink_to(shared_venv_data_dir)
 
     _install(tmp_path, spaced, "--register-test-report-permission", "--claude-settings-file", str(settings))
 
