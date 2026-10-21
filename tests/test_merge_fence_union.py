@@ -213,10 +213,8 @@ class TestOneFencePerRoleIsAsBefore:
             for line in err.splitlines()
             if line.startswith(("merge: NOTICE -- comment #", "merge: WARNING -- comment #"))
         ]
-        assert (
-            f"merge: WARNING -- {NAME!r} verdict (comment #1) is clean but records no "
-            f"scanner outcomes; it may rest on judgment alone"
-        ) in err.splitlines()
+        assert "scanner outcomes" not in err
+        assert "judgment alone" not in err
 
     def test_report_only_output_is_the_single_fence_output(self, capsys):
         code, err, out, requests = _run([_comment(1, "clean")], capsys, extra=["--report-only"])

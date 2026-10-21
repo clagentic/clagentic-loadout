@@ -1269,7 +1269,7 @@ def check_required_scanners(
     records no scanner outcomes at all (VerdictScannersMissingError), or when
     a required scanner is reported failed (VerdictScannerFailedError).
     not_applicable and not_invoked, with their reason, are legitimate. With no
-    required scanners declared, absence only warns. A required scanner the
+    required scanners declared, an empty record is accepted without a warning. A required scanner the
     verdict does not record, even beside others it does record, also refuses
     (VerdictScannersMissingError): a declared gate gates.
     A repeated scanner name is malformed (VerdictMalformedError), never
@@ -1315,11 +1315,6 @@ def check_required_scanners(
             f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) says it supersedes "
             f"comment #{verdict.unresolved_supersedes}, which is not an earlier verdict "
             f"comment from that reviewer on this PR"
-        )
-    if not verdict.state.scanners_run:
-        warnings.append(
-            f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) is clean but "
-            f"records no scanner outcomes; it may rest on judgment alone"
         )
     return warnings
 

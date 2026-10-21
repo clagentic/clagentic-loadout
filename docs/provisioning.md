@@ -388,7 +388,7 @@ comments never needs to declare it at all. See its own bullet below for the
   are accepted. A clean verdict from a role that has an entry here, but that
   records no outcome for one of the named scanners (no record at all, or a
   partial record that omits one), refuses the merge naming the missing
-  record; for a role with no entry, no record only warns. `--ignore-repo-gate`
+  record; for a role with no entry, no record is accepted with no warning. `--ignore-repo-gate`
   lifts this requirement along with the reviewer floor. Scanner names are
   deployment vocabulary; none is built in. A malformed declaration drops
   `required_reviewer_roles` and `required_scanners` together to flags-only with
