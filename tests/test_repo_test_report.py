@@ -254,6 +254,24 @@ def test_diff_against_a_run_with_no_recorded_repo_is_marked_unverified(
     assert code == exits.EXIT_OK and json.loads(out)["repo_check"] == "unverified"
 
 
+def test_diff_with_a_remote_on_only_one_run_compares_paths_and_never_refuses_a_clone(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    remote = "https://h.example.test/o/alpha.git"
+    write_run(reports, "20260101T000000Z-10", repo_path="/repos/alpha", remote_url=remote)
+    write_run(reports, "20260102T000000Z-11", repo_path="/repos/alpha")
+    write_run(reports, "20260103T000000Z-12", repo_path="/elsewhere/alpha")
+
+    code, out, _ = _report(capsys, "20260102T000000Z-11", "--diff", "20260101T000000Z-10")
+    assert code == exits.EXIT_OK and json.loads(out)["repo_check"] == "same"
+
+    code, out, _ = _report(capsys, "20260103T000000Z-12", "--diff", "20260101T000000Z-10")
+    assert code == exits.EXIT_OK and json.loads(out)["repo_check"] == "unverified"
+
+    code, out, _ = _report(capsys, "20260101T000000Z-10", "--diff", "20260103T000000Z-12")
+    assert code == exits.EXIT_OK and json.loads(out)["repo_check"] == "unverified"
+
+
 def test_diff_base_must_be_an_explicit_existing_run_id(reports: Path, capsys: pytest.CaptureFixture[str]) -> None:
     write_run(reports, "20260101T000000Z-10")
 

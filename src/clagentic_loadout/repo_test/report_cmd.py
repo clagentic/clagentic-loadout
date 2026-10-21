@@ -157,34 +157,41 @@ def _require_complete(run: RunRecord, what: str) -> None:
         )
 
 
-def _repo_identity(run: RunRecord) -> str | None:
-    remote = run.repo.get("remote_url")
-    if isinstance(remote, str) and remote:
-        return f"remote:{remote}"
-    path = run.repo.get("path")
-    return f"path:{path}" if isinstance(path, str) and path else None
+def _recorded(run: RunRecord, key: str) -> str | None:
+    value = run.repo.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+def _refuse_different(head: RunRecord, base: RunRecord, head_id: str, base_id: str) -> ReportRefused:
+    return ReportRefused(
+        f"runs {head.run_id} and {base.run_id} are from different repositories "
+        f"({head_id} and {base_id}); refusing to compare them",
+        exits.EXIT_DIFF_REFUSED,
+    )
 
 
 def _repo_check(head: RunRecord, base: RunRecord) -> str:
-    head_remote, base_remote = head.repo.get("remote_url"), base.repo.get("remote_url")
-    if isinstance(head_remote, str) and head_remote and isinstance(base_remote, str) and base_remote:
+    """Whether two runs are the same repository; refuse only on proof they differ.
+
+    Remotes are compared only when both runs recorded one. Otherwise resolved
+    paths are compared: equal paths are the same repository, and differing paths
+    prove a difference only when neither run has a remote (a remote on one side
+    means the other may just be a clone elsewhere), so that case is unverified,
+    as is any run with no path recorded.
+    """
+    head_remote, base_remote = _recorded(head, "remote_url"), _recorded(base, "remote_url")
+    if head_remote is not None and base_remote is not None:
         if head_remote != base_remote:
-            raise ReportRefused(
-                f"runs {head.run_id} and {base.run_id} are from different repositories "
-                f"({head_remote} and {base_remote}); refusing to compare them",
-                exits.EXIT_DIFF_REFUSED,
-            )
+            raise _refuse_different(head, base, head_remote, base_remote)
         return REPO_SAME
-    head_id, base_id = _repo_identity(head), _repo_identity(base)
-    if head_id is None or base_id is None:
+    head_path, base_path = _recorded(head, "path"), _recorded(base, "path")
+    if head_path is None or base_path is None:
         return REPO_UNVERIFIED
-    if head_id != base_id:
-        raise ReportRefused(
-            f"runs {head.run_id} and {base.run_id} are from different repositories "
-            f"({head.repo.get('path')} and {base.repo.get('path')}); refusing to compare them",
-            exits.EXIT_DIFF_REFUSED,
-        )
-    return REPO_SAME
+    if head_path == base_path:
+        return REPO_SAME
+    if head_remote is not None or base_remote is not None:
+        return REPO_UNVERIFIED
+    raise _refuse_different(head, base, head_path, base_path)
 
 
 def diff_of(head: RunRecord, base: RunRecord) -> dict[str, Any]:

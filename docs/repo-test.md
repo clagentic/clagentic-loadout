@@ -111,9 +111,10 @@ below).
   counts, the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
 - **`--failing-ids`**: the failing test ids, sorted, one per line.
 - **`--diff BASE_RUN_ID`**: JSON with `head_only`, `base_only` and `shared_count` of failing
-  ids, and `repo_check`. It refuses two runs from different repositories (compared by remote
-  URL when both recorded one, else by path); when either run recorded no repository,
-  `repo_check` is `unverified`.
+  ids, and `repo_check`. It refuses two runs proven to be from different repositories: remote
+  URLs are compared when both runs recorded one, otherwise resolved paths. When only one run
+  recorded a remote and the paths differ, or either run recorded no repository, `repo_check`
+  is `unverified` instead of a refusal.
 - An `unrunnable` run has no results, so `--failing-ids` and `--diff` refuse it (exit `78`)
   rather than report an empty set.
 
