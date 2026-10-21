@@ -28,6 +28,8 @@ deny:                           # optional; released-tool only
   hosts: [host.example.test]    # a literal; a path prefix such as /srv/data/ also works
   users: [some-username]
 tool_packages: [some_tool]      # optional; internal only
+test:                           # optional; the commands `clagentic-loadout test run` uses
+  full: [python3, -m, pytest, "--junitxml={junit}"]
 ```
 
 A complete example, kept valid by the test suite, is
@@ -52,6 +54,10 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
   import is checked mechanically. The list is added to the rule statements the reviewer reads
   (and that `loadout-profile check` prints), so the reviewer judges whether code in an
   `internal` path reaches into their internal modules rather than the documented interface.
+
+- **`test`** declares the argv `clagentic-loadout test run` uses for `full`, `impacted` and
+  `files`, and a default `base`. Review ignores it. Its shape and use are in
+  [repo-test.md](repo-test.md).
 
 ## What review does with it
 

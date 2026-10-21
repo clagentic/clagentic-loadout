@@ -28,6 +28,8 @@ with no internal path)::
       users: [some-username]
     tool_packages: [some_tool]      # optional; internal only: importing a
                                     # submodule of one of these is flagged
+    test: {full: [...]}             # optional; the commands ``clagentic-loadout
+                                    # test run`` uses (see repo_test.spec)
 
 The denial lists named here ADD to the deployment's own list (see
 review.profile_deny); nothing in a profile can remove an entry from it.
@@ -41,6 +43,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from clagentic_loadout.repo_test.spec import DeclaredTests, TestBlockError, parse_test_block
 from clagentic_loadout.review.path_glob import path_matches
 
 CLASS_RELEASED_TOOL = "released-tool"
@@ -131,6 +134,7 @@ class RepoProfile:
     paths: tuple[tuple[str, str], ...] = ()
     deny: ProfileDeny = field(default_factory=ProfileDeny)
     tool_packages: tuple[str, ...] = ()
+    test: DeclaredTests | None = None
 
     def class_for(self, path: str) -> str:
         """The class that governs *path*."""
@@ -222,7 +226,7 @@ def parse_profile_document(doc: Any) -> RepoProfile:
     half-applied."""
     if not isinstance(doc, dict):
         raise ProfileFormatError("the profile must be a mapping with a class")
-    allowed = ("class", "paths", "deny", "tool_packages")
+    allowed = ("class", "paths", "deny", "tool_packages", "test")
     unknown = sorted(str(k) for k in doc if k not in allowed)
     if unknown:
         raise ProfileFormatError(f"unknown or misplaced key: {', '.join(unknown)}")
@@ -232,6 +236,10 @@ def parse_profile_document(doc: Any) -> RepoProfile:
     paths = _path_overrides(doc.get("paths"))
     deny = parse_deny(doc.get("deny"))
     tool_packages = _tool_packages(doc.get("tool_packages"))
+    try:
+        declared_tests = parse_test_block(doc.get("test"))
+    except TestBlockError as exc:
+        raise ProfileFormatError(str(exc)) from exc
     # A field only means something where its class is in effect: the top-level
     # class or a path override. Anywhere else it would be silently ignored.
     classes_in_effect = {repo_class, *(value for _, value in paths)}
@@ -243,7 +251,13 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         raise ProfileFormatError(
             f"tool_packages is for {CLASS_INTERNAL} paths only, and no path of this profile has that class"
         )
-    return RepoProfile(repo_class=repo_class, paths=paths, deny=deny, tool_packages=tool_packages)
+    return RepoProfile(
+        repo_class=repo_class,
+        paths=paths,
+        deny=deny,
+        tool_packages=tool_packages,
+        test=declared_tests if declared_tests.declared_keys() else None,
+    )
 
 
 @dataclass(frozen=True)

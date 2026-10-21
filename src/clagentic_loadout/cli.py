@@ -134,6 +134,12 @@ def _doctor_main(argv: list[str]) -> int:
     return doctor_main(argv)
 
 
+def _test_main(argv: list[str]) -> int:
+    from clagentic_loadout.repo_test.verb import main as test_main
+
+    return test_main(argv)
+
+
 #: verb name -> (one-line summary, entry-point callable taking the verb's
 #: own argv and returning its process exit code). A verb with a
 #: single-word name (push, merge) dispatches directly; a verb with a
@@ -166,6 +172,10 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "doctor": (
         "Run the deployment-conformance check suite (read-only).",
         _doctor_main,
+    ),
+    "test": (
+        "Run a repo's declared tests (run); read results by run id (report).",
+        _test_main,
     ),
 }
 
