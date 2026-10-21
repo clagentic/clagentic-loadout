@@ -101,6 +101,20 @@
 #                                           # nothing is written outside those
 #                                           # dirs and TMPDIR. See "Git-host
 #                                           # config seeding" below.
+#   scripts/install.sh --register-test-report-permission
+#                                           # OPT-IN: add exactly one allow rule,
+#                                           # Bash(clagentic-loadout test report *),
+#                                           # to a Claude Code settings file so
+#                                           # the read-only `test report` verb
+#                                           # runs without a prompt. Off by
+#                                           # default. See "Permission rule"
+#                                           # below.
+#   scripts/install.sh --claude-settings-file <file>
+#                                           # settings file for the step above
+#                                           # (default: settings.json in
+#                                           # $CLAUDE_CONFIG_DIR, else
+#                                           # ~/.claude; override via
+#                                           # CLAGENTIC_LOADOUT_CLAUDE_SETTINGS)
 #   scripts/install.sh --dry-run           # print the resolved plan, install
 #                                           # nothing
 #   scripts/install.sh --help
@@ -124,8 +138,20 @@
 #   CLAGENTIC_LOADOUT_SKILLS_DIR      same as --skills-dir
 #   CLAGENTIC_LOADOUT_NO_SEED_CONFIG=1
 #                                     same as --no-seed-config
+#   CLAGENTIC_LOADOUT_REGISTER_TEST_REPORT_PERMISSION=1
+#                                     same as --register-test-report-permission
+#   CLAGENTIC_LOADOUT_CLAUDE_SETTINGS same as --claude-settings-file
 #   PIP_EDITABLE=1                   same as --editable, for the pip/venv
 #                                     fallback paths
+#
+# Permission rule (opt-in):
+#   `clagentic-loadout test report` only reads recorded test runs by run id, so
+#   it is safe to allow unprompted. With --register-test-report-permission this
+#   installer runs `clagentic-loadout test register-permission`, which adds the
+#   single rule Bash(clagentic-loadout test report *) to permissions.allow in the
+#   settings file and changes nothing else (the file is re-written as JSON with
+#   two-space indent). It is idempotent, refuses a settings file that is not a
+#   JSON object or is a symlink, and never runs unless asked for.
 #
 # Skill install:
 #   This installer also copies this repo's global, LLM-invocable skills
@@ -211,6 +237,11 @@ SKILLS_DIR=""
 # DATA_DIR. Overridable via --no-seed-config or
 # CLAGENTIC_LOADOUT_NO_SEED_CONFIG=1; default 0 leaves behavior unchanged.
 NO_SEED_CONFIG=0
+# 1 runs `clagentic-loadout test register-permission` after the install. Opt-in
+# only; see "Permission rule" in the header.
+REGISTER_TEST_REPORT_PERMISSION=0
+# Settings file the opt-in step updates. Empty means the verb's own default.
+CLAUDE_SETTINGS_FILE=""
 
 _usage() {
     cat <<'EOF'
@@ -255,9 +286,19 @@ Options:
                         With --installer venv and --data-dir/--bin-dir/
                         --skills-dir, nothing is written outside those dirs
                         and TMPDIR.
+  --register-test-report-permission
+                        Opt-in: add the single allow rule
+                        Bash(clagentic-loadout test report *) to a Claude Code
+                        settings file (override via
+                        CLAGENTIC_LOADOUT_REGISTER_TEST_REPORT_PERMISSION=1).
+                        Nothing else in that file is changed. Off by default.
+  --claude-settings-file FILE
+                        Settings file for the step above (default:
+                        settings.json in $CLAUDE_CONFIG_DIR, else ~/.claude;
+                        override via CLAGENTIC_LOADOUT_CLAUDE_SETTINGS).
   --dry-run              Print the resolved installer + command, install
                         nothing.
-  -h, --help             Show this help and exit.
+  -h, --help            Show this help and exit.
   --version              Show this script's own version marker and exit.
 EOF
 }
@@ -307,6 +348,15 @@ while [ "$#" -gt 0 ]; do
             NO_SEED_CONFIG=1
             shift
             ;;
+        --register-test-report-permission)
+            REGISTER_TEST_REPORT_PERMISSION=1
+            shift
+            ;;
+        --claude-settings-file)
+            [ "$#" -ge 2 ] || { echo "$PROG: --claude-settings-file requires a FILE argument" >&2; exit "$EXIT_USAGE"; }
+            CLAUDE_SETTINGS_FILE="$2"
+            shift 2
+            ;;
         --dry-run)
             DRY_RUN=1
             shift
@@ -349,6 +399,14 @@ fi
 if [ "$NO_SEED_CONFIG" -eq 0 ] && [ -n "${CLAGENTIC_LOADOUT_NO_SEED_CONFIG:-}" ] \
     && [ "${CLAGENTIC_LOADOUT_NO_SEED_CONFIG:-0}" != "0" ]; then
     NO_SEED_CONFIG=1
+fi
+if [ "$REGISTER_TEST_REPORT_PERMISSION" -eq 0 ] \
+    && [ -n "${CLAGENTIC_LOADOUT_REGISTER_TEST_REPORT_PERMISSION:-}" ] \
+    && [ "${CLAGENTIC_LOADOUT_REGISTER_TEST_REPORT_PERMISSION:-0}" != "0" ]; then
+    REGISTER_TEST_REPORT_PERMISSION=1
+fi
+if [ -z "$CLAUDE_SETTINGS_FILE" ] && [ -n "${CLAGENTIC_LOADOUT_CLAUDE_SETTINGS:-}" ]; then
+    CLAUDE_SETTINGS_FILE="$CLAGENTIC_LOADOUT_CLAUDE_SETTINGS"
 fi
 
 # Trim leading/trailing whitespace from path-shaped values BEFORE the
@@ -845,6 +903,10 @@ if [ "$INSTALLER" = "venv" ]; then
 fi
 echo "$PROG: command: $*" >&2
 
+if [ "$REGISTER_TEST_REPORT_PERMISSION" -eq 1 ]; then
+    echo "$PROG: would register the test-report allow rule in ${CLAUDE_SETTINGS_FILE:-<default settings file>} after installing." >&2
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "$PROG: --dry-run -- not executing." >&2
     exit "$EXIT_OK"
@@ -1072,6 +1134,42 @@ _install_skills() {
 }
 
 _install_skills
+
+# ---------------------------------------------------------------------------
+# Optional permission rule (opt-in; see "Permission rule" in the header).
+# Calls the INSTALLED verb, so the rule is written by the same code a person
+# gets from `clagentic-loadout test register-permission`. A failure here is
+# fatal because the caller asked for the rule and would otherwise believe it
+# was in place.
+# ---------------------------------------------------------------------------
+
+_register_test_report_permission() {
+    if [ "$INSTALLER" = "venv" ]; then
+        _loadout_bin="$VENV_DIR/bin/clagentic-loadout"
+    else
+        _loadout_bin="$DEFAULT_BIN_DIR/clagentic-loadout"
+    fi
+    if [ ! -x "$_loadout_bin" ]; then
+        _loadout_bin="$(command -v clagentic-loadout 2>/dev/null || true)"
+    fi
+    if [ -z "$_loadout_bin" ]; then
+        echo "$PROG: cannot register the test-report permission: no clagentic-loadout executable found in $DEFAULT_BIN_DIR or on PATH." >&2
+        exit "$EXIT_INSTALL_FAILED"
+    fi
+    if [ -n "$CLAUDE_SETTINGS_FILE" ]; then
+        set -- --settings-file "$CLAUDE_SETTINGS_FILE"
+    else
+        set --
+    fi
+    if ! "$_loadout_bin" test register-permission "$@" >&2; then
+        echo "$PROG: registering the test-report permission failed (settings file: ${CLAUDE_SETTINGS_FILE:-<default>})." >&2
+        exit "$EXIT_INSTALL_FAILED"
+    fi
+}
+
+if [ "$REGISTER_TEST_REPORT_PERMISSION" -eq 1 ]; then
+    _register_test_report_permission
+fi
 
 # ---------------------------------------------------------------------------
 # Git-host config seeding: write ~/.config/clagentic/loadout/
