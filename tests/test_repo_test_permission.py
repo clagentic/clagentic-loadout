@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -196,3 +197,75 @@ def test_installer_registration_is_idempotent(tmp_path: Path, shared_venv_data_d
 
     assert settings.read_bytes() == first
     assert json.loads(first)["permissions"]["allow"] == [REPORT_RULE]
+
+
+def _interpreter_of(script: Path) -> str:
+    """Run the installer's own interpreter-discovery function, extracted verbatim."""
+    source = (CHECKOUT / "scripts" / "install.sh").read_text().splitlines()
+    start = source.index("_console_script_interpreter() {")
+    end = source.index("}", start)
+    body = "\n".join(source[start : end + 1])
+    result = subprocess.run(
+        ["sh", "-c", f'{body}\n_console_script_interpreter "$1"', "sh", str(script)],
+        capture_output=True, text=True, check=True,
+    )
+    return result.stdout.rstrip("\n")
+
+
+def _write_script(path: Path, *lines: str) -> Path:
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+@pytest.mark.parametrize(
+    "python",
+    [
+        "/opt/tools/venv/bin/python",
+        "/home/u/.local/share/pipx/venvs/clagentic-loadout/bin/python",
+        "/home/u/.local/share/uv/tools/clagentic-loadout/bin/python",
+        "/opt/my tools/venv/bin/python",
+    ],
+)
+def test_a_shebang_yields_the_whole_interpreter_path(tmp_path: Path, python: str) -> None:
+    script = _write_script(tmp_path / "tool", f"#!{python}", "import sys")
+
+    assert _interpreter_of(script) == python
+
+
+@pytest.mark.parametrize(
+    ("exec_line", "expected"),
+    [
+        ("'''exec' /opt/venv/bin/python \"$0\" \"$@\"", "/opt/venv/bin/python"),
+        ("'''exec' \"/opt/my tools/venv/bin/python\" \"$0\" \"$@\"", "/opt/my tools/venv/bin/python"),
+        ("'''exec' '/opt/my tools/venv/bin/python' \"$0\" \"$@\"", "/opt/my tools/venv/bin/python"),
+        (
+            "'''exec' \"/home/u/.local/share/pipx/venvs/x y/bin/python\" \"$0\" \"$@\"",
+            "/home/u/.local/share/pipx/venvs/x y/bin/python",
+        ),
+        (
+            "'''exec' \"/home/u/.local/share/uv/tools/x y/bin/python\" \"$0\" \"$@\"",
+            "/home/u/.local/share/uv/tools/x y/bin/python",
+        ),
+    ],
+)
+def test_a_pip_wrapper_yields_the_whole_interpreter_path(tmp_path: Path, exec_line: str, expected: str) -> None:
+    script = _write_script(tmp_path / "tool", "#!/bin/sh", exec_line, "' '''")
+
+    assert _interpreter_of(script) == expected
+
+
+def test_a_wrapper_without_an_exec_line_yields_nothing_so_the_installer_fails_closed(tmp_path: Path) -> None:
+    script = _write_script(tmp_path / "tool", "#!/bin/sh", "echo hello")
+
+    assert _interpreter_of(script) == ""
+
+
+def test_installer_registers_the_rule_when_the_install_path_contains_a_space(
+    tmp_path: Path,
+) -> None:
+    settings = tmp_path / "settings.json"
+    spaced = tmp_path / "data dir"
+
+    _install(tmp_path, spaced, "--register-test-report-permission", "--claude-settings-file", str(settings))
+
+    assert json.loads(settings.read_text()) == {"permissions": {"allow": [REPORT_RULE]}}

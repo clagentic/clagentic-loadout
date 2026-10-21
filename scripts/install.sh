@@ -1144,6 +1144,25 @@ _install_skills
 # was in place.
 # ---------------------------------------------------------------------------
 
+# Print the interpreter path a console script runs under. pip writes a
+# `#!/bin/sh` wrapper whose `'''exec' <python> "$0" "$@"` line carries the
+# interpreter, quoted when the path contains spaces, when the path is long; read
+# that form when the shebang names a shell. Prints nothing when none is found.
+_console_script_interpreter() {
+    _csi_first="$(sed -n '1s/^#![[:space:]]*//p' "$1")"
+    case "$_csi_first" in
+        */sh | */bash)
+            _csi_rest="$(sed -n "/^'''exec' /{s///;p;q;}" "$1")"
+            case "$_csi_rest" in
+                \"*) _csi_rest="${_csi_rest#\"}"; printf '%s\n' "${_csi_rest%%\"*}" ;;
+                \'*) _csi_rest="${_csi_rest#\'}"; printf '%s\n' "${_csi_rest%%\'*}" ;;
+                *) printf '%s\n' "${_csi_rest%% *}" ;;
+            esac
+            ;;
+        *) printf '%s\n' "$_csi_first" ;;
+    esac
+}
+
 _register_test_report_permission() {
     if [ "$INSTALLER" = "venv" ]; then
         _loadout_bin="$VENV_DIR/bin/clagentic-loadout"
@@ -1159,15 +1178,7 @@ _register_test_report_permission() {
     fi
     # The helper is a module entry point, not a clagentic-loadout subcommand, so
     # run it with the interpreter the installed console script itself uses.
-    # pip writes a `#!/bin/sh` wrapper whose second line is
-    # `'''exec' <python> "$0" "$@"` when the interpreter path is long, so read that
-    # form when the shebang names a shell.
-    _loadout_python="$(sed -n '1s/^#![[:space:]]*//p' "$_loadout_bin")"
-    case "$_loadout_python" in
-        */sh | */bash)
-            _loadout_python="$(sed -n "s/^'''exec' \([^ ]*\) .*/\1/p" "$_loadout_bin")"
-            ;;
-    esac
+    _loadout_python="$(_console_script_interpreter "$_loadout_bin")"
     if [ -z "$_loadout_python" ] || [ ! -x "$_loadout_python" ]; then
         echo "$PROG: cannot register the test-report permission: no usable interpreter in the shebang of $_loadout_bin." >&2
         exit "$EXIT_INSTALL_FAILED"
