@@ -19,6 +19,7 @@ from clagentic_loadout.repo_test.permission import (
     default_settings_path,
     register_report_permission,
 )
+from clagentic_loadout.repo_test.permission import main as helper_main
 from clagentic_loadout.repo_test.verb import main
 
 
@@ -103,10 +104,12 @@ def test_the_default_path_follows_the_override_then_the_config_dir_then_home(tmp
     assert default_settings_path({}) == Path.home() / ".claude" / "settings.json"
 
 
-def test_the_verb_registers_and_reports_the_result(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_the_installer_helper_registers_and_reports_the_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     path = tmp_path / "settings.json"
 
-    code = main(["register-permission", "--settings-file", str(path)])
+    code = helper_main(["--settings-file", str(path)])
 
     assert code == exits.EXIT_OK
     assert json.loads(capsys.readouterr().out) == {
@@ -116,14 +119,34 @@ def test_the_verb_registers_and_reports_the_result(tmp_path: Path, capsys: pytes
     }
 
 
-def test_the_verb_exits_with_its_own_code_on_an_unusable_file(
+def test_the_installer_helper_exits_with_its_own_code_on_an_unusable_file(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     path = tmp_path / "settings.json"
     path.write_text("{")
 
-    assert main(["register-permission", "--settings-file", str(path)]) == exits.EXIT_SETTINGS
+    assert helper_main(["--settings-file", str(path)]) == exits.EXIT_SETTINGS
     assert "settings.json" in capsys.readouterr().err
+
+
+def test_register_permission_is_not_a_subcommand(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    path = tmp_path / "settings.json"
+
+    code = main(["register-permission", "--settings-file", str(path)])
+
+    assert code == exits.EXIT_USAGE
+    assert not path.exists()
+    assert "register-permission" in capsys.readouterr().err
+
+
+def test_the_help_lists_only_run_and_report(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--help"]) == exits.EXIT_OK
+
+    help_text = capsys.readouterr().out
+    assert "register-permission" not in help_text
+    assert REPORT_RULE not in help_text
+    assert "  run " in help_text
+    assert "  report " in help_text
 
 
 def _install(tmp_path: Path, data_dir: Path, *extra: str) -> tuple[int, Path]:

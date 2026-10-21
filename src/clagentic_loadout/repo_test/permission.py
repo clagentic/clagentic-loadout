@@ -4,8 +4,10 @@
 an agent session can be allowed to run it without a prompt. This module adds
 exactly one rule, ``REPORT_RULE``, to the ``permissions.allow`` list of a Claude
 Code settings file, and nothing else. It is opt-in: the installer calls it only
-when asked (``--register-test-report-permission``), and a person can run it by
-hand with ``clagentic-loadout test register-permission``.
+when asked (``--register-test-report-permission``). It is deliberately not a
+``clagentic-loadout`` subcommand: the installer reaches it through
+``python -m clagentic_loadout.repo_test.permission``, an internal helper that
+no binary or router advertises.
 
 The settings file is parsed as JSON and written back whole, so its other
 contents are preserved but its formatting is normalised to two-space indent.
@@ -15,11 +17,14 @@ unexpected type, is refused and left untouched, as is a symlink.
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 
+from clagentic_loadout.repo_test import exits
 from clagentic_loadout.review.atomic_io import write_bytes_atomic
 
 REPORT_RULE = "Bash(clagentic-loadout test report *)"
@@ -82,6 +87,26 @@ def register_report_permission(settings_path: Path, *, dry_run: bool = False) ->
     return RESULT_ADDED
 
 
+def main(argv: list[str] | None = None) -> int:
+    """Installer entry point. Prints the result as JSON; exits ``EXIT_SETTINGS``
+    when the settings file cannot be updated safely."""
+    parser = argparse.ArgumentParser(
+        prog="python -m clagentic_loadout.repo_test.permission",
+        description=f"Installer helper: add the one rule {REPORT_RULE} to a settings file.",
+    )
+    parser.add_argument("--settings-file", default=None, help="Settings file to update.")
+    parser.add_argument("--dry-run", action="store_true", help="Change nothing.")
+    args = parser.parse_args(argv)
+    path = Path(args.settings_file) if args.settings_file else default_settings_path()
+    try:
+        result = register_report_permission(path, dry_run=args.dry_run)
+    except SettingsError as exc:
+        print(f"settings error: {exc}", file=sys.stderr)
+        return exits.EXIT_SETTINGS
+    print(json.dumps({"result": result, "rule": REPORT_RULE, "settings_file": str(path)}, sort_keys=True))
+    return exits.EXIT_OK
+
+
 __all__ = [
     "CONFIG_DIR_ENV_VAR",
     "REPORT_RULE",
@@ -91,5 +116,10 @@ __all__ = [
     "SETTINGS_ENV_VAR",
     "SettingsError",
     "default_settings_path",
+    "main",
     "register_report_permission",
 ]
+
+
+if __name__ == "__main__":
+    sys.exit(main())

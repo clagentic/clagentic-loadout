@@ -15,7 +15,8 @@ in the run and never returned, so none of these can be mistaken for it.
   77  report: no run matches --sha (names what exists), or the prefix is ambiguous
   78  report: refused (--diff across repositories, or an unrunnable run, which
       has no results to list or compare)
-  79  register-permission: the settings file could not be read or written
+  79  installer helper (repo_test.permission): the settings file could not be read
+      or written; not a `clagentic-loadout test` exit
 """
 
 EXIT_OK = 0

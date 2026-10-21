@@ -147,7 +147,8 @@
 # Permission rule (opt-in):
 #   `clagentic-loadout test report` only reads recorded test runs by run id, so
 #   it is safe to allow unprompted. With --register-test-report-permission this
-#   installer runs `clagentic-loadout test register-permission`, which adds the
+#   installer runs its internal helper (python -m
+#   clagentic_loadout.repo_test.permission; not a clagentic-loadout subcommand), which adds the
 #   single rule Bash(clagentic-loadout test report *) to permissions.allow in the
 #   settings file and changes nothing else (the file is re-written as JSON with
 #   two-space indent). It is idempotent, refuses a settings file that is not a
@@ -237,7 +238,7 @@ SKILLS_DIR=""
 # DATA_DIR. Overridable via --no-seed-config or
 # CLAGENTIC_LOADOUT_NO_SEED_CONFIG=1; default 0 leaves behavior unchanged.
 NO_SEED_CONFIG=0
-# 1 runs `clagentic-loadout test register-permission` after the install. Opt-in
+# 1 runs the permission-rule helper after the install. Opt-in
 # only; see "Permission rule" in the header.
 REGISTER_TEST_REPORT_PERMISSION=0
 # Settings file the opt-in step updates. Empty means the verb's own default.
@@ -1137,8 +1138,8 @@ _install_skills
 
 # ---------------------------------------------------------------------------
 # Optional permission rule (opt-in; see "Permission rule" in the header).
-# Calls the INSTALLED verb, so the rule is written by the same code a person
-# gets from `clagentic-loadout test register-permission`. A failure here is
+# Calls the installer-internal helper module in the installed environment; no
+# clagentic-loadout subcommand writes the rule. A failure here is
 # fatal because the caller asked for the rule and would otherwise believe it
 # was in place.
 # ---------------------------------------------------------------------------
@@ -1156,12 +1157,27 @@ _register_test_report_permission() {
         echo "$PROG: cannot register the test-report permission: no clagentic-loadout executable found in $DEFAULT_BIN_DIR or on PATH." >&2
         exit "$EXIT_INSTALL_FAILED"
     fi
+    # The helper is a module entry point, not a clagentic-loadout subcommand, so
+    # run it with the interpreter the installed console script itself uses.
+    # pip writes a `#!/bin/sh` wrapper whose second line is
+    # `'''exec' <python> "$0" "$@"` when the interpreter path is long, so read that
+    # form when the shebang names a shell.
+    _loadout_python="$(sed -n '1s/^#![[:space:]]*//p' "$_loadout_bin")"
+    case "$_loadout_python" in
+        */sh | */bash)
+            _loadout_python="$(sed -n "s/^'''exec' \([^ ]*\) .*/\1/p" "$_loadout_bin")"
+            ;;
+    esac
+    if [ -z "$_loadout_python" ] || [ ! -x "$_loadout_python" ]; then
+        echo "$PROG: cannot register the test-report permission: no usable interpreter in the shebang of $_loadout_bin." >&2
+        exit "$EXIT_INSTALL_FAILED"
+    fi
     if [ -n "$CLAUDE_SETTINGS_FILE" ]; then
         set -- --settings-file "$CLAUDE_SETTINGS_FILE"
     else
         set --
     fi
-    if ! "$_loadout_bin" test register-permission "$@" >&2; then
+    if ! "$_loadout_python" -m clagentic_loadout.repo_test.permission "$@" >&2; then
         echo "$PROG: registering the test-report permission failed (settings file: ${CLAUDE_SETTINGS_FILE:-<default>})." >&2
         exit "$EXIT_INSTALL_FAILED"
     fi

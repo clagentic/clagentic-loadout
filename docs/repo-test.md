@@ -15,7 +15,6 @@ clagentic-loadout test run full|impacted [--repo-root DIR] [--base REV] [--timeo
 clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout SECONDS]
 clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S]
                               [--summary | --failing-ids | --diff BASE_RUN_ID]
-clagentic-loadout test register-permission [--settings-file FILE] [--dry-run]
 ```
 
 ## Declaring the commands
@@ -134,14 +133,17 @@ add a single allow rule for it to a Claude Code settings file. It is **off by de
 
 ```
 scripts/install.sh --register-test-report-permission [--claude-settings-file FILE]
-clagentic-loadout test register-permission [--settings-file FILE] [--dry-run]
 ```
+
+The installer is the only path that writes the rule: there is no `clagentic-loadout` verb or
+subcommand for it. The installer calls an internal helper module in the installed environment
+(`python -m clagentic_loadout.repo_test.permission`); it is not part of the interface.
 
 The rule is exactly `Bash(clagentic-loadout test report *)`, added to `permissions.allow`.
 Nothing else is changed: no other rule, no other key. The file is parsed as JSON and written
 back with two-space indent, other contents preserved. Running it again changes nothing. A file
 that is not a JSON object, whose `permissions` or `allow` has the wrong type, or that is a
-symlink, is refused and left untouched (exit `79`).
+symlink, is refused and left untouched, and the installer then fails.
 
 The default settings file is `settings.json` in `$CLAUDE_CONFIG_DIR`, else `~/.claude`;
-`CLAGENTIC_LOADOUT_CLAUDE_SETTINGS` or `--settings-file` overrides it.
+`CLAGENTIC_LOADOUT_CLAUDE_SETTINGS` or `--claude-settings-file` overrides it.

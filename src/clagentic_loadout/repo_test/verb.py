@@ -5,7 +5,6 @@ and read the results by run id.
   clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout S]
   clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S]
                                 [--summary | --failing-ids | --diff BASE_RUN_ID]
-  clagentic-loadout test register-permission [--settings-file FILE] [--dry-run]
 
 The exit codes are in ``repo_test.exits``; a test command's own exit code is
 recorded in the run and never returned. Both ``run`` and ``report`` print JSON
@@ -23,16 +22,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from pathlib import Path
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.repo_test import exits, report_cmd, store
-from clagentic_loadout.repo_test.permission import (
-    REPORT_RULE,
-    SettingsError,
-    default_settings_path,
-    register_report_permission,
-)
 from clagentic_loadout.repo_test.report_cmd import LATEST, ReportRefused
 from clagentic_loadout.repo_test.run_cmd import RunRefused, execute_run
 from clagentic_loadout.repo_test.spec import MODES
@@ -44,7 +36,7 @@ _EXIT_CODES_TEXT = (
     "declare the command (or base), 73 command could not run or left no JUnit report, "
     "74 run could not be recorded, 75 no reports root or no matching run, 76 bad or unknown "
     "run id, 77 no run for --sha, 78 report refused (different repositories, or a run "
-    "without results), 79 settings file unusable."
+    "without results)."
 )
 
 _TOP_HELP = f"""{_PROG} -- run the tests a repository declares, and read the results by run id.
@@ -53,14 +45,11 @@ Usage: {_PROG} run full|impacted [--repo-root DIR] [--base REV] [--timeout SECON
        {_PROG} run files PATH... [--repo-root DIR] [--timeout SECONDS]
        {_PROG} report [RUN_ID|latest] [--repo R] [--sha S]
                                     [--summary | --failing-ids | --diff BASE_RUN_ID]
-       {_PROG} register-permission [--settings-file FILE] [--dry-run]
        {_PROG} --help | --version
 
 Commands:
-  run                  Run the profile's declared tests and record the run.
-  report               Read a recorded run by id (read-only).
-  register-permission  Add the one allow rule {REPORT_RULE}
-                       to a Claude Code settings file (opt-in).
+  run     Run the profile's declared tests and record the run.
+  report  Read a recorded run by id (read-only).
 
 Run `{_PROG} <command> --help` for a command's own arguments.
 {_EXIT_CODES_TEXT}"""
@@ -141,24 +130,6 @@ def _report_parser() -> argparse.ArgumentParser:
     return report
 
 
-def _permission_parser() -> argparse.ArgumentParser:
-    allow = _new_parser(
-        "register-permission",
-        f"Add exactly one rule, {REPORT_RULE}, to permissions.allow in a Claude Code settings "
-        "file, so `test report` runs without a prompt. Nothing else is changed.",
-    )
-    allow.add_argument(
-        "--settings-file",
-        default=None,
-        help="Settings file to update (default: CLAGENTIC_LOADOUT_CLAUDE_SETTINGS, else "
-        "settings.json in the Claude config directory).",
-    )
-    allow.add_argument(
-        "--dry-run", action="store_true", help="Say what would change and change nothing."
-    )
-    return allow
-
-
 def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -198,17 +169,6 @@ def _report(args: argparse.Namespace) -> int:
     return exits.EXIT_OK
 
 
-def _register_permission(args: argparse.Namespace) -> int:
-    path = Path(args.settings_file) if args.settings_file else default_settings_path()
-    try:
-        result = register_report_permission(path, dry_run=args.dry_run)
-    except SettingsError as exc:
-        print(f"{_PROG}: {exc}", file=sys.stderr)
-        return exits.EXIT_SETTINGS
-    _print_json({"result": result, "rule": REPORT_RULE, "settings_file": str(path)})
-    return exits.EXIT_OK
-
-
 def _parse(parser: argparse.ArgumentParser, argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     """Parse *argv* with options and positionals in any order. Tokens after a
     literal ``--`` are returned separately, untouched, as positionals."""
@@ -231,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{_PROG} {get_version()}")
         return exits.EXIT_OK
     command, rest = argv[0], argv[1:]
-    builders = {"run": _run_parser, "report": _report_parser, "register-permission": _permission_parser}
+    builders = {"run": _run_parser, "report": _report_parser}
     if command not in builders:
         print(
             f"{_PROG}: unknown command {command!r}. Known commands: {', '.join(builders)}. "
@@ -254,9 +214,7 @@ def main(argv: list[str] | None = None) -> int:
         return exits.EXIT_OK if exc.code in (0, None) else exits.EXIT_USAGE
     if command == "run":
         return _run(args)
-    if command == "report":
-        return _report(args)
-    return _register_permission(args)
+    return _report(args)
 
 
 if __name__ == "__main__":
