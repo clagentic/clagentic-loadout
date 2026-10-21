@@ -217,7 +217,7 @@ class TestRequiredScanners:
         code, _ = _merge([_comment(1, _fence("clean", HEAD_B, state))], repo_path=self._config(tmp_path))
         assert code == verb.EXIT_OK
 
-    def test_a_clean_verdict_with_no_scanner_record_only_warns_when_none_are_required(
+    def test_a_clean_verdict_with_no_scanner_record_merges_silently_when_none_are_required(
         self, tmp_path, capsys
     ):
         _write_config(tmp_path, {"required_reviewer_roles": []})
@@ -225,7 +225,8 @@ class TestRequiredScanners:
             [_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys
         )
         assert code == verb.EXIT_OK
-        assert "records no scanner outcomes" in err
+        assert "scanner outcomes" not in err
+        assert "judgment alone" not in err
 
     def test_ignore_repo_gate_also_lifts_the_scanner_requirement(self, tmp_path, capsys):
         config = self._config(tmp_path)
