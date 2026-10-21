@@ -8,3 +8,7 @@ paths:
   # Deployment config that ships as disaster-recovery data and carries its own
   # cast identifiers by design.
   ".crew/**": {class: internal}
+# What `clagentic-loadout test run` executes; see docs/repo-test.md.
+test:
+  full: [python3, -m, pytest, "--junitxml={junit}"]
+  files: [python3, -m, pytest, "--junitxml={junit}"]
