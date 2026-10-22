@@ -8,10 +8,13 @@ never creates tags, releases or notes, runs no release logic, and has no wait
 loop.
 
 ```
-loadout-workflow-dispatch --caller <role> --repo <owner/repo> \
+loadout-workflow-dispatch --caller <role> \
     --workflow <file.yml> --ref <branch-or-tag> \
-    [--input KEY=VALUE ...] [--platform github] [--repo-path <dir>]
+    [--input KEY=VALUE ...] [--repo-path <dir>]
 ```
+
+There is no `--repo` and no `--platform`. The target is derived from the
+checkout (see [Target derivation](#target-derivation)).
 
 - It sends `POST /repos/{owner}/{repo}/actions/workflows/{file}/dispatches` with
   `{"ref": ..., "inputs": {...}}` (no `inputs` key when none are given). Inputs
@@ -21,9 +24,33 @@ loadout-workflow-dispatch --caller <role> --repo <owner/repo> \
   credential comes from the credential-provider seam
   ([credentials.md](credentials.md)), exactly like every other verb. The
   credential must carry the **`actions: write`** permission on the repo.
-- `--platform` is detected from the origin remote of `--repo-path` (default: the
-  current directory) when omitted. Only `github` is supported; any other
-  platform is refused with a message and nothing is sent.
+- Only GitHub is supported. An origin on any other host is refused with a
+  message saying so, and nothing is sent.
+
+## Target derivation
+
+The verb takes the git top-level that contains `--repo-path` (default: the
+current directory) and reads that tree's `origin` remote with
+`git remote get-url origin`. From the URL it takes the host, the owner and the
+repo name. It dispatches against exactly that owner and repo, mints the
+credential scoped to it, and reads the allow-list from that same top-level.
+
+- Accepted origin forms: `https://github.com/<owner>/<repo>[.git]`,
+  `ssh://git@github.com/<owner>/<repo>[.git]` and `git@github.com:<owner>/<repo>[.git]`.
+  The host must be exactly `github.com` (case-insensitive). A suffix
+  (`notgithub.com`), a subdomain (`api.github.com`), a lookalike prefix
+  (`github.com.example.com`), a `github.com@other-host` userinfo trick and an
+  explicit port are all refused.
+- Only the remote named `origin` is read. A branch's tracking remote, or a
+  `github.com` remote under another name, never substitutes for it.
+- The config is read from the top-level only. A config that exists only in a
+  directory above the checkout (a wrapper directory) is not used; the dispatch
+  is refused with exit 31.
+- Refused before any credential or network use, with the message ending
+  "Nothing was sent": no git tree (exit 1), no readable `origin` (exit 1), a URL
+  that cannot be parsed or does not name exactly one owner and repo (exit 1),
+  an origin on another host (exit 4, "GitHub only"), a config outside the
+  checkout (exit 31).
 
 ## The allow-list (the one policy check)
 
@@ -47,17 +74,16 @@ workflow_dispatch:
   never treated as an open one.
 - The check runs **before** any credential is minted and before any network
   call (the only earlier steps are the local `--caller` identity binding and the
-  repo binding below). A refused dispatch costs nothing.
+  target derivation above). A refused dispatch costs nothing.
 
-### The repo binding
+### What the allow-list protects
 
-The allow-list is read from `--repo-path`, but the dispatch targets `--repo`, so
-the two must name the same repo. Before the config is read, the verb reads the
-`origin` remote of `--repo-path` (HTTPS or SSH form, case-insensitive, host
-ignored) and requires its `owner/repo` to equal `--repo`. A mismatch, or a
-`--repo-path` that is not a git tree or has no parseable `origin`, is refused
-with exit 35 and nothing is minted or sent: an unverifiable tree is never
-trusted. One repo's config therefore cannot authorize a dispatch against another.
+The allow-list is deployment policy, as trusted as the checkout it is read from.
+It is a guard against dispatching an unlisted workflow or ref by mistake. It is
+not a defence against someone who can edit that checkout: anyone who can change
+the config, or the `origin` remote, in the tree the verb runs from can change
+what it permits and where it dispatches. The credential is a separate control:
+the credential provider scopes it to the derived repo, whatever the config says.
 
 ## Output
 
@@ -94,15 +120,14 @@ the run id reads it later.
 | Code | Meaning |
 |---|---|
 | 0 | Dispatch accepted |
-| 1 | Usage error (including an undetectable platform: pass `--platform github`) |
+| 1 | Usage error, or a target that cannot be derived (no git tree, no `origin`, unparseable URL) |
 | 2 | Credential resolution failed |
-| 4 | Platform not supported (anything but GitHub) |
+| 4 | The origin remote is not on github.com (GitHub only) |
 | 30 | Workflow or ref not listed in the repo config |
-| 31 | Repo config missing or malformed |
+| 31 | Repo config missing, malformed, or found only outside the checkout |
 | 32 | `--caller` does not match the attested invoking identity |
 | 33 | The host rejected the dispatch or could not be reached (401, 404, 422, other) |
 | 34 | HTTP 403: the credential lacks the `actions: write` permission |
-| 35 | `--repo-path`'s origin remote does not match `--repo`, or cannot be derived |
 
 Errors report the resolved repo, workflow and ref. A 422 usually means the
 workflow has no `workflow_dispatch` trigger, the ref does not exist, or an input

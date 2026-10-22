@@ -456,7 +456,6 @@ _MINIMAL_ARGV_BY_SCRIPT: dict[str, list[str]] = {
         "--repo-path", "/nonexistent-conformance-path",
     ],
     "loadout-workflow-dispatch": [
-        "--platform", "github", "--repo", "some-owner/some-repo",
         "--workflow", "build.yml", "--ref", "main",
         "--repo-path", "/nonexistent-conformance-path",
     ],

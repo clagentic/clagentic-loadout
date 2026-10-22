@@ -16,14 +16,21 @@ ORDER OF CHECKS (each refuses before the next runs, so a refusal costs no
 credential and no network call):
   1. Arguments parse; `--caller` is bound to the attested invoking identity
      (a local check, as in every caller-bound verb).
-  2. The target platform resolves; a non-GitHub platform is refused (the
-     endpoint is GitHub's).
-  3. `--repo-path`'s origin remote must name `--repo` (derivable and equal),
-     so the config read next belongs to the repo being dispatched against.
-  4. The workflow file AND the ref must both be listed in the repo's config
-     (`workflow_dispatch:`, see dispatch_config). The one policy check.
-  5. The credential is resolved through the credential-provider seam.
-  6. The dispatch.
+  2. The target is derived from the `origin` remote of the git top-level that
+     contains `--repo-path` (default: the current directory): host, owner and
+     repo name. The host must be exactly github.com (see origin_target). There
+     is no `--repo` or `--platform` argument to disagree with it.
+  3. The workflow file AND the ref must both be listed in the config of that
+     same top-level (`workflow_dispatch:`, see dispatch_config). The one
+     policy check. The config is read from the top-level only, never from a
+     wrapper directory above it.
+  4. The credential is resolved through the credential-provider seam, scoped
+     to the derived repo.
+  5. The dispatch.
+
+The allow-list is deployment policy, as trusted as the checkout it is read
+from: a guard against dispatching an unlisted workflow or ref by mistake, not a
+defence against anyone who can edit that checkout.
 
 Inputs are passed through as given; this verb does not interpret them.
 
@@ -31,13 +38,12 @@ Exit codes (this verb's own range; a child process's code is never reused):
     0   dispatch accepted
     1   usage error
     2   credential resolution failed
-    4   platform not supported (anything but GitHub)
+    4   the origin remote is not on github.com (GitHub only)
     30  workflow or ref not listed in the repo config
     31  repo config missing or malformed
     32  --caller does not match the attested invoking identity
     33  the host rejected or could not complete the dispatch
     34  the credential lacks the `actions: write` permission (HTTP 403)
-    35  --repo-path's origin remote does not match --repo, or cannot be derived
 """
 
 from __future__ import annotations
@@ -53,15 +59,7 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout._version import get_version
-from clagentic_loadout.merge.repo_path_consistency import check_repo_path_consistency
-from clagentic_loadout.platform_detect import (
-    PLATFORM_FORGEJO,
-    PLATFORM_GITHUB,
-    PlatformResolutionError,
-    resolve_platform,
-)
-from clagentic_loadout.push.errors import RemoteResolutionError
-from clagentic_loadout.push.git_coords import parse_owner_repo, read_remote_url_best_effort
+from clagentic_loadout.platform_detect import PLATFORM_GITHUB
 from clagentic_loadout.transport import github_client
 from clagentic_loadout.transport.attestation import (
     AttestationError,
@@ -88,7 +86,16 @@ from clagentic_loadout.workflow.dispatch_config import (
     is_valid_workflow_file,
     load_dispatch_allowlist,
 )
-from clagentic_loadout.repo_config import resolve_repo_config_path
+from clagentic_loadout.repo_config import (
+    DEFAULT_CONFIG_RELATIVE_PATH,
+    LEGACY_CONFIG_RELATIVE_PATH,
+    resolve_repo_config_path,
+    resolve_repo_config_root,
+)
+from clagentic_loadout.workflow.origin_target import (
+    OriginTargetError,
+    derive_github_target,
+)
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -99,7 +106,6 @@ EXIT_CONFIG_INVALID = 31
 EXIT_CALLER_INVOKER_MISMATCH = 32
 EXIT_DISPATCH_FAILED = 33
 EXIT_PERMISSION_DENIED = 34
-EXIT_REPO_MISMATCH = 35
 
 #: The permission a credential needs to dispatch a workflow; named in the 403
 #: message so the fix is obvious.
@@ -296,8 +302,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
+            "The target repo is the origin remote of the git top-level containing "
+            "--repo-path; it must be on github.com.\n\n"
             "Example:\n"
-            "  loadout-workflow-dispatch --caller some-role --repo some-owner/some-repo \\\n"
+            "  loadout-workflow-dispatch --caller some-role \\\n"
             "      --workflow release.yml --ref main --input channel=stable\n"
         ),
     )
@@ -314,7 +322,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "invoking identity or the call is refused before any I/O. "
         f"{_describe_omitted_caller(flag_name='--caller')}",
     )
-    parser.add_argument("--repo", required=True, help="owner/repo that owns the workflow.")
     parser.add_argument(
         "--workflow", required=True, help="Workflow file name, for example release.yml."
     )
@@ -328,30 +335,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="A workflow input, passed through as given (repeatable).",
     )
     parser.add_argument(
-        "--platform",
-        choices=(PLATFORM_GITHUB, PLATFORM_FORGEJO),
-        default=None,
-        help="Host platform. Detected from the origin remote of --repo-path when omitted. "
-        "Only github is supported.",
-    )
-    parser.add_argument(
         "--repo-path",
         default=None,
-        help="Directory holding the repo config (and the origin remote used for platform "
-        "detection). Default: the current directory.",
+        help="A directory inside the checkout to dispatch for. The target repo is its git "
+        "top-level's origin remote and the allow-list is read from that top-level. "
+        "Default: the current directory.",
     )
     return parser
-
-
-def _resolve_target_platform(args: argparse.Namespace, repo_path: Path) -> str:
-    try:
-        return resolve_platform(args.platform, read_remote_url_best_effort(repo_path))
-    except PlatformResolutionError as exc:
-        _fail(
-            f"cannot resolve the host platform for --repo-path {str(repo_path)!r}: {exc} "
-            f"Pass --platform github.",
-            EXIT_USAGE,
-        )
 
 
 def _run(
@@ -361,10 +351,6 @@ def _run(
     opener,
     identity_provider,
 ) -> int:
-    try:
-        owner, repo = parse_owner_repo(args.repo)
-    except RemoteResolutionError as exc:
-        _fail(str(exc), EXIT_USAGE)
     if not is_valid_workflow_file(args.workflow):
         _fail(
             f"--workflow {args.workflow!r} must be a workflow file name such as "
@@ -393,43 +379,38 @@ def _run(
     except (AttestationError, CallerBindingError) as exc:
         _fail(f"attested-identity binding FAILED -- {exc}", EXIT_CALLER_INVOKER_MISMATCH)
 
-    repo_path = Path(args.repo_path) if args.repo_path else Path.cwd()
-    platform = _resolve_target_platform(args, repo_path)
-    if platform != PLATFORM_GITHUB:
+    start = Path(args.repo_path) if args.repo_path else Path.cwd()
+    try:
+        target = derive_github_target(start)
+    except OriginTargetError as exc:
         _fail(
-            f"platform {platform!r} is not supported: workflow dispatch is a GitHub "
-            f"endpoint and this verb has no equivalent for {platform!r}. Nothing was sent.",
-            EXIT_UNSUPPORTED_PLATFORM,
+            f"{exc} Nothing was sent.",
+            EXIT_UNSUPPORTED_PLATFORM if exc.unsupported_host else EXIT_USAGE,
         )
+    owner, repo, top = target.owner, target.repo, target.top
+    platform = PLATFORM_GITHUB
 
-    # The allow-list is read from --repo-path but the dispatch targets --repo;
-    # without this binding one repo's config could authorize a dispatch against
-    # another. An unverifiable tree is refused, never treated as a pass.
-    consistency = check_repo_path_consistency(f"{owner}/{repo}", str(repo_path))
-    if not consistency.checked:
+    # The config resolver may hop to the wrapper directory above a checkout; a
+    # dispatch policy is read from the checkout itself only.
+    config_root = resolve_repo_config_root(
+        top, DEFAULT_CONFIG_RELATIVE_PATH, LEGACY_CONFIG_RELATIVE_PATH
+    )
+    if config_root != top:
         _fail(
-            f"cannot confirm that --repo-path {str(repo_path)!r} is a clone of "
-            f"{owner}/{repo}: {consistency.reason} The allow-list is only trusted from "
-            f"a tree whose origin remote names the --repo. Nothing was sent.",
-            EXIT_REPO_MISMATCH,
-        )
-    if not consistency.matches:
-        _fail(
-            f"--repo {owner}/{repo!s} does not match --repo-path {str(repo_path)!r}, whose "
-            f"origin remote resolves to {consistency.remote_owner_repo!r}. The allow-list "
-            f"in that tree cannot authorize a dispatch against {owner}/{repo}. "
+            f"the repo config for {owner}/{repo} was found at {str(config_root)!r}, outside "
+            f"the checkout {str(top)!r}; the allow-list is read from the checkout only. "
             f"Nothing was sent.",
-            EXIT_REPO_MISMATCH,
+            EXIT_CONFIG_INVALID,
         )
 
     # The one policy check, before any credential or network use.
     try:
-        entries = load_dispatch_allowlist(repo_path)
+        entries = load_dispatch_allowlist(top)
         check_dispatch_allowed(
             entries,
             workflow=args.workflow,
             ref=args.ref,
-            source=str(resolve_repo_config_path(repo_path, warn=False)),
+            source=str(resolve_repo_config_path(top, warn=False)),
         )
     except DispatchConfigError as exc:
         _fail(str(exc), EXIT_CONFIG_INVALID)

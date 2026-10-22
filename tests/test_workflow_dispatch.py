@@ -108,7 +108,7 @@ def _git_origin(path: Path, url: str) -> None:
 def _repo(
     tmp_path: Path,
     config: str | None = _CONFIG,
-    origin: str | None = f"https://git-host.example.com/{_REPO}.git",
+    origin: str | None = f"https://github.com/{_REPO}.git",
 ) -> Path:
     if origin is not None:
         _git_origin(tmp_path, origin)
@@ -121,8 +121,8 @@ def _repo(
 
 def _argv(repo_path: Path, *extra: str, workflow="build.yml", ref="main") -> list[str]:
     return [
-        "--caller", "role-a", "--repo", _REPO, "--workflow", workflow, "--ref", ref,
-        "--platform", "github", "--repo-path", str(repo_path), *extra,
+        "--caller", "role-a", "--workflow", workflow, "--ref", ref,
+        "--repo-path", str(repo_path), *extra,
     ]
 
 
@@ -277,44 +277,115 @@ def test_unlisted_or_bad_config_refuses_before_any_call(
     assert fragment in capsys.readouterr().err
 
 
-def test_repo_path_for_a_different_repo_is_refused_with_no_call(tmp_path, capsys):
-    # The tree's config lists the workflow and ref, but its origin is another repo.
-    repo = _repo(tmp_path, origin="https://git-host.example.com/other-owner/other-repo.git")
-    rc = _run(_argv(repo), host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
-    assert rc == dispatch_verb.EXIT_REPO_MISMATCH
-    err = capsys.readouterr().err
-    assert _REPO in err and "other-owner/other-repo" in err and "Nothing was sent" in err
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "git@github.com:Some-Owner/Some-Repo.git",
+        f"https://github.com/{_REPO}",
+        f"https://github.com/{_REPO}/",
+        f"ssh://git@github.com/{_REPO}.git",
+        f"https://GitHub.com/{_REPO}.git",
+    ],
+)
+def test_github_origin_forms_are_accepted_and_target_the_origin(tmp_path, origin):
+    host = _Host()
+    assert _run(_argv(_repo(tmp_path, origin=origin)), host=host) == 0
+    assert "/repos/some-owner/some-repo/actions/workflows/" in host.requests[0][1].lower()
+
+
+def test_post_url_owner_and_repo_come_from_origin_only(tmp_path):
+    host, tokens = _Host(), _Token()
+    repo = _repo(tmp_path, origin="https://github.com/origin-owner/origin-repo.git")
+    assert _run(_argv(repo), host=host, tokens=tokens) == 0
+    assert host.requests[0][1] == (
+        "https://api.github.com/repos/origin-owner/origin-repo/actions/workflows/build.yml/dispatches"
+    )
+    assert tokens.calls == [("role-a", "origin-owner/origin-repo")]
+
+
+def test_subdirectory_of_the_checkout_uses_the_top_level(tmp_path):
+    repo = _repo(tmp_path)
+    sub = repo / "pkg" / "inner"
+    sub.mkdir(parents=True)
+    host = _Host()
+    assert _run(_argv(sub), host=host) == 0
+    assert "/repos/some-owner/some-repo/" in host.requests[0][1]
 
 
 @pytest.mark.parametrize(
-    "origin", ["git@git-host.example.com:Some-Owner/Some-Repo.git", f"https://git-host.example.com/{_REPO}"]
+    "origin",
+    [
+        "https://git-host.example.com/some-owner/some-repo.git",
+        "https://github.com@git-host.example.com/some-owner/some-repo.git",
+        "https://notgithub.com/some-owner/some-repo.git",
+        "https://github.com.example.com/some-owner/some-repo.git",
+        "https://api.github.com/some-owner/some-repo.git",
+    ],
 )
-def test_matching_origin_forms_are_accepted(tmp_path, origin):
-    assert _run(_argv(_repo(tmp_path, origin=origin)), host=_Host()) == 0
+def test_origin_on_another_host_is_refused_with_no_call(tmp_path, capsys, origin):
+    repo = _repo(tmp_path, origin=origin)
+    rc = _run(_argv(repo), host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
+    assert rc == dispatch_verb.EXIT_UNSUPPORTED_PLATFORM
+    err = capsys.readouterr().err
+    assert "GitHub only" in err and "Nothing was sent" in err
 
 
-@pytest.mark.parametrize("origin", [None, "not-a-remote-url"])
+@pytest.mark.parametrize(
+    "origin",
+    [
+        None,
+        "not-a-remote-url",
+        "git@github.com@git-host.example.com:some-owner/some-repo.git",
+        "https://github.com/only-owner",
+        "https://github.com/a/b/c",
+        "https://github.com:8443/some-owner/some-repo.git",
+        "https://github.com/some-owner/../some-repo.git",
+        "file:///srv/some-owner/some-repo.git",
+    ],
+)
 def test_underivable_origin_is_refused_with_no_call(tmp_path, capsys, origin):
     repo = _repo(tmp_path, origin=origin)
     rc = _run(_argv(repo), host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
-    assert rc == dispatch_verb.EXIT_REPO_MISMATCH
-    assert "cannot confirm" in capsys.readouterr().err
-
-
-def test_forgejo_is_refused_with_no_call(tmp_path, capsys):
-    argv = _argv(_repo(tmp_path))
-    argv[argv.index("github")] = "forgejo"
-    rc = _run(argv, host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
-    assert rc == dispatch_verb.EXIT_UNSUPPORTED_PLATFORM
-    err = capsys.readouterr().err
-    assert "forgejo" in err and "not supported" in err and "Nothing was sent" in err
-
-
-def test_undetectable_platform_is_a_usage_error(tmp_path, capsys):
-    argv = [a for a in _argv(_repo(tmp_path, origin=None)) if a not in ("--platform", "github")]
-    rc = _run(argv, host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
     assert rc == dispatch_verb.EXIT_USAGE
-    assert "--platform github" in capsys.readouterr().err
+    assert "Nothing was sent" in capsys.readouterr().err
+
+
+def test_no_git_tree_is_refused_with_no_call(tmp_path, capsys):
+    rc = _run(_argv(tmp_path), host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
+    assert rc == dispatch_verb.EXIT_USAGE
+    assert "not inside a git working tree" in capsys.readouterr().err
+
+
+def test_tracking_remote_on_github_does_not_rescue_a_foreign_origin(tmp_path, capsys):
+    repo = _repo(tmp_path, origin="https://git-host.example.com/some-owner/some-repo.git")
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "upstream", f"https://github.com/{_REPO}.git"],
+        check=True,
+    )
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "work"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "branch.work.remote", "upstream"], check=True)
+    rc = _run(_argv(repo), host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
+    assert rc == dispatch_verb.EXIT_UNSUPPORTED_PLATFORM
+    assert "git-host.example.com" in capsys.readouterr().err
+
+
+def test_config_only_in_the_wrapper_parent_is_not_used(tmp_path, capsys):
+    wrapper_cfg = tmp_path / ".clagentic" / "loadout"
+    wrapper_cfg.mkdir(parents=True)
+    (wrapper_cfg / "config.yaml").write_text(_CONFIG, encoding="utf-8")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    _repo(checkout, config=None)
+    rc = _run(_argv(checkout), host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
+    assert rc == dispatch_verb.EXIT_CONFIG_INVALID
+    err = capsys.readouterr().err
+    assert "outside" in err and "Nothing was sent" in err
+
+
+def test_repo_and_platform_flags_no_longer_exist(tmp_path):
+    repo = _repo(tmp_path)
+    for extra in (["--repo", _REPO], ["--platform", "github"]):
+        assert _run(_argv(repo, *extra), host=_FailOnAnyCall(), tokens=_FailOnAnyToken()) != 0
 
 
 def test_caller_mismatch_is_refused_before_credential(tmp_path, capsys):
@@ -396,7 +467,7 @@ def test_bad_workflow_name_is_a_usage_error(tmp_path, workflow):
 
 
 def test_missing_required_argument_is_a_usage_error():
-    assert dispatch_verb.main(["--repo", _REPO]) != 0
+    assert dispatch_verb.main(["--workflow", "build.yml"]) != 0
 
 
 def test_allowlist_matching_is_exact_not_glob(tmp_path):
