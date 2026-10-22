@@ -965,6 +965,24 @@ before, and keeps an OMITTED `--caller`/`--role` resolving to
 `DEFAULT_ROLE` with no attestation required — this package's
 originally-released omitted-caller behavior, not a new relaxation.
 
+## `workflow_dispatch:` -- workflows a role may start
+
+An OPTIONAL top-level list in `.clagentic/loadout/config.yaml`, read only by
+`loadout-workflow-dispatch` ([workflow-dispatch.md](workflow-dispatch.md)). Each
+entry names a workflow file and the exact refs it may be started on:
+
+```yaml
+workflow_dispatch:
+  - workflow: release.yml
+    refs: [main]
+```
+
+A dispatch is refused unless its workflow and ref are both listed. The key has no
+default: absent, or malformed, means every dispatch is refused (a malformed entry
+is an error naming the key path, such as `workflow_dispatch[0].refs`). To let a
+role invoke the verb, add the label `workflow-dispatch` to that role's verb set
+under `roles:`.
+
 ## Conformance
 
 This entire contract is exercised in the test suite with **synthetic role
