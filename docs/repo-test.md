@@ -13,6 +13,7 @@ exit codes below are the contract; a change to any of them is a breaking change.
 ```
 clagentic-loadout test run full|impacted [--repo-root DIR] [--base REV] [--timeout SECONDS]
 clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout SECONDS]
+clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout SECONDS]
 clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S]
                               [--summary | --failing-ids | --diff BASE_RUN_ID]
 ```
@@ -27,6 +28,8 @@ test:
   files: [python3, -m, pytest, "--junitxml={junit}"]
   impacted: [./select-and-run-tests, --since, "{base}", --junit, "{junit}"]
   base: origin/main
+  tiers:
+    integration: [python3, -m, pytest, -m, integration, "--junitxml={junit}"]
 ```
 
 - Each of `full`, `impacted` and `files` is an argv list. It is run without a shell, with the
@@ -38,6 +41,12 @@ test:
   revision: `--base`, else the profile's `base`. `impacted` with neither is refused.
 - `files` appends the paths given on the command line to its argv. A path must be an existing
   file inside the repository root and must not start with `-`.
+- `tiers` maps a tier name to an argv list, run by `test run tier NAME`. The names are the
+  repository's own. A name starts with a lowercase letter, then lowercase letters, digits, `-`
+  or `_`, at most 32 characters. A tier argv follows the rules of `full`: it must contain
+  `{junit}` and may not use `{base}`; errors name the key path (`test.tiers.<name>`). A tier run
+  executes only that tier's command. An undeclared tier exits `72` naming `test.tiers.<name>`;
+  a malformed name is a usage error (`1`).
 - Every key is optional. Asking for a mode whose key is absent exits `72` and names the key
   (`test.files`); a missing, invalid or absent-`test` profile is refused cleanly too. The block
   is validated strictly like the rest of the profile, and `loadout-profile check` reports an
@@ -76,7 +85,7 @@ skipped.
 
 ## `test run`
 
-Prints the run summary as JSON (`run_id`, `state`, `mode`, `counts`, `failing_id_count`,
+Prints the run summary as JSON (`run_id`, `state`, `mode`, `tier`, `counts`, `failing_id_count`,
 `command_exit_code`, `problem`, timestamps) and exits:
 
 | Code | Meaning |
@@ -90,6 +99,10 @@ Prints the run summary as JSON (`run_id`, `state`, `mode`, `counts`, `failing_id
 | `74` | The run could not be recorded under the reports root. |
 
 The command's own exit code is recorded in the run and is never this verb's exit code.
+
+A tier run has `mode` `tier` and `tier` set to the tier name; every other run has `tier` null.
+Runs recorded before tiers existed have no `tier` field, and readers treat that as null. The
+field is additive, so the interface version stays 1.
 
 ## `test report`
 
@@ -107,13 +120,16 @@ below).
   recorded no commit ("commit unknown"), is never selected. `--repo` and `--sha` cannot be
   combined with an explicit run id.
 - **`--summary`** (default): JSON with the run id, `state` (`complete` or `unrunnable`), mode,
-  counts, the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
+  `tier` (the tier name for a tier run, else null), counts, the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
 - **`--failing-ids`**: the failing test ids, sorted, one per line.
 - **`--diff BASE_RUN_ID`**: JSON with `head_only`, `base_only` and `shared_count` of failing
   ids, and `repo_check`. It refuses two runs proven to be from different repositories: remote
   URLs are compared when both runs recorded one, otherwise resolved paths. When only one run
   recorded a remote and the paths differ, or either run recorded no repository, `repo_check`
   is `unverified` instead of a refusal.
+- `--diff` compares like with like: it refuses (exit `78`) when exactly one of the two runs is
+  a tier run, or when both are tier runs of different tiers. Two runs of the same tier, and two
+  non-tier runs, compare as before.
 - An `unrunnable` run has no results, so `--failing-ids` and `--diff` refuse it (exit `78`)
   rather than report an empty set.
 
@@ -124,7 +140,7 @@ below).
 | `75` | The reports root does not exist, or holds no matching finished run. |
 | `76` | The run id is malformed or no such run exists; the message names the id. |
 | `77` | No clean run matches `--sha` (or the prefix is ambiguous). |
-| `78` | Refused: `--diff` across repositories, or a run without results. |
+| `78` | Refused: `--diff` across repositories or unlike tiers, or a run without results. |
 
 ## The optional permission rule
 

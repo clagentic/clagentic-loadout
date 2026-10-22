@@ -3,6 +3,7 @@ and read the results by run id.
 
   clagentic-loadout test run full|impacted [--repo-root DIR] [--base REV] [--timeout S]
   clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout S]
+  clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout S]
   clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S]
                                 [--summary | --failing-ids | --diff BASE_RUN_ID]
 
@@ -27,7 +28,7 @@ from clagentic_loadout._version import get_version
 from clagentic_loadout.repo_test import exits, report_cmd, store
 from clagentic_loadout.repo_test.report_cmd import LATEST, ReportRefused
 from clagentic_loadout.repo_test.run_cmd import RunRefused, execute_run
-from clagentic_loadout.repo_test.spec import MODES
+from clagentic_loadout.repo_test.spec import MODE_TIER, RUN_MODES
 
 _PROG = "clagentic-loadout test"
 
@@ -35,7 +36,7 @@ _EXIT_CODES_TEXT = (
     "Exit codes: 0 ok, 1 usage, 70 tests failed, 71 no valid profile, 72 profile does not "
     "declare the command (or base), 73 command could not run or left no JUnit report, "
     "74 run could not be recorded, 75 no reports root or no matching run, 76 bad or unknown "
-    "run id, 77 no run for --sha, 78 report refused (different repositories, or a run "
+    "run id, 77 no run for --sha, 78 report refused (different repositories, unlike tiers, or a run "
     "without results)."
 )
 
@@ -43,6 +44,7 @@ _TOP_HELP = f"""{_PROG} -- run the tests a repository declares, and read the res
 
 Usage: {_PROG} run full|impacted [--repo-root DIR] [--base REV] [--timeout SECONDS]
        {_PROG} run files PATH... [--repo-root DIR] [--timeout SECONDS]
+       {_PROG} run tier NAME [--repo-root DIR] [--timeout SECONDS]
        {_PROG} report [RUN_ID|latest] [--repo R] [--sha S]
                                     [--summary | --failing-ids | --diff BASE_RUN_ID]
        {_PROG} --help | --version
@@ -76,8 +78,8 @@ def _run_parser() -> argparse.ArgumentParser:
         "Run the command the repo profile declares as test.<mode>, record the run, and print "
         "its summary as JSON. A non-zero command exit counts as a failed run.",
     )
-    run.add_argument("mode", choices=MODES, help="Which declared command to run.")
-    run.add_argument("paths", nargs="*", help="Test files, for `files` only.")
+    run.add_argument("mode", choices=RUN_MODES, help="Which declared command to run.")
+    run.add_argument("paths", nargs="*", help="Test files for `files`; the tier name for `tier`.")
     run.add_argument(
         "--repo-root",
         default=".",
@@ -135,13 +137,20 @@ def _print_json(payload: object) -> None:
 
 
 def _run(args: argparse.Namespace) -> int:
+    paths, tier = list(args.paths), None
+    if args.mode == MODE_TIER:
+        if len(paths) != 1:
+            print(f"{_PROG}: `tier` takes exactly one tier name, got {len(paths)}", file=sys.stderr)
+            return exits.EXIT_USAGE
+        tier, paths = paths[0], []
     try:
         outcome = execute_run(
             mode=args.mode,
-            paths=args.paths,
+            paths=paths,
             repo_root=args.repo_root,
             base=args.base,
             timeout_seconds=args.timeout,
+            tier=tier,
         )
     except RunRefused as exc:
         print(f"{_PROG}: {exc}", file=sys.stderr)

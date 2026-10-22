@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.repo_test import exits, store
+from clagentic_loadout.repo_test.spec import MODE_TIER
 from clagentic_loadout.repo_test.store import RunRecord, StoreError
 
 LATEST = "latest"
@@ -121,6 +122,7 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
         "run_id": run.run_id,
         "state": run.state,
         "mode": result.get("mode"),
+        "tier": _tier_name(run),
         "problem": result.get("problem"),
         "command": result.get("command"),
         "command_exit_code": result.get("command_exit_code"),
@@ -134,6 +136,36 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
         "base_sha": run.provenance.get("base_sha"),
         "commit_known": run.head_sha is not None,
     }
+
+
+def _tier_name(run: RunRecord) -> str | None:
+    """The tier a run executed, or None for a non-tier run or a record written
+    before tiers existed."""
+    value = run.result.get("tier")
+    return value if isinstance(value, str) and value else None
+
+
+def _is_tier_run(run: RunRecord) -> bool:
+    return run.result.get("mode") == MODE_TIER
+
+
+def _require_like_tiers(head: RunRecord, base: RunRecord) -> None:
+    """Refuse to compare a tier run with a different kind of run, or with a run
+    of another tier: their failing ids answer different questions."""
+    if _is_tier_run(head) != _is_tier_run(base):
+        tier_run, other = (head, base) if _is_tier_run(head) else (base, head)
+        raise ReportRefused(
+            f"run {tier_run.run_id} is a run of tier {_tier_name(tier_run) or 'unknown'!r} but run "
+            f"{other.run_id} is not a tier run; refusing to compare unlike runs",
+            exits.EXIT_DIFF_REFUSED,
+        )
+    if _is_tier_run(head) and _tier_name(head) != _tier_name(base):
+        raise ReportRefused(
+            f"runs {head.run_id} and {base.run_id} are of different tiers "
+            f"({_tier_name(head) or 'unknown'!r} and {_tier_name(base) or 'unknown'!r}); "
+            "refusing to compare them",
+            exits.EXIT_DIFF_REFUSED,
+        )
 
 
 def _failing_ids(run: RunRecord) -> list[str]:
@@ -198,6 +230,7 @@ def diff_of(head: RunRecord, base: RunRecord) -> dict[str, Any]:
     """Failing ids only in *head*, only in *base*, and how many are in both."""
     _require_complete(head, "a comparison")
     _require_complete(base, "a comparison")
+    _require_like_tiers(head, base)
     repo_check = _repo_check(head, base)
     head_ids, base_ids = set(_failing_ids(head)), set(_failing_ids(base))
     return {

@@ -21,6 +21,8 @@ from clagentic_loadout.repo_test.spec import (
     JUNIT_PLACEHOLDER,
     MODE_FILES,
     MODE_IMPACTED,
+    MODE_TIER,
+    TIER_NAME_RE,
     DeclaredTests,
 )
 from clagentic_loadout.review.atomic_io import ensure_private_dir, write_json_atomic
@@ -110,12 +112,22 @@ def execute_run(
     base: str | None,
     timeout_seconds: float | None,
     env: Mapping[str, str] | None = None,
+    tier: str | None = None,
 ) -> RunOutcome:
-    """Run the declared tests for *mode* and record the run. Raises RunRefused
-    for anything that stops the run before it starts."""
+    """Run the declared tests for *mode* and record the run. Mode ``tier`` runs
+    the tier named by *tier*. Raises RunRefused for anything that stops the run
+    before it starts."""
     root = Path(repo_root).resolve()
     if not root.is_dir():
         raise RunRefused(f"repo root {str(repo_root)!r} (resolved {str(root)!r}) is not a directory", exits.EXIT_USAGE)
+    if (mode == MODE_TIER) != (tier is not None):
+        raise RunRefused("`tier` needs a tier name, and no other mode takes one", exits.EXIT_USAGE)
+    if tier is not None and TIER_NAME_RE.match(tier) is None:
+        raise RunRefused(
+            f"tier name {tier!r} is not valid: use a lowercase letter, then lowercase letters, "
+            "digits, '-' or '_', at most 32 characters",
+            exits.EXIT_USAGE,
+        )
     if (mode == MODE_FILES) == (not paths):
         raise RunRefused(
             "`files` needs at least one path" if mode == MODE_FILES else f"`{mode}` takes no file paths",
@@ -123,10 +135,16 @@ def execute_run(
         )
 
     declared = load_declared_tests(root)
-    template = declared.argv_for(mode)
+    if tier is not None:
+        template = declared.tier_argv(tier)
+        key_path = f"test.tiers.{tier}"
+    else:
+        template = declared.argv_for(mode)
+        key_path = f"test.{mode}"
     if template is None:
         raise RunRefused(
-            f"the repo profile in {str(root)!r} does not declare test.{mode}; add it to run `{mode}`",
+            f"the repo profile in {str(root)!r} does not declare {key_path}; add it to run `{mode}`"
+            + (f" {tier}" if tier is not None else ""),
             exits.EXIT_NOT_DECLARED,
         )
 
@@ -185,6 +203,7 @@ def execute_run(
         "schema": SCHEMA_VERSION,
         "run_id": run_id,
         "mode": mode,
+        "tier": tier,
         "state": state,
         "problem": problem,
         "command": [*template, *files],

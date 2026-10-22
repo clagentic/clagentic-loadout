@@ -13,8 +13,8 @@ in the run and never returned, so none of these can be mistaken for it.
   75  report: the reports root is missing, or holds no matching run
   76  report: the run id is malformed, or no such run exists
   77  report: no run matches --sha (names what exists), or the prefix is ambiguous
-  78  report: refused (--diff across repositories, or an unrunnable run, which
-      has no results to list or compare)
+  78  report: refused (--diff across repositories or across unlike tiers, or an
+      unrunnable run, which has no results to list or compare)
   79  installer helper (repo_test.permission): the settings file could not be read
       or written; not a `clagentic-loadout test` exit
 """

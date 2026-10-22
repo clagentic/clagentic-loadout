@@ -56,7 +56,7 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
   `internal` path reaches into their internal modules rather than the documented interface.
 
 - **`test`** declares the argv `clagentic-loadout test run` uses for `full`, `impacted` and
-  `files`, and a default `base`. Review ignores it. Its shape and use are in
+  `files`, a default `base`, and named `tiers`. Review ignores it. Its shape and use are in
   [repo-test.md](repo-test.md).
 
 ## What review does with it

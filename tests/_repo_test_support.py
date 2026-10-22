@@ -81,6 +81,8 @@ def write_run(
     repo_path: str | None = "/repos/alpha",
     remote_url: str | None = None,
     finished: bool = True,
+    mode: str = "full",
+    tier: str | None = None,
 ) -> Path:
     """A finished run directory written directly, for the read side's tests."""
     run_dir = reports / run_id
@@ -95,7 +97,7 @@ def write_run(
         result = {
             "schema": 1,
             "run_id": run_id,
-            "mode": "full",
+            "mode": mode,
             "state": state,
             "problem": None if state == store.STATE_COMPLETE else "no report",
             "command": ["runner"],
@@ -105,6 +107,9 @@ def write_run(
             "started_at": "2026-01-01T00:00:00+00:00",
             "finished_at": "2026-01-01T00:00:01+00:00",
         }
+        if tier is not None:
+            # A record written before tiers existed has no tier key at all.
+            result["tier"] = tier
         (run_dir / store.RESULT_FILE).write_text(json.dumps(result))
     return run_dir
 
