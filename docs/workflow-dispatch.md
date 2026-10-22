@@ -46,8 +46,18 @@ workflow_dispatch:
   path, for example `workflow_dispatch[1].refs[0]`. An unreadable allow-list is
   never treated as an open one.
 - The check runs **before** any credential is minted and before any network
-  call (the only earlier step is the local `--caller` identity binding). A
-  refused dispatch costs nothing.
+  call (the only earlier steps are the local `--caller` identity binding and the
+  repo binding below). A refused dispatch costs nothing.
+
+### The repo binding
+
+The allow-list is read from `--repo-path`, but the dispatch targets `--repo`, so
+the two must name the same repo. Before the config is read, the verb reads the
+`origin` remote of `--repo-path` (HTTPS or SSH form, case-insensitive, host
+ignored) and requires its `owner/repo` to equal `--repo`. A mismatch, or a
+`--repo-path` that is not a git tree or has no parseable `origin`, is refused
+with exit 35 and nothing is minted or sent: an unverifiable tree is never
+trusted. One repo's config therefore cannot authorize a dispatch against another.
 
 ## Output
 
@@ -65,14 +75,19 @@ On success, one JSON object on stdout:
 }
 ```
 
+When no run is reported, `run` is `null` and a `note` field is added.
+
 GitHub's dispatch response is normally `204 No Content` with no run id. When the
 response does carry one it is reported (`run_lookup: "dispatch_response"`).
 Otherwise the verb makes **one** read of the newest `workflow_dispatch` run for
 that workflow and ref (`run_lookup: "newest_run"`), and reports it only if it
-was created at or after the dispatch (allowing a few seconds of clock skew), so
-an earlier dispatch is never reported as this one. If no such run is visible yet
-the result is `"run": null` with `run_lookup` of `"not_yet_visible"` or
-`"unavailable"`; the dispatch itself was still accepted, and the exit code is 0.
+was created strictly after the moment the dispatch request was made, so a run
+that is not provably this dispatch's (an earlier one, or one created in the
+same instant) is never reported. If no such run is visible yet the result is
+`"run": null` with `run_lookup` of `"not_yet_visible"` or `"unavailable"` and a
+`note` saying the run is not yet visible; the dispatch itself was still
+accepted, and the exit code is 0. There is no wait loop, so a caller that needs
+the run id reads it later.
 
 ## Exit codes
 
@@ -87,6 +102,7 @@ the result is `"run": null` with `run_lookup` of `"not_yet_visible"` or
 | 32 | `--caller` does not match the attested invoking identity |
 | 33 | The host rejected the dispatch or could not be reached (401, 404, 422, other) |
 | 34 | HTTP 403: the credential lacks the `actions: write` permission |
+| 35 | `--repo-path`'s origin remote does not match `--repo`, or cannot be derived |
 
 Errors report the resolved repo, workflow and ref. A 422 usually means the
 workflow has no `workflow_dispatch` trigger, the ref does not exist, or an input

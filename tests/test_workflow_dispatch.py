@@ -9,6 +9,7 @@ on any use, proving the allow-list check runs before either.
 from __future__ import annotations
 
 import json
+import subprocess
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
@@ -99,7 +100,18 @@ def _identity(subject: str):
     return lambda: Identity(subject, "builtin")
 
 
-def _repo(tmp_path: Path, config: str | None = _CONFIG) -> Path:
+def _git_origin(path: Path, url: str) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "remote", "add", "origin", url], check=True)
+
+
+def _repo(
+    tmp_path: Path,
+    config: str | None = _CONFIG,
+    origin: str | None = f"https://git-host.example.com/{_REPO}.git",
+) -> Path:
+    if origin is not None:
+        _git_origin(tmp_path, origin)
     if config is not None:
         cfg = tmp_path / ".clagentic" / "loadout"
         cfg.mkdir(parents=True)
@@ -187,6 +199,24 @@ def test_stale_run_is_not_reported_as_this_dispatch(tmp_path, capsys):
     assert out["run"] is None and out["run_lookup"] == "not_yet_visible"
 
 
+def test_run_created_just_before_the_dispatch_is_not_attributed(tmp_path, capsys):
+    # Inside the old five-second skew window: an earlier dispatch must not be
+    # named as this one.
+    earlier = {"id": 2, "html_url": "https://example.test/runs/2", "created_at": _now_iso(-2)}
+    assert _run(_argv(_repo(tmp_path)), host=_Host(runs=[earlier])) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["run"] is None and out["run_lookup"] == "not_yet_visible"
+    assert "not yet visible" in out["note"]
+
+
+def test_run_created_after_the_dispatch_is_attributed_without_a_note(tmp_path, capsys):
+    later = {"id": 3, "html_url": "https://example.test/runs/3", "created_at": _now_iso(2)}
+    assert _run(_argv(_repo(tmp_path)), host=_Host(runs=[later])) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["run"] == {"id": 3, "url": "https://example.test/runs/3"}
+    assert "note" not in out
+
+
 def test_failed_run_read_does_not_fail_an_accepted_dispatch(tmp_path, capsys):
     assert _run(_argv(_repo(tmp_path)), host=_Host(runs_error=True)) == 0
     out = json.loads(capsys.readouterr().out)
@@ -247,6 +277,30 @@ def test_unlisted_or_bad_config_refuses_before_any_call(
     assert fragment in capsys.readouterr().err
 
 
+def test_repo_path_for_a_different_repo_is_refused_with_no_call(tmp_path, capsys):
+    # The tree's config lists the workflow and ref, but its origin is another repo.
+    repo = _repo(tmp_path, origin="https://git-host.example.com/other-owner/other-repo.git")
+    rc = _run(_argv(repo), host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
+    assert rc == dispatch_verb.EXIT_REPO_MISMATCH
+    err = capsys.readouterr().err
+    assert _REPO in err and "other-owner/other-repo" in err and "Nothing was sent" in err
+
+
+@pytest.mark.parametrize(
+    "origin", ["git@git-host.example.com:Some-Owner/Some-Repo.git", f"https://git-host.example.com/{_REPO}"]
+)
+def test_matching_origin_forms_are_accepted(tmp_path, origin):
+    assert _run(_argv(_repo(tmp_path, origin=origin)), host=_Host()) == 0
+
+
+@pytest.mark.parametrize("origin", [None, "not-a-remote-url"])
+def test_underivable_origin_is_refused_with_no_call(tmp_path, capsys, origin):
+    repo = _repo(tmp_path, origin=origin)
+    rc = _run(_argv(repo), host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
+    assert rc == dispatch_verb.EXIT_REPO_MISMATCH
+    assert "cannot confirm" in capsys.readouterr().err
+
+
 def test_forgejo_is_refused_with_no_call(tmp_path, capsys):
     argv = _argv(_repo(tmp_path))
     argv[argv.index("github")] = "forgejo"
@@ -257,7 +311,7 @@ def test_forgejo_is_refused_with_no_call(tmp_path, capsys):
 
 
 def test_undetectable_platform_is_a_usage_error(tmp_path, capsys):
-    argv = [a for a in _argv(_repo(tmp_path)) if a not in ("--platform", "github")]
+    argv = [a for a in _argv(_repo(tmp_path, origin=None)) if a not in ("--platform", "github")]
     rc = _run(argv, host=_FailOnAnyCall(), tokens=_FailOnAnyToken())
     assert rc == dispatch_verb.EXIT_USAGE
     assert "--platform github" in capsys.readouterr().err

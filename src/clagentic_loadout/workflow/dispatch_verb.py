@@ -18,10 +18,12 @@ credential and no network call):
      (a local check, as in every caller-bound verb).
   2. The target platform resolves; a non-GitHub platform is refused (the
      endpoint is GitHub's).
-  3. The workflow file AND the ref must both be listed in the repo's config
+  3. `--repo-path`'s origin remote must name `--repo` (derivable and equal),
+     so the config read next belongs to the repo being dispatched against.
+  4. The workflow file AND the ref must both be listed in the repo's config
      (`workflow_dispatch:`, see dispatch_config). The one policy check.
-  4. The credential is resolved through the credential-provider seam.
-  5. The dispatch.
+  5. The credential is resolved through the credential-provider seam.
+  6. The dispatch.
 
 Inputs are passed through as given; this verb does not interpret them.
 
@@ -35,6 +37,7 @@ Exit codes (this verb's own range; a child process's code is never reused):
     32  --caller does not match the attested invoking identity
     33  the host rejected or could not complete the dispatch
     34  the credential lacks the `actions: write` permission (HTTP 403)
+    35  --repo-path's origin remote does not match --repo, or cannot be derived
 """
 
 from __future__ import annotations
@@ -45,11 +48,12 @@ import re
 import sys
 import urllib.error
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from clagentic_loadout._version import get_version
+from clagentic_loadout.merge.repo_path_consistency import check_repo_path_consistency
 from clagentic_loadout.platform_detect import (
     PLATFORM_FORGEJO,
     PLATFORM_GITHUB,
@@ -95,14 +99,16 @@ EXIT_CONFIG_INVALID = 31
 EXIT_CALLER_INVOKER_MISMATCH = 32
 EXIT_DISPATCH_FAILED = 33
 EXIT_PERMISSION_DENIED = 34
+EXIT_REPO_MISMATCH = 35
 
 #: The permission a credential needs to dispatch a workflow; named in the 403
 #: message so the fix is obvious.
 REQUIRED_PERMISSION = "actions: write"
 
-#: Clock-skew allowance when deciding whether a run was created by this
-#: dispatch rather than an earlier one.
-_RUN_FRESHNESS_SKEW = timedelta(seconds=5)
+#: Reported beside a null run so a reader knows the dispatch itself succeeded.
+_RUN_NOT_VISIBLE_NOTE = (
+    "the dispatch was accepted; its run is not yet visible, so no run id is reported"
+)
 
 _INPUT_KEY_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_-]{0,127}\Z")
 
@@ -234,9 +240,11 @@ def read_newest_dispatched_run(
 ) -> tuple[dict[str, Any] | None, str]:
     """One read of the newest `workflow_dispatch` run for the workflow and ref.
 
-    Returns (run or None, lookup label). A run created before *not_before* is
-    an earlier dispatch, not this one, and is not reported. Failing to read is
-    never an error here: the dispatch has already been accepted.
+    Returns (run or None, lookup label). A run is reported only when it was
+    created strictly after *not_before* (the local time of the dispatch
+    request); anything older or simultaneous may be an earlier dispatch and is
+    not provably this one, so it is not reported. Failing to read is never an
+    error here: the dispatch has already been accepted.
     """
     query = urllib.parse.urlencode(
         {"event": "workflow_dispatch", "branch": ref, "per_page": 1}
@@ -256,7 +264,7 @@ def read_newest_dispatched_run(
         return None, "not_yet_visible"
     newest = runs[0]
     created = _parse_time(newest.get("created_at"))
-    if created is None or created < not_before - _RUN_FRESHNESS_SKEW:
+    if created is None or created <= not_before:
         return None, "not_yet_visible"
     run_id = newest.get("id")
     run_url = newest.get("html_url")
@@ -394,6 +402,26 @@ def _run(
             EXIT_UNSUPPORTED_PLATFORM,
         )
 
+    # The allow-list is read from --repo-path but the dispatch targets --repo;
+    # without this binding one repo's config could authorize a dispatch against
+    # another. An unverifiable tree is refused, never treated as a pass.
+    consistency = check_repo_path_consistency(f"{owner}/{repo}", str(repo_path))
+    if not consistency.checked:
+        _fail(
+            f"cannot confirm that --repo-path {str(repo_path)!r} is a clone of "
+            f"{owner}/{repo}: {consistency.reason} The allow-list is only trusted from "
+            f"a tree whose origin remote names the --repo. Nothing was sent.",
+            EXIT_REPO_MISMATCH,
+        )
+    if not consistency.matches:
+        _fail(
+            f"--repo {owner}/{repo!s} does not match --repo-path {str(repo_path)!r}, whose "
+            f"origin remote resolves to {consistency.remote_owner_repo!r}. The allow-list "
+            f"in that tree cannot authorize a dispatch against {owner}/{repo}. "
+            f"Nothing was sent.",
+            EXIT_REPO_MISMATCH,
+        )
+
     # The one policy check, before any credential or network use.
     try:
         entries = load_dispatch_allowlist(repo_path)
@@ -431,7 +459,7 @@ def _run(
             not_before=dispatched_at, token=token, opener=opener,
         )
 
-    print(json.dumps({
+    result: dict[str, Any] = {
         "platform": platform,
         "repo": f"{owner}/{repo}",
         "workflow": args.workflow,
@@ -439,7 +467,10 @@ def _run(
         "dispatch": {"accepted": True, "status": status},
         "run": run,
         "run_lookup": lookup,
-    }))
+    }
+    if run is None:
+        result["note"] = _RUN_NOT_VISIBLE_NOTE
+    print(json.dumps(result))
     return EXIT_OK
 
 
