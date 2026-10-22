@@ -64,6 +64,7 @@ loadout-close-pr ="clagentic_loadout.merge.close_verb:main"
 loadout-post-merge = "clagentic_loadout.merge.post_merge_verb:main"
 loadout-provision-allowlist = "clagentic_loadout.provisioning.cli:main"
 loadout-doctor = "clagentic_loadout.doctor.cli:main"
+loadout-workflow-dispatch = "clagentic_loadout.workflow.dispatch_verb:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

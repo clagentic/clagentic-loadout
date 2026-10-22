@@ -140,6 +140,12 @@ def _test_main(argv: list[str]) -> int:
     return test_main(argv)
 
 
+def _workflow_dispatch_main(argv: list[str]) -> int:
+    from clagentic_loadout.workflow.dispatch_verb import main as workflow_dispatch_main
+
+    return workflow_dispatch_main(argv)
+
+
 #: verb name -> (one-line summary, entry-point callable taking the verb's
 #: own argv and returning its process exit code). A verb with a
 #: single-word name (push, merge) dispatches directly; a verb with a
@@ -176,6 +182,10 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "test": (
         "Run a repo's declared tests (run); read results by run id (report).",
         _test_main,
+    ),
+    "workflow-dispatch": (
+        "Start a listed workflow on a listed ref (GitHub).",
+        _workflow_dispatch_main,
     ),
 }
 
