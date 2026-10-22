@@ -330,13 +330,13 @@ def test_a_one_class_profile_carries_only_that_class(env, capsys):
     assert "### released-tool paths" in sent and "### internal paths" not in sent
 
 
-def test_no_section_for_a_missing_or_an_invalid_profile(env, capsys):
+def test_no_section_for_a_missing_or_an_invalid_profile(env, tmp_path, capsys):
     _configure(env)
     env.run(capsys=capsys)
     assert "Repository class rules" not in _carrier_prompts(env)
 
     base = commit_files(env.repo, {PROFILE_PATH: "class: not-a-class\n"})
-    env.run("--out", "invalid-run", capsys=capsys, base_sha=base)
+    env.run("--out", str(tmp_path / "invalid-run"), capsys=capsys, base_sha=base)
     assert "Repository class rules" not in _carrier_prompts(env)
 
 
