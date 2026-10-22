@@ -83,6 +83,7 @@ KNOWN_VERBS: tuple[str, ...] = (
     "scoped-test-wait",
     "doctor",
     "ruling",
+    "workflow-dispatch",
 )
 
 #: Reference/default role -> verb-set mapping for the seed roles named in

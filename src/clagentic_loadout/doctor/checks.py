@@ -222,6 +222,10 @@ from clagentic_loadout.transport.provider_config import (
     resolve_platform_provider,
     resolve_provider_kind_and_command,
 )
+from clagentic_loadout.workflow.dispatch_config import (
+    DispatchConfigError,
+    load_dispatch_allowlist,
+)
 from clagentic_loadout.wait.config import (
     InvalidScopedTestConfigError,
     load_scoped_test_patterns,
@@ -839,7 +843,7 @@ def check_attestation_source_configured(
 #: know how to validate," not to become a second registry those modules
 #: must keep in lockstep with (each validate step below imports its own
 #: loader directly; this tuple is documentation, not a coupling point).
-KNOWN_CONFIG_SECTIONS: tuple[str, ...] = ("wait", "roles", "merge")
+KNOWN_CONFIG_SECTIONS: tuple[str, ...] = ("wait", "roles", "merge", "workflow_dispatch")
 
 
 @dataclass(frozen=True)
@@ -1111,6 +1115,14 @@ def check_repo_loadout_schema(
         load_post_merge_steps(repo_root, config_relative_path=config_relative_path)
     except PostMergeConfigError as exc:
         errors.append(f"merge: {exc}")
+
+    # Optional section: absent is fine (the verb then refuses every dispatch),
+    # but a present one must parse, or the verb fails at dispatch time.
+    if "workflow_dispatch" in raw:
+        try:
+            load_dispatch_allowlist(repo_root, config_relative_path=config_relative_path)
+        except DispatchConfigError as exc:
+            errors.append(f"workflow_dispatch: {exc}")
 
     errors.extend(gate_findings.errors)
     required_reviewer_roles = gate_findings.declared_roles
