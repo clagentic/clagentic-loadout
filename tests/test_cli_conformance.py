@@ -50,6 +50,7 @@ from clagentic_loadout.review import verb as review_verb
 from clagentic_loadout.transport import git_host_api
 from clagentic_loadout.transport import stage_body_verb
 from clagentic_loadout.wait import cli as wait_cli
+from clagentic_loadout.workflow import dispatch_verb as workflow_dispatch_verb
 
 _PACKAGE_VERSION = get_version()
 
@@ -77,6 +78,7 @@ _ARGPARSE_VERBS = [
     ("provision-allowlist", provisioning_cli.main, "--version"),
     ("doctor", doctor_cli.main, "--version"),
     ("test", test_verb.main, "--version"),
+    ("workflow-dispatch", workflow_dispatch_verb.main, "--version"),
 ]
 
 
@@ -207,6 +209,7 @@ def test_umbrella_unknown_grouped_subverb_reports_reserved_exit_code(capsys) -> 
         ["test"],
         ["test", "run"],
         ["test", "report"],
+        ["workflow-dispatch"],
     ],
     ids=lambda argv: " ".join(argv),
 )
