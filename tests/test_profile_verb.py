@@ -37,6 +37,21 @@ def test_check_reports_a_valid_profile_with_its_class_rules_and_overrides(tmp_pa
     assert result["rules"] and result["deny"] == {"names": 0, "hosts": 0, "users": 0}
 
 
+def test_check_prints_the_statements_of_each_class_in_effect_beside_the_top_level_rules(
+    tmp_path, capsys
+):
+    repo = make_repo(tmp_path)
+    (repo / PROFILE_PATH).parent.mkdir(parents=True)
+    (repo / PROFILE_PATH).write_text(VALID + "tool_packages: [tool_one]\n", encoding="utf-8")
+
+    _, result, _ = _run(capsys, "check", "--repo-path", str(repo))
+
+    assert set(result["class_rules"]) == {"released-tool", "internal"}
+    assert result["rules"] == result["class_rules"]["released-tool"]
+    assert any("tool_one" in item for item in result["class_rules"]["internal"])
+    assert not any("tool_one" in item for item in result["class_rules"]["released-tool"])
+
+
 def test_check_without_a_ref_reads_the_working_tree_and_with_a_ref_the_revision(tmp_path, capsys):
     repo = make_repo(tmp_path)
     commit_files(repo, {PROFILE_PATH: "class: internal\n"})

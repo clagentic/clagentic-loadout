@@ -65,7 +65,7 @@ from clagentic_loadout.review.evaluation import (
 from clagentic_loadout.review.finding_identity import with_fingerprints
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
-from clagentic_loadout.review.profile_rules import profile_findings
+from clagentic_loadout.review.profile_rules import chunk_class_rules, profile_findings
 from clagentic_loadout.sha import FULL_SHA_RE
 
 EXIT_COMPLETE = 0
@@ -85,7 +85,7 @@ CHUNK_WORKDIR_PREFIX = "loadout-chunk-"
 
 #: Bump when chunk planning, prompting, or merging changes: part of the
 #: resume key, so a state directory built by older logic is never reused.
-PIPELINE_VERSION = "7"
+PIPELINE_VERSION = "8"
 
 #: Optional key on a merged finding that re-anchors a prior one: the line the
 #: prior finding had in the last reviewed head.
@@ -162,13 +162,18 @@ def bind_run_dir(
 
 
 def _resume_key(
-    chunks: list[Chunk], profile: ReviewProfile, head_sha: str, delta_note: str = ""
+    chunks: list[Chunk],
+    profile: ReviewProfile,
+    head_sha: str,
+    delta_note: str = "",
+    class_rules: str = "",
 ) -> str:
     digest = hashlib.sha256()
     for part in (
         PIPELINE_VERSION,
         head_sha,
         delta_note,
+        class_rules,
         json.dumps(profile.carrier),
         json.dumps(profile.fallback),
         json.dumps([profile.carrier_model, profile.fallback_model]),
@@ -446,8 +451,18 @@ def run_review(
             chunk.index: render_delta_note(delta, findings_for_chunk(delta, chunk, chunks), chunks)
             for chunk in chunks
         }
+    # Policy is read once, here: the repo profile it holds gives each chunk's
+    # prompt the stated class rules for its files, states findings about the
+    # diff below, and the evaluator judges all findings under the same read.
+    context = evaluation if evaluation is not None else EvaluationContext()
+    policy = read_context_policy(context)
+    class_rules = {chunk.index: chunk_class_rules(policy, chunk) for chunk in chunks}
     resume_note = "\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else ""
-    state_dir = run_dir / f"state-{_resume_key(chunks, profile, acquired.head_sha, resume_note)}"
+    resume_rules = "\0".join(class_rules[chunk.index] for chunk in chunks)
+    state_dir = (
+        run_dir
+        / f"state-{_resume_key(chunks, profile, acquired.head_sha, resume_note, resume_rules)}"
+    )
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -506,6 +521,7 @@ def run_review(
                     runner=runner,
                     delta_note=delta_notes.get(chunk.index, ""),
                     breaker=breaker,
+                    class_rules=class_rules[chunk.index],
                 )
             finally:
                 discard_chunk_workdir(chunk_cwd)
@@ -611,10 +627,6 @@ def run_review(
         left_open = accounting.left_open
         prior_open = delta.prior_open_count
         per_chunk.append((0, carried + left_open))
-    # Policy is read once: the repo profile it holds states findings about this
-    # diff here, and the evaluator below judges all findings under the same read.
-    context = evaluation if evaluation is not None else EvaluationContext()
-    policy = read_context_policy(context)
     rule_findings = profile_findings(policy, chunks, context.profile_settings)
     if rule_findings:
         per_chunk.append((0, rule_findings))

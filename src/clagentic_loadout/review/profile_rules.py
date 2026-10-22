@@ -13,10 +13,14 @@ What is checked mechanically:
                        absolute host path under a home directory.
 
 Nothing is checked mechanically for the internal class. Rules that need
-judgement (other tools stay optional and pluggable; an internal tree uses a tool
-only through its documented interface) are stated in repo_profile.CLASS_RULES
-for the reviewer, and ``rule_statements`` adds the profile's ``tool_packages``
-list to the statements so the reviewer judges against it.
+judgement (other tools stay optional and pluggable; a released tool never
+special-cases a consumer's tools or permissions; an internal tree uses a tool only through its
+documented interface) are stated in repo_profile.CLASS_RULES. They reach the
+reviewer in the chunk prompt: ``class_rules_section`` renders, per class present
+in a chunk, that class's statements and the chunk files it governs, and
+``rule_statements`` adds the profile's ``tool_packages`` list to the internal
+statements. Both the prompt and ``loadout-profile check`` use that rendering.
+Statements are context to judge against, never a finding source or a severity.
 
 An invalid profile is itself reported, and so is a missing one, always. Each is
 a finding that scores ``none``: it cannot block at any threshold, so it can
@@ -45,7 +49,9 @@ from clagentic_loadout.review.policy_source import (
 )
 from clagentic_loadout.review.profile_settings import ProfileSettings
 from clagentic_loadout.review.repo_profile import (
+    CLASS_INTERNAL,
     CLASS_RELEASED_TOOL,
+    CLASSES,
     CLASS_RULES,
     DENY_HOSTS,
     DENY_NAMES,
@@ -63,6 +69,7 @@ RULE_MORE = "repo-profile.more"
 MAX_RULE_FINDINGS = 100
 
 _MAX_SHOWN_CHARS = 60
+_MAX_RULE_FILES = 20
 _KIND_LABEL = {
     DENY_NAMES: "agent or deployment name",
     DENY_HOSTS: "host or domain",
@@ -196,17 +203,62 @@ def _scan_chunk(
     return found
 
 
-def rule_statements(profile: RepoProfile) -> list[str]:
-    """The class rules as statements for the reviewer. When the profile lists
-    ``tool_packages``, a statement naming them is added; it produces no finding."""
-    statements = list(CLASS_RULES[profile.repo_class])
-    if profile.tool_packages:
+def rule_statements(profile: RepoProfile, repo_class: str) -> list[str]:
+    """The rules of *repo_class* as statements for the reviewer. For the
+    internal class, when the profile lists ``tool_packages``, a statement naming
+    them is added. Statements produce no finding and name no severity."""
+    statements = list(CLASS_RULES[repo_class])
+    if repo_class == CLASS_INTERNAL and profile.tool_packages:
         statements.append(
             "Tool packages this repository consumes: "
             + ", ".join(profile.tool_packages)
             + ". In internal paths, judge whether code reaches into their internal modules."
         )
     return statements
+
+
+def classes_in_effect(profile: RepoProfile) -> list[str]:
+    """The classes that govern at least one path of *profile*: its own class and
+    each path override's, in the fixed order of ``CLASSES``."""
+    present = {profile.repo_class, *(value for _, value in profile.paths)}
+    return [name for name in CLASSES if name in present]
+
+
+def class_rules_section(profile: RepoProfile, files: Sequence[str]) -> str:
+    """The "Repository class rules" prompt section for a chunk touching *files*:
+    per class present among them, the class's stated rules and the files it
+    governs. Empty when *files* is empty. The statements are for the reviewer to
+    judge against; this adds no check and no finding."""
+    by_class: dict[str, list[str]] = {}
+    for file in files:
+        by_class.setdefault(profile.class_for(file), []).append(file)
+    if not by_class:
+        return ""
+    parts = [
+        "## Repository class rules\n\n"
+        "The repository states these rules for the paths below. Judge the diff against "
+        "them; report a breach as an ordinary finding with its facts.\n\n"
+    ]
+    for name in CLASSES:
+        governed = by_class.get(name)
+        if not governed:
+            continue
+        shown = governed[:_MAX_RULE_FILES]
+        more = len(governed) - len(shown)
+        parts.append(f"### {name} paths\n\nFiles in this chunk: {', '.join(shown)}")
+        parts.append(f" (and {more} more)\n\n" if more > 0 else "\n\n")
+        parts.extend(f"- {statement}\n" for statement in rule_statements(profile, name))
+        parts.append("\n")
+    return "".join(parts).rstrip("\n") + "\n"
+
+
+def chunk_class_rules(policy: PolicySource, chunk: Chunk) -> str:
+    """The class rules section for *chunk* under *policy*; empty unless the
+    profile at the base revision was read and valid. A missing or invalid
+    profile is already reported as a finding, so nothing is invented here."""
+    if policy.profile_state != PROFILE_OK or policy.repo_profile is None:
+        return ""
+    return class_rules_section(policy.repo_profile, chunk.files)
 
 
 def profile_findings(
@@ -266,6 +318,9 @@ __all__ = [
     "RULE_INVALID",
     "RULE_MISSING",
     "RULE_MORE",
+    "chunk_class_rules",
+    "class_rules_section",
+    "classes_in_effect",
     "profile_findings",
     "rule_statements",
 ]

@@ -2,7 +2,8 @@
 
 Policy, in one place:
 
-  * The prompt carries the review-only preamble, the rulebook, the chunk, and
+  * The prompt carries the review-only preamble, the rulebook, the repository's
+    stated class rules for the chunk's files (when its profile was read), the chunk, and
     (LAST) the output contract. The reply states facts per finding and never a
     severity; a severity in a reply is discarded (see review.findings_contract).
   * The carrier runs first. An absent carrier (MODEL_UNAVAILABLE) hands THIS
@@ -69,13 +70,23 @@ _REVIEW_ONLY_PREFIX = (
 )
 
 
-def build_prompt(chunk: Chunk, total: int, rulebook_text: str, delta_note: str = "") -> str:
+def build_prompt(
+    chunk: Chunk,
+    total: int,
+    rulebook_text: str,
+    delta_note: str = "",
+    class_rules: str = "",
+) -> str:
     """Chunk prompt with the output contract placed LAST, where a model
     weighs it most. *delta_note*, when given, frames the chunk as part of an
-    incremental review (see review.delta)."""
+    incremental review (see review.delta). *class_rules*, when given, is the
+    repository's stated class rules for the chunk's files
+    (review.profile_rules.chunk_class_rules); it sits after the rulebook."""
     parts = [_REVIEW_ONLY_PREFIX]
     if rulebook_text.strip():
         parts.append("## Rulebook\n\n" + rulebook_text.strip() + "\n\n")
+    if class_rules.strip():
+        parts.append(class_rules.strip() + "\n\n")
     if delta_note.strip():
         parts.append(delta_note.strip() + "\n\n")
     parts.append(f"## Diff chunk {chunk.index} of {total}\n\n" + chunk.text + "\n")
@@ -315,6 +326,7 @@ def review_chunk(
     runner: Runner = run_in_process_group,
     delta_note: str = "",
     breaker: EngineBreaker | None = None,
+    class_rules: str = "",
 ) -> dict[str, Any]:
     """Review *chunk*; returns its persistable record. Never raises for an
     engine problem: every outcome is a record with a status. *cwd* is the
@@ -326,7 +338,7 @@ def review_chunk(
     when it has one, so a posted verdict can name the model."""
     record = _review_chunk(
         chunk, total, profile, attempts_before=attempts_before, cwd=cwd, log_dir=log_dir,
-        runner=runner, delta_note=delta_note, breaker=breaker,
+        runner=runner, delta_note=delta_note, breaker=breaker, class_rules=class_rules,
     )
     label = profile.fallback_model if record.get("engine") == ENGINE_FALLBACK else profile.carrier_model
     if label:
@@ -345,8 +357,9 @@ def _review_chunk(
     runner: Runner,
     delta_note: str,
     breaker: EngineBreaker | None,
+    class_rules: str,
 ) -> dict[str, Any]:
-    prompt = build_prompt(chunk, total, profile.rulebook_text, delta_note)
+    prompt = build_prompt(chunk, total, profile.rulebook_text, delta_note, class_rules)
     record = _new_record(chunk, attempts_before + 1)
 
     skipped = breaker.reason(ENGINE_CARRIER) if breaker is not None else ""
