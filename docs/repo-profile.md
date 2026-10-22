@@ -10,7 +10,7 @@ Two classes:
 
 | Class | Meaning | Rules |
 |---|---|---|
-| `released-tool` | The tree ships to people outside the deployment that built it. | No agent or deployment names, hostnames, domains or usernames in the shipped tree. No absolute host paths. Other tools are optional and pluggable, never a hard requirement. |
+| `released-tool` | The tree ships to people outside the deployment that built it. | No agent or deployment names, hostnames, domains or usernames in the shipped tree. No absolute host paths. Other tools are optional and pluggable, never a hard requirement. A released tool never adds, removes or changes the tools or permissions of a particular agent or consumer based on its identity, and never names or special-cases a consumer. Behaviour that affects permissions for all sessions is a documented setting the user controls. |
 | `internal` | The tree stays inside a deployment. | Other tools are consumed only through their documented interfaces: an installed command, or the top level of a package, never one of its internal modules. |
 
 The profile is read from the **base revision**, like `stakes.yaml` and `dispositions.yaml`
@@ -78,6 +78,14 @@ values it forbids). Nothing is checked mechanically for the `internal` class. Ru
 judgement, such as "other tools stay optional" or "use a tool only through its documented
 interface", are stated for the reviewer and are not guessed at mechanically.
 
+**Stated rules in the reviewer prompt.** Each chunk prompt carries a `## Repository class rules`
+section after the rulebook and before the diff. For every class that governs a file in the chunk
+(by `class` and `paths`), it lists that class's stated rules and the chunk files it governs; the
+`internal` section also carries the `tool_packages` list. The same applies to a delta review, for
+the delta's chunks. The section is context for the reviewer to judge against: it is not a check,
+names no severity, and is absent when the base revision has a missing or invalid profile (those
+are reported as findings instead).
+
 **How severe.** A rule hit states `reachable: no`: a shape violation is not an attack path, so
 the evaluator holds it at `low`. At the default threshold (`block_at: high`) it is advisory; a
 deployment that wants rule hits to block sets `review.evaluator.block_at: low`
@@ -120,7 +128,8 @@ loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
 
 `check` validates the profile with the same loader the review uses and prints one JSON object:
 the class, the rules the class carries, the overrides, how many denial entries the profile
-adds, and `tool_packages`. By default it reads the working tree, so a profile can be checked
+adds, and `tool_packages`. `rules` is the statements of the top-level class; `class_rules` maps
+each class in effect (top-level or a `paths` override) to its statements. By default it reads the working tree, so a profile can be checked
 before it is committed; with `--ref` it reads that revision, as the review does.
 
 `init` drafts a profile for a repository that has none, from the file list of a revision

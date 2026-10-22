@@ -289,3 +289,90 @@ def test_a_resumed_run_states_the_same_profile_findings(env, tmp_path, capsys):
     _, second = env.run("--out", str(tmp_path / "one"), capsys=capsys, base_sha=base)
 
     assert _rules(_document(first)) == _rules(_document(second)) != []
+
+
+MIXED_PROFILE = (
+    "class: released-tool\n"
+    "paths:\n"
+    "  'internal_dir/**': {class: internal}\n"
+    "tool_packages: [tool_one, tool_two]\n"
+)
+
+
+def _carrier_prompts(env: Env) -> str:
+    return "\n".join(prompts(env.stubs, "carrier"))
+
+
+def test_the_prompt_carries_each_present_class_rules_and_the_tool_packages(env, capsys):
+    _configure(env)
+    base = commit_files(env.repo, {PROFILE_PATH: MIXED_PROFILE})
+    env.diff = _added("src/mod.py", "x = 1") + _added("internal_dir/a.py", "y = 2")
+
+    code, _ = env.run(capsys=capsys, base_sha=base)
+
+    assert code == 0
+    sent = _carrier_prompts(env)
+    assert "## Repository class rules" in sent
+    assert "### released-tool paths" in sent and "### internal paths" in sent
+    assert "tool_one, tool_two" in sent
+    assert "never adds, removes or changes the tools or permissions" in sent
+    assert sent.index("## Repository class rules") < sent.index("## Diff chunk 1 of 1")
+
+
+def test_a_one_class_profile_carries_only_that_class(env, capsys):
+    _configure(env)
+    base = commit_files(env.repo, {PROFILE_PATH: "class: released-tool\n"})
+    env.diff = _added("src/mod.py", "x = 1")
+
+    env.run(capsys=capsys, base_sha=base)
+
+    sent = _carrier_prompts(env)
+    assert "### released-tool paths" in sent and "### internal paths" not in sent
+
+
+def test_no_section_for_a_missing_or_an_invalid_profile(env, tmp_path, capsys):
+    _configure(env)
+    env.run(capsys=capsys)
+    assert "Repository class rules" not in _carrier_prompts(env)
+
+    base = commit_files(env.repo, {PROFILE_PATH: "class: not-a-class\n"})
+    env.run("--out", str(tmp_path / "invalid-run"), capsys=capsys, base_sha=base)
+    assert "Repository class rules" not in _carrier_prompts(env)
+
+
+def test_a_delta_review_carries_the_section_for_the_delta_chunks(env, tmp_path, capsys):
+    _configure(env)
+    base = commit_files(env.repo, {PROFILE_PATH: MIXED_PROFILE})
+    prior = tmp_path / "prior.json"
+    prior.write_text(
+        json.dumps(
+            {
+                "owner": "some-owner", "repo": "some-repo", "pr_number": 42,
+                "head_sha": "c" * 40, "findings": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    env.run(
+        "--prior-findings", str(prior), capsys=capsys, base_sha=base,
+        compare={"status": "ahead", "diff": _added("internal_dir/new.py", "z = 3")},
+    )
+
+    sent = _carrier_prompts(env)
+    assert "### internal paths" in sent and "internal_dir/new.py" in sent
+    assert "### released-tool paths" not in sent
+
+
+def test_the_fallback_engine_gets_the_same_prompt_text_as_the_carrier(env, capsys):
+    env.configure(carrier_mode="exit127", fallback_mode="empty")
+    base = commit_files(env.repo, {PROFILE_PATH: MIXED_PROFILE})
+    env.diff = _added("src/mod.py", "x = 1")
+
+    code, _ = env.run(capsys=capsys, base_sha=base)
+
+    assert code == 0
+    (via_carrier,) = prompts(env.stubs, "carrier")
+    (via_fallback,) = prompts(env.stubs, "fallback")
+    assert via_carrier == via_fallback
+    assert "## Repository class rules" in via_fallback

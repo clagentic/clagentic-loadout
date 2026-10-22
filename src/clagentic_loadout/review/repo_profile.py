@@ -26,8 +26,9 @@ with no internal path)::
       names: [some-agent-name]      # whole-token, case-insensitive
       hosts: [host.example.test]
       users: [some-username]
-    tool_packages: [some_tool]      # optional; internal only: importing a
-                                    # submodule of one of these is flagged
+    tool_packages: [some_tool]      # optional; internal only: stated to the
+                                    # reviewer as the packages to consume only
+                                    # through their top level; no check flags it
     test: {full: [...]}             # optional; the commands ``clagentic-loadout
                                     # test run`` uses (see repo_test.spec)
 
@@ -58,6 +59,10 @@ CLASS_RULES: dict[str, tuple[str, ...]] = {
         "No agent or deployment names, hostnames, domains or usernames in the shipped tree.",
         "No absolute host paths in the shipped tree.",
         "Other tools are optional and pluggable, never a hard requirement.",
+        "A released tool never adds, removes or changes the tools or permissions of a "
+        "particular agent or consumer based on its identity, and never names or special-cases "
+        "a consumer. Behaviour that affects permissions for all sessions is a documented "
+        "setting the user controls.",
     ),
     CLASS_INTERNAL: (
         "Other tools are consumed only through their documented interfaces: an installed "

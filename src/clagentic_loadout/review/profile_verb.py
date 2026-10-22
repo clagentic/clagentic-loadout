@@ -45,7 +45,7 @@ from clagentic_loadout.review.policy_source import (
     PROFILE_PATH,
     read_repo_profile,
 )
-from clagentic_loadout.review.profile_rules import rule_statements
+from clagentic_loadout.review.profile_rules import classes_in_effect, rule_statements
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -158,7 +158,10 @@ def _reader(args: argparse.Namespace) -> tuple[PolicyReader, str]:
 def _describe(profile: rp.RepoProfile) -> dict[str, object]:
     return {
         "class": profile.repo_class,
-        "rules": rule_statements(profile),
+        "rules": rule_statements(profile, profile.repo_class),
+        "class_rules": {
+            name: rule_statements(profile, name) for name in classes_in_effect(profile)
+        },
         "paths": [{"glob": glob, "class": value} for glob, value in profile.paths],
         "deny": {kind: len(getattr(profile.deny, kind)) for kind in rp.DENY_KINDS},
         "tool_packages": list(profile.tool_packages),
