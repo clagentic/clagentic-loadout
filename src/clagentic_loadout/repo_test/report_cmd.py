@@ -131,6 +131,7 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
         "command": result.get("command"),
         "command_exit_code": result.get("command_exit_code"),
         "counts": result.get("counts"),
+        "report_verification": result.get("report_verification"),
         "failing_id_count": len(_failing_ids(run)),
         "started_at": result.get("started_at"),
         "finished_at": result.get("finished_at"),

@@ -37,6 +37,17 @@ test:
 - Every command must contain the `{junit}` placeholder. Loadout replaces it with the path the
   command has to write its JUnit XML report to, and reads the counts and failing test ids
   from that file. A command that writes no readable report leaves an `unrunnable` run.
+- The report path is in a per-run scratch directory outside the run record, mode `1733`
+  (others can enter and create files but not list them; the sticky bit stops anyone but a
+  file's owner removing it). Loadout does not create the report: the command does, so the file
+  belongs to whichever user the command wrote it as, which lets a command that switches to
+  another unprivileged user still produce one. After the command ends, the report is refused
+  (the run is `unrunnable`, `problem` says why, nothing is stored) when it is not a regular
+  file with one link, is writable by any user, or is owned by a user that is neither the
+  caller nor one the command's processes were seen running as. A verified report is recorded as
+  `report_verification` (`status`, `owner_uid`, `command_uids`) in the run summary. Remaining
+  risk: a report that is group-writable is accepted, and a user the command ran as for less
+  than a millisecond is not seen, which refuses rather than trusts.
 - `{base}` is allowed in `impacted` only. It is replaced by the full commit SHA of the base
   revision: `--base`, else the profile's `base`. `impacted` with neither is refused.
 - `files` appends the paths given on the command line to its argv. A path must be an existing
