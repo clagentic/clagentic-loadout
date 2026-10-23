@@ -108,8 +108,18 @@ class UidWatcher:
     def _sample(self) -> None:
         changed = False
         for pid in list(self._known):
+            # A pid can be reused by an unrelated process after its child exits;
+            # only a pid still in the leader's session may contribute a user id.
+            if pid != self._leader and _session_of(pid) != self._leader:
+                self._known.discard(pid)
+                continue
             changed = self._record(pid) or changed
         now = time.monotonic()
+        if changed:
+            # Documented reset: a new user id means the session is no longer
+            # stable, so scan for new members on this tick.
+            self._scan_wait = _FULL_SCAN_MIN
+            self._next_scan = now
         if now < self._next_scan:
             return
         for pid in _session_members(self._leader):
