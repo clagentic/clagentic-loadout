@@ -345,3 +345,52 @@ def test_a_report_rewritten_in_place_by_a_stranger_is_refused(
     assert code == exits.EXIT_UNRUNNABLE
     assert "writable by any user" in summary["problem"]
     assert summary["report_verification"]["status"] == "refused"
+
+
+def test_a_fifo_at_the_report_name_is_refused_without_blocking(tmp_path: Path) -> None:
+    directory = tmp_path / "scratch"
+    directory.mkdir()
+    source = directory / "junit.xml"
+    os.mkfifo(source)
+    scratch = report_scratch.ReportScratch(directory, source)
+    dest = tmp_path / "stored.xml"
+    outcome: list[BaseException] = []
+
+    def collect() -> None:
+        try:
+            report_scratch.collect_report(scratch, dest, _OWN)
+        except BaseException as exc:  # noqa: BLE001 - the thread hands any outcome back to the assertion
+            outcome.append(exc)
+
+    worker = threading.Thread(target=collect, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+
+    try:
+        assert not worker.is_alive(), "collecting a FIFO report blocked"
+    finally:
+        if worker.is_alive():
+            # Unblock the stuck open so the thread can end.
+            fd = os.open(source, os.O_WRONLY | os.O_NONBLOCK)
+            os.close(fd)
+            worker.join(timeout=5)
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], report_scratch.ReportUntrusted)
+    assert "not a regular file" in str(outcome[0])
+    assert not dest.exists()
+
+
+def test_a_run_whose_report_name_holds_a_fifo_is_refused_in_bounded_time(
+    tmp_path: Path, reports: Path, scratch_base: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo = make_repo(
+        tmp_path / "repo", profile=profile_text(full=[sys.executable, "mk.py", "{junit}"])
+    )
+    (repo / "mk.py").write_text("import os, sys; os.mkfifo(sys.argv[1])")
+    started = time.monotonic()
+
+    code, summary = _run(capsys, repo)
+
+    assert time.monotonic() - started < 30
+    assert code != exits.EXIT_OK
+    assert "not a regular file" in json.dumps(summary)

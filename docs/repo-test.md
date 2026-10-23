@@ -46,8 +46,13 @@ test:
   file with one link, is writable by any user, or is owned by a user that is neither the
   caller nor one the command's processes were seen running as. A verified report is recorded as
   `report_verification` (`status`, `owner_uid`, `command_uids`) in the run summary. Remaining
-  risk: a report that is group-writable is accepted, and a user the command ran as for less
-  than a millisecond is not seen, which refuses rather than trusts.
+  risk: a report that is group-writable is accepted, and a user id is not seen when a process
+  held it for less than the sampling interval, which refuses rather than trusts. Processes
+  already seen are re-checked about every millisecond. The host-wide search for new processes
+  in the command's session starts at every 4 ms and backs off to every 100 ms while nothing new
+  appears, resetting on any change, so a process that is started and switches user within one
+  such interval, while nothing else changes, can be missed. A path in the scratch directory that
+  is not a regular file (for example a named pipe) is refused without being read.
 - `{base}` is allowed in `impacted` only. It is replaced by the full commit SHA of the base
   revision: `--base`, else the profile's `base`. `impacted` with neither is refused.
 - `files` appends the paths given on the command line to its argv. A path must be an existing

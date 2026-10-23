@@ -135,7 +135,10 @@ def collect_report(scratch: ReportScratch, dest: Path, allowed_uids: frozenset[i
     is not shown to come from the command."""
     source = scratch.junit_path
     try:
-        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK: any user may create names in the scratch directory, and a
+        # blocking open of a FIFO with no writer would hang the runner. The type
+        # is checked on the descriptor below, before anything is read.
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError as exc:
         raise JunitError(
             f"the command never wrote its report to {str(source)!r}: no file exists there "
@@ -148,7 +151,10 @@ def collect_report(scratch: ReportScratch, dest: Path, allowed_uids: frozenset[i
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode):
-            raise ReportUntrusted(f"the report path {str(source)!r} is not a regular file")
+            raise ReportUntrusted(
+                f"the report path {str(source)!r} is not a regular file (mode {stat.S_IFMT(info.st_mode):06o}): "
+                "it was not read and nothing is stored"
+            )
         _check_origin(info, source, allowed_uids)
         if info.st_size == 0:
             raise JunitError(
