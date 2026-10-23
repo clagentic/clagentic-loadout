@@ -51,6 +51,7 @@ from typing import Any
 from clagentic_loadout.acquire.contract import AcquiredPr, RangeDiffBackend
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.review.chunking import Chunk
+from clagentic_loadout.review.evaluate import is_praise_note
 from clagentic_loadout.review.prior_view import (
     MAX_LINE_CHARS,
     locate_prior_line,
@@ -89,7 +90,7 @@ class DeltaContext:
     """What a delta review is measured against."""
 
     since_head: str
-    #: Findings of the last verdict that are still open: everything but praise.
+    #: Findings of the last verdict that are still open: everything but a praise note.
     open_findings: tuple[dict[str, Any], ...]
     #: Open findings the caller ruled resolved, as `resolved` entries (see
     #: review.resolutions.resolved_entry). They are not in open_findings.
@@ -125,8 +126,10 @@ class DeltaResolution:
 
 
 def open_findings_of(findings: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
-    """The findings a later review must still answer for."""
-    return tuple(f for f in findings if f.get("severity") != "praise")
+    """The findings a later review must still answer for: everything except a
+    praise note the evaluator itself would show as praise. A praise label on a
+    finding whose facts say otherwise does not let it drop out of the carry."""
+    return tuple(f for f in findings if not is_praise_note(f))
 
 
 def resolve_delta(

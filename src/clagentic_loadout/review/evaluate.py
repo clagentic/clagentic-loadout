@@ -48,8 +48,9 @@ from clagentic_loadout.review.stakes import INTERNAL, PathStakes, Stakes
 
 #: Identifies the rules a verdict was computed under. Bump it with any change to
 #: the rubric, the blocking rule, the merge rule or the disposition rules, so a
-#: reader can tell two verdicts were not computed by the same logic.
-EVALUATOR_VERSION = "1"
+#: reader can tell two verdicts were not computed by the same logic. Version 2:
+#: a praise label no longer exempts a finding from scoring.
+EVALUATOR_VERSION = "2"
 
 OUTCOME_CLEAN = "CLEAN"
 OUTCOME_BLOCKED = "BLOCKED"
@@ -185,6 +186,24 @@ def is_floor_finding(finding: Mapping[str, Any]) -> bool:
     return _in_floor(parse_facts(finding.get(KEY_FACTS)))
 
 
+def is_praise_note(finding: Mapping[str, Any]) -> bool:
+    """Whether *finding* is shown as praise: it is labelled so AND its own facts
+    are complete, outside the security floor, and state no impact at all.
+
+    The label never changes a score. A finding that states anything else (no
+    facts, invalid facts, a floor category, any impact) is scored from its facts
+    like every other finding and the label is ignored. Impact none on every
+    dimension scores none under any stakes, so this needs no policy to decide."""
+    if finding.get("severity") != _PRAISE:
+        return False
+    parsed = parse_facts(finding.get(KEY_FACTS))
+    return (
+        parsed.state == STATE_COMPLETE
+        and not _in_floor(parsed)
+        and all(level == "none" for level in parsed.facts.impact)
+    )
+
+
 def _assess(finding: Mapping[str, Any], stakes: Stakes, source: int = 0) -> _Assessed:
     parsed = parse_facts(finding.get(KEY_FACTS))
     path_stakes = stakes.for_path(finding["file"])
@@ -196,16 +215,15 @@ def _assess(finding: Mapping[str, Any], stakes: Stakes, source: int = 0) -> _Ass
         path_stakes,
         computed,
         floor_category,
-        finding.get("severity") == _PRAISE,
+        is_praise_note(finding),
         source,
     )
 
 
 def _blocks_before_dispositions(item: _Assessed, threshold: int) -> bool:
     """Whether *item* would block if no disposition applied. The one definition
-    of blocking, shared by the merge below and the verdict loop."""
-    if item.praise:
-        return False
+    of blocking, shared by the merge below and the verdict loop. Scored from
+    facts only: a praise label takes no part."""
     return severity_rank(item.score.severity) >= threshold or (
         item.floor_category and item.stakes.exposure != INTERNAL
     )
@@ -482,4 +500,5 @@ __all__ = [
     "Verdict",
     "evaluate",
     "is_floor_finding",
+    "is_praise_note",
 ]

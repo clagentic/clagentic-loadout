@@ -269,8 +269,8 @@ def test_clean_lists_advisory_findings():
     assert "Advisory findings (1)" in render_text(verdict)
 
 
-def test_praise_is_advisory_and_not_scored():
-    verdict = run([finding(severity="praise")])
+def test_a_praise_note_with_complete_low_risk_facts_is_advisory_and_not_scored():
+    verdict = run([finding(severity="praise", fact=facts())])
     assert verdict.outcome == ev.OUTCOME_CLEAN
     assert verdict.findings[0].praise
     assert verdict.findings[0].score is None

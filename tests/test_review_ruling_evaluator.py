@@ -175,5 +175,6 @@ class TestNoRegistry:
         text = render_text(verdict)
         assert "Rulings for this pull request" not in text and "ruling (" not in text
 
-    def test_the_evaluator_version_is_unchanged(self):
-        assert ev.EVALUATOR_VERSION == "1"
+    def test_the_evaluator_version_is_the_one_the_praise_rule_set_it_to(self):
+        # The rulings feature itself adds no version: this pins the current rules.
+        assert ev.EVALUATOR_VERSION == "2"

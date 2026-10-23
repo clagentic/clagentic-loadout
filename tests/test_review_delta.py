@@ -66,12 +66,39 @@ def test_a_fast_forward_is_reviewed_as_a_delta_against_the_last_reviewed_head():
     assert resolution.stage_fields() == {"mode": "delta", "since_head": _SINCE}
 
 
-def test_praise_is_not_an_open_finding():
-    findings = [_finding(), _finding(rule="R2", severity="praise"), _finding(rule="R3", severity="nit")]
+_LOW_RISK_FACTS = {
+    "category": "other",
+    "reachable": "no",
+    "attacker_precondition": "none",
+    "impact": {"confidentiality": "none", "integrity": "none", "availability": "none"},
+    "durability": "durable",
+}
+
+
+def test_a_praise_note_with_complete_low_risk_facts_is_not_an_open_finding():
+    findings = [
+        _finding(),
+        {**_finding(rule="R2", severity="praise"), "facts": _LOW_RISK_FACTS},
+        _finding(rule="R3", severity="nit"),
+    ]
 
     resolution = resolve_delta(_Backend(), _acquired(), _SINCE, findings)
 
     assert [f["rule_id"] for f in resolution.context.open_findings] == ["R1", "R3"]
+
+
+def test_a_praise_label_does_not_drop_a_finding_whose_facts_say_otherwise():
+    floor_facts = {**_LOW_RISK_FACTS, "category": "injection"}
+    impactful = {**_LOW_RISK_FACTS, "impact": {**_LOW_RISK_FACTS["impact"], "integrity": "full"}}
+    findings = [
+        _finding(rule="NOFACTS", severity="praise"),
+        {**_finding(rule="FLOOR", severity="praise"), "facts": floor_facts},
+        {**_finding(rule="IMPACT", severity="praise"), "facts": impactful},
+    ]
+
+    resolution = resolve_delta(_Backend(), _acquired(), _SINCE, findings)
+
+    assert [f["rule_id"] for f in resolution.context.open_findings] == ["NOFACTS", "FLOOR", "IMPACT"]
 
 
 def test_the_same_head_falls_back_to_the_full_diff_without_reading_a_range():
