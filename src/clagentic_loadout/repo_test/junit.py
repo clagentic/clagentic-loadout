@@ -12,7 +12,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 
-_MAX_JUNIT_BYTES = 256 * 1024 * 1024
+MAX_JUNIT_BYTES = 256 * 1024 * 1024
 
 
 class JunitError(Exception):
@@ -39,8 +39,8 @@ def parse_junit(path: Path) -> JunitSummary:
         size = path.stat().st_size
     except OSError as exc:
         raise JunitError(f"no JUnit report at the path the run was given: {exc}") from exc
-    if size > _MAX_JUNIT_BYTES:
-        raise JunitError(f"the JUnit report is {size} bytes, over the {_MAX_JUNIT_BYTES} byte limit")
+    if size > MAX_JUNIT_BYTES:
+        raise JunitError(f"the JUnit report is {size} bytes, over the {MAX_JUNIT_BYTES} byte limit")
     try:
         root = ET.parse(path).getroot()
     except (ET.ParseError, OSError) as exc:
@@ -67,4 +67,4 @@ def parse_junit(path: Path) -> JunitSummary:
     )
 
 
-__all__ = ["JunitError", "JunitSummary", "parse_junit"]
+__all__ = ["MAX_JUNIT_BYTES", "JunitError","JunitSummary", "parse_junit"]
