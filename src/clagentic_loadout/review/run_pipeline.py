@@ -706,7 +706,6 @@ def run_review(
             )
             for chunk in chunks
         ],
-        KEY_CLASS_RULES: _class_rules_summary(records),
         **verdict_document_fields(verdict, context),
         "findings": findings,
     }
@@ -732,7 +731,7 @@ def run_review(
             KEY_VERDICT_OUTCOME: verdict.outcome,
             KEY_VERDICT_REASONS: document[KEY_VERDICT_REASONS],
             "carried_count": len(carried),
-            KEY_CLASS_RULES: document[KEY_CLASS_RULES],
+            KEY_CLASS_RULES: _class_rules_summary(records),
             **(
                 _accounting_fields(prior_open, len(kept) + len(left_open), resolved)
                 if delta is not None

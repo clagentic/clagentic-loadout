@@ -1148,7 +1148,7 @@ evaluator and the verdict do not read it):
 | where | field | meaning |
 | --- | --- | --- |
 | each chunk record, and `chunks[]` in `findings.json` | `class_rules` | present only when the chunk's prompt carried the section: `classes` (array of class names stated, in the order `released-tool`, `internal`), `sha256` (hex digest of the exact section text sent), `chars` (its length). Absent when no section was sent: no profile, a missing, invalid or unreadable profile, or no files |
-| `findings.json` and `run` stdout | `class_rules` | run summary: `chunks_with_section` (integer) and `classes` (union over chunks, same order); `0` and `[]` when no chunk carried the section |
+| `run` stdout | `class_rules` | run summary: `chunks_with_section` (integer) and `classes` (union over chunks, same order); `0` and `[]` when no chunk carried the section. `findings.json` keeps its top-level fields; its `chunks[]` entries carry the per-chunk value above |
 
 The carrier and the fallback engine are handed the same prompt, so either records the
 same digest. A delta run records it for each delta chunk. A resumed chunk keeps its
@@ -1158,11 +1158,16 @@ the chunk instead of reusing a stale record.
 ```json
 "chunks": [{"index": 1, "engine": "carrier", "files": ["src/mod.py"],
   "class_rules": {"classes": ["released-tool"], "sha256": "9b1c...e4", "chars": 612}}],
+```
+
+and, in the `run` stdout result:
+
+```json
 "class_rules": {"chunks_with_section": 1, "classes": ["released-tool"]}
 ```
 
 A run with no valid profile reports `"class_rules": {"chunks_with_section": 0, "classes": []}`
-and no per-chunk `class_rules`.
+on stdout and no per-chunk `class_rules`.
 
 **Failure diagnostics.** When no engine can answer a chunk, the blocked result carries
 each engine's saved stderr path (`carrier_stderr_file`, `fallback_stderr_file`;

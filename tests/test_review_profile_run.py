@@ -405,7 +405,8 @@ def test_each_chunk_and_the_run_record_the_classes_and_digest_of_the_section_sen
         "chars": len(sent),
     }
     summary = {"chunks_with_section": 1, "classes": ["released-tool", "internal"]}
-    assert payload["class_rules"] == _document(payload)["class_rules"] == summary
+    assert payload["class_rules"] == summary
+    assert "class_rules" not in _document(payload)
 
 
 def test_a_one_class_profile_records_only_that_class(env, capsys):
@@ -428,7 +429,7 @@ def test_a_missing_or_invalid_profile_records_that_no_section_was_sent(env, tmp_
     _, invalid = env.run("--out", str(tmp_path / "invalid-run"), capsys=capsys, base_sha=base)
 
     for payload in (missing, invalid):
-        assert payload["class_rules"] == _document(payload)["class_rules"] == none
+        assert payload["class_rules"] == none
         assert all("class_rules" not in chunk for chunk in _document(payload)["chunks"])
 
 
