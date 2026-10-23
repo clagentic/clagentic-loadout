@@ -83,6 +83,8 @@ def write_run(
     finished: bool = True,
     mode: str = "full",
     tier: str | None = None,
+    id_scheme: int | None = None,
+    failed: int | None = None,
 ) -> Path:
     """A finished run directory written directly, for the read side's tests."""
     run_dir = reports / run_id
@@ -102,11 +104,19 @@ def write_run(
             "problem": None if state == store.STATE_COMPLETE else "no report",
             "command": ["runner"],
             "command_exit_code": 1 if ids else 0,
-            "counts": {"collected": 3, "passed": 3 - len(ids), "failed": len(ids), "skipped": 0},
+            "counts": {
+                "collected": 3,
+                "passed": 3 - len(ids),
+                "failed": len(ids) if failed is None else failed,
+                "skipped": 0,
+            },
             "failing_ids": ids,
             "started_at": "2026-01-01T00:00:00+00:00",
             "finished_at": "2026-01-01T00:00:01+00:00",
         }
+        if id_scheme is not None:
+            # A record written before ids were made distinct has no such key.
+            result["id_scheme"] = id_scheme
         if tier is not None:
             # A record written before tiers existed has no tier key at all.
             result["tier"] = tier

@@ -3,7 +3,11 @@
 A test id is ``<classname>::<name>`` (just ``<name>`` when the case has no class
 name). A case with a ``failure`` or ``error`` child is failing; one with a
 ``skipped`` child is skipped; every other case passed. The ids are what two runs
-are compared by, so the format is part of the report contract.
+are compared by, so the format is part of the report contract. The failing ids
+are a multiset: one entry per failed case, so two failed cases that share an id
+appear twice and the entry count equals the failed count. Ids are never
+rewritten, so no synthetic id can equal a real test's id, and a comparison
+counts entries.
 """
 
 from __future__ import annotations
@@ -13,6 +17,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 MAX_JUNIT_BYTES = 256 * 1024 * 1024
+
+# Recorded in result.json. A run without it predates per-case entries and holds
+# one entry per distinct name, however many cases failed under that name.
+ID_SCHEME = 2
 
 
 class JunitError(Exception):
@@ -48,23 +56,28 @@ def parse_junit(path: Path) -> JunitSummary:
     if root.tag not in ("testsuites", "testsuite"):
         raise JunitError(f"the JUnit report root is <{root.tag}>, not <testsuites> or <testsuite>")
     failing: list[str] = []
-    passed = failed = skipped = 0
+    passed = skipped = 0
     for case in root.iter("testcase"):
         tags = {child.tag for child in case}
         if tags & {"failure", "error"}:
-            failed += 1
             failing.append(_test_id(case))
         elif "skipped" in tags:
             skipped += 1
         else:
             passed += 1
     return JunitSummary(
-        collected=passed + failed + skipped,
+        collected=passed + len(failing) + skipped,
         passed=passed,
-        failed=failed,
+        failed=len(failing),
         skipped=skipped,
-        failing_ids=tuple(sorted(set(failing))),
+        failing_ids=tuple(sorted(failing)),
     )
 
 
-__all__ = ["MAX_JUNIT_BYTES", "JunitError","JunitSummary", "parse_junit"]
+__all__ = [
+    "ID_SCHEME",
+    "MAX_JUNIT_BYTES",
+    "JunitError",
+    "JunitSummary",
+    "parse_junit",
+]

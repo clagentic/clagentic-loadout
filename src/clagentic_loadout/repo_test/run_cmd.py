@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.repo_test import exits, provenance, store
-from clagentic_loadout.repo_test.junit import JunitError, JunitSummary, parse_junit
+from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, JunitSummary, parse_junit
 from clagentic_loadout.repo_test.report_scratch import collect_report, create_scratch, remove_scratch
 from clagentic_loadout.repo_test.runner import log_tail, run_command
 from clagentic_loadout.repo_test.spec import (
@@ -221,6 +221,7 @@ def execute_run(
         "command": [*template, *files],
         "command_exit_code": outcome.exit_code,
         "counts": _result_counts(junit),
+        "id_scheme": ID_SCHEME,
         "failing_ids": list(junit.failing_ids) if junit else [],
         "started_at": started.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
