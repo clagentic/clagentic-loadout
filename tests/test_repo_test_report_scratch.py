@@ -176,3 +176,42 @@ def test_a_command_that_drops_to_an_unprivileged_user_still_yields_a_report(
 
     assert code == exits.EXIT_OK
     assert summary["counts"] == {"collected": 1, "passed": 1, "failed": 0, "skipped": 0}
+
+
+def test_a_report_that_grows_past_the_cap_after_the_size_check_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "scratch"
+    directory.mkdir()
+    source = directory / "junit.xml"
+    source.write_bytes(b"x" * 100)
+    scratch = report_scratch.ReportScratch(directory, source)
+    dest = tmp_path / "stored.xml"
+    monkeypatch.setattr(report_scratch, "MAX_JUNIT_BYTES", 50)
+    real_fstat = os.fstat
+
+    def small_when_checked(fd: int) -> object:
+        real = real_fstat(fd)
+        return type("Info", (), {"st_mode": real.st_mode, "st_size": 10})()
+
+    monkeypatch.setattr(report_scratch.os, "fstat", small_when_checked)
+
+    with pytest.raises(report_scratch.JunitError) as caught:
+        report_scratch.collect_report(scratch, dest)
+
+    assert "grew past the 50 byte limit" in str(caught.value)
+    assert str(source) in str(caught.value)
+    assert not dest.exists()
+
+
+def test_a_report_exactly_at_the_cap_is_stored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = tmp_path / "scratch"
+    directory.mkdir()
+    source = directory / "junit.xml"
+    source.write_bytes(b"y" * 50)
+    dest = tmp_path / "stored.xml"
+    monkeypatch.setattr(report_scratch, "MAX_JUNIT_BYTES", 50)
+
+    report_scratch.collect_report(report_scratch.ReportScratch(directory, source), dest)
+
+    assert dest.read_bytes() == b"y" * 50

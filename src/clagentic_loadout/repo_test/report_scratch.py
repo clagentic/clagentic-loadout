@@ -33,7 +33,11 @@ from pathlib import Path
 
 from clagentic_loadout.repo_test.junit import MAX_JUNIT_BYTES, JunitError
 
+# TMPDIR (via tempfile.gettempdir) is tried first. These are the POSIX/FHS
+# standard temporary directories, the same fallback set the standard library's
+# tempfile module tries; they are not a deployment- or host-specific path.
 _FALLBACK_BASES = ("/tmp", "/var/tmp")
+_COPY_CHUNK = 1024 * 1024
 _SCRATCH_DIR_MODE = 0o733
 _SCRATCH_FILE_MODE = 0o666
 _REPORT_NAME = "junit.xml"
@@ -109,10 +113,34 @@ def collect_report(scratch: ReportScratch, dest: Path) -> None:
             raise JunitError(f"the JUnit report is {info.st_size} bytes, over the {MAX_JUNIT_BYTES} byte limit")
         try:
             out_fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(out_fd, "wb") as out:
-                shutil.copyfileobj(handle, out)
         except OSError as exc:
             raise JunitError(f"cannot store the report at {str(dest)!r}: {exc}") from exc
+        # The size check above is only an early exit: the command may still be
+        # appending, so the copy itself reads at most the cap plus one byte.
+        copied = 0
+        oversized = False
+        failure: OSError | None = None
+        try:
+            with os.fdopen(out_fd, "wb") as out:
+                while True:
+                    chunk = handle.read(min(_COPY_CHUNK, MAX_JUNIT_BYTES + 1 - copied))
+                    if not chunk:
+                        break
+                    copied += len(chunk)
+                    if copied > MAX_JUNIT_BYTES:
+                        oversized = True
+                        break
+                    out.write(chunk)
+        except OSError as exc:
+            failure = exc
+        if oversized or failure is not None:
+            dest.unlink(missing_ok=True)
+        if oversized:
+            raise JunitError(
+                f"the JUnit report at {str(source)!r} grew past the {MAX_JUNIT_BYTES} byte limit while it was being stored"
+            )
+        if failure is not None:
+            raise JunitError(f"cannot store the report at {str(dest)!r}: {failure}") from failure
 
 
 def remove_scratch(scratch: ReportScratch) -> str | None:
