@@ -823,7 +823,10 @@ def _unsafe_status_message(status: str, verdict: Verdict, reasons: list[str]) ->
         + (f" ({listed})" if listed else "")
         + ". The verdict is computed from the findings' facts, the stakes and the policy at "
         "the base revision; it cannot be posted as clean. Fix the findings, or rule on them "
-        "in the base branch's dispositions, then run the review again"
+        "in the base branch's dispositions, then run the review again. A finding you judge "
+        "not to be a defect of this change is not cleared by its severity or rule_id label: "
+        "state its facts completely (a low-risk category, reachable no, impact none), or "
+        "list it in --dropped with its reason"
     )
 
 

@@ -368,6 +368,44 @@ findings file is unreadable or invalid.
 A finding with no facts resolves to the worst case, which blocks, and its missing facts make
 the verdict DEGRADED; the reason names the finding.
 
+### Non-blocking notes: the two routes the evaluator honours
+
+A reviewer often holds a candidate it assesses as not a defect of the change under review:
+a scanner hit on an unchanged context line outside the diff range, or a finding a second
+pass demoted for lack of a failure sequence. The findings file is the reviewer's to write,
+so the evaluator reads **no label** in it as a reason to clear anything. These are never
+trusted, alone or together:
+
+- `severity` (`nit`, `blocking` or any other value). Every finding is scored from its
+  facts whatever severity it states. The one exception is `praise`, which marks a finding
+  that is not a defect at all and is listed as advisory without scoring.
+- `rule_id` (a name such as `outside-range` carries no meaning to the evaluator).
+- Any marker, prefix or provenance note in the message or elsewhere in the file.
+
+Trusting any of them would let a reviewer clear a real blocker by relabelling it. Two
+shapes are non-blocking because the evaluator can check them itself:
+
+1. **Complete low-risk facts.** State every fact: a non-floor `category` (`other` for a
+   note that fits none), `reachable: no`, `none` for all three impact dimensions, and the
+   remaining facts. The finding scores `none`, does not block, and is listed as advisory,
+   so it stays visible. A floor category, an absent or `unknown` fact, or any stated impact
+   takes the finding back to the rubric above.
+2. **Listed in `--dropped`.** A candidate the reviewer examined and ruled out is passed to
+   `post` in the dropped list with its reason. A candidate that is in both the findings and
+   the dropped list is removed from the findings before evaluation (matched on
+   `file:line:rule_id`), and the posted comment and fence list it as dropped with the
+   reason.
+
+What stays blocking: an in-range finding with a floor category on an exposed path, or with
+facts that score at or above the threshold, blocks whatever severity or rule_id it carries;
+a finding with absent or invalid facts is worst case and makes the outcome DEGRADED. A
+`post --status clean` over either is refused with exit 32, and the refusal names the two
+routes above.
+
+The verdict a `post` computes is the only one that counts. Fields such as `verdict_outcome`
+and `verdict_reasons` that a producer carries from an earlier stage in the findings file are
+ignored by `post`.
+
 Required scanners are an allowlist: a scanner is satisfied only by status `ran`, or
 `not_applicable` with a non-empty reason. Every other value, including an unrecognised
 string such as `timeout`, is DEGRADED and names the scanner and its status. A scanner that
