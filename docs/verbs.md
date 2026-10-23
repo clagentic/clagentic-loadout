@@ -1153,7 +1153,9 @@ evaluator and the verdict do not read it):
 The carrier and the fallback engine are handed the same prompt, so either records the
 same digest. A delta run records it for each delta chunk. A resumed chunk keeps its
 recorded value; the class rules are part of the resume key, so a changed section re-runs
-the chunk instead of reusing a stale record.
+the chunk instead of reusing a stale record. A reused record saved by an earlier release,
+before this field existed, takes the value of the section computed for the current run
+(the resume key guarantees it is the same text) and is saved back with it.
 
 ```json
 "chunks": [{"index": 1, "engine": "carrier", "files": ["src/mod.py"],

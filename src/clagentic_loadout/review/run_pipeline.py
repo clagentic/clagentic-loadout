@@ -515,6 +515,21 @@ def run_review(
     for chunk in chunks:
         existing = _load_record(state_dir, chunk.index)
         if existing is not None and existing.get("status") == STATUS_OK:
+            # The resume key binds the exact section text, so a reused record was
+            # produced under the section computed now. A record written before
+            # the evidence field existed carries none; it takes the current value
+            # rather than reporting that no section was sent.
+            if KEY_CLASS_RULES not in existing and class_rules_sent[chunk.index] is not None:
+                existing[KEY_CLASS_RULES] = class_rules_sent[chunk.index]
+                try:
+                    _write_json(_result_path(state_dir, chunk.index), existing)
+                except OSError as exc:
+                    # The in-memory value still serves this run's outputs.
+                    print(
+                        f"loadout-review: notice: chunk {chunk.index}: cannot persist the "
+                        f"class rules evidence: {exc}",
+                        file=sys.stderr,
+                    )
             records[chunk.index] = existing
             stage(f"chunk-{chunk.index}", _stage_status(existing), resumed="yes", nonce=existing.get("nonce"))
         else:

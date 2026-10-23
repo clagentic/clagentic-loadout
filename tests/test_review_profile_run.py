@@ -470,6 +470,33 @@ def test_a_delta_run_records_the_section_for_its_delta_chunks(env, tmp_path, cap
     assert payload["class_rules"] == {"chunks_with_section": 1, "classes": ["internal"]}
 
 
+def test_a_chunk_persisted_before_the_field_existed_takes_the_current_section_on_resume(
+    env, tmp_path, capsys
+):
+    _configure(env)
+    out = tmp_path / "old"
+    base = commit_files(env.repo, {PROFILE_PATH: "class: released-tool\n"})
+    env.diff = _added("src/mod.py", "x = 1")
+    env.run("--out", str(out), capsys=capsys, base_sha=base)
+    calls = len(prompts(env.stubs, "carrier"))
+    sent = _stated_section(env)
+    # The previous record shape: the same chunk result without the field.
+    (result,) = out.glob("state-*/result-*.json")
+    record = json.loads(result.read_text(encoding="utf-8"))
+    del record["class_rules"]
+    result.write_text(json.dumps(record), encoding="utf-8")
+
+    _, second = env.run("--out", str(out), capsys=capsys, base_sha=base)
+
+    assert len(prompts(env.stubs, "carrier")) == calls
+    (chunk,) = _document(second)["chunks"]
+    assert chunk["class_rules"] == {
+        "classes": ["released-tool"], "sha256": _sha(sent), "chars": len(sent),
+    }
+    assert second["class_rules"] == {"chunks_with_section": 1, "classes": ["released-tool"]}
+    assert json.loads(result.read_text(encoding="utf-8"))["class_rules"] == chunk["class_rules"]
+
+
 def test_a_resumed_chunk_keeps_its_recorded_value_and_a_changed_section_reruns_it(
     env, tmp_path, capsys
 ):
