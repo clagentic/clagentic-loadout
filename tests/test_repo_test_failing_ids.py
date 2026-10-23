@@ -10,7 +10,7 @@ import pytest
 from _repo_test_support import make_repo, write_run
 
 from clagentic_loadout.repo_test import exits, store
-from clagentic_loadout.repo_test.junit import ID_SCHEME, collapse_duplicate_id, parse_junit
+from clagentic_loadout.repo_test.junit import ID_SCHEME, parse_junit
 from clagentic_loadout.repo_test.run_cmd import execute_run
 from clagentic_loadout.repo_test.verb import main
 
@@ -48,7 +48,7 @@ def test_a_failure_followed_by_a_teardown_error_gets_two_ids(tmp_path: Path) -> 
     summary = parse_junit(path)
 
     assert summary.failed == 2
-    assert summary.failing_ids == ("m.T::test_a", "m.T::test_a#dup2")
+    assert summary.failing_ids == ("m.T::test_a", "m.T::test_a")
 
 
 def test_ids_do_not_depend_on_document_order(tmp_path: Path) -> None:
@@ -60,7 +60,7 @@ def test_ids_do_not_depend_on_document_order(tmp_path: Path) -> None:
     ).failing_ids
 
 
-def test_every_failed_case_has_its_own_id_across_causes(tmp_path: Path) -> None:
+def test_every_failed_case_has_its_own_entry_across_causes(tmp_path: Path) -> None:
     path = _junit(
         tmp_path,
         # parametrized ids stay distinct by name
@@ -84,11 +84,12 @@ def test_every_failed_case_has_its_own_id_across_causes(tmp_path: Path) -> None:
 
     assert summary.failed == 10
     assert len(summary.failing_ids) == summary.failed
-    assert len(set(summary.failing_ids)) == summary.failed
-    assert "m.T::multi" in summary.failing_ids
+    assert summary.failing_ids.count("m.T::x") == 3
+    assert summary.failing_ids.count("m.T::multi") == 1
+    assert "m.T::t[1]" in summary.failing_ids and "m.T::t[2]" in summary.failing_ids
 
 
-def test_a_suffix_never_lands_on_a_real_test_id(tmp_path: Path) -> None:
+def test_ids_are_never_rewritten_so_a_real_name_is_its_own_id(tmp_path: Path) -> None:
     path = _junit(
         tmp_path,
         "<testcase classname='m.T' name='t'><failure/></testcase>"
@@ -98,22 +99,16 @@ def test_a_suffix_never_lands_on_a_real_test_id(tmp_path: Path) -> None:
 
     summary = parse_junit(path)
 
-    assert len(set(summary.failing_ids)) == summary.failed == 3
+    assert summary.failing_ids == ("m.T::t", "m.T::t", "m.T::t#dup2")
 
 
-def test_a_producer_without_pytest_attributes_gets_distinct_ids(tmp_path: Path) -> None:
+def test_a_producer_without_pytest_attributes_keeps_one_entry_per_case(tmp_path: Path) -> None:
     path = _junit(
         tmp_path,
         "<testcase name='case one'><failure/></testcase><testcase name='case one'><failure/></testcase>",
     )
 
-    assert parse_junit(path).failing_ids == ("case one", "case one#dup2")
-
-
-def test_collapse_removes_only_the_trailing_suffix() -> None:
-    assert collapse_duplicate_id("m.T::t#dup2") == "m.T::t"
-    assert collapse_duplicate_id("m.T::t#dup2[x]") == "m.T::t#dup2[x]"
-    assert collapse_duplicate_id("m.T::t") == "m.T::t"
+    assert parse_junit(path).failing_ids == ("case one", "case one")
 
 
 def test_a_recorded_run_carries_the_scheme_and_failed_equals_the_id_count(
@@ -139,28 +134,46 @@ def test_a_recorded_run_carries_the_scheme_and_failed_equals_the_id_count(
 
     assert outcome.summary["counts"]["failed"] == outcome.summary["failing_id_count"] == 3
     result = json.loads((reports / outcome.summary["run_id"] / store.RESULT_FILE).read_text())
-    assert result["id_scheme"] == ID_SCHEME and len(set(result["failing_ids"])) == 3
+    assert result["id_scheme"] == ID_SCHEME
+    assert result["failing_ids"] == ["s::t", "s::t", "s::t"]
 
 
-def test_diff_shows_a_new_failure_that_shares_a_name_with_an_old_one(
+def test_diff_shows_a_new_failure_that_shares_an_id_with_an_old_one(
     reports: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     write_run(reports, OLD, failing=["m.T::t"], remote_url=REMOTE, id_scheme=ID_SCHEME)
-    write_run(reports, NEW, failing=["m.T::t", "m.T::t#dup2"], remote_url=REMOTE, id_scheme=ID_SCHEME)
+    write_run(reports, NEW, failing=["m.T::t", "m.T::t"], remote_url=REMOTE, id_scheme=ID_SCHEME)
 
     code, out = _report(capsys, NEW, "--diff", OLD)
+    reverse_code, reverse_out = _report(capsys, OLD, "--diff", NEW)
 
-    diff = json.loads(out)
-    assert code == exits.EXIT_OK
-    assert diff["head_only"] == ["m.T::t#dup2"] and diff["base_only"] == []
+    diff, reverse = json.loads(out), json.loads(reverse_out)
+    assert code == reverse_code == exits.EXIT_OK
+    assert diff["head_only"] == ["m.T::t"] and diff["base_only"] == [] and diff["shared_count"] == 1
+    assert reverse["head_only"] == [] and reverse["base_only"] == ["m.T::t"]
     assert "id_basis" not in diff
 
 
-def test_diff_between_an_old_run_and_a_new_run_compares_plain_names_and_says_so(
+def test_a_failure_literally_named_like_a_suffix_is_not_hidden_by_a_repeat(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Base: two failed cases named t. Head: one failed t plus a distinct test
+    # literally named "t#dup2". Both used to store the same id set.
+    write_run(reports, OLD, failing=["m.T::t", "m.T::t"], remote_url=REMOTE, id_scheme=ID_SCHEME)
+    write_run(reports, NEW, failing=["m.T::t", "m.T::t#dup2"], remote_url=REMOTE, id_scheme=ID_SCHEME)
+
+    _, out = _report(capsys, NEW, "--diff", OLD)
+
+    diff = json.loads(out)
+    assert diff["head_only"] == ["m.T::t#dup2"] and diff["base_only"] == ["m.T::t"]
+    assert diff["shared_count"] == 1
+
+
+def test_diff_between_an_old_run_and_a_new_run_compares_presence_and_says_so(
     reports: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     write_run(reports, OLD, failing=["m.T::t", "m.T::u"], remote_url=REMOTE)
-    write_run(reports, NEW, failing=["m.T::t", "m.T::t#dup2", "m.T::v"], remote_url=REMOTE, id_scheme=ID_SCHEME)
+    write_run(reports, NEW, failing=["m.T::t", "m.T::t", "m.T::v"], remote_url=REMOTE, id_scheme=ID_SCHEME)
 
     code, out = _report(capsys, NEW, "--diff", OLD)
     reverse_code, reverse_out = _report(capsys, OLD, "--diff", NEW)
@@ -170,6 +183,7 @@ def test_diff_between_an_old_run_and_a_new_run_compares_plain_names_and_says_so(
     assert diff["head_only"] == ["m.T::v"] and diff["base_only"] == ["m.T::u"] and diff["shared_count"] == 1
     assert diff["id_basis"] == "collapsed" and diff["id_basis_reason"]
     assert reverse["head_only"] == ["m.T::u"] and reverse["base_only"] == ["m.T::v"]
+    assert reverse["id_basis"] == "collapsed"
 
 
 def test_two_old_runs_are_compared_as_recorded(reports: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -186,7 +200,7 @@ def test_summary_of_an_old_run_states_why_the_counts_differ(
     reports: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     write_run(reports, OLD, failing=["m.T::a"], failed=3)
-    write_run(reports, NEW, failing=["m.T::a", "m.T::a#dup2", "m.T::a#dup3"], id_scheme=ID_SCHEME)
+    write_run(reports, NEW, failing=["m.T::a", "m.T::a", "m.T::a"], id_scheme=ID_SCHEME)
 
     _, old_out = _report(capsys, OLD)
     _, new_out = _report(capsys, NEW)

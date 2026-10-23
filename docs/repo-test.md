@@ -121,9 +121,14 @@ below).
   combined with an explicit run id.
 - **`--summary`** (default): JSON with the run id, `state` (`complete` or `unrunnable`), mode,
   `tier` (the tier name for a tier run, else null), counts, the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
-- **`--failing-ids`**: the failing test ids, sorted, one per line.
+- **`--failing-ids`**: the failing test ids, sorted, one per line. One line per failed test
+  case, so an id that failed twice appears twice and the line count equals `counts.failed`.
 - **`--diff BASE_RUN_ID`**: JSON with `head_only`, `base_only` and `shared_count` of failing
-  ids, and `repo_check`. It refuses two runs proven to be from different repositories: remote
+  ids, and `repo_check`. Ids are compared as a multiset: an id that failed more often at head
+  than at base is in `head_only` once per extra failure. A run recorded before per-case ids
+  holds one entry per name; comparing it with a newer run compares presence only and adds
+  `id_basis: "collapsed"` with a reason, and a `--summary` of such a run carries a
+  `failing_id_note` when its counts differ. It refuses two runs proven to be from different repositories: remote
   URLs are compared when both runs recorded one, otherwise resolved paths. When only one run
   recorded a remote and the paths differ, or either run recorded no repository, `repo_check`
   is `unverified` instead of a refusal.
