@@ -824,7 +824,7 @@ The range `<prior head>..<current head>` is read from the host API (GitHub's
 compare endpoint; on Forgejo the compare API for the relation and the web
 compare `.diff` route for the net diff). Each chunk is framed as an incremental
 review: report new defects only on lines the delta changes, and judge each
-open finding (everything but praise) against the new head. Every prior open
+open finding (everything but a praise note with complete no-impact facts) against the new head. Every prior open
 finding ends the round as exactly one of three outcomes:
 
 - **carried** — its file is not in the delta at all (so its line is unchanged),

@@ -16,7 +16,20 @@ from tests._review_cli_support import HEAD_SHA, Env, make_diff, prompts
 SINCE_SHA = "c" * 40
 
 _BLOCKING = {"file": "a.py", "line": 3, "rule_id": "R1", "severity": "blocking", "message": "bad"}
-_PRAISE = {"file": "a.py", "line": 1, "rule_id": "R9", "severity": "praise", "message": "nice"}
+_PRAISE = {
+    "file": "a.py",
+    "line": 1,
+    "rule_id": "R9",
+    "severity": "praise",
+    "message": "nice",
+    "facts": {
+        "category": "other",
+        "reachable": "no",
+        "attacker_precondition": "none",
+        "impact": {"confidentiality": "none", "integrity": "none", "availability": "none"},
+        "durability": "durable",
+    },
+}
 
 
 @pytest.fixture

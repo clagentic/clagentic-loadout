@@ -59,11 +59,22 @@ The security-floor categories are `injection`, `authn_authz`, `secrets_exposure`
 `deserialization`, `ssrf` and `path_traversal`. A finding with no `category` (absent or
 invalid) is treated as a floor category, the worst case for that dimension.
 
-A finding whose own `severity` is `praise` is not a defect: it is listed as advisory and
-not scored. Every other finding is scored from its facts, whatever `severity` it states.
-This applies to a findings file handed to `evaluate` or `post`. A model reply in `run` is
-different: it never carries a severity (see below), so nothing a model writes can mark a
-finding as praise.
+Every finding is scored from its facts, whatever `severity` it states, `praise` included.
+`praise` is a presentation label only: a finding labelled `praise` whose own facts are
+complete, outside the security floor and state `none` on all three impact dimensions scores
+`none` and is listed as advisory with a `(praise)` mark. A finding labelled `praise` with
+anything else (absent or invalid facts, a floor category, any stated impact) is not a
+praise note: the label is ignored and it is scored like any other finding, so it can block
+or degrade the verdict. A praise note therefore has to state complete low-risk facts; one
+with no facts is worst case and makes the verdict DEGRADED. This applies to a findings
+file handed to `evaluate` or `post`. A model reply in `run` is different: it never carries a
+severity (see below), so nothing a model writes can mark a finding as praise.
+
+Evaluator version 2 introduced this rule. A verdict fence posted under version 1 is read
+the same way as before: the merge gate never trusts the fence's `verdict_outcome` or
+`evaluator_version`, it recomputes from the fence's `evaluated_findings` under the version
+it runs, so a version 1 fence that recorded CLEAN over a relabelled finding is refused as a
+disagreement between the fence and the gate's own computation.
 
 ## Rubric
 
@@ -377,8 +388,8 @@ so the evaluator reads **no label** in it as a reason to clear anything. These a
 trusted, alone or together:
 
 - `severity` (`nit`, `blocking` or any other value). Every finding is scored from its
-  facts whatever severity it states. The one exception is `praise`, which marks a finding
-  that is not a defect at all and is listed as advisory without scoring.
+  facts whatever severity it states. `praise` is no exception: it is shown only on a
+  finding whose facts already score none (see above) and clears nothing.
 - `rule_id` (a name such as `outside-range` carries no meaning to the evaluator).
 - Any marker, prefix or provenance note in the message or elsewhere in the file.
 
@@ -412,7 +423,7 @@ string such as `timeout`, is DEGRADED and names the scanner and its status. A sc
 reports more than once is satisfied only if every report is.
 
 Deduplication: findings with identical file, line, rule and message are merged. The copy
-kept is the strongest: a non-praise copy always beats a praise or advisory one, then a
+kept is the strongest: a copy that is not a praise note beats a praise note, then a
 blocking copy beats a non-blocking one, then the most severe wins. A blocking finding is
 never suppressed by a merge. Findings on the same file and rule at different lines or with
 different messages are both kept and annotated `possible_duplicates`.

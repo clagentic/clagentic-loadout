@@ -230,6 +230,42 @@ class TestClean:
         assert "evaluated_findings" in run.err
 
 
+class TestPraiseLabel:
+    """The gate recomputes from facts, so a praise label in a fence clears nothing,
+    whichever evaluator version posted the fence."""
+
+    @pytest.mark.parametrize("version", ["1", "2"])
+    def test_a_clean_fence_over_a_relabelled_floor_finding_is_refused(self, tmp_path, capsys, version):
+        repo = _repo(tmp_path)
+        relabelled = _finding(FLOOR_FACTS, severity="praise")
+        fence = _fence("CLEAN", findings=[relabelled], evaluator_version=version)
+
+        run = _merge([_comment(1, fence)], repo, capsys)
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "records CLEAN, but the merge gate computed BLOCKED" in run.err
+        assert "src/a.py:10:R1" in run.err
+
+    def test_a_clean_fence_over_a_praise_note_with_no_facts_is_refused(self, tmp_path, capsys):
+        repo = _repo(tmp_path)
+        run = _merge(
+            [_comment(1, _fence("CLEAN", findings=[_finding(None, severity="praise")]))], repo, capsys
+        )
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "records CLEAN, but the merge gate computed DEGRADED" in run.err
+
+    def test_a_clean_fence_over_a_praise_note_with_complete_low_risk_facts_proceeds(
+        self, tmp_path, capsys
+    ):
+        repo = _repo(tmp_path)
+        note = _finding(HARMLESS_FACTS, severity="praise")
+
+        run = _merge([_comment(1, _fence("CLEAN", findings=[note]))], repo, capsys)
+
+        assert run.code == verb.EXIT_OK, run.err
+
+
 class TestStale:
     def test_an_outcome_of_stale_refuses_naming_both_heads(self, tmp_path, capsys):
         repo = _repo(tmp_path)
