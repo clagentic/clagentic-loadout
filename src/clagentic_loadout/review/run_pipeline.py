@@ -65,7 +65,12 @@ from clagentic_loadout.review.evaluation import (
 from clagentic_loadout.review.finding_identity import with_fingerprints
 from clagentic_loadout.review.findings_contract import merge_findings
 from clagentic_loadout.review.profile_config import ReviewProfile
-from clagentic_loadout.review.profile_rules import chunk_class_rules, profile_findings
+from clagentic_loadout.review.profile_rules import (
+    chunk_class_rules,
+    class_rules_evidence,
+    profile_findings,
+)
+from clagentic_loadout.review.repo_profile import CLASSES
 from clagentic_loadout.sha import FULL_SHA_RE
 
 EXIT_COMPLETE = 0
@@ -90,6 +95,9 @@ PIPELINE_VERSION = "8"
 #: Optional key on a merged finding that re-anchors a prior one: the line the
 #: prior finding had in the last reviewed head.
 KEY_PRIOR_LINE = "prior_line"
+
+#: Key, on a chunk record and in the run summary, of the class rules evidence.
+KEY_CLASS_RULES = "class_rules"
 
 REASON_ACQUIRE_INVALID = "ACQUIRE_INVALID"
 REASON_DIFF_EMPTY = "DIFF_EMPTY"
@@ -309,6 +317,27 @@ def _engine_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
     return summary
 
 
+def _class_rules_of(record: dict[str, Any]) -> list[str]:
+    """The class names a persisted chunk record says its prompt stated; a
+    record without the field, or with a malformed one, stated none."""
+    value = record.get(KEY_CLASS_RULES)
+    classes = value.get("classes") if isinstance(value, dict) else None
+    if isinstance(classes, list) and all(isinstance(item, str) for item in classes):
+        return classes
+    return []
+
+
+def _class_rules_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """How many chunk prompts carried the class rules section, and the union of
+    the classes they stated in CLASSES order. Zero and empty when none did."""
+    stated = [_class_rules_of(record) for record in records.values()]
+    union = {name for classes in stated for name in classes}
+    return {
+        "chunks_with_section": sum(1 for classes in stated if classes),
+        "classes": [name for name in CLASSES if name in union],
+    }
+
+
 def _finding_key(finding: dict[str, Any]) -> tuple[Any, ...]:
     return (finding["file"], finding["line"], finding["rule_id"], finding["message"])
 
@@ -457,6 +486,10 @@ def run_review(
     context = evaluation if evaluation is not None else EvaluationContext()
     policy = read_context_policy(context)
     class_rules = {chunk.index: chunk_class_rules(policy, chunk) for chunk in chunks}
+    class_rules_sent = {
+        chunk.index: class_rules_evidence(policy, chunk, class_rules[chunk.index])
+        for chunk in chunks
+    }
     resume_note = "\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else ""
     resume_rules = "\0".join(class_rules[chunk.index] for chunk in chunks)
     state_dir = (
@@ -482,6 +515,21 @@ def run_review(
     for chunk in chunks:
         existing = _load_record(state_dir, chunk.index)
         if existing is not None and existing.get("status") == STATUS_OK:
+            # The resume key binds the exact section text, so a reused record was
+            # produced under the section computed now. A record written before
+            # the evidence field existed carries none; it takes the current value
+            # rather than reporting that no section was sent.
+            if KEY_CLASS_RULES not in existing and class_rules_sent[chunk.index] is not None:
+                existing[KEY_CLASS_RULES] = class_rules_sent[chunk.index]
+                try:
+                    _write_json(_result_path(state_dir, chunk.index), existing)
+                except OSError as exc:
+                    # The in-memory value still serves this run's outputs.
+                    print(
+                        f"loadout-review: notice: chunk {chunk.index}: cannot persist the "
+                        f"class rules evidence: {exc}",
+                        file=sys.stderr,
+                    )
             records[chunk.index] = existing
             stage(f"chunk-{chunk.index}", _stage_status(existing), resumed="yes", nonce=existing.get("nonce"))
         else:
@@ -525,6 +573,10 @@ def run_review(
                 )
             finally:
                 discard_chunk_workdir(chunk_cwd)
+            # Both engines are handed the one prompt, so this holds whichever
+            # answered. Stamped here, where the policy is in hand.
+            if class_rules_sent[chunk.index] is not None:
+                record[KEY_CLASS_RULES] = class_rules_sent[chunk.index]
         try:
             _write_json(_result_path(state_dir, chunk.index), record)
         except OSError as exc:
@@ -662,6 +714,11 @@ def run_review(
                     "carrier_unavailable_reason", "carrier_failure",
                 )
             }
+            | (
+                {KEY_CLASS_RULES: records[chunk.index][KEY_CLASS_RULES]}
+                if KEY_CLASS_RULES in records[chunk.index]
+                else {}
+            )
             for chunk in chunks
         ],
         **verdict_document_fields(verdict, context),
@@ -689,6 +746,7 @@ def run_review(
             KEY_VERDICT_OUTCOME: verdict.outcome,
             KEY_VERDICT_REASONS: document[KEY_VERDICT_REASONS],
             "carried_count": len(carried),
+            KEY_CLASS_RULES: _class_rules_summary(records),
             **(
                 _accounting_fields(prior_open, len(kept) + len(left_open), resolved)
                 if delta is not None

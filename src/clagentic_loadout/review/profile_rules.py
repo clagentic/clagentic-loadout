@@ -34,6 +34,7 @@ threshold to ``low``.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterator, Sequence
 from typing import Any
@@ -261,6 +262,22 @@ def chunk_class_rules(policy: PolicySource, chunk: Chunk) -> str:
     return class_rules_section(policy.repo_profile, chunk.files)
 
 
+def class_rules_evidence(policy: PolicySource, chunk: Chunk, section: str) -> dict[str, Any] | None:
+    """What a run leaves behind about the class rules section sent for *chunk*:
+    the classes it states (in ``CLASSES`` order), the sha256 of the exact text
+    the prompt carries, and its length. None when no section was sent, so a
+    reader can tell "not stated" from "stated"."""
+    sent = section.strip()
+    if not sent or policy.repo_profile is None:
+        return None
+    present = {policy.repo_profile.class_for(file) for file in chunk.files}
+    return {
+        "classes": [name for name in CLASSES if name in present],
+        "sha256": hashlib.sha256(sent.encode("utf-8")).hexdigest(),
+        "chars": len(sent),
+    }
+
+
 def profile_findings(
     policy: PolicySource,
     chunks: Sequence[Chunk],
@@ -319,6 +336,7 @@ __all__ = [
     "RULE_MISSING",
     "RULE_MORE",
     "chunk_class_rules",
+    "class_rules_evidence",
     "class_rules_section",
     "classes_in_effect",
     "profile_findings",

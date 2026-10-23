@@ -1140,6 +1140,37 @@ fence's `evaluated_findings` so the merge gate can match the same ruling. `evalu
 `--repo` and `--pr` for the same purpose. See
 [review-evaluator.md](review-evaluator.md#per-pr-rulings).
 
+**Class rules evidence.** The repo profile's class rules reach the reviewer as a
+"Repository class rules" section of each chunk prompt. The prompt itself is not kept, so
+a run records what was sent, additively (no existing field changes; the merge gate, the
+evaluator and the verdict do not read it):
+
+| where | field | meaning |
+| --- | --- | --- |
+| each chunk record, and `chunks[]` in `findings.json` | `class_rules` | present only when the chunk's prompt carried the section: `classes` (array of class names stated, in the order `released-tool`, `internal`), `sha256` (hex digest of the exact section text sent), `chars` (its length). Absent when no section was sent: no profile, a missing, invalid or unreadable profile, or no files |
+| `run` stdout | `class_rules` | run summary: `chunks_with_section` (integer) and `classes` (union over chunks, same order); `0` and `[]` when no chunk carried the section. `findings.json` keeps its top-level fields; its `chunks[]` entries carry the per-chunk value above |
+
+The carrier and the fallback engine are handed the same prompt, so either records the
+same digest. A delta run records it for each delta chunk. A resumed chunk keeps its
+recorded value; the class rules are part of the resume key, so a changed section re-runs
+the chunk instead of reusing a stale record. A reused record saved by an earlier release,
+before this field existed, takes the value of the section computed for the current run
+(the resume key guarantees it is the same text) and is saved back with it.
+
+```json
+"chunks": [{"index": 1, "engine": "carrier", "files": ["src/mod.py"],
+  "class_rules": {"classes": ["released-tool"], "sha256": "9b1c...e4", "chars": 612}}],
+```
+
+and, in the `run` stdout result:
+
+```json
+"class_rules": {"chunks_with_section": 1, "classes": ["released-tool"]}
+```
+
+A run with no valid profile reports `"class_rules": {"chunks_with_section": 0, "classes": []}`
+on stdout and no per-chunk `class_rules`.
+
 **Failure diagnostics.** When no engine can answer a chunk, the blocked result carries
 each engine's saved stderr path (`carrier_stderr_file`, `fallback_stderr_file`;
 `stderr_file` is the engine tried last), and a fallback that itself fails reports its
