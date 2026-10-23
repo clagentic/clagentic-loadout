@@ -5,6 +5,7 @@ run is the real pipeline against a fake host and a real local repository."""
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -376,3 +377,119 @@ def test_the_fallback_engine_gets_the_same_prompt_text_as_the_carrier(env, capsy
     (via_fallback,) = prompts(env.stubs, "fallback")
     assert via_carrier == via_fallback
     assert "## Repository class rules" in via_fallback
+
+
+def _stated_section(env: Env, index: int = 0) -> str:
+    """The class rules section exactly as the engine was handed it."""
+    prompt = prompts(env.stubs, "carrier")[index]
+    start = prompt.index("## Repository class rules")
+    return prompt[start : prompt.index("## Diff chunk", start)].strip()
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def test_each_chunk_and_the_run_record_the_classes_and_digest_of_the_section_sent(env, capsys):
+    _configure(env)
+    base = commit_files(env.repo, {PROFILE_PATH: MIXED_PROFILE})
+    env.diff = _added("src/mod.py", "x = 1") + _added("internal_dir/a.py", "y = 2")
+
+    _, payload = env.run(capsys=capsys, base_sha=base)
+
+    sent = _stated_section(env)
+    (chunk,) = _document(payload)["chunks"]
+    assert chunk["class_rules"] == {
+        "classes": ["released-tool", "internal"],
+        "sha256": _sha(sent),
+        "chars": len(sent),
+    }
+    summary = {"chunks_with_section": 1, "classes": ["released-tool", "internal"]}
+    assert payload["class_rules"] == _document(payload)["class_rules"] == summary
+
+
+def test_a_one_class_profile_records_only_that_class(env, capsys):
+    _configure(env)
+    base = commit_files(env.repo, {PROFILE_PATH: "class: released-tool\n"})
+    env.diff = _added("src/mod.py", "x = 1")
+
+    _, payload = env.run(capsys=capsys, base_sha=base)
+
+    assert _document(payload)["chunks"][0]["class_rules"]["classes"] == ["released-tool"]
+    assert payload["class_rules"] == {"chunks_with_section": 1, "classes": ["released-tool"]}
+
+
+def test_a_missing_or_invalid_profile_records_that_no_section_was_sent(env, tmp_path, capsys):
+    _configure(env)
+    none = {"chunks_with_section": 0, "classes": []}
+
+    _, missing = env.run(capsys=capsys)
+    base = commit_files(env.repo, {PROFILE_PATH: "class: not-a-class\n"})
+    _, invalid = env.run("--out", str(tmp_path / "invalid-run"), capsys=capsys, base_sha=base)
+
+    for payload in (missing, invalid):
+        assert payload["class_rules"] == _document(payload)["class_rules"] == none
+        assert all("class_rules" not in chunk for chunk in _document(payload)["chunks"])
+
+
+def test_the_fallback_engine_records_the_same_digest_as_the_carrier_would(env, tmp_path, capsys):
+    base = commit_files(env.repo, {PROFILE_PATH: MIXED_PROFILE})
+    env.diff = _added("src/mod.py", "x = 1")
+    env.configure(carrier_mode="empty")
+    _, via_carrier = env.run("--out", str(tmp_path / "a"), capsys=capsys, base_sha=base)
+    env.configure(carrier_mode="exit127", fallback_mode="empty")
+    _, via_fallback = env.run("--out", str(tmp_path / "b"), capsys=capsys, base_sha=base)
+
+    assert _document(via_fallback)["chunks"][0]["engine"] == "fallback"
+    assert (
+        _document(via_fallback)["chunks"][0]["class_rules"]
+        == _document(via_carrier)["chunks"][0]["class_rules"]
+    )
+
+
+def test_a_delta_run_records_the_section_for_its_delta_chunks(env, tmp_path, capsys):
+    _configure(env)
+    base = commit_files(env.repo, {PROFILE_PATH: MIXED_PROFILE})
+    prior = tmp_path / "prior.json"
+    prior.write_text(
+        json.dumps(
+            {"owner": "some-owner", "repo": "some-repo", "pr_number": 42,
+             "head_sha": "c" * 40, "findings": []}
+        ),
+        encoding="utf-8",
+    )
+
+    _, payload = env.run(
+        "--prior-findings", str(prior), capsys=capsys, base_sha=base,
+        compare={"status": "ahead", "diff": _added("internal_dir/new.py", "z = 3")},
+    )
+
+    assert payload["mode"] == "delta"
+    assert _document(payload)["chunks"][0]["class_rules"]["classes"] == ["internal"]
+    assert payload["class_rules"] == {"chunks_with_section": 1, "classes": ["internal"]}
+
+
+def test_a_resumed_chunk_keeps_its_recorded_value_and_a_changed_section_reruns_it(
+    env, tmp_path, capsys
+):
+    _configure(env)
+    out = str(tmp_path / "one")
+    base = commit_files(env.repo, {PROFILE_PATH: "class: released-tool\n"})
+    env.diff = _added("src/mod.py", "x = 1")
+
+    _, first = env.run("--out", out, capsys=capsys, base_sha=base)
+    calls = len(prompts(env.stubs, "carrier"))
+    _, second = env.run("--out", out, capsys=capsys, base_sha=base)
+
+    assert len(prompts(env.stubs, "carrier")) == calls
+    assert _document(second)["chunks"] == _document(first)["chunks"]
+    assert second["class_rules"] == first["class_rules"]
+
+    changed = commit_files(env.repo, {PROFILE_PATH: MIXED_PROFILE})
+    env.diff = _added("src/mod.py", "x = 1") + _added("internal_dir/a.py", "y = 2")
+    _, third = env.run("--out", out, capsys=capsys, base_sha=changed)
+
+    assert len(prompts(env.stubs, "carrier")) > calls
+    sent = _stated_section(env, -1)
+    assert _document(third)["chunks"][0]["class_rules"]["sha256"] == _sha(sent)
+    assert third["class_rules"]["classes"] == ["released-tool", "internal"]
