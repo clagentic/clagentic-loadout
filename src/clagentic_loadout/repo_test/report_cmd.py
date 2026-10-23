@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.repo_test import exits, store
+from clagentic_loadout.repo_test.junit import ID_SCHEME, collapse_duplicate_id
 from clagentic_loadout.repo_test.spec import MODE_TIER
 from clagentic_loadout.repo_test.store import RunRecord, StoreError
 
@@ -32,6 +33,8 @@ _LISTED_RUNS = 10
 
 REPO_SAME = "same"
 REPO_UNVERIFIED = "unverified"
+
+ID_BASIS_COLLAPSED = "collapsed"
 
 
 class ReportRefused(Exception):
@@ -118,7 +121,7 @@ def select_run(root: Path, target: str, *, repo: str | None, sha: str | None) ->
 
 def summary_of(run: RunRecord) -> dict[str, Any]:
     result = run.result
-    return {
+    summary: dict[str, Any] = {
         "run_id": run.run_id,
         "state": run.state,
         "mode": result.get("mode"),
@@ -136,6 +139,10 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
         "base_sha": run.provenance.get("base_sha"),
         "commit_known": run.head_sha is not None,
     }
+    note = _failing_id_note(run)
+    if note is not None:
+        summary["failing_id_note"] = note
+    return summary
 
 
 def _tier_name(run: RunRecord) -> str | None:
@@ -233,7 +240,15 @@ def diff_of(head: RunRecord, base: RunRecord) -> dict[str, Any]:
     _require_like_tiers(head, base)
     repo_check = _repo_check(head, base)
     head_ids, base_ids = set(_failing_ids(head)), set(_failing_ids(base))
-    return {
+    # A run recorded before ids were made distinct holds one id per name, so its
+    # ids cannot be told apart from a new run's. Comparing them as recorded would
+    # report every repeated failure as head_only; compare on the plain names and
+    # say so.
+    collapsed = _has_distinct_ids(head) != _has_distinct_ids(base)
+    if collapsed:
+        head_ids = {collapse_duplicate_id(item) for item in head_ids}
+        base_ids = {collapse_duplicate_id(item) for item in base_ids}
+    diff: dict[str, Any] = {
         "head_run": head.run_id,
         "base_run": base.run_id,
         "head_only": sorted(head_ids - base_ids),
@@ -241,6 +256,30 @@ def diff_of(head: RunRecord, base: RunRecord) -> dict[str, Any]:
         "shared_count": len(head_ids & base_ids),
         "repo_check": repo_check,
     }
+    if collapsed:
+        diff["id_basis"] = ID_BASIS_COLLAPSED
+        diff["id_basis_reason"] = (
+            "one run was recorded before failing ids were made distinct per failed case, "
+            "so failures that share a name are compared as one"
+        )
+    return diff
+
+
+def _has_distinct_ids(run: RunRecord) -> bool:
+    return run.result.get("id_scheme") == ID_SCHEME
+
+
+def _failing_id_note(run: RunRecord) -> str | None:
+    """Why a run's failed count and failing id count differ, or None when they
+    do not. Only a run recorded before ids were made distinct can differ."""
+    counts = run.result.get("counts")
+    failed = counts.get("failed") if isinstance(counts, dict) else None
+    if not isinstance(failed, int) or _has_distinct_ids(run) or failed == len(_failing_ids(run)):
+        return None
+    return (
+        f"{failed - len(_failing_ids(run))} failed test case(s) share a name with another failed case "
+        "and were recorded as one id; this run predates distinct failing ids"
+    )
 
 
 def load_base_run(root: Path, base_id: str) -> RunRecord:
