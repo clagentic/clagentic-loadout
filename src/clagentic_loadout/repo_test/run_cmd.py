@@ -15,6 +15,7 @@ from typing import Any
 
 from clagentic_loadout.repo_test import exits, provenance, store
 from clagentic_loadout.repo_test.junit import JunitError, JunitSummary, parse_junit
+from clagentic_loadout.repo_test.report_scratch import collect_report, create_scratch, remove_scratch
 from clagentic_loadout.repo_test.runner import log_tail, run_command
 from clagentic_loadout.repo_test.spec import (
     BASE_PLACEHOLDER,
@@ -175,20 +176,30 @@ def execute_run(
 
     junit_path = run_dir / store.JUNIT_FILE
     log_path = run_dir / store.LOG_FILE
+    try:
+        scratch = create_scratch()
+    except OSError as exc:
+        raise RunRefused(f"cannot make a report directory for run {run_id}: {exc}", exits.EXIT_STORE_WRITE) from exc
     argv = [
-        part.replace(JUNIT_PLACEHOLDER, str(junit_path)).replace(BASE_PLACEHOLDER, base_sha or "")
+        part.replace(JUNIT_PLACEHOLDER, str(scratch.junit_path)).replace(BASE_PLACEHOLDER, base_sha or "")
         for part in template
     ] + files
     started = datetime.now(timezone.utc)
-    outcome = run_command(argv, root, log_path, timeout_seconds)
-
     junit: JunitSummary | None = None
-    problem = outcome.problem
-    if problem is None:
-        try:
-            junit = parse_junit(junit_path)
-        except JunitError as exc:
-            problem = f"{exc} (the command exited {outcome.exit_code})"
+    cleanup_problem: str | None = None
+    try:
+        outcome = run_command(argv, root, log_path, timeout_seconds)
+        problem = outcome.problem
+        if problem is None:
+            try:
+                collect_report(scratch, junit_path)
+                junit = parse_junit(junit_path)
+            except JunitError as exc:
+                problem = f"{exc} (the command exited {outcome.exit_code})"
+    finally:
+        cleanup_problem = remove_scratch(scratch)
+    if cleanup_problem is not None:
+        problem = f"{problem}; {cleanup_problem}" if problem else cleanup_problem
 
     if junit is None:
         state, code = store.STATE_UNRUNNABLE, exits.EXIT_UNRUNNABLE
@@ -197,7 +208,8 @@ def execute_run(
         failed = bool(junit.failing_ids) or outcome.exit_code != 0
         code = exits.EXIT_TESTS_FAILED if failed else exits.EXIT_OK
         if outcome.exit_code != 0 and not junit.failing_ids:
-            problem = f"the command exited {outcome.exit_code} with no failing test in its report"
+            exited = f"the command exited {outcome.exit_code} with no failing test in its report"
+            problem = f"{exited}; {cleanup_problem}" if cleanup_problem else exited
 
     record: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
