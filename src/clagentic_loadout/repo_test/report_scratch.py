@@ -1,25 +1,41 @@
 """repo_test.report_scratch — a per-run place for the test command to write its
-JUnit report, reachable by whatever user the command ends up running as.
+JUnit report, reachable by whatever user the command ends up running as, and the
+checks that the report found there was written by that command.
 
 The run record under the reports root is owner-only, and a declared command may
 re-execute itself as a different unprivileged user partway through, so the
 runner cannot hand the report path inside that record to the command. Instead
 each run gets a fresh directory outside the store:
 
-* its name is random and the directory is mode 0o733 (others may enter and create
-  files but cannot list it), so only a process that was handed the path can find
-  the report file;
-* the report file inside it is pre-created mode 0o666, so a command that opens the
-  path for writing succeeds whichever user it is;
-* once the command has ended the report is copied into the private run record
-  (never followed through a symlink) and the scratch directory is removed, on
-  success, failure and timeout alike.
+* its name is random and the directory is mode 0o1733 (others may enter and create
+  files but cannot list it; the sticky bit stops anyone but a file's owner removing
+  or renaming it), so only a process that was handed the path can find the name;
+* the runner does NOT create the report. The command creates it, so the file is
+  owned by, and has the permissions of, the user the command wrote it as, and a
+  stranger cannot write into it afterwards;
+* once the command has ended the report is verified and copied into the private
+  run record (never followed through a symlink) and the scratch directory is
+  removed, on success, failure and timeout alike.
+
+Verification at copy-back refuses a report that is not a regular file with one
+link, that is writable by others, or whose owner is neither the caller nor a user
+the command's process tree was seen running as. The refusal names the reason and
+nothing is stored; the stored run record carries what was verified.
+
+Residual risk: a stranger who learns the path from the process list can still
+create the report name before the command does. That is caught by the owner check
+unless the stranger runs as the same user as the caller or as a user the command
+itself switched to. A user the command switched to for less than the sampling
+interval is not seen, which refuses a genuine report rather than trusting a
+forged one. Group-writable reports are accepted, because a default umask of 002 is
+common; members of the report's group could rewrite it in place. Nothing here
+needs root or knows a user name.
 
 Trade-off against the alternatives: a report path inside the repository's own
 tree would touch the consumer's working tree and show up in its status; widening
-the store itself would expose the other runs' records. The cost here is that the
-report is briefly writable by any user who is told, or guesses, the path of an
-unlisted random name. Nothing here needs root or knows a user name.
+the store itself would expose the other runs' records; an inherited descriptor in
+place of a path needs every declared command to accept one and to keep it across a
+privilege-dropping re-execution.
 """
 
 from __future__ import annotations
@@ -33,14 +49,20 @@ from pathlib import Path
 
 from clagentic_loadout.repo_test.junit import MAX_JUNIT_BYTES, JunitError
 
+VERIFIED = "verified"
+REFUSED = "refused"
+
 # TMPDIR (via tempfile.gettempdir) is tried first. These are the POSIX/FHS
 # standard temporary directories, the same fallback set the standard library's
 # tempfile module tries; they are not a deployment- or host-specific path.
 _FALLBACK_BASES = ("/tmp", "/var/tmp")
 _COPY_CHUNK = 1024 * 1024
-_SCRATCH_DIR_MODE = 0o733
-_SCRATCH_FILE_MODE = 0o666
+_SCRATCH_DIR_MODE = 0o1733
 _REPORT_NAME = "junit.xml"
+
+
+class ReportUntrusted(JunitError):
+    """The report exists but was not shown to come from the test command."""
 
 
 @dataclass(frozen=True)
@@ -80,22 +102,48 @@ def create_scratch() -> ReportScratch:
     directory = Path(tempfile.mkdtemp(prefix="loadout-junit-", dir=_scratch_base()))
     try:
         os.chmod(directory, _SCRATCH_DIR_MODE)
-        junit_path = directory / _REPORT_NAME
-        fd = os.open(junit_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, _SCRATCH_FILE_MODE)
-        os.close(fd)
-        os.chmod(junit_path, _SCRATCH_FILE_MODE)
     except OSError:
         shutil.rmtree(directory, ignore_errors=True)
         raise
-    return ReportScratch(directory, junit_path)
+    return ReportScratch(directory, directory / _REPORT_NAME)
 
 
-def collect_report(scratch: ReportScratch, dest: Path) -> None:
-    """Copy the report from *scratch* into the private record at *dest*. Raises
-    JunitError, naming the path and the reason, when there is nothing usable."""
+def _check_origin(info: os.stat_result, source: Path, allowed_uids: frozenset[int]) -> None:
+    """Refuse a report that cannot have been written only by the command's tree."""
+    if info.st_nlink != 1:
+        raise ReportUntrusted(
+            f"the report {str(source)!r} has {info.st_nlink} links: it may be another file linked in"
+        )
+    if info.st_mode & stat.S_IWOTH:
+        raise ReportUntrusted(
+            f"the report {str(source)!r} is writable by any user (mode {stat.S_IMODE(info.st_mode):04o}), "
+            "so it cannot be shown to be the command's own output"
+        )
+    if info.st_uid not in allowed_uids:
+        seen = ", ".join(str(uid) for uid in sorted(allowed_uids))
+        raise ReportUntrusted(
+            f"the report {str(source)!r} is owned by user id {info.st_uid}, which the command was not seen "
+            f"running as (seen: {seen}); another user may have created it"
+        )
+
+
+def collect_report(scratch: ReportScratch, dest: Path, allowed_uids: frozenset[int]) -> dict[str, object]:
+    """Verify the report in *scratch* and copy it into the private record at
+    *dest*; returns what was verified. *allowed_uids* are the users the command
+    may legitimately have written it as. Raises JunitError, naming the path and
+    the reason, when there is nothing usable, and ReportUntrusted when the report
+    is not shown to come from the command."""
     source = scratch.junit_path
     try:
-        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK: any user may create names in the scratch directory, and a
+        # blocking open of a FIFO with no writer would hang the runner. The type
+        # is checked on the descriptor below, before anything is read.
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError as exc:
+        raise JunitError(
+            f"the command never wrote its report to {str(source)!r}: no file exists there "
+            "(it may have ended early, run as a user that could not create it, or removed the file)"
+        ) from exc
     except OSError as exc:
         raise JunitError(
             f"the command left no readable report at {str(source)!r} (it may have removed or replaced it): {exc}"
@@ -103,7 +151,11 @@ def collect_report(scratch: ReportScratch, dest: Path) -> None:
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode):
-            raise JunitError(f"the report path {str(source)!r} is not a regular file")
+            raise ReportUntrusted(
+                f"the report path {str(source)!r} is not a regular file (mode {stat.S_IFMT(info.st_mode):06o}): "
+                "it was not read and nothing is stored"
+            )
+        _check_origin(info, source, allowed_uids)
         if info.st_size == 0:
             raise JunitError(
                 f"the command never wrote its report to {str(source)!r}: the file is still empty "
@@ -141,6 +193,13 @@ def collect_report(scratch: ReportScratch, dest: Path) -> None:
             )
         if failure is not None:
             raise JunitError(f"cannot store the report at {str(dest)!r}: {failure}") from failure
+    return {
+        "status": VERIFIED,
+        "owner_uid": info.st_uid,
+        "single_link": True,
+        "writable_by_others": False,
+        "command_uids": sorted(allowed_uids),
+    }
 
 
 def remove_scratch(scratch: ReportScratch) -> str | None:
@@ -155,4 +214,12 @@ def remove_scratch(scratch: ReportScratch) -> str | None:
     return None
 
 
-__all__ = ["ReportScratch", "collect_report", "create_scratch", "remove_scratch"]
+__all__ = [
+    "REFUSED",
+    "VERIFIED",
+    "ReportScratch",
+    "ReportUntrusted",
+    "collect_report",
+    "create_scratch",
+    "remove_scratch",
+]

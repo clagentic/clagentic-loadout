@@ -15,6 +15,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.repo_test.process_uids import UidWatcher
+
 
 @dataclass(frozen=True)
 class CommandOutcome:
@@ -23,6 +25,8 @@ class CommandOutcome:
 
     exit_code: int | None
     problem: str | None
+    # User ids the command's session was seen running as.
+    process_uids: frozenset[int] = frozenset()
 
 
 def run_command(
@@ -38,17 +42,20 @@ def run_command(
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
             )
+            watcher = UidWatcher(proc.pid)
+            watcher.start()
             try:
                 code = proc.wait(timeout=timeout_seconds)
             except subprocess.TimeoutExpired:
                 os.killpg(proc.pid, signal.SIGKILL)
                 proc.wait()
-                return CommandOutcome(None, f"timed out after {timeout_seconds} seconds")
+                return CommandOutcome(None, f"timed out after {timeout_seconds} seconds", watcher.stop())
+            uids = watcher.stop()
     except FileNotFoundError:
         return CommandOutcome(None, f"command not found: {argv[0]!r} (working directory {str(cwd)!r})")
     except OSError as exc:
         return CommandOutcome(None, f"cannot run {argv[0]!r}: {exc}")
-    return CommandOutcome(code, None)
+    return CommandOutcome(code, None, uids)
 
 
 def log_tail(log_path: Path, lines: int) -> str:

@@ -7,6 +7,7 @@ JSON summary to print. Nothing here prints or exits; verb.py does.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,7 +16,13 @@ from typing import Any
 
 from clagentic_loadout.repo_test import exits, provenance, store
 from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, JunitSummary, parse_junit
-from clagentic_loadout.repo_test.report_scratch import collect_report, create_scratch, remove_scratch
+from clagentic_loadout.repo_test.report_scratch import (
+    REFUSED,
+    ReportUntrusted,
+    collect_report,
+    create_scratch,
+    remove_scratch,
+)
 from clagentic_loadout.repo_test.runner import log_tail, run_command
 from clagentic_loadout.repo_test.spec import (
     BASE_PLACEHOLDER,
@@ -186,14 +193,21 @@ def execute_run(
     ] + files
     started = datetime.now(timezone.utc)
     junit: JunitSummary | None = None
+    report_verification: dict[str, Any] | None = None
     cleanup_problem: str | None = None
     try:
         outcome = run_command(argv, root, log_path, timeout_seconds)
         problem = outcome.problem
         if problem is None:
+            # The caller's own ids are always the command's: a command that keeps
+            # them never switched user.
+            allowed = outcome.process_uids | {os.getuid(), os.geteuid()}
             try:
-                collect_report(scratch, junit_path)
+                report_verification = collect_report(scratch, junit_path, allowed)
                 junit = parse_junit(junit_path)
+            except ReportUntrusted as exc:
+                report_verification = {"status": REFUSED, "reason": str(exc)}
+                problem = f"{exc} (the command exited {outcome.exit_code})"
             except JunitError as exc:
                 problem = f"{exc} (the command exited {outcome.exit_code})"
     finally:
@@ -220,6 +234,7 @@ def execute_run(
         "problem": problem,
         "command": [*template, *files],
         "command_exit_code": outcome.exit_code,
+        "report_verification": report_verification,
         "counts": _result_counts(junit),
         "id_scheme": ID_SCHEME,
         "failing_ids": list(junit.failing_ids) if junit else [],
