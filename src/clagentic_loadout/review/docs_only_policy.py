@@ -279,12 +279,16 @@ def classify_changeset(
     ``docs-only`` only when there is at least one path and every path is
     documentation; otherwise ``code``. Pure: the same inputs always give the
     same answer."""
-    files = tuple(
-        sorted(
-            {entry.path: _classify_path(entry, policy) for entry in changed}.values(),
-            key=lambda item: item.path,
-        )
-    )
+    # Every entry is judged on its own and a path keeps its most restrictive
+    # result: a later plain-file entry must never erase the executable, symlink
+    # or submodule mode (or any other code reason) an earlier entry carried.
+    by_path: dict[str, PathClass] = {}
+    for entry in changed:
+        result = _classify_path(entry, policy)
+        known = by_path.get(result.path)
+        if known is None or (known.kind == PATH_DOCS and result.kind == PATH_CODE):
+            by_path[result.path] = result
+    files = tuple(sorted(by_path.values(), key=lambda item: item.path))
     docs_only = bool(files) and all(item.kind == PATH_DOCS for item in files)
     return Classification(
         kind=CLASSIFICATION_DOCS_ONLY if docs_only else CLASSIFICATION_CODE,

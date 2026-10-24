@@ -120,6 +120,24 @@ class TestClassification:
         assert result.kind == "code"
         assert mode in result.files[0].reason
 
+    @pytest.mark.parametrize("mode", ["100755", "120000", "160000"])
+    def test_a_later_plain_entry_for_the_same_path_does_not_erase_a_special_mode(self, mode):
+        special = dop.ChangedPath("docs/guide.md", (mode,))
+        plain = dop.ChangedPath("docs/guide.md", ("100644",))
+
+        for order in ([special, plain], [plain, special]):
+            result = dop.classify_changeset(order, POLICY, SOURCE)
+            assert result.kind == "code"
+            [only] = result.files
+            assert only.kind == "code" and mode in only.reason
+
+    def test_a_path_is_docs_only_when_every_one_of_its_entries_is(self):
+        entries = [dop.ChangedPath("docs/guide.md", ("100644",)), dop.ChangedPath("docs/guide.md")]
+
+        result = dop.classify_changeset(entries, POLICY, SOURCE)
+
+        assert result.is_docs_only and len(result.files) == 1
+
     def test_a_plain_mode_is_not_special(self):
         assert _classify("docs/guide.md", modes={"docs/guide.md": ("100644", "100644")}).is_docs_only
 
