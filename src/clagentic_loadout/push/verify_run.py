@@ -30,6 +30,7 @@ from clagentic_loadout.bounded_capture import (
 )
 from clagentic_loadout.push.push_redaction import redact_push_secrets
 from clagentic_loadout.push.verify_config import VerifyEntry
+from clagentic_loadout.verdict_record.record import utc_timestamp
 
 #: Characters of each captured stream kept in a result. The TAIL is kept:
 #: the failing assertion or compiler error is at the end, not the start.
@@ -87,6 +88,10 @@ class VerifyResult:
     stdout_tail: str
     stderr_tail: str
     start_error: str | None = None
+    #: UTC record timestamps of the run (verdict_record.record.utc_timestamp);
+    #: None on a result built without running the command.
+    started: str | None = None
+    finished: str | None = None
 
     @property
     def passed(self) -> bool:
@@ -133,6 +138,7 @@ def _tail(buffer: TailBuffer) -> str:
 def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
     """Run one entry in *cwd* and return its result. Never raises for a
     command-level failure; those are reported in the result."""
+    started = utc_timestamp()
     try:
         proc = subprocess.Popen(
             list(entry.argv),
@@ -148,6 +154,7 @@ def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
             name=entry.name, argv=entry.argv, exit_code=None, timed_out=False,
             timeout_seconds=entry.timeout_seconds, stdout_tail="", stderr_tail="",
             start_error=f"{type(exc).__name__}: {exc}",
+            started=started, finished=utc_timestamp(),
         )
 
     out_buf, err_buf, readers = start_tail_capture(proc, _CAPTURE_BYTES)
@@ -174,6 +181,7 @@ def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
         exit_code=None if timed_out else proc.returncode, timed_out=timed_out,
         timeout_seconds=entry.timeout_seconds,
         stdout_tail=_tail(out_buf), stderr_tail=_tail(err_buf),
+        started=started, finished=utc_timestamp(),
     )
 
 

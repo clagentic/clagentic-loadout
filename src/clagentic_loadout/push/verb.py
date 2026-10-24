@@ -307,8 +307,11 @@ from clagentic_loadout.push.verify_config import (
     InvalidVerifyConfigError,
     load_verify_entries,
 )
+from clagentic_loadout.verdict_record.emit import try_emit_record
+from clagentic_loadout.verdict_record.record import KIND_PUSH_VERIFY, gate_name, utc_timestamp
 from clagentic_loadout.push.verify_run import (
     VerificationFailedError,
+    VerifyResult,
     append_section,
     append_to_existing,
     render_skipped_section,
@@ -1365,16 +1368,26 @@ def _dirty_path_count(project_root: Path) -> int | None:
 
 
 def _run_verification(
-    project_root: Path, *, body: str | None, skip: bool, tested_sha: str | None = None
+    project_root: Path,
+    *,
+    body: str | None,
+    skip: bool,
+    tested_sha: str | None = None,
+    results_out: list[VerifyResult] | None = None,
 ) -> str | None:
     """Body-only view of `_run_verification_outcome`."""
     return _run_verification_outcome(
-        project_root, body=body, skip=skip, tested_sha=tested_sha
+        project_root, body=body, skip=skip, tested_sha=tested_sha, results_out=results_out
     )[0]
 
 
 def _run_verification_outcome(
-    project_root: Path, *, body: str | None, skip: bool, tested_sha: str | None = None
+    project_root: Path,
+    *,
+    body: str | None,
+    skip: bool,
+    tested_sha: str | None = None,
+    results_out: list[VerifyResult] | None = None,
 ) -> tuple[str | None, str, str | None]:
     """Run the repo's declared `push.verify` commands (push.verify_run) in
     *project_root* and return (body, outcome, tested sha): *body* with a
@@ -1392,6 +1405,9 @@ def _run_verification_outcome(
     something ran or was skipped, the returned body is the section alone, so
     the record is never lost; a caller that passed None must treat the result
     as an addition to an existing body, not a replacement.
+
+    *results_out*, when given, receives every result the run produced, the
+    failing one included, so the caller can leave a verdict record for each.
 
     Raises push.verify_config.InvalidVerifyConfigError for malformed config
     and push.verify_run.VerificationFailedError on the first failing check;
@@ -1416,7 +1432,14 @@ def _run_verification_outcome(
         f"push: running {len(entries)} verification check(s) in {project_root}",
         file=sys.stderr,
     )
-    results = run_verifications(entries, project_root)
+    try:
+        results = run_verifications(entries, project_root)
+    except VerificationFailedError as exc:
+        if results_out is not None:
+            results_out.extend(exc.results)
+        raise
+    if results_out is not None:
+        results_out.extend(results)
     return (
         _with_section(body, render_verification_section(results, tested_sha)),
         VERIFICATION_RAN,
@@ -1428,6 +1451,50 @@ def _with_section(body: str | None, section: str) -> str:
     """*body* with *section* appended, or *section* alone when no body was
     supplied -- a verification outcome is never dropped for want of a body."""
     return section if body is None else append_section(body, section)
+
+
+def _tree_sha_of(project_root: Path, head_sha: str) -> str | None:
+    """The tree object of *head_sha* in the checkout, or None when git cannot
+    say (the commit is not in this object database)."""
+    import subprocess
+
+    probe = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{head_sha}^{{tree}}"],
+        cwd=str(project_root), capture_output=True, text=True,
+    )
+    tree = probe.stdout.strip()
+    return tree if probe.returncode == 0 and _FULL_SHA_RE.match(tree) else None
+
+
+def _emit_verify_records(
+    results: list[VerifyResult], *, head_sha: str, project_root: Path, owner: str, repo: str
+) -> list[str]:
+    """Leave one verdict record per verification result, for *head_sha*: the
+    commit the remote holds (create path) or the PR head the checkout was
+    proven to be (update path), never a head read before commits were
+    re-authored. The exit is the command's own; a run that timed out or never
+    started records -1. A write that fails is reported and leaves the gate
+    reading as not measured. Returns the ids written."""
+    if not results:
+        return []
+    tree_sha = _tree_sha_of(project_root, head_sha)
+    ids: list[str] = []
+    for result in results:
+        record = try_emit_record(
+            "push",
+            gate=gate_name(KIND_PUSH_VERIFY, result.name),
+            head_sha=head_sha,
+            tool="loadout-push",
+            exit=result.exit_code if result.exit_code is not None else -1,
+            started=result.started or utc_timestamp(),
+            finished=result.finished or utc_timestamp(),
+            tree_sha=tree_sha,
+            repo=f"{owner}/{repo}",
+            untrusted_roots=(project_root,),
+        )
+        if record is not None:
+            ids.append(record.id)
+    return ids
 
 
 def _resolve_repo_root(repo_path_override: str) -> Path:
@@ -2282,6 +2349,7 @@ def _run_update_pr(
     force_append = False
     verification = VERIFICATION_NONE
     verification_sha: str | None = None
+    verification_record_ids: list[str] = []
     if body is not None or has_new_commits:
         body_supplied = body is not None
         run_checks = True
@@ -2306,10 +2374,27 @@ def _run_update_pr(
                         file=sys.stderr,
                     )
         if run_checks:
-            body, verification, verification_sha = _run_verification_outcome(
-                project_root, body=body, skip=args.skip_verify,
-                tested_sha=_checkout_head_sha(project_root),
-            )
+            verify_results: list[VerifyResult] = []
+            tested_head = _checkout_head_sha(project_root)
+            try:
+                body, verification, verification_sha = _run_verification_outcome(
+                    project_root, body=body, skip=args.skip_verify,
+                    tested_sha=tested_head, results_out=verify_results,
+                )
+            except VerificationFailedError:
+                # The checkout is the PR head, so a failing run is a measurement
+                # of that head too: record it before the refusal.
+                if tested_head:
+                    _emit_verify_records(
+                        verify_results, head_sha=tested_head, project_root=project_root,
+                        owner=owner, repo=repo,
+                    )
+                raise
+            if tested_head and verification == VERIFICATION_RAN:
+                verification_record_ids = _emit_verify_records(
+                    verify_results, head_sha=tested_head, project_root=project_root,
+                    owner=owner, repo=repo,
+                )
             force_append = body is not None and not body_supplied
     elif load_verify_entries(project_root):
         verification = VERIFICATION_SKIPPED_NO_NEW_COMMITS
@@ -2373,6 +2458,8 @@ def _run_update_pr(
     }
     if verification_sha:
         result["verification_sha"] = verification_sha
+    if verification_record_ids:
+        result["verdict_records"] = verification_record_ids
     print(json.dumps(result))
     return EXIT_OK
 
@@ -2577,8 +2664,13 @@ def _run_create_pr(
     # (bot-identity re-authoring above has already settled it), before any
     # ref moves or PR exists. A dry run pushes nothing and opens no PR, so it
     # does not spend a verification run.
+    verify_results: list[VerifyResult] = []
+    verified_head: str | None = None
     if not args.dry_run:
-        body = _run_verification(project_root, body=body, skip=args.skip_verify)
+        verified_head = _checkout_head_sha(project_root)
+        body = _run_verification(
+            project_root, body=body, skip=args.skip_verify, results_out=verify_results
+        )
 
     # LEASE CONTROL (lr-f57f13, D5 DECIDED): never derive force_with_lease
     # silently from history_rewritten alone -- resolve_lease applies the
@@ -2695,6 +2787,27 @@ def _run_create_pr(
         expected_bot_email=effective_bot_email, token=token,
     )
 
+    # Verification records name the head the REMOTE now holds, read back above,
+    # and only when it is the commit the checks ran against: a head that cannot
+    # be confirmed, or that differs, is not a measurement of what was pushed, so
+    # the gate stays not measured rather than being recorded against a guess.
+    verification_record_ids: list[str] = []
+    if verify_results:
+        confirmed_head = remote_readback_envelope.get("remote_head_sha")
+        if confirmed_head and confirmed_head == verified_head:
+            verification_record_ids = _emit_verify_records(
+                verify_results, head_sha=confirmed_head, project_root=project_root,
+                owner=owner, repo=repo,
+            )
+        else:
+            print(
+                f"push: WARNING -- no verdict record was written for the verification "
+                f"run: the remote head {confirmed_head or 'could not be read back'} is not "
+                f"confirmed to be the commit it ran against ({verified_head or 'unreadable'}). "
+                f"Those gates will read as not measured at the pushed head.",
+                file=sys.stderr,
+            )
+
     try:
         if args.platform == PLATFORM_GITHUB:
             pr_number = github_backend.create_pr(
@@ -2766,6 +2879,8 @@ def _run_create_pr(
         "pr_number": pr_number, "pr_url": pr_url, "owner": owner, "repo": repo,
     }
     envelope.update(remote_readback_envelope)
+    if verification_record_ids:
+        envelope["verdict_records"] = verification_record_ids
 
     print(f"push: PR #{pr_number} opened: {pr_url}")
     print(json.dumps(envelope))
