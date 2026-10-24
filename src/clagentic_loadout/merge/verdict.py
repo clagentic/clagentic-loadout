@@ -159,6 +159,11 @@ VERDICT_FENCE = "review-result"
 _SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
 _VERDICT_SCHEMA_PATH = _SCHEMAS_DIR / "review-result.schema.json"
 
+def verdict_schema_path() -> Path:
+    """The path of the packaged JSON Schema for the verdict block's payload."""
+    return _VERDICT_SCHEMA_PATH
+
+
 #: Valid review_status values. Mirrored from the schema's enum for the
 #: build-side guard in build_verdict_block() (fail fast before ever
 #: constructing a block, rather than only catching it on parse).
@@ -1337,4 +1342,5 @@ __all__ = [
     "find_all_verdict_blocks",
     "parse_verdict_block",
     "read_reviewer_verdict",
+    "verdict_schema_path",
 ]

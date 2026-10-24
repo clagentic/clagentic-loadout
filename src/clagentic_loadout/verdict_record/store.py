@@ -21,35 +21,32 @@ environment must pass ``CLAGENTIC_LOADOUT_VERDICT_RECORDS_DIR`` through, or give
 each identity the same user config root; otherwise each identity resolves a
 different default root and a record written by one is not found by another.
 
-A root this module creates is mode 0755, so only its creator can write: that is
-single-user by design. A head directory created under an existing root takes
-that root's permission bits, setgid included, so a multi-user deployment
-pre-creates the root once with a shared group (for example mode 2775) and every
-identity in the group can write.
-
-TRUST. The pull request under review must not be able to write its own
-measurements. A root inside a repository the caller names as untrusted (the
-checkout the pull request lives in) is refused on write and on read. Code that
-runs as the same user as the reader can still write to the root; that is the
-same limit the ruling registry documents, and the optional pre-checks sandbox
-(``merge.pre_checks_sandbox``) is the control for it.
+Root resolution, the untrusted-root refusal and the permission rule for the
+root and the head directories are the shared head-keyed store's
+(artifact_store); see there for the multi-user setup and the trust limits.
 """
 
 from __future__ import annotations
 
 import json
-import os
-import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from clagentic_loadout.transport import provider_config
+from clagentic_loadout.artifact_store import (
+    RootUnreadableError,
+    StoreError,
+    StoreKind,
+    head_dir,
+    list_head_dirs,
+    refuse_untrusted,
+    resolve_root,
+    write_into_head_dir,
+)
 from clagentic_loadout.verdict_record.record import (
     RECORD_ID_RE,
     RecordFormatError,
     VerdictRecord,
-    is_full_sha,
     validate_record_dict,
 )
 
@@ -57,22 +54,19 @@ RECORDS_DIR_ENV_VAR = "CLAGENTIC_LOADOUT_VERDICT_RECORDS_DIR"
 CONFIG_SECTION = "verdict_records"
 CONFIG_KEY_DIR = "dir"
 
-_FILE_MODE = 0o644
-_DIR_MODE = 0o755
+_RECORDS_KIND = StoreKind(
+    label="verdict records",
+    env_var=RECORDS_DIR_ENV_VAR,
+    section=CONFIG_SECTION,
+    key=CONFIG_KEY_DIR,
+    default_subdir="verdict-records",
+)
+
 _MAX_RECORD_BYTES = 64 * 1024
 
 #: Files read when looking for the newest record of one gate across every head.
 #: Bounds the cost of describing a miss; the answer is only ever a diagnostic.
 DIAGNOSTIC_SCAN_LIMIT = 200
-
-
-class StoreError(Exception):
-    """The records root could not be resolved or used, or a record could not be
-    read. The message names the path or id and what was found."""
-
-
-class RootUnreadableError(StoreError):
-    """The records root exists but cannot be listed."""
 
 
 class RecordNotFoundError(StoreError):
@@ -92,34 +86,11 @@ def records_root(
     env: Mapping[str, str] | None = None, *, config_root: str | Path | None = None
 ) -> Path:
     """The records root. It is not created here."""
-    environ = os.environ if env is None else env
-    configured = environ.get(RECORDS_DIR_ENV_VAR, "").strip()
-    if configured:
-        return Path(configured).expanduser()
-    section = provider_config.load_user_config_section(CONFIG_SECTION, config_root=config_root)
-    from_config = section.get(CONFIG_KEY_DIR)
-    if isinstance(from_config, str) and from_config.strip():
-        return Path(from_config.strip()).expanduser()
-    root = Path(config_root) if config_root is not None else provider_config.DEFAULT_USER_CONFIG_ROOT
-    return root / "state" / "verdict-records"
+    return resolve_root(_RECORDS_KIND, env, config_root=config_root)
 
 
 def _refuse_untrusted(root: Path, untrusted_roots: Sequence[Path]) -> None:
-    resolved = root.resolve()
-    for untrusted in untrusted_roots:
-        base = Path(untrusted).resolve()
-        if resolved == base or base in resolved.parents:
-            raise StoreError(
-                f"the verdict records root {str(root)!r} is inside {str(base)!r}, a repository "
-                f"the pull request under review can write; set {RECORDS_DIR_ENV_VAR} or "
-                f"{CONFIG_SECTION}.{CONFIG_KEY_DIR} to a location outside it"
-            )
-
-
-def _head_dir(root: Path, head_sha: str) -> Path:
-    if not is_full_sha(head_sha):
-        raise StoreError(f"{head_sha!r} is not a full commit sha (40 or 64 lowercase hex digits)")
-    return root / head_sha
+    refuse_untrusted(root, untrusted_roots, _RECORDS_KIND)
 
 
 def write_record(
@@ -127,35 +98,16 @@ def write_record(
 ) -> Path:
     """Store *record* and return its path. Raises StoreError when the root is a
     refused location or the file cannot be written."""
-    # Imported here, not at module level: the review package imports the review
-    # verb, which writes records, so a module-level import would make importing
-    # this store first (for example from the push verb) a circular import.
-    from clagentic_loadout.review.atomic_io import write_bytes_atomic
-
-    _refuse_untrusted(root, untrusted_roots)
-    directory = _head_dir(root, record.head_sha)
     payload = json.dumps(record.as_dict(), indent=2, sort_keys=True).encode("utf-8")
-    try:
-        if directory.is_symlink():
-            raise StoreError(f"{str(directory)!r} is a symlink, refusing to write through it")
-        # A root this call creates is made traversable for every user (the umask
-        # could otherwise narrow it) and is single-user by design. A head
-        # directory takes the permission bits of the root it is created under,
-        # setgid included, so a root an administrator pre-created with a shared
-        # group stays writable to every identity in that group.
-        if not root.exists():
-            root.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
-            os.chmod(root, _DIR_MODE)
-        if not directory.exists():
-            head_mode = stat.S_IMODE(root.stat().st_mode)
-            directory.mkdir(mode=head_mode)
-            os.chmod(directory, head_mode)
-        target = directory / f"{record.id}.json"
-        write_bytes_atomic(target, payload, mode=_FILE_MODE)
-        os.chmod(target, _FILE_MODE)
-    except OSError as exc:
-        raise StoreError(f"cannot write the verdict record {record.id} under {str(root)!r}: {exc}") from exc
-    return target
+    return write_into_head_dir(
+        root,
+        record.head_sha,
+        f"{record.id}.json",
+        payload,
+        kind=_RECORDS_KIND,
+        description=f"the verdict record {record.id}",
+        untrusted_roots=untrusted_roots,
+    )
 
 
 def _read_file(path: Path, expected_head: str | None) -> VerdictRecord:
@@ -182,16 +134,7 @@ def _read_file(path: Path, expected_head: str | None) -> VerdictRecord:
 
 
 def _head_dirs(root: Path) -> list[Path]:
-    try:
-        return [
-            entry
-            for entry in root.iterdir()
-            if is_full_sha(entry.name) and entry.is_dir() and not entry.is_symlink()
-        ]
-    except FileNotFoundError:
-        return []
-    except OSError as exc:
-        raise RootUnreadableError(f"cannot read the verdict records root {str(root)!r}: {exc}") from exc
+    return list_head_dirs(root, _RECORDS_KIND)
 
 
 def records_at_head(
@@ -201,7 +144,7 @@ def records_at_head(
     read as a valid record for this head is reported in ``skipped`` and is never
     counted. A root that does not exist holds no records."""
     _refuse_untrusted(root, untrusted_roots)
-    directory = _head_dir(root, head_sha)
+    directory = head_dir(root, head_sha)
     if directory.is_symlink() or not directory.is_dir():
         return HeadRecords()
     records: list[VerdictRecord] = []

@@ -146,6 +146,12 @@ def _record_main(argv: list[str]) -> int:
     return record_main(argv)
 
 
+def _spec_main(argv: list[str]) -> int:
+    from clagentic_loadout.spec.verb import main as spec_main
+
+    return spec_main(argv)
+
+
 #: verb name -> (one-line summary, entry-point callable taking the verb's
 #: own argv and returning its process exit code). A verb with a
 #: single-word name (push, merge) dispatches directly; a verb with a
@@ -184,6 +190,7 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         _test_main,
     ),
     "record": ("Read the verdict records gates left for a commit (show, list).", _record_main),
+    "spec": ("Create, seal and read the standard spec (new, seal, show).", _spec_main),
 }
 
 #: Parent verb name -> {subverb name: (summary, callable)}.

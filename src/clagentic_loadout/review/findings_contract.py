@@ -15,6 +15,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from clagentic_loadout.merge.fence_state import KEY_SPEC_TAG, SPEC_TAGS
 from clagentic_loadout.review import facts as vocab
 from clagentic_loadout.review.facts import KEY_FACTS
 from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
@@ -110,6 +111,7 @@ def validate_finding(
     truncate_message: bool = True,
     carry_fingerprint: bool = False,
     carry_facts: bool = False,
+    carry_spec_tag: bool = False,
     reply_contract: bool = False,
     problems: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -140,6 +142,12 @@ def validate_finding(
     findings file; a model reply never sets it, so a fingerprint in a reply is
     dropped like any unknown key. A malformed one is dropped, not refused: the
     finding keeps its position-only identity.
+
+    ``spec_tag`` is read only with ``carry_spec_tag``, for a review that runs
+    against a sealed spec: every finding must then carry exactly one tag from
+    SPEC_TAGS, and one that carries none, a value outside the vocabulary, or
+    several is refused. Without the flag the key is dropped like any unknown
+    key, so a review that is given no spec is unchanged.
 
     ``facts`` (see review.facts) is optional and additive: it is carried through
     only with ``carry_facts``, exactly as the reader found it, because judging it
@@ -202,6 +210,14 @@ def validate_finding(
     sequence = _clean_sequence(item.get(KEY_FAILURE_SEQUENCE), truncate_message)
     if sequence is not None and (reply_contract or severity == "blocking"):
         validated[KEY_FAILURE_SEQUENCE] = sequence
+    if carry_spec_tag:
+        tag = item.get(KEY_SPEC_TAG)
+        if not isinstance(tag, str) or tag not in SPEC_TAGS:
+            raise InvalidReplyError(
+                f"finding {position} must carry exactly one {KEY_SPEC_TAG} from "
+                f"{', '.join(SPEC_TAGS)}, got {tag!r}"
+            )
+        validated[KEY_SPEC_TAG] = tag
     if carry_fingerprint and is_fingerprint(item.get(KEY_FINGERPRINT)):
         validated[KEY_FINGERPRINT] = item[KEY_FINGERPRINT]
     if carry_facts and item.get(KEY_FACTS) is not None:

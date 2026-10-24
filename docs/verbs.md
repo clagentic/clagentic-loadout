@@ -2802,6 +2802,169 @@ checks and falls back to the built-in reference role mapping for slugs
 coverage. The deployment-tier identity check (item 4 above) always runs,
 with or without `--repo-root`.
 
+## `loadout-spec`: the standard spec
+
+```
+loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--supersedes HASH] [--out FILE]
+loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
+loadout-spec show HASH [--chain]
+```
+
+(also `clagentic-loadout spec new|seal|show`.) A spec is one document, written by
+one role before the build, that every later role reads unchanged: the builder works
+to it, the reviewer judges against it, and the roles after the reviewer fetch the
+same version by hash. The role is an opaque key: `new --role` records the string and
+checks only its shape (letters, digits, `-` and `_`, at most 64 characters, starting
+with a letter or digit, the grammar every other role key here is held to). Nothing in
+the spec or the verbs branches on which role it is, and no role list is built in.
+
+### The schema
+
+The published contract is `schemas/spec.schema.json`
+(`https://clagentic.ai/schemas/loadout/spec.schema.json`, `schema_version` 1).
+
+| Field | Content | Source |
+|---|---|---|
+| `role` | The authoring role. | `--role` |
+| `head_sha` | The full commit sha of the branch head it was sealed at. | `seal` |
+| `sealed_at` | UTC time of the seal. | `seal` |
+| `supersedes` | The hash of the sealed spec this one replaces, or `null`. | `new --supersedes` |
+| `goal` | What the change is for. | authored |
+| `scope` | `in` and `out`, lists of strings. | authored |
+| `acceptance_criteria` | At least one `{id, given, when, then}`; ids are unique in the spec. | authored |
+| `class_rules` | `{source, note, class, rules, paths}`: the repository class, the rule statements of each class in effect, and the per-path overrides. | the repo profile |
+| `group_rules` | `{source, note, items}` | no source yet |
+| `consumers` | `{source, note, items}`, each item `{consumer, disposition}` | no source yet |
+| `test_plan` | `{source, note, declared, plan}`: the commands the profile's `test` block declares, and the author's plan. | profile + authored |
+| `verification_evidence_owed` | `{gate, note}` entries naming the verdict records that must exist. | authored |
+| `rulings_already_made` | Decisions the build must not reopen. | authored |
+| `profile_completeness` | `{source, note, items}` | no source yet |
+| `docs_only_justification` | Why no tests are needed because only documentation changed, or `null`. | authored |
+
+`new` fills `class_rules` and `test_plan.declared` from the repo profile through the
+same reader `loadout-profile check` uses (the working tree, or `--ref`), by way of
+one function, `review.profile_brief.profile_brief`, that returns the class, the rule
+statements, the overrides and the declared test commands. A repository with no
+profile leaves both sections empty and says so in `note`; an invalid profile is
+refused (exit 54), because a half-read profile would be filled in silently.
+`group_rules`, `consumers` and `profile_completeness` have no automatic source yet:
+they are present and empty with `source: null` and the note `no source yet`, for the
+author to fill or leave. No field of a spec carries posture, and the schema refuses
+any key it does not name.
+
+### The three verbs
+
+`new` writes a **draft**: the sealed form minus `head_sha` and `sealed_at`. A draft is
+an ordinary file (`--out FILE`, or standard output) that the author edits; `--out`
+never replaces an existing file.
+
+`seal` validates the draft (a non-empty `goal`, at least one acceptance criterion, no
+repeated criterion id, no unknown key), binds it to a branch head, stores it as a
+content-addressed artifact under the specs root, and prints one JSON object:
+`spec_hash`, `head_sha`, `role`, `sealed_at`, `supersedes`, `artifact` (the path), and
+`pr_body_copy`. The head is `--head` or, by default, `git rev-parse HEAD` in
+`--repo-path`; it must be a full sha (40 or 64 lowercase hex digits).
+
+`show HASH` prints the sealed spec stored under `HASH`, byte for byte, after
+recomputing the hash and refusing a file whose bytes do not hash to its name, are not
+a valid spec, are not in canonical form, or are filed under a different head than the
+one they were sealed at. `show HASH --chain` prints `{"spec_hash", "chain": [...]}`,
+the hashes of that seal and every seal it supersedes, newest first.
+
+### Artifact location, hash and PR-body copy
+
+A sealed spec is `<specs root>/<head sha>/<spec hash>.json`. The file holds the
+**canonical serialization** (keys sorted, no insignificant whitespace, ASCII), and its
+name is the sha256 of exactly those bytes, so the name proves the content. Because
+`head_sha` and `sealed_at` are part of the content, the hash is bound to the head the
+spec was sealed at: the same draft sealed at another head is another hash.
+
+The pull request body carries a copy: `pr_body_copy` in the `seal` output is the
+artifact's own bytes, unchanged, so a reader can compare the body to `loadout-spec
+show HASH` byte for byte. Put it in the body as a fenced block (the fence is outside
+the copy) and state the hash beside it. The artifact, not the body copy, is the
+record: a spec is not a committed file.
+
+The specs root is, in order: the `CLAGENTIC_LOADOUT_SPECS_DIR` environment variable,
+the user-level `specs.dir` setting, then `<user config root>/state/specs`. It is the
+same store as the verdict records (`artifact_store`), so the rules are the same: files
+are written atomically and are readable by every user on the host; a root the tool
+creates is mode 0755 (single user); a head directory takes the permission bits of the
+root it is created under, so a multi-user deployment pre-creates the root once with a
+shared group (for example mode 2775); and a root inside the repository under review
+(`--repo-path`, or the repository the working directory is in) is refused on write and
+on read, because the pull request could write its own specification. A spawner that
+filters the child environment must pass `CLAGENTIC_LOADOUT_SPECS_DIR` through, or give
+every identity the same user config root.
+
+### Immutability and the chain
+
+No verb edits a sealed spec. `seal` refuses a document that already carries `head_sha`
+or `sealed_at` (exit 53) and says how to change one: `new --supersedes HASH` writes a
+draft that starts from the sealed spec (with the verb-sourced sections refreshed from
+the profile and the authored ones kept) and names it in `supersedes`; edit that draft
+and `seal` it. The new seal has a new hash, and `supersedes` makes the chain of seals
+visible with `show --chain`. Only the role that authored a spec supersedes it: `new
+--role` and a draft's own `role` must equal the superseded spec's, or the verb refuses
+(exit 53); a superseded hash that is not in the store is refused (exit 50). The earlier
+seals stay in the store, untouched.
+
+The verb binds no caller and mints no credential. The `role` is the author's own
+statement, kept in the sealed record, and the protection is against the verbs, not
+against a process that can write the specs root as the same user (the limit the
+verdict records store documents; the pre-checks sandbox is the control for it).
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | ok |
+| 1 | usage error (including a role that is not a key, a head that is not a full sha, a hash that is not 64 hex digits) |
+| 3 | the specs root cannot be used or read |
+| 50 | no sealed spec has that hash |
+| 51 | a stored file is not the spec its name says |
+| 52 | the draft is not valid JSON or not a complete, valid spec |
+| 53 | refused: the document is already sealed, or the supersession is another role's |
+| 54 | the repo profile is invalid |
+| 55 | a file or the repository could not be read or written |
+
+### Review against a spec
+
+`loadout-review post` takes two additional, optional flags. Without them the post is
+exactly what it was: no existing flag, output field or exit code changes, and a
+`spec_tag` key in a findings file is ignored.
+
+```
+loadout-review post ... --spec-hash HASH --spec-coverage FILE
+```
+
+The two go together (otherwise exit 1). With them:
+
+- The spec is read from the specs store and verified against its hash; a spec that is
+  absent, does not verify, or whose root is refused exits **33**.
+- **Tags.** Every finding in the findings file must carry a `spec_tag` of exactly one
+  of `in-spec`, `out-of-spec` or `fix-caused` (inside the spec's scope, outside it, or
+  caused by a fix made during the build). A finding with none, a value outside the vocabulary, or several is refused
+  (exit 32) before anything is posted. Each finding's bullet shows `spec tag: <tag>`.
+- **Coverage.** `FILE` is a JSON array, one `{"criterion": "<id>", "status":
+  "met"|"unmet"}` entry per acceptance criterion of the spec; it must name each
+  criterion exactly once and no other (exit 32 otherwise).
+- The tags, the coverage and the spec hash ride in the verdict fence as `spec_tags`,
+  `spec_coverage` and `spec_hash` (all or none). They are evidence like `dropped`:
+  they hold no finding open, clear none, and the merge gate does not read them. A
+  fence that carries them is `fence_schema_version` **4**, a superset of version 3 (the
+  schema's version enum is now 1 to 4, the three new properties are optional, and a
+  reader that predates version 4 refuses such a fence, which is why the version moved).
+- **Verdict records.** After the post is read back, the verb writes the usual
+  `reviewer:<role>` record, now carrying `spec_hash`, and one more with the gate name
+  `spec-coverage`: `spec_hash` set, `evidence_ref` `comment:<id>` of the posted
+  comment, `exit` 0 only when every criterion is met and 1 otherwise. The per-criterion
+  marks are the posted fence's `spec_coverage`, which the record points at. The merge
+  verb does not require this record.
+
+The output of a post that ran against a spec adds `spec_hash`, `spec_unmet_count` and,
+when the record was written, `spec_coverage_record_id`.
+
 ## Not yet landed
 
 - `clagentic-loadout` (the bare top-level CLI, `clagentic_loadout.cli`) is
