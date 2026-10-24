@@ -4,6 +4,14 @@
 # in it. The deployment's own denial list is user-level configuration and is
 # deliberately not written here.
 class: released-tool
+# Risk posture, read by gates from the merge base (see docs/repo-profile.md). This
+# repository is a library and CLI that runs locally or in CI, holds no private data,
+# is published, and has no enforced review rule on its default branch.
+exposure: local_or_ci_only
+data: public_or_none
+visibility: public
+merge_control: unrestricted
+confirmed_at: 2026-10-24
 paths:
   # Deployment config that ships as disaster-recovery data and carries its own
   # cast identifiers by design.
