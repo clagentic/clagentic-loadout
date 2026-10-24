@@ -323,7 +323,6 @@ def gate_from_deployment_config(
     repo_path: str | Path,
     *,
     config_binding: ConfigTreeBinding | None = None,
-    binding_tree: str | Path | None = None,
 ) -> RepoGate:
     """The gate the deployment `config.yaml` declares, for a repo whose PR base
     commit has no tracked gate file.
@@ -344,7 +343,8 @@ def gate_from_deployment_config(
 
     With *config_binding*, the file is read only from *repo_path* and its own git
     top-level (never the directory above), and a file that declares gate keys is
-    used only if *binding_tree* is a confirmed clone for the binding; otherwise
+    used only if the git top-level of *repo_path* (the tree the file is read
+    from, never a tree a config file declares) is a confirmed clone; otherwise
     the result is the "nothing readable" gate. A file that declares nothing
     needs no confirmation, because nothing is taken from it.
     """
@@ -366,7 +366,7 @@ def gate_from_deployment_config(
         return RepoGate()
     if config_binding is not None:
         try:
-            config_binding.confirm(binding_tree if binding_tree is not None else repo_path)
+            config_binding.confirm(repo_path)
         except OriginBindingError as exc:
             return _nothing_readable(
                 (),
@@ -398,8 +398,9 @@ def load_gate_at_commit(
     at *sha* (`gate_from_deployment_config`), and its gate keys are reported as
     IGNORED when the tracked file is present or unreadable.
 
-    *config_binding*, when given, is checked against *git_tree* before that
-    fallback's gate keys are used: a tree that is not a clone of the named
+    *config_binding*, when given, is checked against the git top-level of
+    *deployment_repo_path* (the tree that fallback is read from) before its
+    gate keys are used: a tree that is not a clone of the named
     repository on the configured host, or whose origin cannot be read, yields
     the "nothing readable" gate (the merge refuses). The tracked file read above
     is content-addressed at *sha*, so it needs no binding. None keeps the
@@ -411,9 +412,7 @@ def load_gate_at_commit(
     except CommitFileReadError as exc:
         return _nothing_readable(_ignored_or_none(deployment_repo_path), f"{source}: {exc}")
     if text is None and deployment_repo_path is not None:
-        return gate_from_deployment_config(
-            deployment_repo_path, config_binding=config_binding, binding_tree=git_tree
-        )
+        return gate_from_deployment_config(deployment_repo_path, config_binding=config_binding)
     return gate_from_tracked_text(
         text, source=source, ignored_warnings=_ignored_or_none(deployment_repo_path)
     )

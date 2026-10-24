@@ -258,29 +258,119 @@ def test_report_only_also_refuses_steps_from_a_foreign_tree(tmp_path, capsys):
     assert code == verb.EXIT_USAGE and "other.example.test" in err
 
 
-def test_a_declared_working_tree_that_is_not_a_git_tree_is_left_to_the_tree_sync(tmp_path):
-    wrapper = tmp_path / "wrapper"
-    (wrapper / "not-a-repo").mkdir(parents=True)
-    write_deployment_config(wrapper, {**STEPS, "git_working_tree": "not-a-repo"})
-
-    require_confirmed_tree_for_steps(
-        config_binding_for("forgejo", f"http://{HOST}:3000", SLUG), str(wrapper)
-    )
-
-
-def test_a_declared_working_tree_that_is_a_foreign_clone_is_refused(tmp_path):
+def test_a_wrapper_directory_cannot_name_the_tree_that_vouches_for_its_steps(tmp_path):
+    # The wrapper's config declares a working tree that IS a confirmed clone and
+    # supplies the steps. One tree supplies origin, fallback config and steps:
+    # the git top-level of --repo-path. The wrapper is not a git tree, so the
+    # declared clone must not stand in for it.
     wrapper = tmp_path / "wrapper"
     wrapper.mkdir()
     write_deployment_config(wrapper, {**STEPS, "git_working_tree": "inner"})
     inner = wrapper / "inner"
     inner.mkdir()
     git(inner, "init", "-q", "-b", "main")
-    git(inner, "remote", "add", "origin", f"https://other.example.test/{SLUG}")
+    git(inner, "remote", "add", "origin", f"https://{HOST}/{SLUG}")
 
-    with pytest.raises(MergeUsageError, match="other.example.test"):
+    with pytest.raises(MergeUsageError) as info:
         require_confirmed_tree_for_steps(
             config_binding_for("forgejo", f"http://{HOST}:3000", SLUG), str(wrapper)
         )
+
+    assert str(wrapper) in str(info.value) and "not inside a git work tree" in str(info.value)
+
+
+def test_the_fallback_gate_is_not_confirmed_through_a_tree_the_config_declares(tmp_path):
+    wrapper = tmp_path / "wrapper"
+    wrapper.mkdir()
+    write_deployment_config(wrapper, {**GATE, "git_working_tree": "inner"})
+    repo = init_gate_repo(wrapper / "inner", tracked_gate=None)
+    (repo.path / ".clagentic" / "loadout" / "config.yaml").unlink()
+    git(repo.path, "remote", "add", "origin", f"https://{HOST}/{SLUG}")
+    binding = ConfigTreeBinding(HOST, SLUG)
+
+    gate = load_repo_gate_at_base(
+        wrapper, base_sha=repo.base_sha, config_binding=binding
+    )
+
+    assert not gate.notices
+    assert gate.pre_checks_error and "not inside a git work tree" in gate.pre_checks_error
+
+
+# --- a remote's credentials never reach a message or output ------------------------
+
+TOKEN = "s3cr3t-token-value"
+
+
+def _merge_both_streams(repo, capsys, *, flags=()):
+    code = verb.main(
+        [*base_args(**{"--repo-path": str(repo.path)}), *flags],
+        token_provider=RecordingTokenProvider(),
+        authority_provider=AllowingAuthorityProvider(),
+        opener=make_opener(pr_info=repo.pr_info()),
+    )
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        f"https://user:{TOKEN}@other.example.test/{SLUG}.git",
+        f"https://{TOKEN}@other.example.test/{SLUG}",
+        f"https://user:{TOKEN}@{HOST}/{SLUG}/extra/segments",
+        f"https://user:{TOKEN}@{HOST}/{SLUG}?x=1",
+    ],
+    ids=["foreign-host", "token-only-userinfo", "unparseable-path", "unparseable-query"],
+)
+@pytest.mark.parametrize("deployment", [GATE, STEPS], ids=["fallback-gate", "post-merge-steps"])
+def test_a_refused_origin_carrying_a_token_never_prints_it(tmp_path, capsys, origin, deployment):
+    repo = _repo(tmp_path, origin, tracked_gate=None if deployment is GATE else {}, deployment_merge=deployment)
+
+    code, out, err = _merge_both_streams(repo, capsys)
+
+    assert code != verb.EXIT_OK
+    assert TOKEN not in out and TOKEN not in err
+    assert "--repo-path" in err or "gate keys" in err
+
+
+def test_a_refused_origin_carrying_a_token_still_names_the_remote_and_the_hosts(tmp_path, capsys):
+    repo = _repo(
+        tmp_path,
+        f"https://user:{TOKEN}@other.example.test/{SLUG}.git",
+        tracked_gate={},
+        deployment_merge=STEPS,
+    )
+
+    code, out, err = _merge_both_streams(repo, capsys)
+
+    assert code == verb.EXIT_USAGE
+    assert f"https://other.example.test/{SLUG}.git" in err and HOST in err
+    assert TOKEN not in out and TOKEN not in err
+
+
+def test_post_merge_refusal_of_an_origin_carrying_a_token_never_prints_it(tmp_path, capsys):
+    repo = _repo(
+        tmp_path,
+        f"https://user:{TOKEN}@other.example.test/{SLUG}",
+        tracked_gate={},
+        deployment_merge=STEPS,
+    )
+
+    code, err = _post_merge(repo, capsys)
+
+    assert code == post_merge_verb.EXIT_USAGE
+    assert "other.example.test" in err and TOKEN not in err
+
+
+def test_the_slug_consistency_refusal_does_not_print_a_token_either(tmp_path, capsys):
+    repo = _repo(
+        tmp_path, f"https://user:{TOKEN}@{HOST}/a/b/c/d", tracked_gate={}, deployment_merge=STEPS
+    )
+
+    code, out, err = _merge_both_streams(repo, capsys)
+
+    assert code != verb.EXIT_OK
+    assert TOKEN not in out and TOKEN not in err
 
 
 def test_merge_with_skip_post_merge_does_not_ask_for_a_confirmed_tree(tmp_path, capsys):
@@ -364,7 +454,8 @@ def _post_merge(repo, capsys):
         authority_provider=AllowingAuthorityProvider(),
         opener=opener,
     )
-    return code, capsys.readouterr().err
+    captured = capsys.readouterr()
+    return code, captured.err + captured.out
 
 
 def test_post_merge_refuses_a_foreign_tree_before_any_checkout(tmp_path, capsys):

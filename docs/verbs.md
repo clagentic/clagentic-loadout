@@ -2687,8 +2687,7 @@ commands the verb then runs). The tracked `gate.yaml` is read at the base commit
 binding. Before either input is taken from the tree, the verb confirms that the tree is a clone
 of `--repo` on the platform's configured host:
 
-- `origin` is read **once**, at the git top-level of `--repo-path` (or of the git tree its
-  `merge.git_working_tree` declares), and parsed with an anchored parser (`https://`, `http://`,
+- `origin` is read **once**, at the git top-level of `--repo-path` itself, and parsed with an anchored parser (`https://`, `http://`,
   `ssh://`, or scp-like `user@host:owner/name`). The tracking remote of the current branch is
   never consulted.
 - The **hostname** must equal the configured host, case-insensitively: `github.com` for
@@ -2700,14 +2699,17 @@ of `--repo` on the platform's configured host:
 - The SSH and HTTPS remotes of one host both pass.
 - A tree that is not a directory, not inside a git work tree, has no `origin`, or whose `origin`
   is not one of those shapes is refused, not passed.
-- Both reads then use `--repo-path` and its own git top-level only; the directory above is not
-  consulted for them.
+- One tree supplies all three: the origin, the fallback gate keys and the steps are read from
+  `--repo-path` and its own git top-level only. The directory above is not consulted, and a
+  `merge.git_working_tree` declared in the file never names the tree that is confirmed in place
+  of `--repo-path` (a wrapper directory that is not itself a git tree is refused).
+- Any remote shown in a refusal has its credentials removed: userinfo, query and fragment are
+  dropped, leaving `scheme://host/owner/name`.
 
-A refusal names the resolved tree, its `origin` and host, and the configured host. For
+A refusal names the resolved tree, its `origin` (without credentials), its host, and the
+configured host. For
 `post_merge_steps`, the verb exits `1` as the last check before the merge call, so nothing is
-merged (the check applies only when the file declares steps, and not with `--skip-post-merge`; a
-declared `merge.git_working_tree` that is not a git tree is left to the tree sync, which refuses
-it before any step runs). For the
+merged (the check applies only when the file declares steps, and not with `--skip-post-merge`). For the
 fallback gate, the keys are not used and the merge is refused through the same path as an
 unreadable gate (`pre_checks_error`, which `--skip-pre-checks` bypasses without reading the
 foreign file). An absent `--repo-path` is unchanged. `loadout-post-merge` applies the same check
