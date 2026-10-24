@@ -58,6 +58,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.git_origin import redact_remote_url
 from clagentic_loadout.merge.errors import MergeUsageError
 
 #: Matches an SSH-form git remote: git@host:owner/repo[.git], or the
@@ -175,7 +176,7 @@ def check_repo_path_consistency(
             checked=False,
             matches=False,
             reason=(
-                f"{repo_path!r}'s origin remote {remote_url!r} does not match "
+                f"{repo_path!r}'s origin remote {redact_remote_url(remote_url)!r} does not match "
                 f"a recognized SSH or HTTPS git remote shape "
                 f"(<scheme>://<host>/<owner>/<repo>[.git] or "
                 f"<user>@<host>:<owner>/<repo>[.git])."

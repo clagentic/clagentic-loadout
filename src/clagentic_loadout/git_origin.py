@@ -41,8 +41,9 @@ class OriginBindingError(Exception):
 @dataclass(frozen=True)
 class OriginTarget:
     """What one ``origin`` URL says: its lowercased host, owner and name (the
-    ``.git`` suffix removed), the URL itself and the git top-level it was read
-    at (empty for a bare parse)."""
+    ``.git`` suffix removed), the URL with any userinfo removed (never the raw
+    string, so it is safe to print) and the git top-level it was read at
+    (empty for a bare parse)."""
 
     host: str
     owner: str
@@ -53,6 +54,28 @@ class OriginTarget:
     @property
     def slug(self) -> str:
         return f"{self.owner}/{self.name}"
+
+
+_AUTHORITY_RE = re.compile(r"\A(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<authority>[^/?#]*)(?P<rest>.*)\Z", re.S)
+
+
+def redact_remote_url(url: str) -> str:
+    """*url* with everything that can carry a credential removed, for any
+    message, log line or JSON output that names a remote.
+
+    Userinfo (user, password, token) is dropped from a URL or an scp-like
+    remote, and so are a query and a fragment, leaving ``scheme://host/path``
+    (or ``host:path``). Works on a string that does not parse as a remote,
+    which is the case an error message most needs it for. Never raises."""
+    text = url.strip()
+    match = _AUTHORITY_RE.match(text)
+    if match is not None:
+        authority = match.group("authority").rpartition("@")[2]
+        path = re.split(r"[?#]", match.group("rest"), maxsplit=1)[0]
+        return f"{match.group('scheme')}{authority}{path}"
+    if "@" in text.split("/", 1)[0]:
+        return text.rpartition("@")[2]
+    return text
 
 
 def host_of(value: str) -> str:
@@ -105,7 +128,7 @@ def parse_origin_url(url: str) -> OriginTarget | None:
         host = match.group("host").lower()
     if pair is None:
         return None
-    return OriginTarget(host=host, owner=pair[0], name=pair[1], url=text)
+    return OriginTarget(host=host, owner=pair[0], name=pair[1], url=redact_remote_url(text))
 
 
 def _git(tree: str, *args: str) -> tuple[int, str, str]:
@@ -143,10 +166,10 @@ def read_origin_target(tree: str | Path) -> OriginTarget:
     target = parse_origin_url(url)
     if target is None:
         raise OriginBindingError(
-            f"the origin remote {url!r} of the git tree {top!r} is not a recognised "
-            "https, ssh:// or scp-like remote naming owner/name"
+            f"the origin remote {redact_remote_url(url)!r} of the git tree {top!r} is not a "
+            "recognised https, ssh:// or scp-like remote naming owner/name"
         )
-    return OriginTarget(target.host, target.owner, target.name, url, top)
+    return OriginTarget(target.host, target.owner, target.name, target.url, top)
 
 
 @dataclass(frozen=True)
@@ -159,8 +182,15 @@ class ConfigTreeBinding:
 
     def confirm(self, tree: str | Path) -> OriginTarget:
         """The tree's origin target when it matches, else OriginBindingError."""
-        target = read_origin_target(tree)
         wanted_host = host_of(self.expected_host)
+        try:
+            target = read_origin_target(tree)
+        except OriginBindingError as exc:
+            # The refusal names the host the tree was being compared against
+            # even when the tree gave nothing to compare.
+            raise OriginBindingError(
+                f"{exc}; the configured platform host is {wanted_host!r}"
+            ) from exc
         if not wanted_host:
             raise OriginBindingError(
                 f"the configured platform host {self.expected_host!r} names no host to compare "
@@ -186,4 +216,5 @@ __all__ = [
     "host_of",
     "parse_origin_url",
     "read_origin_target",
+    "redact_remote_url",
 ]

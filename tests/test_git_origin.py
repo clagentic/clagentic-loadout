@@ -10,6 +10,7 @@ from clagentic_loadout.git_origin import (
     host_of,
     parse_origin_url,
     read_origin_target,
+    redact_remote_url,
 )
 from tests._gate_repo import git
 
@@ -195,3 +196,36 @@ def test_binding_with_no_expected_host_refuses_rather_than_passing(tmp_path):
 
     with pytest.raises(OriginBindingError, match="names no host"):
         ConfigTreeBinding(expected_host="", slug="some-owner/some-repo").confirm(tree)
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        (f"https://user:secret@{HOST}/some-owner/some-repo.git", f"https://{HOST}/some-owner/some-repo.git"),
+        (f"https://secret@{HOST}:3000/some-owner/some-repo", f"https://{HOST}:3000/some-owner/some-repo"),
+        (f"https://a@b:secret@{HOST}/some-owner/some-repo", f"https://{HOST}/some-owner/some-repo"),
+        (f"https://{HOST}/some-owner/some-repo?token=secret#frag", f"https://{HOST}/some-owner/some-repo"),
+        (f"ssh://git@{HOST}/some-owner/some-repo", f"ssh://{HOST}/some-owner/some-repo"),
+        (f"git@{HOST}:some-owner/some-repo.git", f"{HOST}:some-owner/some-repo.git"),
+        (f"user:secret@{HOST}:some-owner/some-repo", f"{HOST}:some-owner/some-repo"),
+        (f"https://user:secret@{HOST}/a/b/c/d", f"https://{HOST}/a/b/c/d"),
+        ("/srv/local/some-repo.git", "/srv/local/some-repo.git"),
+    ],
+)
+def test_redact_remote_url_drops_credentials_and_keeps_the_location(url, expected):
+    assert redact_remote_url(url) == expected
+
+
+def test_a_parsed_target_carries_only_the_redacted_url():
+    target = parse_origin_url(f"https://user:secret@{HOST}/some-owner/some-repo.git")
+
+    assert target is not None and "secret" not in target.url and target.url.startswith("https://")
+
+
+def test_the_binding_error_for_an_unparseable_origin_names_the_configured_host(tmp_path):
+    tree = _clone(tmp_path, f"https://user:secret@{HOST}/a/b/c/d")
+
+    with pytest.raises(OriginBindingError) as info:
+        ConfigTreeBinding(HOST, "some-owner/some-repo").confirm(tree)
+
+    assert "secret" not in str(info.value) and repr(HOST) in str(info.value)
