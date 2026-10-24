@@ -53,11 +53,18 @@ from clagentic_loadout.merge.fence_state import (
     KEY_FINDINGS_OPEN,
     KEY_RESOLVED,
     KEY_SCANNERS_RUN,
+    KEY_SPEC_COVERAGE,
+    KEY_SPEC_HASH,
+    KEY_SPEC_TAG,
+    KEY_SPEC_TAGS,
     KEY_VERDICT_OUTCOME,
     KEY_VERDICT_REASONS,
+    COVERAGE_UNMET,
+    SPEC_TAGS,
     failure_sequences_of,
     normalize_findings_state,
 )
+from clagentic_loadout.review import spec_review
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.delta import resolve_delta
 from clagentic_loadout.review.dropped_overlap import drop_overlapping
@@ -112,6 +119,7 @@ from clagentic_loadout.review.run_pipeline import (
     unusable_acquire_outcome,
 )
 from clagentic_loadout.sha import FULL_SHA_RE
+from clagentic_loadout.spec.model import is_spec_hash
 from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
@@ -150,6 +158,9 @@ EXIT_POST_FAILED = 30
 EXIT_STALE_HEAD = 31
 #: `post`: the findings file or --status is internally inconsistent.
 EXIT_FINDINGS_INVALID = 32
+#: `post`: the spec named by --spec-hash is not in the specs store, does not
+#: verify against its hash, or the store cannot be used.
+EXIT_SPEC_UNAVAILABLE = 33
 
 _GIT_PROBE_TIMEOUT_SECONDS = 10
 RUN_ROOT_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT"
@@ -347,6 +358,23 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "findings and do not change the verdict.",
     )
     post.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
+    post.add_argument(
+        "--spec-hash",
+        default=None,
+        help="Review against this sealed spec (its sha256, as printed by `loadout-spec seal`). "
+        "Every finding in the findings file must then carry a 'spec_tag' of exactly one of "
+        f"{', '.join(SPEC_TAGS)}, and --spec-coverage is required. The tags and the coverage "
+        "ride in the verdict fence, and the coverage pass is recorded as a verdict record "
+        "for the gate spec-coverage. Without this flag, 'spec_tag' keys are ignored and the "
+        "post is exactly as it was.",
+    )
+    post.add_argument(
+        "--spec-coverage",
+        default=None,
+        help="JSON array marking each acceptance criterion of the --spec-hash spec as met or "
+        'unmet: [{"criterion": "<id>", "status": "met"|"unmet"}, ...]. It must name every '
+        "criterion of the spec exactly once. Requires --spec-hash.",
+    )
 
     add_evaluate_parser(subparsers)
     return parser
@@ -625,6 +653,7 @@ def _load_findings(
     head_sha_arg: str | None,
     head_flag: str,
     meta: dict[str, Any] | None = None,
+    carry_spec_tag: bool = False,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Read a findings file (a `run` output or a bare array) for this PR and
     return its head SHA, its findings, and the run evidence (commit range and
@@ -633,7 +662,9 @@ def _load_findings(
     may have edited the file; messages are kept whole; each finding's facts are
     carried for the evaluator. A bare array has no run record, so its evidence
     is empty. When *meta* is given, the base revision the run read policy from
-    (``policy_base_sha``) is stored in it when the file records a valid one."""
+    (``policy_base_sha``) is stored in it when the file records a valid one.
+    With *carry_spec_tag* every finding must carry exactly one spec tag, which
+    is kept."""
     evidence: dict[str, Any] = {}
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -682,7 +713,7 @@ def _load_findings(
             validated.append(
                 validate_finding(
                     item, position, lenient_severity=True, truncate_message=False,
-                    carry_fingerprint=True, carry_facts=True,
+                    carry_fingerprint=True, carry_facts=True, carry_spec_tag=carry_spec_tag,
                 )
             )
         except InvalidReplyError as exc:
@@ -830,6 +861,44 @@ def _unsafe_status_message(status: str, verdict: Verdict, reasons: list[str]) ->
     )
 
 
+def _spec_inputs(args: argparse.Namespace, config_root) -> dict[str, Any] | None:
+    """The spec hash and coverage a `post` carries, or None when it was given
+    neither. They are given together; the spec must be in the specs store and
+    verify against its hash, and the coverage must mark each of its acceptance
+    criteria exactly once. Checked before any host call."""
+    if args.spec_hash is None and args.spec_coverage is None:
+        return None
+    if args.spec_hash is None or args.spec_coverage is None:
+        _fail("--spec-hash and --spec-coverage must be given together", EXIT_USAGE)
+    if not is_spec_hash(args.spec_hash):
+        _fail(
+            f"--spec-hash must be 64 lowercase hex characters, got {args.spec_hash!r}", EXIT_USAGE
+        )
+    try:
+        criterion_ids = spec_review.load_spec_criterion_ids(
+            args.spec_hash,
+            config_root=config_root,
+            untrusted_roots=(Path(args.repo_path),) if args.repo_path else (),
+        )
+    except spec_review.SpecReviewError as exc:
+        _fail(str(exc), EXIT_SPEC_UNAVAILABLE)
+    try:
+        coverage = spec_review.load_coverage(args.spec_coverage, criterion_ids)
+    except spec_review.SpecReviewError as exc:
+        _fail(str(exc), EXIT_FINDINGS_INVALID)
+    return {KEY_SPEC_HASH: args.spec_hash, KEY_SPEC_COVERAGE: coverage}
+
+
+def _spec_fence_fields(
+    spec_fields: dict[str, Any] | None, findings: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """The spec fields of the verdict fence for *findings*: the hash, the tag of
+    each finding and the coverage. Empty when the review has no spec."""
+    if spec_fields is None:
+        return {}
+    return {**spec_fields, KEY_SPEC_TAGS: spec_review.tags_for_fence(findings)}
+
+
 def _post_command(
     args: argparse.Namespace,
     caller: str,
@@ -843,10 +912,12 @@ def _post_command(
     identity_provider,
     config_root,
 ) -> int:
+    spec_fields = _spec_inputs(args, config_root)
     loaded_meta: dict[str, Any] = {}
     head_sha, findings, evidence = _load_findings(
         args.findings, owner=owner, repo=repo, pr_number=args.pr,
         head_sha_arg=args.head_sha, head_flag="--head-sha", meta=loaded_meta,
+        carry_spec_tag=spec_fields is not None,
     )
     _check_base_sha_flag(args)
     try:
@@ -910,7 +981,11 @@ def _post_command(
     sequences = failure_sequences_of(findings)
     try:
         normalize_findings_state(
-            {**evidence, **({KEY_FAILURE_SEQUENCES: sequences} if sequences else {})},
+            {
+                **evidence,
+                **({KEY_FAILURE_SEQUENCES: sequences} if sequences else {}),
+                **_spec_fence_fields(spec_fields, findings),
+            },
             head_sha=head_sha,
             review_status=claimed_status,
         )
@@ -979,7 +1054,10 @@ def _post_command(
             {
                 **{k: item[k] for k in (*_FINDING_KEYS, *_OPTIONAL_FINDING_KEYS) if k in item},
                 "blocking": evaluated.blocking,
-                "notes": finding_notes(evaluated),
+                "notes": [
+                    *finding_notes(evaluated),
+                    *([f"spec tag: {item[KEY_SPEC_TAG]}"] if spec_fields is not None else []),
+                ],
             }
             for item, evaluated in zip(annotated, verdict.findings)
         ],
@@ -987,6 +1065,7 @@ def _post_command(
         **({KEY_FINDINGS_OPEN: open_findings} if open_findings else {}),
         **evidence,
         **fence_fields,
+        **_spec_fence_fields(spec_fields, annotated),
         KEY_EVALUATED_FINDINGS: evaluated_findings_for_fence(
             findings, with_fingerprint=evaluation.ruling_provider is not None
         ),
@@ -1085,6 +1164,13 @@ def _post_command(
             result[key] = posted[key]
     if KEY_DROPPED in evidence:
         result["dropped_count"] = len(evidence[KEY_DROPPED])
+    if spec_fields is not None:
+        result[KEY_SPEC_HASH] = spec_fields[KEY_SPEC_HASH]
+        result["spec_unmet_count"] = sum(
+            1 for entry in spec_fields[KEY_SPEC_COVERAGE] if entry["status"] == COVERAGE_UNMET
+        )
+        if "spec_coverage_record_id" in posted:
+            result["spec_coverage_record_id"] = posted["spec_coverage_record_id"]
 
     # The late re-read above narrows the GitHub race but cannot close it: a
     # push can still land between that read and the post. The comment cannot

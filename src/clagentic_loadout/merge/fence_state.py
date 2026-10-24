@@ -59,6 +59,21 @@ They are present together or not at all (policy_base_sha excepted). A fence at
 version 1 or 2 carries none of them and reads as NOT EVALUATED: its
 review_status was asserted by the poster, not computed.
 
+SPEC fields record a review that ran against a sealed spec, and are what a
+fence_schema_version 4 fence adds. They are evidence, like the fields above them:
+they hold no finding open, clear none, and the merge gate does not read them.
+
+  spec_hash       <sha256>               the sealed spec the review ran against
+  spec_tags       [{file, line, rule_id, message, spec_tag}]
+                                         exactly one tag for each finding, from
+                                         in-spec, out-of-spec or fix-caused
+  spec_coverage   [{criterion, status}]  each acceptance criterion of that spec,
+                                         once, as met or unmet
+
+They are present together or not at all. A version 4 fence is a superset of
+version 3: it says nothing about evaluation by itself, so a fence that carries
+both reads as evaluated exactly as a version 3 fence does.
+
 COMPATIBILITY. A version-1 fence (no state fields) stays valid and readable.
 It reads as "no findings asserted open at that fence", never as an error: an
 absent field is silence, not a malformed verdict.
@@ -89,6 +104,10 @@ FENCE_SCHEMA_VERSION = 2
 #: Version stamped on a fence that carries the evaluation fields. It is a
 #: superset of version 2: it says nothing about findings state by itself.
 EVALUATED_FENCE_SCHEMA_VERSION = 3
+
+#: Version stamped on a fence that carries the spec fields. A superset of
+#: version 3, for the same reason version 3 is a superset of version 2.
+SPEC_FENCE_SCHEMA_VERSION = 4
 
 KEY_FENCE_SCHEMA_VERSION = "fence_schema_version"
 KEY_FINDINGS_OPEN = "findings_open"
@@ -127,6 +146,26 @@ EVALUATION_KEYS = (
 
 VERDICT_OUTCOMES = ("CLEAN", "BLOCKED", "DEGRADED", "STALE")
 
+KEY_SPEC_HASH = "spec_hash"
+KEY_SPEC_TAGS = "spec_tags"
+KEY_SPEC_COVERAGE = "spec_coverage"
+
+#: The tool-supplied spec fields; all or nothing, and they raise the schema
+#: version to SPEC_FENCE_SCHEMA_VERSION.
+SPEC_KEYS = (KEY_SPEC_HASH, KEY_SPEC_TAGS, KEY_SPEC_COVERAGE)
+
+#: A finding's key for its tag in a findings file (not a fence key).
+KEY_SPEC_TAG = "spec_tag"
+SPEC_TAG_IN_SPEC = "in-spec"
+SPEC_TAG_OUT_OF_SPEC = "out-of-spec"
+SPEC_TAG_FIX_CAUSED = "fix-caused"
+#: The vocabulary a review tags every finding with when it runs against a spec.
+SPEC_TAGS = (SPEC_TAG_IN_SPEC, SPEC_TAG_OUT_OF_SPEC, SPEC_TAG_FIX_CAUSED)
+
+COVERAGE_MET = "met"
+COVERAGE_UNMET = "unmet"
+COVERAGE_STATUSES = (COVERAGE_MET, COVERAGE_UNMET)
+
 EVIDENCE_KEYS = (
     KEY_FAILURE_SEQUENCES,
     KEY_DROPPED,
@@ -134,6 +173,7 @@ EVIDENCE_KEYS = (
     KEY_RANGE,
     KEY_ENGINES,
     *EVALUATION_KEYS,
+    *SPEC_KEYS,
 )
 
 RANGE_BASIS_BASE_HEAD = "base..head"
@@ -151,6 +191,11 @@ SCANNER_FAILED = "failed"
 SCANNER_STATUSES = (SCANNER_RAN, SCANNER_NOT_APPLICABLE, SCANNER_NOT_INVOKED, SCANNER_FAILED)
 
 _ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
+
+#: Restated from the spec contract (spec.model) because the merge layer reads a
+#: fence without importing the spec layer.
+_CRITERION_ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+_SPEC_HASH_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True)
@@ -483,7 +528,58 @@ def normalize_findings_state(
     if any(key in raw for key in EVALUATION_KEYS):
         out.update(_normalize_evaluation(raw))
         out[KEY_FENCE_SCHEMA_VERSION] = EVALUATED_FENCE_SCHEMA_VERSION
+    if any(key in raw for key in SPEC_KEYS):
+        out.update(_normalize_spec(raw))
+        out[KEY_FENCE_SCHEMA_VERSION] = SPEC_FENCE_SCHEMA_VERSION
     return out
+
+
+def _normalize_spec(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate the spec fields. They are all or nothing: a hash without the tags
+    and the coverage, or the reverse, would be a review nobody can tell the
+    specification of."""
+    missing = [key for key in SPEC_KEYS if key not in raw]
+    if missing:
+        raise ValueError(f"spec fields must be given together, missing {missing}")
+    spec_hash = raw[KEY_SPEC_HASH]
+    if not (isinstance(spec_hash, str) and _SPEC_HASH_RE.match(spec_hash)):
+        raise ValueError(
+            f"{KEY_SPEC_HASH} must be 64 lowercase hex characters (a sha256), got {spec_hash!r}"
+        )
+    tags = []
+    for index, entry in enumerate(_entries(raw[KEY_SPEC_TAGS], KEY_SPEC_TAGS)):
+        where = f"{KEY_SPEC_TAGS}[{index}]"
+        _exact_keys(entry, ("file", "line", "rule_id", "message", KEY_SPEC_TAG), where)
+        tag = entry.get(KEY_SPEC_TAG)
+        if tag not in SPEC_TAGS:
+            raise ValueError(f"{where}.{KEY_SPEC_TAG} must be exactly one of {list(SPEC_TAGS)}, got {tag!r}")
+        tags.append(
+            {
+                "file": _text(entry.get("file"), f"{where}.file"),
+                "line": _line_number(entry.get("line"), f"{where}.line"),
+                "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+                "message": _text(entry.get("message"), f"{where}.message", single_line=False),
+                KEY_SPEC_TAG: tag,
+            }
+        )
+    coverage = []
+    seen: set[str] = set()
+    for index, entry in enumerate(_entries(raw[KEY_SPEC_COVERAGE], KEY_SPEC_COVERAGE)):
+        where = f"{KEY_SPEC_COVERAGE}[{index}]"
+        _exact_keys(entry, ("criterion", "status"), where)
+        criterion = entry.get("criterion")
+        if not (isinstance(criterion, str) and _CRITERION_ID_RE.match(criterion)):
+            raise ValueError(f"{where}.criterion must be an acceptance criterion id, got {criterion!r}")
+        if criterion in seen:
+            raise ValueError(f"{where}.criterion {criterion!r} is listed twice")
+        seen.add(criterion)
+        status = entry.get("status")
+        if status not in COVERAGE_STATUSES:
+            raise ValueError(f"{where}.status must be one of {list(COVERAGE_STATUSES)}, got {status!r}")
+        coverage.append({"criterion": criterion, "status": status})
+    if not coverage:
+        raise ValueError(f"{KEY_SPEC_COVERAGE} must list at least one acceptance criterion")
+    return {KEY_SPEC_HASH: spec_hash, KEY_SPEC_TAGS: tags, KEY_SPEC_COVERAGE: coverage}
 
 
 def _normalize_evaluation(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -596,7 +692,8 @@ def has_findings_state(data: Mapping[str, Any]) -> bool:
 
 
 _RAW_VERSION_2_RE = re.compile(
-    rf"{KEY_FENCE_SCHEMA_VERSION}\W+(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION})\b"
+    rf"{KEY_FENCE_SCHEMA_VERSION}\W+"
+    rf"(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION}|{SPEC_FENCE_SCHEMA_VERSION})\b"
 )
 
 
@@ -715,6 +812,19 @@ def with_derived_failure_sequences(
 
 __all__ = [
     "with_derived_failure_sequences",
+    "COVERAGE_MET",
+    "COVERAGE_STATUSES",
+    "COVERAGE_UNMET",
+    "KEY_SPEC_COVERAGE",
+    "KEY_SPEC_HASH",
+    "KEY_SPEC_TAG",
+    "KEY_SPEC_TAGS",
+    "SPEC_FENCE_SCHEMA_VERSION",
+    "SPEC_KEYS",
+    "SPEC_TAGS",
+    "SPEC_TAG_FIX_CAUSED",
+    "SPEC_TAG_IN_SPEC",
+    "SPEC_TAG_OUT_OF_SPEC",
     "ENGINE_CARRIER",
     "ENGINE_FALLBACK",
     "EVALUATED_FENCE_SCHEMA_VERSION",

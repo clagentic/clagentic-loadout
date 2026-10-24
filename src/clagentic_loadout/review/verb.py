@@ -161,9 +161,12 @@ import sys
 from clagentic_loadout._version import get_version
 from clagentic_loadout.merge.errors import VerdictMalformedError
 from clagentic_loadout.merge.fence_state import (
+    COVERAGE_UNMET,
     EVIDENCE_KEYS,
     KEY_DROPPED,
     KEY_FENCE_SCHEMA_VERSION,
+    KEY_SPEC_COVERAGE,
+    KEY_SPEC_HASH,
     STATE_KEYS,
     normalize_findings_state,
     with_derived_failure_sequences,
@@ -231,7 +234,12 @@ from clagentic_loadout.transport.git_host_api import (
 )
 from clagentic_loadout.transport.provider_config import resolve_platform_provider
 from clagentic_loadout.verdict_record.emit import try_emit_record
-from clagentic_loadout.verdict_record.record import KIND_REVIEWER, gate_name, utc_timestamp
+from clagentic_loadout.verdict_record.record import (
+    GATE_SPEC_COVERAGE,
+    KIND_REVIEWER,
+    gate_name,
+    utc_timestamp,
+)
 
 # Digit-only comment_id constraint (lr-f43c4b security-review hardening
 # finding, same finding class as lr-26f774): --delete-own-comment's value is
@@ -1353,6 +1361,7 @@ def _run(
         # merge verb looks for. It points at the posted comment, so the fence and
         # the record cross-reference. A write failure is reported and does not
         # undo the post; the merge verb then reads this gate through the fence.
+        spec_hash = parsed.get(KEY_SPEC_HASH)
         record = try_emit_record(
             "review-post",
             gate=gate_name(KIND_REVIEWER, caller),
@@ -1362,10 +1371,32 @@ def _run(
             started=post_started,
             finished=utc_timestamp(),
             repo=f"{owner}/{repo}",
+            spec_hash=spec_hash,
             evidence_ref=f"comment:{verified.id}",
         )
         if record is not None:
             result["verdict_record_id"] = record.id
+        if spec_hash is not None:
+            # The coverage pass is its own measurement of the same commit: it
+            # passes only when every acceptance criterion of the sealed spec is
+            # met. The per-criterion marks live in the posted fence, which the
+            # record points at, so the record and its evidence cannot disagree.
+            marks = parsed.get(KEY_SPEC_COVERAGE) or ()
+            unmet = [entry for entry in marks if entry["status"] == COVERAGE_UNMET]
+            coverage_record = try_emit_record(
+                "review-post",
+                gate=GATE_SPEC_COVERAGE,
+                head_sha=args.verdict_head_sha,
+                tool="loadout-review-post",
+                exit=1 if unmet or not marks else 0,
+                started=post_started,
+                finished=utc_timestamp(),
+                repo=f"{owner}/{repo}",
+                spec_hash=spec_hash,
+                evidence_ref=f"comment:{verified.id}",
+            )
+            if coverage_record is not None:
+                result["spec_coverage_record_id"] = coverage_record.id
 
     print(json.dumps(result))
     return EXIT_OK

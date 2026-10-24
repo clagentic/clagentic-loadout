@@ -34,8 +34,8 @@
     },
     "fence_schema_version": {
       "type": "integer",
-      "enum": [1, 2, 3],
-      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated."
+      "enum": [1, 2, 3, 4],
+      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated."
     },
     "verdict_outcome": {
       "type": "string",
@@ -168,6 +168,41 @@
           "by": {"type": "string", "enum": ["reviewer", "caller"], "description": "Who resolved it."},
           "reason": {"type": "string", "minLength": 1, "description": "The caller's one-line reason. Required when by is caller."},
           "fingerprint": {"type": "string", "minLength": 1, "description": "The finding's fingerprint, when it had one."}
+        }
+      }
+    },
+    "spec_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "OPTIONAL evidence, version 4. The sha256 of the sealed spec the review ran against. Present together with spec_tags and spec_coverage or not at all."
+    },
+    "spec_tags": {
+      "type": "array",
+      "description": "OPTIONAL evidence, version 4. The tag of each finding the review states: exactly one of in-spec, out-of-spec or fix-caused. Informational: a tag holds no finding open and clears none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["file", "line", "rule_id", "message", "spec_tag"],
+        "properties": {
+          "file": {"type": "string", "minLength": 1, "description": "Path of the finding the tag belongs to."},
+          "line": {"type": "integer", "minimum": 1, "description": "Line of that finding."},
+          "rule_id": {"type": "string", "minLength": 1, "description": "Rule the finding was raised under."},
+          "message": {"type": "string", "minLength": 1, "description": "What the finding claimed."},
+          "spec_tag": {"type": "string", "enum": ["in-spec", "out-of-spec", "fix-caused"], "description": "Whether the finding is within the spec's scope, outside it, or caused by a fix made during the build."}
+        }
+      }
+    },
+    "spec_coverage": {
+      "type": "array",
+      "minItems": 1,
+      "description": "OPTIONAL evidence, version 4. Each acceptance criterion of the sealed spec, once, as met or unmet.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["criterion", "status"],
+        "properties": {
+          "criterion": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$", "description": "The acceptance criterion id in the sealed spec."},
+          "status": {"type": "string", "enum": ["met", "unmet"], "description": "Whether the change meets the criterion."}
         }
       }
     },
