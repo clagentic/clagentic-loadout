@@ -3252,6 +3252,15 @@ result (not in the findings file), under `changeset`: `classification`,
 the slice since the last reviewed head. The earlier verdicts on the pull request are read
 only when the change is docs-only.
 
+Given `--spec-hash` (a sealed spec in the specs store, else exit 33), `run` also puts the
+spec's `docs_only_justification` in front of the reviewer. When the classification is
+`docs-only`, the lighter path is open (`lighter_review_available` is true) and the spec states
+a justification, every chunk prompt of the run carries a `Docs-only justification` section: the
+classification, the justification quoted verbatim, and an instruction to judge whether it
+holds for the chunk's changes. A change classified as code, a pull request whose earlier
+verdicts rejected a justification or could not be read, a spec with no justification and a run
+given no spec carry no such section.
+
 ### The lighter path
 
 The lighter path is opt-in and fails toward more review. It applies only when **all** of

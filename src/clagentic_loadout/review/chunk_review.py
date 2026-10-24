@@ -76,17 +76,22 @@ def build_prompt(
     rulebook_text: str,
     delta_note: str = "",
     class_rules: str = "",
+    docs_note: str = "",
 ) -> str:
     """Chunk prompt with the output contract placed LAST, where a model
     weighs it most. *delta_note*, when given, frames the chunk as part of an
     incremental review (see review.delta). *class_rules*, when given, is the
     repository's stated class rules for the chunk's files
-    (review.profile_rules.chunk_class_rules); it sits after the rulebook."""
+    (review.profile_rules.chunk_class_rules); it sits after the rulebook.
+    *docs_note*, when given, is the docs-only justification to judge
+    (review.docs_only_review.render_justification_note); it follows the class rules."""
     parts = [_REVIEW_ONLY_PREFIX]
     if rulebook_text.strip():
         parts.append("## Rulebook\n\n" + rulebook_text.strip() + "\n\n")
     if class_rules.strip():
         parts.append(class_rules.strip() + "\n\n")
+    if docs_note.strip():
+        parts.append(docs_note.strip() + "\n\n")
     if delta_note.strip():
         parts.append(delta_note.strip() + "\n\n")
     parts.append(f"## Diff chunk {chunk.index} of {total}\n\n" + chunk.text + "\n")
@@ -327,6 +332,7 @@ def review_chunk(
     delta_note: str = "",
     breaker: EngineBreaker | None = None,
     class_rules: str = "",
+    docs_note: str = "",
 ) -> dict[str, Any]:
     """Review *chunk*; returns its persistable record. Never raises for an
     engine problem: every outcome is a record with a status. *cwd* is the
@@ -339,6 +345,7 @@ def review_chunk(
     record = _review_chunk(
         chunk, total, profile, attempts_before=attempts_before, cwd=cwd, log_dir=log_dir,
         runner=runner, delta_note=delta_note, breaker=breaker, class_rules=class_rules,
+        docs_note=docs_note,
     )
     label = profile.fallback_model if record.get("engine") == ENGINE_FALLBACK else profile.carrier_model
     if label:
@@ -358,8 +365,9 @@ def _review_chunk(
     delta_note: str,
     breaker: EngineBreaker | None,
     class_rules: str,
+    docs_note: str,
 ) -> dict[str, Any]:
-    prompt = build_prompt(chunk, total, profile.rulebook_text, delta_note, class_rules)
+    prompt = build_prompt(chunk, total, profile.rulebook_text, delta_note, class_rules, docs_note)
     record = _new_record(chunk, attempts_before + 1)
 
     skipped = breaker.reason(ENGINE_CARRIER) if breaker is not None else ""

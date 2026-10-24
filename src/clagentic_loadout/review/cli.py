@@ -312,8 +312,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "alone to review a delta with no open findings to answer for.",
     )
     run.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
+    run.add_argument(
+        "--spec-hash",
+        default=None,
+        help="The sealed spec (its sha256, as printed by `loadout-spec seal`) the review is "
+        "against. When the change is documentation only by the base revision's docs allowlist, "
+        "the lighter review is open to it, and the spec carries a docs-only justification, that "
+        "justification is quoted verbatim into every chunk prompt for the reviewer to judge. "
+        "Nothing else changes: without this flag, or for any other change, the prompts carry "
+        "no justification.",
+    )
 
-    post = subparsers.add_parser(
+    post =subparsers.add_parser(
         "post",
         help="Post findings with the tool-constructed verdict fence and verify.",
         description="Stage and post findings; the comment body is built from "
@@ -552,6 +562,27 @@ def _emit_stage(name: str, status: str, **fields: Any) -> None:
     )
 
 
+def _run_justification(args: argparse.Namespace, config_root) -> str | None:
+    """The docs-only justification of the sealed spec `run` was given, or None
+    when it was given no spec or the spec states none. The spec must be in the
+    specs store and verify against its hash; checked before any host call."""
+    if args.spec_hash is None:
+        return None
+    if not is_spec_hash(args.spec_hash):
+        _fail(
+            f"--spec-hash must be 64 lowercase hex characters, got {args.spec_hash!r}", EXIT_USAGE
+        )
+    try:
+        facts = spec_review.load_spec_facts(
+            args.spec_hash,
+            config_root=config_root,
+            untrusted_roots=(Path(args.repo_path),) if args.repo_path else (),
+        )
+    except spec_review.SpecReviewError as exc:
+        _fail(str(exc), EXIT_SPEC_UNAVAILABLE)
+    return facts.docs_only_justification
+
+
 def _run_command(
     args: argparse.Namespace,
     caller: str,
@@ -576,6 +607,7 @@ def _run_command(
 
     since_head, prior_findings = _load_prior_review(args, owner=owner, repo=repo)
     resolutions = _load_resolutions(args.resolved_findings)
+    justification = _run_justification(args, config_root)
     # Read before any model is called, so a bad evaluator setting costs nothing.
     try:
         evaluation = context_from_config(config_root)
@@ -616,6 +648,7 @@ def _run_command(
         earlier_rejection=earlier_verdicts_reader(
             backend, owner=owner, repo=repo, pr_number=args.pr
         ),
+        justification=justification,
     )
 
     delta = None

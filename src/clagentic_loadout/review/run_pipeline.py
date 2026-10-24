@@ -54,7 +54,11 @@ from clagentic_loadout.review.delta import (
     reviewer_resolved_positions,
 )
 from clagentic_loadout.merge.fence_state import KEY_VERDICT_OUTCOME, KEY_VERDICT_REASONS
-from clagentic_loadout.review.docs_only_review import ChangesetInput, summarize_changeset
+from clagentic_loadout.review.docs_only_review import (
+    ChangesetInput,
+    render_justification_note,
+    summarize_changeset,
+)
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
 from clagentic_loadout.review.evaluation import (
     EvaluationContext,
@@ -180,6 +184,7 @@ def _resume_key(
     head_sha: str,
     delta_note: str = "",
     class_rules: str = "",
+    docs_note: str = "",
 ) -> str:
     digest = hashlib.sha256()
     for part in (
@@ -187,6 +192,7 @@ def _resume_key(
         head_sha,
         delta_note,
         class_rules,
+        docs_note,
         json.dumps(profile.carrier),
         json.dumps(profile.fallback),
         json.dumps([profile.carrier_model, profile.fallback_model]),
@@ -499,7 +505,14 @@ def run_review(
         if changeset is not None
         else None
     )
-    class_rules ={chunk.index: chunk_class_rules(policy, chunk) for chunk in chunks}
+    # The justification is quoted into every chunk prompt of a run the lighter path
+    # is open to, so the resume key binds it.
+    docs_note = (
+        render_justification_note(changeset_block, changeset.justification)
+        if changeset is not None and changeset_block is not None
+        else ""
+    )
+    class_rules = {chunk.index: chunk_class_rules(policy, chunk) for chunk in chunks}
     class_rules_sent = {
         chunk.index: class_rules_evidence(policy, chunk, class_rules[chunk.index])
         for chunk in chunks
@@ -508,7 +521,7 @@ def run_review(
     resume_rules = "\0".join(class_rules[chunk.index] for chunk in chunks)
     state_dir = (
         run_dir
-        / f"state-{_resume_key(chunks, profile, acquired.head_sha, resume_note, resume_rules)}"
+        / f"state-{_resume_key(chunks, profile, acquired.head_sha, resume_note, resume_rules, docs_note)}"
     )
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -584,6 +597,7 @@ def run_review(
                     delta_note=delta_notes.get(chunk.index, ""),
                     breaker=breaker,
                     class_rules=class_rules[chunk.index],
+                    docs_note=docs_note,
                 )
             finally:
                 discard_chunk_workdir(chunk_cwd)

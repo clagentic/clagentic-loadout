@@ -24,7 +24,7 @@ from clagentic_loadout.spec import model
 from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.verdict_record.store import records_at_head, records_root
-from tests._review_cli_support import Env, identity_provider, make_diff
+from tests._review_cli_support import Env, identity_provider, make_diff, prompts
 from tests._review_evaluate_support import commit_files, facts
 from tests._support.review_host import PRIOR_HEAD, ReviewHost
 
@@ -573,3 +573,129 @@ class TestRun:
         world.review("run", capsys=capsys)
 
         assert not [r for r in world.host.requests if "/comments" in r[1]]
+
+
+class TestJustificationInThePrompt:
+    """The justification reaches every chunk prompt of a run the lighter path is open
+    to, and no other run's prompt."""
+
+    HEADING = "## Docs-only justification"
+
+    def _run(self, world, capsys, spec, *extra):
+        before = len(prompts(world.env.stubs, "carrier"))
+        code, result, _ = world.review("run", "--spec-hash", spec.spec_hash, *extra, capsys=capsys)
+        assert code == 0
+        return result, prompts(world.env.stubs, "carrier")[before:]
+
+    def test_an_eligible_run_quotes_the_justification_verbatim_and_asks_to_judge_it(
+        self, world, capsys
+    ):
+        world.env.configure()
+        spec = world.seal()
+
+        result, sent = self._run(world, capsys, spec)
+
+        assert result["changeset"]["lighter_review_available"] is True
+        assert sent
+        for prompt in sent:
+            assert self.HEADING in prompt
+            assert f"> {JUSTIFICATION}" in prompt
+            assert "classified as docs-only" in prompt
+            assert "Judge whether this justification holds" in prompt
+            # The output contract stays last.
+            assert prompt.rfind(self.HEADING) < prompt.rfind("## Diff chunk")
+
+    def test_every_chunk_of_a_multi_chunk_run_carries_it(self, world, capsys):
+        world.host.diff = make_diff({"docs/guide.md": 30})
+        world.env.configure(chunk_lines=10)
+        spec = world.seal()
+
+        result, sent = self._run(world, capsys, spec)
+
+        assert result["chunk_count"] > 1 and len(sent) >= result["chunk_count"]
+        assert all(f"> {JUSTIFICATION}" in prompt for prompt in sent)
+
+    def test_a_multi_line_justification_is_quoted_line_by_line(self, world, capsys):
+        world.env.configure()
+        spec = world.seal(justification="First line.\nSecond line.")
+
+        _, sent = self._run(world, capsys, spec)
+
+        assert all("> First line.\n> Second line." in prompt for prompt in sent)
+
+    def test_a_code_classified_run_carries_none(self, world, capsys):
+        world.host.diff = make_diff({"docs/guide.md": 3, "src/app.py": 2})
+        world.env.configure()
+        spec = world.seal()
+
+        result, sent = self._run(world, capsys, spec)
+
+        assert result["changeset"]["classification"] == "code"
+        assert sent and all(self.HEADING not in p and JUSTIFICATION not in p for p in sent)
+
+    def test_a_run_after_a_rejection_carries_none(self, world, capsys):
+        world.env.configure()
+        spec = world.seal()
+        world.post(
+            [_finding()], "--reject-justification", TestRejection.REASON, spec=spec, capsys=capsys
+        )
+
+        result, sent = self._run(world, capsys, spec)
+
+        assert result["changeset"]["classification"] == "code"
+        assert sent and all(self.HEADING not in p and JUSTIFICATION not in p for p in sent)
+
+    def test_a_run_whose_earlier_verdicts_cannot_be_read_carries_none(self, world, capsys):
+        world.host.comment_read_failures = 1
+        world.env.configure()
+        spec = world.seal()
+
+        result, sent = self._run(world, capsys, spec)
+
+        assert result["changeset"]["lighter_review_available"] is False
+        assert sent and all(self.HEADING not in p for p in sent)
+
+    def test_a_spec_without_a_justification_carries_none(self, world, capsys):
+        world.env.configure()
+        spec = world.seal(justification=None)
+
+        _, sent = self._run(world, capsys, spec)
+
+        assert sent and all(self.HEADING not in p for p in sent)
+
+    def test_a_run_given_no_spec_carries_none(self, world, capsys):
+        world.env.configure()
+        world.seal()
+
+        code, _, _ = world.review("run", capsys=capsys)
+
+        sent = prompts(world.env.stubs, "carrier")
+        assert code == 0 and sent and all(self.HEADING not in p for p in sent)
+
+    def test_the_justification_is_part_of_what_a_resume_binds(self, world, capsys):
+        world.env.configure()
+        first = world.seal()
+        second = world.seal(justification="A different claim about the same change.")
+
+        _, sent_first = self._run(world, capsys, first)
+        _, sent_second = self._run(world, capsys, second)
+
+        assert sent_first and sent_second
+        assert all("A different claim" in p and JUSTIFICATION not in p for p in sent_second)
+
+    def test_a_spec_that_is_not_in_the_store_is_refused_before_any_host_call(
+        self, world, capsys
+    ):
+        world.env.configure()
+
+        code, _, err = world.review("run", "--spec-hash", "a" * 64, capsys=capsys)
+
+        assert code == review_cli.EXIT_SPEC_UNAVAILABLE
+        assert world.host.requests == [] and err
+
+    def test_a_malformed_spec_hash_is_a_usage_error(self, world, capsys):
+        world.env.configure()
+
+        code, _, err = world.review("run", "--spec-hash", "nothex", capsys=capsys)
+
+        assert code == review_cli.EXIT_USAGE and "--spec-hash" in err
