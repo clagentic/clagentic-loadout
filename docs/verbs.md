@@ -2699,12 +2699,35 @@ of `--repo` on the platform's configured host:
 - The SSH and HTTPS remotes of one host both pass.
 - A tree that is not a directory, not inside a git work tree, has no `origin`, or whose `origin`
   is not one of those shapes is refused, not passed.
-- One tree supplies all three: the origin, the fallback gate keys and the steps are read from
-  `--repo-path` and its own git top-level only. The directory above is not consulted, and a
-  `merge.git_working_tree` declared in the file never names the tree that is confirmed in place
-  of `--repo-path` (a wrapper directory that is not itself a git tree is refused).
+- One tree supplies all three: the origin, the fallback gate keys and the steps are read for
+  the git top-level T of `--repo-path`. The tree that is confirmed is always T, never a tree a
+  config file names.
 - Any remote shown in a refusal has its credentials removed: userinfo, query and fragment are
   dropped, leaving `scheme://host/owner/name`.
+
+**Which config file is read.** Every merge-verb reader of the deployment file (`post_merge_steps`
+and `post_merge_steps` presence, the fallback gate keys, `merge_requirements`,
+`merge.git_working_tree`, `sync_tree_after_merge`, the step timeout, the enforcement flags and
+the `pre_checks` readers) resolves the file through one resolver:
+
+1. A config file at `--repo-path` or at T wins. Nothing above T is consulted for it.
+2. A config file in T's **direct parent** X is used only when its `merge` section declares
+   `git_working_tree: <segment>`, a single path segment (no `/`, `.` or `..`) naming a directory
+   of X that is not a symlink and resolves to exactly T. This is the wrapper layout: the config
+   sits next to the checkout, `--repo-path` is the checkout, steps and requirements load from X,
+   and the tree sync runs in T.
+3. Any other config file above T that holds `post_merge_steps`, `merge_requirements`, a gate key
+   or the declaration is **refused**, never read as empty: an ancestor that is not the direct
+   parent, a direct parent that does not declare T (or declares a symlink, a multi-segment path
+   or another directory), or a file above T that cannot be read. The refusal names the resolved
+   tree, the config root and the remote. A file above T that holds only other settings is ignored.
+4. A `--repo-path` in no git tree is read where it is, and still refused when it declares steps
+   (it is not a confirmable clone).
+
+**Migration.** A deployment whose config sits in a wrapper directory must declare
+`merge.git_working_tree` in that file. Such a layout used to be read by a one-level hop with no
+declaration; an undeclared wrapper now refuses loudly (`1` before anything is merged) instead of
+being read without proof that it belongs to the tree.
 
 A refusal names the resolved tree, its `origin` (without credentials), its host, and the
 configured host. For
@@ -2817,8 +2840,9 @@ merge-embedded run would have, via the SAME
 checked out, a `--repo-path` whose deployment file declares `post_merge_steps`
 must be a confirmed clone of `--repo` on the configured host (see
 "`--repo-path` binding" under `loadout-merge`); otherwise the verb exits `1`
-naming the resolved tree, its `origin` and the host. The steps are read from
-`--repo-path` and its own git top-level only, never from the directory above.
+naming the resolved tree, its `origin` and the host. The steps are read through the same
+resolver (the tree's own config, or its direct parent's when that config declares the tree via
+`merge.git_working_tree`); any other config above the tree that holds steps is refused.
 
 Never calls a merge or comment endpoint — only a PR-info read, then local
 git/subprocess operations. Mirrors `loadout-close-pr`'s own precedent for a
