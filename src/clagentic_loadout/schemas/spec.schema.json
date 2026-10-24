@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clagentic.ai/schemas/loadout/spec.schema.json",
+  "title": "sealed spec",
+  "description": "The standard spec: what a change is meant to do, written by one role before the build and read, unchanged, by every later role. A sealed spec is stored as a content-addressed artifact whose name is the sha256 of its canonical serialization (keys sorted, no insignificant whitespace), bound to the full commit sha it was sealed at. A change to a sealed spec is a new seal whose supersedes names the previous hash, so the chain of seals is visible. The role is an opaque key; this schema names no role. Sections that have no automatic source yet are present and empty, carrying a source of null and a note saying so. schema_version is bumped on any change that an older reader would misread.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "role", "head_sha", "sealed_at", "supersedes", "goal", "scope",
+    "acceptance_criteria", "class_rules", "group_rules", "consumers", "test_plan",
+    "verification_evidence_owed", "rulings_already_made", "profile_completeness",
+    "docs_only_justification"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Version of this spec shape."
+    },
+    "role": {
+      "type": "string",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+      "description": "The role that authored and sealed the spec, an opaque key."
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "description": "The full commit sha of the branch head the spec was sealed at."
+    },
+    "sealed_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "UTC time of the seal, to the second."
+    },
+    "supersedes": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "The hash of the sealed spec this one replaces, or null for the first seal of a chain."
+    },
+    "goal": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What the change is for, in the author's words."
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["in", "out"],
+      "description": "What the change covers and what it deliberately does not.",
+      "properties": {
+        "in": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Work that is in scope."},
+        "out": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Work that is out of scope."}
+      }
+    },
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "description": "The criteria the change is judged against. Each has an id unique within the spec, which a review's coverage pass names.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "given", "when", "then"],
+        "properties": {
+          "id": {"type": "string", "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$", "description": "Criterion id, unique within the spec."},
+          "given": {"type": "string", "minLength": 1, "description": "The precondition."},
+          "when": {"type": "string", "minLength": 1, "description": "The action."},
+          "then": {"type": "string", "minLength": 1, "description": "The observable outcome."}
+        }
+      }
+    },
+    "class_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "class", "rules", "paths"],
+      "description": "The repository class and the rules that class carries, filled from the repo profile when the spec is created.",
+      "properties": {
+        "source": {"type": ["string", "null"], "enum": ["profile", null], "description": "profile when read from the repo profile, null when there was none."},
+        "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},
+        "class": {"type": ["string", "null"], "description": "The repository's top-level class."},
+        "rules": {
+          "type": "object",
+          "description": "The rule statements of each class in effect, keyed by class.",
+          "additionalProperties": {"type": "array", "items": {"type": "string"}}
+        },
+        "paths": {
+          "type": "array",
+          "description": "The per-path class overrides.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["glob", "class"],
+            "properties": {
+              "glob": {"type": "string"},
+              "class": {"type": "string"}
+            }
+          }
+        }
+      }
+    },
+    "group_rules": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "items"],
+      "description": "Rules that apply to a group of repositories. No source exists yet; the section is authored or left empty.",
+      "properties": {
+        "source": {"type": ["string", "null"], "description": "Where the items came from; null while there is no source."},
+        "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},
+        "items": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "consumers": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "items"],
+      "description": "The consumers of what the change touches and how each is dispositioned. No source exists yet; the section is authored or left empty.",
+      "properties": {
+        "source": {"type": ["string", "null"], "description": "Where the items came from; null while there is no source."},
+        "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["consumer", "disposition"],
+            "properties": {
+              "consumer": {"type": "string", "minLength": 1},
+              "disposition": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
+    "test_plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "declared", "plan"],
+      "description": "How the change is tested: the commands the repo profile declares, filled when the spec is created, and the author's plan.",
+      "properties": {
+        "source": {"type": ["string", "null"], "enum": ["profile", null], "description": "profile when the declared commands were read from the repo profile."},
+        "note": {"type": ["string", "null"], "description": "Why the declared commands are absent, when they are."},
+        "declared": {"type": ["object", "null"], "description": "The test commands the profile declares, keyed as the profile keys them."},
+        "plan": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "The author's test plan."}
+      }
+    },
+    "verification_evidence_owed": {
+      "type": "array",
+      "description": "The verdict records that must exist for the change to be accepted, by gate name.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gate"],
+        "properties": {
+          "gate": {"type": "string", "minLength": 1, "pattern": "^[^\\r\\n]+$", "description": "The gate name of a verdict record."},
+          "note": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "rulings_already_made": {
+      "type": "array",
+      "description": "Decisions already made that the build must not reopen.",
+      "items": {"type": "string", "minLength": 1}
+    },
+    "profile_completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "items"],
+      "description": "What the repo profile is still missing. No source exists yet; the section is authored or left empty.",
+      "properties": {
+        "source": {"type": ["string", "null"], "description": "Where the items came from; null while there is no source."},
+        "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},
+        "items": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "docs_only_justification": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Why the change needs no tests because it only changes documentation; null when it does not claim that."
+    }
+  }
+}

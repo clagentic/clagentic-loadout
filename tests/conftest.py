@@ -333,6 +333,18 @@ def _isolate_verdict_records_root(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_specs_root(monkeypatch, tmp_path):
+    """Autouse repo-wide: sealed specs are written and read in a directory of the
+    test's own, never the host's, and a sibling of tmp_path for the reason the
+    verdict records root above is. A test of the default location deletes the
+    variable, which wins."""
+    monkeypatch.setenv(
+        "CLAGENTIC_LOADOUT_SPECS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-specs"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _confine_git_discovery_to_tmp(monkeypatch, tmp_path):
     """Autouse repo-wide: git's upward repo discovery never leaves the
     pytest temp tree.

@@ -65,6 +65,7 @@ loadout-post-merge = "clagentic_loadout.merge.post_merge_verb:main"
 loadout-provision-allowlist = "clagentic_loadout.provisioning.cli:main"
 loadout-doctor = "clagentic_loadout.doctor.cli:main"
 loadout-record = "clagentic_loadout.verdict_record.verb:main"
+loadout-spec = "clagentic_loadout.spec.verb:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
