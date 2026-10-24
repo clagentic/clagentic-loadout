@@ -117,7 +117,9 @@ Stakes are resolved per path from three sources:
 - **The host.** Repository visibility only: passed with `--visibility` to `evaluate`, read
   from the repository record in the PR metadata by `run` and `post`. `public` marks every
   path exposed. Branch protection and rulesets are not read.
-- **A profile** in `stakes.yaml`, selected with `--profile` or the file's own `profile` key.
+- **The repo profile.** The posture keys of `.clagentic/loadout/profile.yaml` at the base
+  revision (see [repo-profile.md](repo-profile.md#risk-posture)). The retired `stakes.yaml`
+  is no longer read.
 
 Rules:
 
@@ -151,28 +153,25 @@ CODEOWNERS is looked up at `.github/CODEOWNERS`, `CODEOWNERS`, `docs/CODEOWNERS`
 an owner (`@user`, `@org/team` or an email address) covers its path, as informational
 context only.
 
-### `stakes.yaml`
+### `stakes.yaml` is retired
 
-Read from `.clagentic/loadout/stakes.yaml` at the base revision.
+`.clagentic/loadout/stakes.yaml` is no longer read. A repository that still has one at the base
+revision gets its stakes from the profile posture instead (or the worst case when it declares
+none), and `loadout-profile check` reports the file as a completeness item naming the keys to
+move. Ignoring the file can only move a stake toward the worst case, never away from it.
+Named profiles and per-path stake overrides are gone; per-path stakes now come only from tree
+markers.
 
-```yaml
-profile: service            # default profile when --profile is not given
-profiles:
-  service:
-    exposure: internal      # exposed | internal
-    data_class: confidential # public | internal | confidential | regulated
-    merge_control: controlled # controlled | uncontrolled
-    paths:                  # applied in order; later matches override field by field
-      "deploy/edge/**": {exposure: exposed}
-      "docs/**": {data_class: public}
-```
+| `stakes.yaml` key | Profile posture key |
+|---|---|
+| `exposure: exposed` / `internal` | `exposure: internet` / `internal_authenticated` or `local_or_ci_only` |
+| `data_class: regulated` / `internal` / `public` | `data: regulated_or_customer` / `internal` / `public_or_none` |
+| `merge_control: controlled` / `uncontrolled` | `merge_control: code_owner_review_required` or `review_required` / `unrestricted` |
 
-Globs: `*` and `?` stay inside one path segment, `**` spans segments.
-
-The schema is strict. `paths` is allowed only directly inside a profile; any other unknown,
-misplaced or nested key (for example a `paths` key inside a path entry) makes the whole file
-malformed. No policy from a malformed file applies, and the verdict is DEGRADED naming the
-key path, such as `profiles.service.paths.deploy/**.paths`.
+The evaluator's own vocabulary (`exposed`, `internal`, `regulated`, `controlled`, and the rest)
+is unchanged, and so is the `stakes:` line in a verdict fence; a value that came from the
+profile shows `(profile)` as its source. `--profile` on `loadout-review evaluate` is
+deprecated: it is still accepted, selects nothing, and prints a notice to standard error.
 
 ## Dispositions
 

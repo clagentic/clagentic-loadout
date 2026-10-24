@@ -750,7 +750,7 @@ unknown, unrecognised or unverifiable value resolves to the worst case.
 
 - **Facts** come from the findings. A finding with none, or with facts outside
   the vocabulary, is worst case: it blocks, and the verdict is DEGRADED naming it.
-- **Policy** (dispositions, stakes, CODEOWNERS and the file list) is read at the
+- **Policy** (dispositions, the repo profile and its posture, CODEOWNERS and the file list) is read at the
   PR's base revision from the host API (the tree and contents endpoints, under the
   same reader credential as the diff), so no local checkout is needed and the
   working directory may be any directory. When `--repo-path` is given explicitly,
@@ -3066,7 +3066,7 @@ The published contract is `schemas/spec.schema.json`
 | `test_plan` | `{source, note, declared, plan}`: the commands the profile's `test` block declares, and the author's plan. | profile + authored |
 | `verification_evidence_owed` | `{gate, note}` entries naming the verdict records that must exist. | authored |
 | `rulings_already_made` | Decisions the build must not reopen. | authored |
-| `profile_completeness` | `{source, note, items}` | no source yet |
+| `profile_completeness` | `{source, note, items}`: one line per thing the repo profile is missing or has wrong. | the repo profile |
 | `docs_only_justification` | Why no tests are needed because only documentation changed, or `null`. | authored |
 
 `new` fills `class_rules` and `test_plan.declared` from the repo profile through the
@@ -3075,10 +3075,14 @@ one function, `review.profile_brief.profile_brief`, that returns the class, the 
 statements, the overrides and the declared test commands. A repository with no
 profile leaves both sections empty and says so in `note`; an invalid profile is
 refused (exit 54), because a half-read profile would be filled in silently.
-`group_rules`, `consumers` and `profile_completeness` have no automatic source yet:
-they are present and empty with `source: null` and the note `no source yet`, for the
-author to fill or leave. No field of a spec carries posture, and the schema refuses
-any key it does not name.
+`new` also fills `profile_completeness` through the same computation `loadout-profile
+check` reports (see [repo-profile.md](repo-profile.md#completeness)): the posture keys that
+are missing, unrecognised or unconfirmed, and a retired `stakes.yaml`. Each item names a key
+and how to fix it, never the value the profile holds; an empty list says the profile is
+complete. This is reporting from the working tree (or `--ref`), not a gate input.
+`group_rules` and `consumers` have no automatic source yet: they are present and empty with
+`source: null` and the note `no source yet`, for the author to fill or leave. No field of a
+spec carries a posture value, and the schema refuses any key it does not name.
 
 ### The three verbs
 

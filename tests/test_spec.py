@@ -3,6 +3,7 @@ store it lives in, the chain a change makes, and the `loadout-spec` verb."""
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import os
@@ -96,8 +97,18 @@ class TestNew:
         assert draft["test_plan"]["declared"] == {"full": TEST_FULL}
         assert draft["test_plan"]["plan"] == []
         # No source exists yet for these: present, empty, and saying so.
-        for section in ("group_rules", "consumers", "profile_completeness"):
+        for section in ("group_rules", "consumers"):
             assert draft[section] == {"source": None, "note": "no source yet", "items": []}
+        # The fixture profile states no posture, so every posture key is an item.
+        completeness = draft["profile_completeness"]
+        assert (completeness["source"], completeness["note"]) == ("profile", None)
+        assert [item.split(":")[0] for item in completeness["items"]] == [
+            "exposure",
+            "data",
+            "visibility",
+            "merge_control",
+            "confirmed_at",
+        ]
         assert draft["goal"] == ""
         assert draft["scope"] == {"in": [], "out": []}
         assert draft["acceptance_criteria"] == []
@@ -105,6 +116,77 @@ class TestNew:
         assert draft["rulings_already_made"] == []
         assert draft["docs_only_justification"] is None
         assert draft["supersedes"] is None
+
+    def test_a_complete_profile_gives_an_empty_completeness_section_that_says_so(
+        self, tmp_path, capsys
+    ):
+        (tmp_path / "complete").mkdir()
+        path = make_repo(tmp_path / "complete")
+        profile = {
+            "class": "internal",
+            "exposure": "internal_authenticated",
+            "data": "internal",
+            "visibility": "private",
+            "merge_control": "review_required",
+            "confirmed_at": "2026-10-24",
+        }
+        commit_files(path, {PROFILE_PATH: yaml.safe_dump(profile)})
+        code, out, err = _run(
+            ["new", "--role", ROLE, "--repo-path", str(path)],
+            capsys,
+            now=dt.datetime(2026, 10, 24, tzinfo=dt.timezone.utc),
+        )
+        assert code == 0, err
+        assert json.loads(out)["profile_completeness"] == {
+            "source": "profile",
+            "note": "the repo profile is complete",
+            "items": [],
+        }
+
+    def test_an_expired_confirmation_is_named_in_the_completeness_items(self, tmp_path, capsys):
+        (tmp_path / "stale").mkdir()
+        path = make_repo(tmp_path / "stale")
+        profile = {
+            "class": "internal",
+            "exposure": "internal_authenticated",
+            "data": "internal",
+            "visibility": "private",
+            "merge_control": "review_required",
+            "confirmed_at": "2026-01-01",
+        }
+        commit_files(path, {PROFILE_PATH: yaml.safe_dump(profile)})
+        code, out, err = _run(
+            ["new", "--role", ROLE, "--repo-path", str(path)],
+            capsys,
+            now=dt.datetime(2026, 10, 24, tzinfo=dt.timezone.utc),
+        )
+        assert code == 0, err
+        (item,) = json.loads(out)["profile_completeness"]["items"]
+        assert item.startswith("confirmed_at: expired")
+
+    def test_a_ref_reads_the_completeness_at_that_revision(self, repo, capsys):
+        complete = {
+            "class": "internal",
+            "exposure": "internal_authenticated",
+            "data": "internal",
+            "visibility": "private",
+            "merge_control": "review_required",
+            "confirmed_at": "2026-10-24",
+        }
+        (repo / PROFILE_PATH).write_text(yaml.safe_dump(complete), encoding="utf-8")
+        now = dt.datetime(2026, 10, 24, tzinfo=dt.timezone.utc)
+        _, working, _ = _run(["new", "--role", ROLE, "--repo-path", str(repo)], capsys, now=now)
+        _, committed, _ = _run(
+            ["new", "--role", ROLE, "--repo-path", str(repo), "--ref", "HEAD"], capsys, now=now
+        )
+        assert json.loads(working)["profile_completeness"]["items"] == []
+        assert len(json.loads(committed)["profile_completeness"]["items"]) == 5
+
+    def test_a_sealed_spec_carries_the_completeness_items(self, tmp_path, repo, capsys):
+        draft = _fill(_new_draft(repo, capsys))
+        code, sealed, err = _seal(tmp_path, repo, capsys, draft)
+        assert code == 0, err
+        assert json.loads(sealed["pr_body_copy"])["profile_completeness"]["items"]
 
     def test_no_posture_key_ever_appears(self, repo, capsys):
         draft = _new_draft(repo, capsys)

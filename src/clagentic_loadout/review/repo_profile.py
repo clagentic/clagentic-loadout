@@ -1,7 +1,7 @@
 """review.repo_profile — a repository's own statement of the shape it must keep.
 
 One file, ``.clagentic/loadout/profile.yaml``, read from the trusted base
-revision exactly like ``stakes.yaml`` (review.policy_source does the reading), so
+revision exactly like ``dispositions.yaml`` (review.policy_source does the reading), so
 a pull request cannot loosen the rules it is judged by. This module is the pure
 part: the schema, the strict parser, the per-path class lookup, the class rules,
 and the draft a repository without a profile can start from.
@@ -31,6 +31,11 @@ with no internal path)::
                                     # through their top level; no check flags it
     test: {full: [...]}             # optional; the commands ``clagentic-loadout
                                     # test run`` uses (see repo_test.spec)
+    exposure: local_or_ci_only      # optional posture keys, read only by gates from
+    data: public_or_none            # the merge base (see review.profile_posture).
+    visibility: public              # A missing, unrecognised or unconfirmed value
+    merge_control: unrestricted     # is the worst case and a completeness item,
+    confirmed_at: 2026-01-31        # never an invalid profile.
 
 The denial lists named here ADD to the deployment's own list (see
 review.profile_deny); nothing in a profile can remove an entry from it.
@@ -46,6 +51,7 @@ from typing import Any
 
 from clagentic_loadout.repo_test.spec import DeclaredTests, TestBlockError, parse_test_block
 from clagentic_loadout.review.path_glob import path_matches
+from clagentic_loadout.review.profile_posture import POSTURE_KEY_ORDER
 
 CLASS_RELEASED_TOOL = "released-tool"
 CLASS_INTERNAL = "internal"
@@ -140,6 +146,12 @@ class RepoProfile:
     deny: ProfileDeny = field(default_factory=ProfileDeny)
     tool_packages: tuple[str, ...] = ()
     test: DeclaredTests | None = None
+    #: The posture keys as written, unvalidated: an unrecognised value is a
+    #: completeness item (review.profile_posture), not an invalid profile.
+    posture: tuple[tuple[str, Any], ...] = ()
+
+    def posture_values(self) -> dict[str, Any]:
+        return dict(self.posture)
 
     def class_for(self, path: str) -> str:
         """The class that governs *path*."""
@@ -231,7 +243,7 @@ def parse_profile_document(doc: Any) -> RepoProfile:
     half-applied."""
     if not isinstance(doc, dict):
         raise ProfileFormatError("the profile must be a mapping with a class")
-    allowed = ("class", "paths", "deny", "tool_packages", "test")
+    allowed = ("class", "paths", "deny", "tool_packages", "test", *POSTURE_KEY_ORDER)
     unknown = sorted(str(k) for k in doc if k not in allowed)
     if unknown:
         raise ProfileFormatError(f"unknown or misplaced key: {', '.join(unknown)}")
@@ -262,6 +274,7 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         deny=deny,
         tool_packages=tool_packages,
         test=declared_tests if declared_tests.declared_keys() else None,
+        posture=tuple((key, doc[key]) for key in POSTURE_KEY_ORDER if key in doc),
     )
 
 

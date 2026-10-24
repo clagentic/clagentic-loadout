@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from clagentic_loadout.review import cli as review_cli
-from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH, STAKES_PATH
+from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
 from clagentic_loadout.transport import provider_config
 from tests._review_cli_support import Env
 
@@ -139,7 +139,7 @@ def test_a_truncated_tree_is_degraded_and_never_read_as_complete(env, capsys):
 def test_a_malformed_policy_file_is_degraded_naming_the_cause(env, capsys):
     env.configure(carrier_mode="facts_mild")
 
-    _, document = _run(env, capsys, base_files={STAKES_PATH: "profile: [unclosed\n"})
+    _, document = _run(env, capsys, base_files={DISPOSITIONS_PATH: "dispositions: [unclosed\n"})
 
     assert document["verdict_outcome"] == "DEGRADED"
     assert any("not valid YAML" in reason for reason in document["verdict_reasons"])

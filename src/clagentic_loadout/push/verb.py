@@ -220,6 +220,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 from clagentic_loadout._version import get_version
@@ -303,6 +304,8 @@ from clagentic_loadout.push.remote_readback import (
     read_remote_head,
     verify_remote_authorship,
 )
+from clagentic_loadout.push import profile_report
+from clagentic_loadout.review.profile_posture import CompletenessItem
 from clagentic_loadout.push.verify_config import (
     InvalidVerifyConfigError,
     load_verify_entries,
@@ -1374,10 +1377,12 @@ def _run_verification(
     skip: bool,
     tested_sha: str | None = None,
     results_out: list[VerifyResult] | None = None,
+    profile_items_out: list[CompletenessItem] | None = None,
 ) -> str | None:
     """Body-only view of `_run_verification_outcome`."""
     return _run_verification_outcome(
-        project_root, body=body, skip=skip, tested_sha=tested_sha, results_out=results_out
+        project_root, body=body, skip=skip, tested_sha=tested_sha,
+        results_out=results_out, profile_items_out=profile_items_out,
     )[0]
 
 
@@ -1388,6 +1393,7 @@ def _run_verification_outcome(
     skip: bool,
     tested_sha: str | None = None,
     results_out: list[VerifyResult] | None = None,
+    profile_items_out: list[CompletenessItem] | None = None,
 ) -> tuple[str | None, str, str | None]:
     """Run the repo's declared `push.verify` commands (push.verify_run) in
     *project_root* and return (body, outcome, tested sha): *body* with a
@@ -1408,12 +1414,19 @@ def _run_verification_outcome(
 
     *results_out*, when given, receives every result the run produced, the
     failing one included, so the caller can leave a verdict record for each.
+    *profile_items_out*, when given, receives the profile completeness items
+    this step printed, so the records point at the very read that was reported
+    rather than at a second read the checks or the push could have outrun.
 
     Raises push.verify_config.InvalidVerifyConfigError for malformed config
     and push.verify_run.VerificationFailedError on the first failing check;
     both are mapped to exit codes in main().
     """
     entries = load_verify_entries(project_root)
+    profile_items = profile_report.read_items(project_root)
+    profile_report.print_items(profile_items)
+    if profile_items_out is not None:
+        profile_items_out.extend(profile_items)
     if not entries:
         return body, VERIFICATION_NONE, None
     if skip:
@@ -1467,17 +1480,26 @@ def _tree_sha_of(project_root: Path, head_sha: str) -> str | None:
 
 
 def _emit_verify_records(
-    results: list[VerifyResult], *, head_sha: str, project_root: Path, owner: str, repo: str
+    results: list[VerifyResult],
+    *,
+    head_sha: str,
+    project_root: Path,
+    owner: str,
+    repo: str,
+    profile_items: Sequence[CompletenessItem],
 ) -> list[str]:
     """Leave one verdict record per verification result, for *head_sha*: the
     commit the remote holds (create path) or the PR head the checkout was
     proven to be (update path), never a head read before commits were
     re-authored. The exit is the command's own; a run that timed out or never
     started records -1. A write that fails is reported and leaves the gate
-    reading as not measured. Returns the ids written."""
+    reading as not measured. *profile_items* are the completeness items the
+    verification step already read and printed; they are never read again here.
+    Returns the ids written."""
     if not results:
         return []
     tree_sha = _tree_sha_of(project_root, head_sha)
+    evidence = profile_report.evidence_ref(profile_items)
     ids: list[str] = []
     for result in results:
         record = try_emit_record(
@@ -1490,6 +1512,7 @@ def _emit_verify_records(
             finished=result.finished or utc_timestamp(),
             tree_sha=tree_sha,
             repo=f"{owner}/{repo}",
+            evidence_ref=evidence,
             untrusted_roots=(project_root,),
         )
         if record is not None:
@@ -2375,11 +2398,13 @@ def _run_update_pr(
                     )
         if run_checks:
             verify_results: list[VerifyResult] = []
+            verify_profile_items: list[CompletenessItem] = []
             tested_head = _checkout_head_sha(project_root)
             try:
                 body, verification, verification_sha = _run_verification_outcome(
                     project_root, body=body, skip=args.skip_verify,
                     tested_sha=tested_head, results_out=verify_results,
+                    profile_items_out=verify_profile_items,
                 )
             except VerificationFailedError:
                 # The checkout is the PR head, so a failing run is a measurement
@@ -2387,13 +2412,13 @@ def _run_update_pr(
                 if tested_head:
                     _emit_verify_records(
                         verify_results, head_sha=tested_head, project_root=project_root,
-                        owner=owner, repo=repo,
+                        owner=owner, repo=repo, profile_items=verify_profile_items,
                     )
                 raise
             if tested_head and verification == VERIFICATION_RAN:
                 verification_record_ids = _emit_verify_records(
                     verify_results, head_sha=tested_head, project_root=project_root,
-                    owner=owner, repo=repo,
+                    owner=owner, repo=repo, profile_items=verify_profile_items,
                 )
             force_append = body is not None and not body_supplied
     elif load_verify_entries(project_root):
@@ -2665,11 +2690,13 @@ def _run_create_pr(
     # ref moves or PR exists. A dry run pushes nothing and opens no PR, so it
     # does not spend a verification run.
     verify_results: list[VerifyResult] = []
+    verify_profile_items: list[CompletenessItem] = []
     verified_head: str | None = None
     if not args.dry_run:
         verified_head = _checkout_head_sha(project_root)
         body = _run_verification(
-            project_root, body=body, skip=args.skip_verify, results_out=verify_results
+            project_root, body=body, skip=args.skip_verify, results_out=verify_results,
+            profile_items_out=verify_profile_items,
         )
 
     # LEASE CONTROL (lr-f57f13, D5 DECIDED): never derive force_with_lease
@@ -2797,7 +2824,7 @@ def _run_create_pr(
         if confirmed_head and confirmed_head == verified_head:
             verification_record_ids = _emit_verify_records(
                 verify_results, head_sha=confirmed_head, project_root=project_root,
-                owner=owner, repo=repo,
+                owner=owner, repo=repo, profile_items=verify_profile_items,
             )
         else:
             print(

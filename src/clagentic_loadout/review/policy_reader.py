@@ -19,6 +19,7 @@ absent file is not an error here: callers learn which files exist from
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Protocol
@@ -28,6 +29,7 @@ from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.merge.pre_check_env import without_git_location
 
 MAX_POLICY_BYTES = 512 * 1024
+_COMMIT_SHA_RE = re.compile(r"\A(?:[0-9a-f]{40}|[0-9a-f]{64})\Z")
 _GIT_TIMEOUT_SECONDS = 30
 
 
@@ -75,6 +77,19 @@ class GitPolicyReader:
             detail = completed.stderr.decode("utf-8", "replace").strip().splitlines()
             raise PolicyReadError(f"cannot read {what}: {detail[-1] if detail else 'git failed'}")
         return completed.stdout
+
+    def resolve_commit(self, ref: str) -> str:
+        """The full commit SHA *ref* names right now. A caller that reads more
+        than once at a mutable ref resolves it here first and reads at the SHA,
+        so every read sees the same commit."""
+        out = self._git(
+            ["rev-parse", "--verify", "--quiet", "--end-of-options", f"{ref}^{{commit}}"],
+            f"the commit {ref[:40]!r} names",
+        )
+        sha = out.decode("ascii", "replace").strip()
+        if not _COMMIT_SHA_RE.match(sha):
+            raise PolicyReadError(f"cannot read the commit {ref[:40]!r} names: git printed {sha[:20]!r}")
+        return sha
 
     def list_paths(self, base: str) -> list[str]:
         out = self._git(

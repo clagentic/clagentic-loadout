@@ -110,6 +110,28 @@ def make_repo(root: Path) -> Path:
     return repo
 
 
+def utc_today_text() -> str:
+    """Today's UTC date as ISO text: a confirmation that is always fresh for a
+    verb that reads the real clock."""
+    return dt.datetime.now(dt.timezone.utc).date().isoformat()
+
+
+def posture_profile(drop: tuple[str, ...] = (), **overrides: str) -> str:
+    """The text of a profile whose posture claims an internal, reviewed,
+    private repository confirmed today. *overrides* replace a key's value and
+    *drop* removes keys."""
+    values = {
+        "exposure": "internal_authenticated",
+        "data": "internal",
+        "visibility": "private",
+        "merge_control": "review_required",
+        "confirmed_at": utc_today_text(),
+    }
+    values.update(overrides)
+    lines = [f"{key}: {value}" for key, value in values.items() if key not in drop]
+    return "class: internal\n" + "\n".join(lines) + "\n"
+
+
 def commit_files(repo: Path, files: dict[str, str]) -> str:
     """Write *files* (path -> text), commit them, return the commit SHA."""
     for rel, text in files.items():

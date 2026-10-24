@@ -73,6 +73,11 @@ CONFIG_SECTION_REVIEW = "review"
 CONFIG_KEY_EVALUATOR = "evaluator"
 FORMATS = ("json", "text")
 
+PROFILE_FLAG_NOTICE = (
+    "loadout-review: --profile is deprecated and selects nothing; stakes are read from the "
+    "posture keys of the repo profile at the base revision"
+)
+
 
 class EvaluateError(Exception):
     """A failure that ends the subcommand with a specific exit code."""
@@ -89,7 +94,7 @@ def add_evaluate_parser(subparsers: Any) -> argparse.ArgumentParser:
         description=(
             "Compute the verdict for a findings file. The reviewer's findings carry facts "
             "only; severity and blocking are computed here from the rubric, the stakes of "
-            "each path and the standing dispositions, which are read from the base "
+            "each path (the posture of the repo profile) and the standing dispositions, read from the base "
             "revision (git show <base>:<path>), never from the working tree or the head. "
             "Offline: no host call is made. Exit codes: 0 CLEAN, 40 BLOCKED, 41 DEGRADED, "
             "42 STALE, 32 findings file invalid, 3 evaluator configuration invalid."
@@ -125,8 +130,9 @@ def add_evaluate_parser(subparsers: Any) -> argparse.ArgumentParser:
     evaluate_parser.add_argument(
         "--profile",
         default=None,
-        help="Stakes profile name in the base revision's stakes.yaml "
-        "(default: the file's own 'profile' key; none means worst-case stakes).",
+        help="Deprecated and ignored: stakes now come from the posture keys of the repo "
+        "profile at the base revision, which has no named profiles. Accepted so existing "
+        "callers keep working; a notice is printed to standard error.",
     )
     evaluate_parser.add_argument(
         "--visibility",
@@ -252,10 +258,11 @@ def run_verdict(args: argparse.Namespace, *, config_root: str | Path | None = No
     expected = _sha(args.expected_head, "--expected-head") if args.expected_head else head
     block_at, required_scanners = load_evaluator_config(config_root)
     file_head, findings, scanners = load_findings_file(args.findings)
+    if args.profile is not None:
+        print(PROFILE_FLAG_NOTICE, file=sys.stderr)
     policy = read_policy(
         Path(args.repo_path) if args.repo_path else Path.cwd(),
         base,
-        profile=args.profile,
         visibility=args.visibility,
     )
     scope = _ruling_scope(args)

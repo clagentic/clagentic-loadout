@@ -24,6 +24,15 @@ deny:
 # their internal modules instead of their documented interface.
 # tool_packages: [some_tool]
 
+# Risk posture, read only by gates from the merge base (never shown to a planner or builder).
+# A missing, unrecognised or older-than-180-days value is the worst case and is reported by
+# `loadout-profile check`. confirmed_at is the date you last checked these answers.
+exposure: local_or_ci_only      # internet | internal_authenticated | local_or_ci_only
+data: public_or_none            # regulated_or_customer | internal | public_or_none
+visibility: public              # public | private
+merge_control: unrestricted     # code_owner_review_required | review_required | unrestricted
+confirmed_at: 2026-10-24
+
 # The commands `clagentic-loadout test run` uses. Each is an argv list run without a shell
 # from the repository root, and must write a JUnit XML report to the {junit} path. Every
 # key is optional. {base} (impacted only) is replaced by the commit SHA of --base, or of

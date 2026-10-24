@@ -7,7 +7,9 @@ Three inputs, in decreasing order of trust for the question they answer:
     file is a supply-chain property, not an attack vector, so it marks nothing)
     and CODEOWNERS presence and coverage, recorded as context only;
   * the HOST: repository visibility, a single field the caller passes in;
-  * the PROFILE: a deployment's own claim in ``stakes.yaml``.
+  * the PROFILE: the repository's own posture claim in ``profile.yaml``
+    (review.profile_posture maps it onto this module's vocabulary; the retired
+    ``stakes.yaml`` is no longer read).
 
 Rules that make the result safe to gate on:
 
@@ -28,7 +30,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
 
 from clagentic_loadout.review.path_glob import glob_regex, path_matches
 
@@ -113,14 +114,13 @@ class PathStakes:
 
 @dataclass(frozen=True)
 class StakesProfile:
-    """One named profile from ``stakes.yaml``. ``paths`` entries apply in
-    order, a later match overriding an earlier one field by field."""
+    """The repository-wide stake claims of a profile. A claim that is None is
+    not made, and resolves to the worst case."""
 
     name: str
     exposure: str | None = None
     data_class: str | None = None
     merge_control: str | None = None
-    paths: tuple[tuple[str, dict[str, str]], ...] = ()
 
 
 #: A host principal: ``@user``, ``@org/team`` or an email address. Any other
@@ -153,8 +153,8 @@ class Stakes:
 
     def for_path(self, path: str) -> PathStakes:
         exposure, exposure_source = self._exposure(path)
-        data_class, data_class_source = self._profile_value(path, "data_class", WORST_DATA_CLASS)
-        merge_control, merge_source = self._merge_control(path)
+        data_class, data_class_source = self._profile_value("data_class", WORST_DATA_CLASS)
+        merge_control, merge_source = self._merge_control()
         return PathStakes(
             exposure,
             exposure_source,
@@ -165,15 +165,12 @@ class Stakes:
             self._codeowners_context(path),
         )
 
-    def _profile_value(self, path: str, key: str, default: str) -> tuple[str, str]:
-        """The profile's claim for *key* on *path*, or *default* (the worst case)
-        when it makes none. A claim outside the key's vocabulary is no claim."""
+    def _profile_value(self, key: str, default: str) -> tuple[str, str]:
+        """The profile's claim for *key*, or *default* (the worst case) when it
+        makes none. A claim outside the key's vocabulary is no claim."""
         if self.profile is None:
             return default, SOURCE_UNSTATED
         value: str | None = getattr(self.profile, key)
-        for pattern, override in self.profile.paths:
-            if key in override and path_matches(pattern, path):
-                value = override[key]
         if value is None or value not in _VOCABULARY[key]:
             return default, SOURCE_UNSTATED
         return value, SOURCE_PROFILE
@@ -183,10 +180,10 @@ class Stakes:
             return EXPOSED, SOURCE_TREE
         if self.visibility == VISIBILITY_PUBLIC:
             return EXPOSED, SOURCE_VISIBILITY
-        return self._profile_value(path, "exposure", EXPOSED)
+        return self._profile_value("exposure", EXPOSED)
 
-    def _merge_control(self, path: str) -> tuple[str, str]:
-        return self._profile_value(path, "merge_control", UNCONTROLLED)
+    def _merge_control(self) -> tuple[str, str]:
+        return self._profile_value("merge_control", UNCONTROLLED)
 
     def _codeowners_context(self, path: str) -> str:
         """Whether CODEOWNERS names an owner for *path*. Context only: it feeds
@@ -244,80 +241,6 @@ def parse_codeowners(text: str) -> tuple[CodeownersRule, ...]:
     return tuple(rules)
 
 
-class StakesFormatError(ValueError):
-    """``stakes.yaml`` is not in the documented shape."""
-
-
-def _checked(value: Any, allowed: tuple[str, ...], where: str) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str) and value in allowed:
-        return value
-    raise StakesFormatError(f"{where} must be one of {', '.join(allowed)}, got {value!r}")
-
-
-_STAKE_KEYS = ("exposure", "data_class", "merge_control")
-
-
-def _fields(block: Any, where: str, *, allow_paths: bool = False) -> dict[str, str]:
-    """The stake claims in *block*. Only a profile may carry ``paths``; a
-    ``paths`` key anywhere else is rejected by its full key path, never ignored."""
-    if not isinstance(block, dict):
-        raise StakesFormatError(f"{where} must be a mapping")
-    allowed = (*_STAKE_KEYS, "paths") if allow_paths else _STAKE_KEYS
-    unknown = sorted(str(k) for k in block if k not in allowed)
-    if unknown:
-        paths = ", ".join(f"{where}.{key}" for key in unknown)
-        raise StakesFormatError(f"unknown or misplaced key: {paths}")
-    out: dict[str, str] = {}
-    for key, allowed in (
-        ("exposure", EXPOSURES),
-        ("data_class", DATA_CLASSES),
-        ("merge_control", MERGE_CONTROLS),
-    ):
-        value = _checked(block.get(key), allowed, f"{where}.{key}")
-        if value is not None:
-            out[key] = value
-    return out
-
-
-def parse_stakes_document(doc: Any) -> tuple[dict[str, StakesProfile], str | None]:
-    """The profiles of a parsed ``stakes.yaml`` and its default profile name.
-    Raises StakesFormatError on anything outside the documented shape, so a
-    half-understood file is never half-applied."""
-    if doc is None:
-        return {}, None
-    if not isinstance(doc, dict):
-        raise StakesFormatError("stakes file must be a mapping")
-    unknown = sorted(str(k) for k in doc if k not in ("profile", "profiles"))
-    if unknown:
-        raise StakesFormatError(f"unknown or misplaced key: {', '.join(unknown)}")
-    default = doc.get("profile")
-    if default is not None and not isinstance(default, str):
-        raise StakesFormatError("profile must be a profile name")
-    raw_profiles = doc.get("profiles", {})
-    if not isinstance(raw_profiles, dict):
-        raise StakesFormatError("profiles must be a mapping of profile name to profile")
-    profiles: dict[str, StakesProfile] = {}
-    for name, block in raw_profiles.items():
-        where = f"profiles.{name}"
-        base = _fields(block, where, allow_paths=True)
-        raw_paths = block.get("paths", {})
-        if not isinstance(raw_paths, dict):
-            raise StakesFormatError(f"{where}.paths must be a mapping of path glob to stakes")
-        entries = tuple(
-            (str(glob), _fields(entry, f"{where}.paths.{glob}")) for glob, entry in raw_paths.items()
-        )
-        profiles[str(name)] = StakesProfile(
-            name=str(name),
-            exposure=base.get("exposure"),
-            data_class=base.get("data_class"),
-            merge_control=base.get("merge_control"),
-            paths=entries,
-        )
-    return profiles, default
-
-
 __all__ = [
     "CODEOWNERS_LOCATIONS",
     "CONTROLLED",
@@ -333,11 +256,9 @@ __all__ = [
     "CodeownersRule",
     "PathStakes",
     "Stakes",
-    "StakesFormatError",
     "StakesProfile",
     "TreeStakes",
     "codeowners_pattern_matches",
     "exposed_dirs_from_paths",
     "parse_codeowners",
-    "parse_stakes_document",
 ]
