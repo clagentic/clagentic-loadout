@@ -117,6 +117,19 @@ class TestStore:
         assert (path.stat().st_mode & 0o777) == 0o644
         assert ((root / HEAD_A).stat().st_mode & 0o555) == 0o555
 
+    def test_a_head_directory_takes_the_mode_of_a_pre_created_shared_root(self, tmp_path):
+        root = tmp_path / "records"
+        root.mkdir()
+        os.chmod(root, 0o2775)
+        write_record(root, _record())
+        assert (root / HEAD_A).stat().st_mode & 0o7777 == 0o2775
+
+    def test_a_root_the_tool_creates_is_0755(self, tmp_path):
+        root = tmp_path / "records"
+        write_record(root, _record())
+        assert root.stat().st_mode & 0o7777 == 0o755
+        assert (root / HEAD_A).stat().st_mode & 0o7777 == 0o755
+
     def test_records_at_head_lists_only_that_head_oldest_first(self, tmp_path):
         root = tmp_path / "records"
         first = _record(record_id="20260101T000000Z-00000001")
@@ -337,6 +350,21 @@ class TestVerb:
         path = records_root() / HEAD_A / f"{record.id}.json"
         path.write_text("[]", encoding="utf-8")
         assert record_verb.main(["show", record.id]) == record_verb.EXIT_RECORD_INVALID
+
+    def test_show_of_an_unreadable_root_is_the_documented_store_exit(self, monkeypatch, tmp_path, capsys):
+        root = tmp_path / "records"
+        root.mkdir()
+        monkeypatch.setenv(RECORDS_DIR_ENV_VAR, str(root))
+        real_iterdir = Path.iterdir
+
+        def deny(self):
+            if self == root:
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_iterdir(self)
+
+        monkeypatch.setattr(Path, "iterdir", deny)
+        assert record_verb.main(["show", new_record_id()]) == record_verb.EXIT_STORE_UNUSABLE
+        assert "cannot read the verdict records root" in capsys.readouterr().err
 
     def test_list_filters_by_head_and_gate(self, capsys):
         emit_record(gate="ci", head_sha=HEAD_A, tool="t", exit=0, started=T0, finished=T1)

@@ -2065,7 +2065,7 @@ def _run(
     pre_check_steps = list(repo_gate.pre_checks) if pre_checks_run is not None else []
     try:
         push_verify_names = (
-            [entry.name for entry in load_verify_entries(args.repo_path)] if args.repo_path else []
+            [entry.name for entry in load_verify_entries(Path(args.repo_path))] if args.repo_path else []
         )
     except InvalidVerifyConfigError as exc:
         _fail(

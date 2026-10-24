@@ -210,6 +210,14 @@ class TestPushVerifyRecords:
         assert f"expected a record at head {repo.head_sha}" in err
         assert "loadout-push --update-pr --pr <n> --append-body" in err
 
+    def test_a_string_repo_path_reads_the_push_verify_entries(self, tmp_path, capsys):
+        repo = self._repo(tmp_path, [self._ENTRY])
+        argv = base_args(**{"--repo-path": str(repo.path)})
+        assert isinstance(argv[argv.index("--repo-path") + 1], str)
+        code = _run(argv, make_opener(pr_info=repo.pr_info()))
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "push.verify:unit" in capsys.readouterr().err
+
     def test_a_record_at_the_head_satisfies_the_entry(self, tmp_path):
         repo = self._repo(tmp_path, [self._ENTRY])
         emit_record(

@@ -32,6 +32,7 @@ from clagentic_loadout._version import get_version
 from clagentic_loadout.verdict_record.record import RECORD_ID_RE, is_full_sha
 from clagentic_loadout.verdict_record.store import (
     RecordNotFoundError,
+    RootUnreadableError,
     StoreError,
     load_record,
     records_at_head,
@@ -99,6 +100,9 @@ def _show(args: argparse.Namespace, root: Path) -> int:
     except RecordNotFoundError as exc:
         print(f"loadout-record: {exc}", file=sys.stderr)
         return EXIT_NOT_FOUND
+    except RootUnreadableError as exc:
+        print(f"loadout-record: {exc}", file=sys.stderr)
+        return EXIT_STORE_UNUSABLE
     except StoreError as exc:
         print(f"loadout-record: {exc}", file=sys.stderr)
         return EXIT_RECORD_INVALID

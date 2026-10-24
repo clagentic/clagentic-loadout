@@ -1783,7 +1783,15 @@ the user-level `verdict_records.dir` setting, then
 `<user config root>/state/verdict-records`, so an unconfigured deployment writes
 and reads records with no setup. A deployment whose identities do not share one
 home directory points all of them at one shared location with the variable or the
-setting. A root inside the checkout under review is refused, since the pull request
+setting. A spawner that filters the child environment must pass
+`CLAGENTIC_LOADOUT_VERDICT_RECORDS_DIR` through, or give each identity the same user
+config root; otherwise each identity resolves a different default root and one
+identity does not find the records another wrote. A root the tool creates itself is
+mode 0755, so only its creator can write (single-user by design). A head directory
+created under an existing root takes that root's permission bits, setgid included:
+a multi-user deployment pre-creates the root once with a shared group (for example
+mode 2775) and every identity in that group can write. `loadout-record show` exits 3
+when the root cannot be read and 41 when a record is invalid. A root inside the checkout under review is refused, since the pull request
 could write it; code running as the same user as the reader can still write the
 root (the optional pre-checks sandbox, `merge.pre_checks_sandbox`, is the control).
 

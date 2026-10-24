@@ -16,7 +16,16 @@ environment variable, the user-level ``verdict_records.dir`` setting, then
 ``<user config root>/state/verdict-records``. An unconfigured deployment
 therefore writes and reads records without any setup; a deployment whose
 identities do not share one home directory points all of them at one shared
-location with the variable or the setting.
+location with the variable or the setting. A spawner that filters the child
+environment must pass ``CLAGENTIC_LOADOUT_VERDICT_RECORDS_DIR`` through, or give
+each identity the same user config root; otherwise each identity resolves a
+different default root and a record written by one is not found by another.
+
+A root this module creates is mode 0755, so only its creator can write: that is
+single-user by design. A head directory created under an existing root takes
+that root's permission bits, setgid included, so a multi-user deployment
+pre-creates the root once with a shared group (for example mode 2775) and every
+identity in the group can write.
 
 TRUST. The pull request under review must not be able to write its own
 measurements. A root inside a repository the caller names as untrusted (the
@@ -30,6 +39,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -59,6 +69,10 @@ DIAGNOSTIC_SCAN_LIMIT = 200
 class StoreError(Exception):
     """The records root could not be resolved or used, or a record could not be
     read. The message names the path or id and what was found."""
+
+
+class RootUnreadableError(StoreError):
+    """The records root exists but cannot be listed."""
 
 
 class RecordNotFoundError(StoreError):
@@ -124,13 +138,18 @@ def write_record(
     try:
         if directory.is_symlink():
             raise StoreError(f"{str(directory)!r} is a symlink, refusing to write through it")
-        # Directories this call creates are made traversable for every user (the
-        # umask could otherwise narrow them); one that already exists is left as
-        # its owner set it.
-        for created in (root, directory):
-            if not created.exists():
-                created.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
-                os.chmod(created, _DIR_MODE)
+        # A root this call creates is made traversable for every user (the umask
+        # could otherwise narrow it) and is single-user by design. A head
+        # directory takes the permission bits of the root it is created under,
+        # setgid included, so a root an administrator pre-created with a shared
+        # group stays writable to every identity in that group.
+        if not root.exists():
+            root.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
+            os.chmod(root, _DIR_MODE)
+        if not directory.exists():
+            head_mode = stat.S_IMODE(root.stat().st_mode)
+            directory.mkdir(mode=head_mode)
+            os.chmod(directory, head_mode)
         target = directory / f"{record.id}.json"
         write_bytes_atomic(target, payload, mode=_FILE_MODE)
         os.chmod(target, _FILE_MODE)
@@ -172,7 +191,7 @@ def _head_dirs(root: Path) -> list[Path]:
     except FileNotFoundError:
         return []
     except OSError as exc:
-        raise StoreError(f"cannot read the verdict records root {str(root)!r}: {exc}") from exc
+        raise RootUnreadableError(f"cannot read the verdict records root {str(root)!r}: {exc}") from exc
 
 
 def records_at_head(
@@ -261,6 +280,7 @@ __all__ = [
     "RECORDS_DIR_ENV_VAR",
     "HeadRecords",
     "RecordNotFoundError",
+    "RootUnreadableError",
     "StoreError",
     "load_record",
     "newest_record_for_gate",
