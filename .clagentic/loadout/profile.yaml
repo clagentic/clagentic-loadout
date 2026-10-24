@@ -8,14 +8,6 @@ paths:
   # Deployment config that ships as disaster-recovery data and carries its own
   # cast identifiers by design.
   ".crew/**": {class: internal}
-# Risk posture, read only by gates from the merge base; see docs/repo-profile.md. A CLI
-# package with no listener, a public product repo. Branch protection is not read, so no
-# claim of enforced review is made.
-exposure: local_or_ci_only
-data: public_or_none
-visibility: public
-merge_control: unrestricted
-confirmed_at: 2026-10-24
 # What `clagentic-loadout test run` executes; see docs/repo-test.md.
 test:
   full: [python3, -m, pytest, "--junitxml={junit}"]
