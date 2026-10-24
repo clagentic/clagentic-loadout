@@ -1212,11 +1212,12 @@ duplicate (54). `list` is read-only, needs no role and makes no network call. Fu
 registry format and exit codes:
 [review-evaluator.md](review-evaluator.md#per-pr-rulings).
 
-### `loadout-profile` — validate a repo profile, or draft one
+### `loadout-profile` — validate a repo profile, draft one, or brief a role
 
 ```
 loadout-profile check [--repo-path DIR] [--ref REV]
 loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
+loadout-profile brief --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
 ```
 
 The repo profile (`.clagentic/loadout/profile.yaml`) states a repository's class,
@@ -1227,6 +1228,133 @@ has none and never overwrites without `--force`. Both are local, need no credent
 caller. Exit codes: `0` ok, `1` usage, `60` no profile, `61` invalid, `62` unreadable or
 unwritable, `63` already exists. The file format, the findings `loadout-review run` states from
 it, and the deployment's denial list: [repo-profile.md](repo-profile.md).
+
+`brief` hands an author the rules it writes under before it writes, shaped by the **class** of
+`--role` (see [Roles and classes](#roles-and-classes)); the role word may be a final role, a
+legacy alias, or a role the deployment gave a class. It prints one JSON object whose
+`shaped_for` says which shape:
+
+| role class | `shaped_for` | content |
+|---|---|---|
+| `scope` (planner, project orchestrator) | `acceptance-criteria` | `class`, `class_rules`, `paths`, `tests`, and `acceptance_criteria_candidates`: each class rule (`source: class:<name>`), each group rule that applies to the repository (`source: group:<id>`, with its `rule` id and groups `file`), the number of denied values by kind (never the values), and the declared test commands |
+| `build` (builder) | `envelope` | `class`, `class_rules`, `paths`, the full `deny` lists, `tool_packages`, and `tests` |
+| `gate` (reviewers, release manager) | `gate` | nothing from the profile: `gate_read` states that a gate reads the repository policy from the merge base by its own path and that this brief is not an input to any gate. No profile is read, so none is needed |
+| `coordinate`, `inform`, `host` | `context` | `class`, `class_rules`, `paths` |
+
+Risk posture (exposure, data class, visibility, merge control, confirmation time and their
+`_source` companions) is read only by gates from the merge base and is **never** part of a
+brief; every brief is filtered for those keys before it is printed. Group rules come from the
+groups file `loadout-rules` reads (`--groups-file`, else the environment variable or config
+setting named in [`loadout-rules`](#loadout-rules--the-group-rules-for-a-repository)); the
+repository name is `--repo`, else the name of the origin of `--repo-path`. With no groups file
+the brief says why in `group_rules_note`. Exit codes of `brief`: `0` ok, `1` usage (including a
+role no vocabulary knows), `60` no profile, `61` invalid profile, `62` the repository, revision
+or groups file could not be read. The verb is read-only and is not an input to any gate.
+
+### `loadout-rules` — the group rules for a repository
+
+```
+loadout-rules --repo NAME [--repo-path DIR] [--groups-file FILE]
+```
+
+Groups are rules a deployment keeps outside any repository, in a groups file. `loadout-rules`
+resolves the groups that apply to `NAME` (a bare repository name; `owner/name` is matched on its
+name part) and prints, as one JSON object, each group rule with its `group`, its `source` and the
+`file` it came from.
+
+**Where the groups file is.** In order: `--groups-file`; the `CLAGENTIC_LOADOUT_GROUPS_FILE`
+environment variable; the `rules.groups_file` setting of the user-level config file
+(`~/.config/clagentic/loadout/config.yaml`). Nothing is read from the repository under work. With
+none of them set, or no file at the configured path, the result is
+`{"result": "empty", "groups": [], "reason": ...}` with exit `0`: the reason says which. A file that
+exists and cannot be parsed exits `80` and names the resolved path.
+
+**The file.**
+
+```yaml
+schema_version: 1
+classes:                              # optional: which repositories hold which class
+  <class>:
+    repos: [<repository name>, ...]
+    source: <where the assignment is recorded>   # or: note: <text>
+groups:
+  - id: <group id>
+    description: <text>
+    jurisdiction: [<glob over bare repository names>, ...]   # or:
+    jurisdiction_class: <class>
+    rules:
+      - {id: <rule id>, statement: <text>, source: <text>}
+    note: <text>                      # shown when the group has no rules
+```
+
+**Selection.** A group with `jurisdiction` applies when a glob matches the bare name
+(case-insensitive). A group with `jurisdiction_class` applies when the repository's **profile**
+class equals it; the class is read from the working tree at `--repo-path` (default the current
+directory) only when that tree is the named repository (its origin names it, else its directory
+name does). With no profile the repository matches no class-selected group, and the output says so
+in `notes` ("no profile, no class-selected group") rather than returning silently fewer groups.
+
+**Classes the profile schema does not admit.** The groups file is configuration and may lead the
+profile schema. A class in it that the schema does not admit is printed, never refused:
+`assigned_classes` lists each class the file assigns the repository with its `file`, whether the
+profile schema admits it, a `note` when it does not, and the groups that select on it with their
+rules and whether each `applied`. Such groups do not apply, because a group applies only through
+the profile class. A repository whose profile class disagrees with the class the file assigns it
+is reported by [`loadout-doctor`](#loadout-doctor--deployment-conformance-check-suite) as an
+advisory; it never refuses a merge.
+
+Exit codes: `0` ok (including the empty result), `1` usage, `80` groups file unreadable or
+malformed, `81` the repo profile at `--repo-path` is invalid. The verb is read-only, binds no
+caller and mints no credential.
+
+### Roles and classes
+
+`clagentic_loadout.role_vocabulary` holds the role words loadout knows and the class each belongs
+to, as data. A feature keys on the **class** where behaviour is shared and on the **role** where
+it is not, and never on an agent name: agent names live in a deployment's own registry.
+
+| role | class |
+|---|---|
+| `coordinator` | `coordinate` |
+| `project-orchestrator` | `scope` |
+| `planner` | `scope` |
+| `builder` | `build` |
+| `reviewer` | `gate` |
+| `security-reviewer` | `gate` |
+| `release-manager` | `gate` |
+| `troubleshooter` | `inform` |
+| `observer` | `inform` |
+| `researcher` | `inform` |
+| `sysadmin` | `host` |
+
+Nothing was renamed. Every word loadout already accepted in role config and in `--caller`/`--role`
+resolution still works, and resolves to its role as an alias:
+
+| legacy word | role |
+|---|---|
+| `security` | `security-reviewer` |
+| `merger` | `release-manager` |
+| `lead` | `project-orchestrator` |
+| `analysis` | `troubleshooter` (the observer shares its checker) |
+| `research` | `researcher` |
+| `planning_reader` | `planner` |
+| `infra` | `sysadmin` |
+
+`builder` and `reviewer` are in both vocabularies unchanged. The `roles:` section (role to verb
+set) keeps its meaning and its words.
+
+A deployment overrides a class, and gives a role of its own a class, in the `role_classes:` section
+of the **user-level** config file, never the repository's (a repository's own file must not steer
+what its roles may do):
+
+```yaml
+role_classes:
+  <role word>: <class>      # coordinate | scope | build | gate | inform | host
+```
+
+An entry wins over the default for that word, and an override for a final role reaches its legacy
+aliases. A value that is not a mapping of bare word to a known class is an error that names it;
+`loadout-doctor` reports it.
 
 ### `loadout-push` — bot-attributed commit push + PR open/update
 
@@ -2551,6 +2679,40 @@ tree, post the merge-completion attestation, or send any task signal.
   `--skip-pre-checks` to bypass them as in a real run.
 - Without the flag, behavior is unchanged.
 
+#### `--repo-path` binding
+
+Two inputs are read from `--repo-path`'s deployment file and are not content-addressed: the
+gate keys used when the PR base commit has no tracked `gate.yaml`, and `post_merge_steps` (the
+commands the verb then runs). The tracked `gate.yaml` is read at the base commit and needs no
+binding. Before either input is taken from the tree, the verb confirms that the tree is a clone
+of `--repo` on the platform's configured host:
+
+- `origin` is read **once**, at the git top-level of `--repo-path` (or of the git tree its
+  `merge.git_working_tree` declares), and parsed with an anchored parser (`https://`, `http://`,
+  `ssh://`, or scp-like `user@host:owner/name`). The tracking remote of the current branch is
+  never consulted.
+- The **hostname** must equal the configured host, case-insensitively: `github.com` for
+  `--platform github`, the host of the resolved git-host base URL for `--platform forgejo`
+  (ports are not compared, so a Forgejo SSH remote on another port matches). It is an equality
+  test on the parsed hostname, not a substring test, so `https://github.com@other-host/o/r` and
+  `https://github.com.example/o/r` are different hosts. Owner and name must equal `--repo`,
+  case-insensitively.
+- The SSH and HTTPS remotes of one host both pass.
+- A tree that is not a directory, not inside a git work tree, has no `origin`, or whose `origin`
+  is not one of those shapes is refused, not passed.
+- Both reads then use `--repo-path` and its own git top-level only; the directory above is not
+  consulted for them.
+
+A refusal names the resolved tree, its `origin` and host, and the configured host. For
+`post_merge_steps`, the verb exits `1` as the last check before the merge call, so nothing is
+merged (the check applies only when the file declares steps, and not with `--skip-post-merge`; a
+declared `merge.git_working_tree` that is not a git tree is left to the tree sync, which refuses
+it before any step runs). For the
+fallback gate, the keys are not used and the merge is refused through the same path as an
+unreadable gate (`pre_checks_error`, which `--skip-pre-checks` bypasses without reading the
+foreign file). An absent `--repo-path` is unchanged. `loadout-post-merge` applies the same check
+after it confirms the PR is merged and before it advances or checks out anything.
+
 ### `loadout-close-pr` — close a PR WITHOUT merging it
 
 `clagentic_loadout.merge.close_verb`. Abandons a superseded/dead PR: issues
@@ -2648,6 +2810,13 @@ re-run gets the exact same bounded-timeout/verified-liveness behavior a
 merge-embedded run would have, via the SAME
 `merge.post_merge_config.resolve_post_merge_step_timeout_seconds` call
 `loadout-merge`'s own post-merge tail makes.
+
+**`--repo-path` binding.** Once the PR is confirmed merged and before anything is
+checked out, a `--repo-path` whose deployment file declares `post_merge_steps`
+must be a confirmed clone of `--repo` on the configured host (see
+"`--repo-path` binding" under `loadout-merge`); otherwise the verb exits `1`
+naming the resolved tree, its `origin` and the host. The steps are read from
+`--repo-path` and its own git top-level only, never from the directory above.
 
 Never calls a merge or comment endpoint — only a PR-info read, then local
 git/subprocess operations. Mirrors `loadout-close-pr`'s own precedent for a
@@ -2793,6 +2962,15 @@ define, always reporting RESOLVED values rather than a guess:
    opt-in and loadout requires none); a configured value `loadout-merge` would
    refuse is a failure. See [docs/provisioning.md](provisioning.md), "Pre-check
    sandbox".
+6. **`role_classes` and the groups file** (user-level config, always runs) —
+   validates the `role_classes:` section through the loader the `loadout-profile brief`
+   verb uses, and the groups file `loadout-rules` reads. A `role_classes` entry with a
+   class that does not exist, or a groups file that exists and cannot be parsed, is a
+   failure naming the value or the resolved path. No groups file configured, or none at
+   the configured path, is an `OK` advisory (group rules are then empty). With
+   `--repo-root`, a repository whose profile class differs from the class the groups
+   file assigns it, or whose assigned class the profile schema does not admit, is reported
+   as an advisory in the same line and never fails the check.
 
 Exits `2` (`EXIT_CHECKS_FAILED`) if any check's outcome is a failure, `0`
 if every check passes. `--repo-root` opts into the schema check and the
