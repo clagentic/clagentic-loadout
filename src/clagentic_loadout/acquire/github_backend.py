@@ -46,6 +46,7 @@ import urllib.parse
 from clagentic_loadout.acquire.contract import (
     AcquiredPr,
     ChangedFile,
+    IssueComment,
     RangeDiff,
     pr_text,
     repository_visibility,
@@ -355,7 +356,9 @@ class GithubAcquireBackend:
     def fetch_file_bytes(self, *, owner: str, repo: str, path: str, ref: str) -> bytes:
         return fetch_file_bytes(owner, repo, path, ref, self._token, opener=self._opener)
 
-    def fetch_issue_comments(self, *, owner: str, repo: str, pr_number: int) -> list[dict]:
+    def fetch_issue_comments(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> list[IssueComment]:
         return fetch_issue_comments(owner, repo, pr_number, self._token, opener=self._opener)
 
 

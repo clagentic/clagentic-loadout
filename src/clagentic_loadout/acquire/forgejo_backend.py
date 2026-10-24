@@ -47,6 +47,7 @@ from typing import Any
 from clagentic_loadout.acquire.contract import (
     AcquiredPr,
     ChangedFile,
+    IssueComment,
     RangeDiff,
     pr_text,
     repository_visibility,
@@ -501,7 +502,9 @@ class ForgejoAcquireBackend:
             self._git_host_base, self._token, owner, repo, path, ref, opener=self._opener
         )
 
-    def fetch_issue_comments(self, *, owner: str, repo: str, pr_number: int) -> list[dict]:
+    def fetch_issue_comments(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> list[IssueComment]:
         return fetch_issue_comments(
             self._git_host_base, self._token, owner, repo, pr_number, opener=self._opener
         )
