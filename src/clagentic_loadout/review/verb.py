@@ -230,6 +230,8 @@ from clagentic_loadout.transport.git_host_api import (
     _resolve_git_host_base,
 )
 from clagentic_loadout.transport.provider_config import resolve_platform_provider
+from clagentic_loadout.verdict_record.emit import try_emit_record
+from clagentic_loadout.verdict_record.record import KIND_REVIEWER, gate_name, utc_timestamp
 
 # Digit-only comment_id constraint (lr-f43c4b security-review hardening
 # finding, same finding class as lr-26f774): --delete-own-comment's value is
@@ -1243,6 +1245,7 @@ def _run(
         except PlatformMismatchError as exc:
             _fail(str(exc), code=EXIT_WRONG_PLATFORM)
 
+    post_started = utc_timestamp()
     try:
         verified = backend.post_and_verify(owner=owner, repo=repo, pr_number=pr_number, body=body)
     except ReviewPostError as exc:
@@ -1345,6 +1348,24 @@ def _run(
             )
 
         result["verdict_block_verified"] = True
+
+        # The verdict landed and read back byte-identical: leave the record the
+        # merge verb looks for. It points at the posted comment, so the fence and
+        # the record cross-reference. A write failure is reported and does not
+        # undo the post; the merge verb then reads this gate through the fence.
+        record = try_emit_record(
+            "review-post",
+            gate=gate_name(KIND_REVIEWER, caller),
+            head_sha=args.verdict_head_sha,
+            tool="loadout-review-post",
+            exit=0 if verdict_review_status == "clean" else 1,
+            started=post_started,
+            finished=utc_timestamp(),
+            repo=f"{owner}/{repo}",
+            evidence_ref=f"comment:{verified.id}",
+        )
+        if record is not None:
+            result["verdict_record_id"] = record.id
 
     print(json.dumps(result))
     return EXIT_OK
