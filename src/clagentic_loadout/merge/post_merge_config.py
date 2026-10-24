@@ -23,31 +23,21 @@ correct trust boundary (contrast with the credentials tier, where a cloned
 repo's config choosing the command that mints a caller's git-host TOKEN
 would be a privilege-escalation surface across repos).
 
-CONFIG-ROOT VS GIT-TREE-ROOT (lr-93d718): `--repo-path` (the caller-supplied
-root this whole module resolves config FROM) is not always a git working
-tree. A "wrapper layout" repo keeps its `.clagentic/loadout/config.yaml`
-alongside other non-git tooling state at a wrapper directory, while the ACTUAL
-git checkout (the `.git` directory `merge.tree_sync.advance_repo_to_merged_sha`
-needs to `git fetch`/`git checkout` in) lives at a subdirectory of that
-wrapper (e.g. `<wrapper>/repo/.git`). Before this task, `merge.verb._run`
-passed the SAME `--repo-path` to both `advance_repo_to_merged_sha` (which
-requires a git working tree) and `load_post_merge_steps` (which requires the
-config-bearing root) — no single value satisfies both for that layout: passing
-the wrapper fails tree_sync ("not a git repository", EXIT_POST_MERGE_FAILED);
-passing the git-tree subdirectory instead silently loads zero
-`post_merge_steps` (config discovery never finds it there).
+CONFIG-ROOT VS GIT-TREE-ROOT: a "wrapper layout" repo keeps its
+`.clagentic/loadout/config.yaml` alongside other non-git tooling state at a
+wrapper directory X, while the ACTUAL git checkout T (the `.git` directory
+`merge.tree_sync.advance_repo_to_merged_sha` needs to `git fetch`/`git
+checkout` in) lives at a subdirectory of that wrapper (e.g.
+`<wrapper>/repo/.git`). `--repo-path` is T: the merge verbs refuse a
+`--repo-path` in no git tree up front (`merge.config_binding.
+require_repo_path_in_git_tree`), and T is the one tree that is confirmed,
+read the gate from, synced and run steps in.
 
-`git_working_tree` (an OPTIONAL key inside the `merge:` section, read by
-`resolve_git_working_tree` below) closes this gap WITHOUT adding a second
-YAML-reading path: when present, it names a path RELATIVE to the resolved
-config root (e.g. `repo`) that `merge.verb._run` joins onto that root before
-calling `advance_repo_to_merged_sha` — config discovery itself (this module's
-`load_post_merge_steps`) is entirely unaffected and keeps reading from the
-config root exactly as before. When the key is ABSENT (the common, flat-
-layout case), `merge.verb._run`'s tree-sync target is UNCHANGED: `--repo-path`
-itself, exactly as before this task — this is a purely additive, narrowing-
-safe knob (absent key = old behavior, never a behavior change for a repo that
-never declares it).
+`git_working_tree` (a `merge:` key, read by `resolve_git_working_tree` below)
+is how X vouches for T: it names, as a single path segment relative to X, the
+directory that must resolve to exactly T. It does not select a tree; a
+declaration that names any other directory is a config error. A config found
+at T itself needs no declaration and wins with no hop.
 
 OPTIONS CONSIDERED (naming the trade-off, per this package's own CLAUDE.md
 "Principle conflict" rule): an upward `.git`-search from `--repo-path` (walk
@@ -232,6 +222,7 @@ from clagentic_loadout.numeric_validation import is_finite_positive_number
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     LEGACY_CONFIG_RELATIVE_PATH,
+    find_git_top_level,
 )
 from clagentic_loadout.transport.provider_config import load_user_config_section
 
@@ -1046,7 +1037,11 @@ def resolve_git_working_tree(
         `resolve_merge_config_root` root `load_post_merge_steps` uses, so a
         wrapper-layout repo's config root and its declared working-tree
         path are always resolved relative to the SAME root) when the key is
-        present and resolves to a path within the config root.
+        present and resolves to a path within the config root and
+        *repo_root* is in no git tree.
+      - The git top-level of *repo_root* when it is in one: the declaration
+        then only has to name that tree, and one that names any other
+        directory raises.
 
     Raises:
         PostMergeConfigError: the config file exists but is unreadable/
@@ -1105,7 +1100,19 @@ def resolve_git_working_tree(
             f"would point tree_sync's git subprocess outside the config "
             f"root it was declared relative to."
         )
-    return config_root / working_tree
+    # The declaration only vouches for the tree; it never names a second one.
+    # With --repo-path inside a git tree, the tree synced and read is that
+    # tree's top-level, and the declared path must resolve to exactly it.
+    git_top = find_git_top_level(repo_root)
+    if git_top is None:
+        return config_root / working_tree
+    if resolved != git_top:
+        raise PostMergeConfigError(
+            f"{config_path}: {CONFIG_KEY_GIT_WORKING_TREE!r} value {working_tree!r} "
+            f"resolves to {resolved}, which is not the git tree {git_top} of "
+            f"--repo-path; the declaration must name that tree."
+        )
+    return git_top
 
 
 def resolve_sync_tree_after_merge(

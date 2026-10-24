@@ -57,6 +57,14 @@ def _run_git(args: list[str], *, cwd) -> None:
     assert result.returncode == 0, f"git {args!r} failed: {result.stderr}"
 
 
+def _head_sha(repo_dir) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(repo_dir)
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
 def _assert_landed_on_base_branch(repo_dir, expected_sha: str) -> None:
     """lr-cd3644 fold-in #4 (PEACHES finding on PR #30's re-review, comment
     5875590535): `git symbolic-ref --short HEAD` alone proves the tree is ON
@@ -464,6 +472,7 @@ class TestPostMergeRunsOnlyAfterSuccess:
             tmp_path,
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
         )
+        seed_base_commit(tmp_path)
         argv = _base_args(
             **{"--repo-path": str(tmp_path), "--allowed-namespace": "different-owner"}
         )
@@ -499,6 +508,7 @@ class TestPostMergeRunsOnlyAfterSuccess:
             tmp_path,
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
         )
+        seed_base_commit(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
@@ -945,11 +955,15 @@ class TestGitWorkingTreeConfigRootSplit:
         git_tree_dir.mkdir()
         _init_repo_with_origin(git_tree_dir)
 
-        # No steps: a wrapper that declares steps is refused (see
-        # test_a_wrapper_layout_that_declares_steps_is_refused), so this proves
-        # the tree sync alone still targets the declared subpath.
-        _write_merge_config(wrapper_dir, [], git_working_tree="repo")
-        argv = _base_args(**{"--repo-path": str(wrapper_dir)})
+        marker = wrapper_dir / "installed.txt"
+        _write_merge_config(
+            wrapper_dir,
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
+            git_working_tree="repo",
+        )
+        # --repo-path is the git tree T; the wrapper X holding the config is
+        # found from it and vouches for T by declaring it.
+        argv = _base_args(**{"--repo-path": str(git_tree_dir)})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
@@ -957,18 +971,18 @@ class TestGitWorkingTreeConfigRootSplit:
             opener=_make_opener(),
         )
         assert code == verb.EXIT_OK
+        # The step ran from the config at X while the tree sync operated
+        # against T -- prove that by asserting the git tree is readable there.
+        assert marker.read_text() == "ok"
         rev_parse = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(git_tree_dir)
         )
         assert rev_parse.returncode == 0
 
-    def test_a_wrapper_layout_that_declares_steps_is_refused(self, tmp_path):
-        # The wrapper layout (config at a non-git wrapper, the real .git in a
-        # subdirectory) used to run post_merge_steps end to end. Steps are an
-        # input that executes, so they are now read only from the tree whose
-        # origin was confirmed: the git top-level of --repo-path. A wrapper that
-        # is not itself a git tree cannot vouch for them through the subdirectory
-        # its own config names, so the merge refuses before anything lands.
+    def test_a_wrapper_layout_that_declares_steps_is_refused(self, tmp_path, capsys):
+        # A non-git wrapper is no longer a valid --repo-path. The merge refuses
+        # up front, before any credential is minted, with a hint naming the
+        # directory to pass instead, and the git tree is left where it was.
         wrapper_dir = tmp_path / "wrapper"
         wrapper_dir.mkdir()
         (wrapper_dir / ".crew").mkdir()  # non-git wrapper-layout marker state
@@ -985,15 +999,22 @@ class TestGitWorkingTreeConfigRootSplit:
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
             git_working_tree="repo",
         )
+        head_before = _head_sha(git_tree_dir)
+        token_provider = _RecordingTokenProvider()
         argv = _base_args(**{"--repo-path": str(wrapper_dir)})
         code = verb.main(
             argv,
-            token_provider=_RecordingTokenProvider(),
+            token_provider=token_provider,
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(),
         )
         assert code == verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
         assert not marker.exists()
+        assert _head_sha(git_tree_dir) == head_before
+        err = capsys.readouterr().err
+        assert "is not inside a git working tree" in err
+        assert f"pass {str((git_tree_dir).resolve())!r} instead" in err
 
     def test_a_declared_wrapper_layout_with_the_git_tree_as_repo_path_runs_its_steps(self, tmp_path):
         # The same setup as the refusal above, with --repo-path naming the git
@@ -1026,28 +1047,31 @@ class TestGitWorkingTreeConfigRootSplit:
         assert marker.read_text() == "ran"
 
     def test_knob_present_but_target_not_a_git_tree_fails_loud(self, tmp_path):
-        # A misconfigured knob (subpath does not actually contain a git tree)
-        # must still fail loud via tree_sync's own contract -- never a
-        # silent fallback to --repo-path. No steps are declared: steps in a
-        # wrapper are refused before the tree sync is reached.
+        # A --repo-path that is a directory holding no git tree (here the
+        # knob names a subpath that is not one) hits the same up-front refusal
+        # as any non-git wrapper: never a silent fallback, and no credential
+        # is minted.
         wrapper_dir = tmp_path
         (wrapper_dir / "not-a-repo").mkdir()
-        _write_merge_config(wrapper_dir, [], git_working_tree="not-a-repo")
-        # The misconfigured tree cannot supply a gate declaration either, which
-        # refuses pre_checks first; skipping them reaches the tree-sync failure
-        # this test is about.
+        _write_merge_config(
+            wrapper_dir,
+            [{"cmd": [_PY, "-c", "pass"]}],
+            git_working_tree="not-a-repo",
+        )
+        token_provider = _RecordingTokenProvider()
         argv = _base_args(**{"--repo-path": str(wrapper_dir)}) + ["--skip-pre-checks"]
         code = verb.main(
             argv,
-            token_provider=_RecordingTokenProvider(),
+            token_provider=token_provider,
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(),
         )
-        assert code == verb.EXIT_POST_MERGE_FAILED
+        assert code == verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
 
     def test_knob_present_but_target_not_a_git_tree_refuses_pre_checks(self, tmp_path):
-        # The same misconfiguration without the bypass: the tree cannot supply
-        # a gate declaration, so pre_checks refuse before anything merges.
+        # The same misconfiguration without the bypass is refused at the same
+        # place, before pre_checks are read.
         (tmp_path / "not-a-repo").mkdir()
         _write_merge_config(
             tmp_path,
@@ -1060,7 +1084,44 @@ class TestGitWorkingTreeConfigRootSplit:
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(),
         )
-        assert code == verb.EXIT_PRE_CHECKS_FAILED
+        assert code == verb.EXIT_USAGE
+
+    @pytest.mark.parametrize("skip_flag", [None, "--skip-post-merge", "--skip-pre-checks", "--no-post-merge-tree"])
+    def test_a_wrapper_with_no_config_is_refused_whatever_the_skip_flag(self, tmp_path, skip_flag):
+        # X holds the git tree but no config, and is not itself in a git tree.
+        wrapper_dir = tmp_path / "wrapper"
+        git_tree_dir = wrapper_dir / "repo"
+        git_tree_dir.mkdir(parents=True)
+        _init_repo_with_origin(git_tree_dir)
+        head_before = _head_sha(git_tree_dir)
+        token_provider = _RecordingTokenProvider()
+        argv = _base_args(**{"--repo-path": str(wrapper_dir)}) + ([skip_flag] if skip_flag else [])
+        code = verb.main(
+            argv,
+            token_provider=token_provider,
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
+        assert _head_sha(git_tree_dir) == head_before
+
+    @pytest.mark.parametrize("skip_flag", ["--skip-post-merge", "--skip-pre-checks"])
+    def test_a_declared_wrapper_is_refused_whatever_the_skip_flag(self, tmp_path, skip_flag):
+        wrapper_dir = tmp_path / "wrapper"
+        git_tree_dir = wrapper_dir / "repo"
+        git_tree_dir.mkdir(parents=True)
+        _init_repo_with_origin(git_tree_dir)
+        _write_merge_config(wrapper_dir, [], git_working_tree="repo")
+        token_provider = _RecordingTokenProvider()
+        code = verb.main(
+            _base_args(**{"--repo-path": str(wrapper_dir)}) + [skip_flag],
+            token_provider=token_provider,
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
 
     def test_drift_check_never_false_positives_in_wrapper_layout(self, tmp_path):
         """BOBBIE finding, lr-cd3644 fold-in #3: the config root (the
@@ -1069,9 +1130,10 @@ class TestGitWorkingTreeConfigRootSplit:
         to compare against lives OUTSIDE the inner git tree entirely (never
         tracked by IT at any commit), so `load_post_merge_steps_from_git_sha`
         must correctly resolve "not comparable" (None) for this split, same
-        as the plain untracked-config case. Since the --repo-path binding, a
-        wrapper-layout merge that declares post_merge_steps is refused (exit
-        usage) before the drift check can run, and runs no step."""
+        as the plain untracked-config case. The regression proof: a
+        wrapper-layout merge with post_merge_steps configured, with
+        --repo-path naming the git tree, must still exit OK and actually run
+        its step."""
         wrapper_dir = tmp_path
         git_tree_dir = wrapper_dir / "repo"
         git_tree_dir.mkdir()
@@ -1083,39 +1145,24 @@ class TestGitWorkingTreeConfigRootSplit:
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
             git_working_tree="repo",
         )
-        argv = _base_args(**{"--repo-path": str(wrapper_dir)})
+        argv = _base_args(**{"--repo-path": str(git_tree_dir)})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(),
         )
-        # Steps in a wrapper layout are refused (the wrapper is not a git
-        # tree), so the drift check is never reached.
-        assert code == verb.EXIT_USAGE
-        assert not marker.exists()
+        assert code == verb.EXIT_OK
+        assert marker.read_text() == "ok"
 
-    def test_drift_check_does_not_compare_against_an_unrelated_inner_tree_file(
-        self, tmp_path
-    ):
-        """BOBBIE finding, lr-cd3644 fold-in #3, THE PRECISE REGRESSION
-        PROOF: the INNER git tree happens to ALSO track a file at the exact
-        same relative path (`.clagentic/loadout/config.yaml`) the wrapper's
-        REAL config lives at -- an entirely UNRELATED file, coincidentally
-        same-named, declaring a DIFFERENT step (a distinct marker). Before
-        this fix, `load_post_merge_steps_from_git_sha` ran `git show
-        <sha>:.clagentic/loadout/config.yaml` with cwd=git_tree_path using
-        the BARE default relative path (as if git_tree_path were the config
-        root) -- which this fixture makes SUCCEED (that path genuinely
-        exists in the inner tree), so the drift check would compare the
-        wrapper's real pre-sync steps against this UNRELATED inner-tree
-        file's steps and could fire a bogus drift correction, running the
-        WRONG step. `resolve_git_tree_relative_config_paths` must resolve
-        (None, None) here instead (the wrapper's REAL config sits outside
-        the inner tree entirely), so the inner tree's own unrelated tracked
-        file at the same path is NEVER read as if it were the wrapper's
-        config -- only the wrapper's own real, pre-sync-resolved step must
-        run."""
+    def test_a_config_at_the_git_tree_wins_over_the_declared_wrapper_config(self, tmp_path):
+        """The INNER git tree tracks its own file at the exact same relative
+        path (`.clagentic/loadout/config.yaml`) the wrapper's config lives at,
+        declaring a DIFFERENT step (a distinct marker). With --repo-path naming
+        the inner tree, the config at the tree wins with no hop: its step runs
+        and the wrapper's never does, and the drift check compares the tree's
+        pre-sync file with the same file at the merged commit, never with the
+        wrapper's."""
         wrapper_dir = tmp_path
         git_tree_dir = wrapper_dir / "repo"
         git_tree_dir.mkdir()
@@ -1123,34 +1170,29 @@ class TestGitWorkingTreeConfigRootSplit:
         # relative path the wrapper's real config lives at (a coincidence a
         # correct implementation must never conflate with the wrapper's own
         # config).
-        wrong_marker = wrapper_dir / "wrong-step-ran.txt"
+        tree_marker = wrapper_dir / "tree-step-ran.txt"
         merged_sha = _init_repo_with_origin_and_tracked_config(
             git_tree_dir,
-            [{"cmd": [_PY, "-c", f"open(r'{wrong_marker}', 'w').write('WRONG')"]}],
+            [{"cmd": [_PY, "-c", f"open(r'{tree_marker}', 'w').write('tree')"]}],
         )
         make_origin_confirmable(git_tree_dir, url=CONFIRMABLE_GITHUB_ORIGIN)
 
-        # The wrapper's REAL config (outside the inner tree) declares a
-        # DIFFERENT step.
-        right_marker = wrapper_dir / "right-step-ran.txt"
+        wrapper_marker = wrapper_dir / "wrapper-step-ran.txt"
         _write_merge_config(
             wrapper_dir,
-            [{"cmd": [_PY, "-c", f"open(r'{right_marker}', 'w').write('right')"]}],
+            [{"cmd": [_PY, "-c", f"open(r'{wrapper_marker}', 'w').write('wrapper')"]}],
             git_working_tree="repo",
         )
-        argv = _base_args(**{"--repo-path": str(wrapper_dir), "--platform": "github"})
+        argv = _base_args(**{"--repo-path": str(git_tree_dir), "--platform": "github"})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_github_opener(merged_sha=merged_sha),
         )
-        # The wrapper declares steps and is not a git tree, so it is refused
-        # before any step runs: neither the wrapper's step nor the inner
-        # tree's unrelated, coincidentally-same-path tracked file executes.
-        assert code == verb.EXIT_USAGE
-        assert not right_marker.exists()
-        assert not wrong_marker.exists()
+        assert code == verb.EXIT_OK
+        assert tree_marker.read_text() == "tree"
+        assert not wrapper_marker.exists()
 
     def test_malformed_git_working_tree_value_surfaces_exit_post_merge_failed(self, tmp_path):
         _init_repo_with_origin(tmp_path)

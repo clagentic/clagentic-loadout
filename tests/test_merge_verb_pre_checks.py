@@ -565,11 +565,11 @@ class TestNoGitTreeToReadTheGateFrom:
         write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "git_working_tree": 42})
         assert _merge(repo, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
 
-    def test_a_repo_path_that_is_not_a_git_tree_refuses_pre_checks(self, tmp_path):
+    def test_a_repo_path_that_is_not_a_git_tree_is_refused_before_the_merge(self, tmp_path):
         write_deployment_config(tmp_path, {"sync_tree_after_merge": False})
         repo = GateRepo(path=tmp_path, base_sha="a" * 40, head_sha="b" * 40)
         merge_calls: list[str] = []
-        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_USAGE
         assert merge_calls == []
 
 

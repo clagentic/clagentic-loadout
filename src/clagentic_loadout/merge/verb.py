@@ -608,6 +608,7 @@ from clagentic_loadout.merge.repo_gate_runtime import (
 from clagentic_loadout.merge.config_binding import (
     config_binding_for,
     require_confirmed_tree_for_steps,
+    require_repo_path_in_git_tree,
     require_resolvable_config_root,
 )
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
@@ -1409,6 +1410,12 @@ def _run(
     # blames the App installation. Compares against the remote, never the
     # directory name (the '.github' org-profile shape is correct and never
     # flagged) -- see merge.repo_path_consistency's module docstring.
+    #
+    # --repo-path must itself be inside a git tree; a wrapper directory that
+    # only holds the tree is refused first, whatever the skip flags say, so the
+    # one git top-level is the tree every later step reads and syncs.
+    if args.repo_path:
+        require_repo_path_in_git_tree(args.repo_path)
     assert_repo_path_consistent(args.repo, args.repo_path)
 
     # --role/attested-invoker fail-closed binding (lr-c75c9a, mirrors

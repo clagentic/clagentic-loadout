@@ -9,6 +9,9 @@ host the platform is configured for, and owner/name must equal ``--repo``,
 case-insensitively. The SSH and HTTPS remotes of one host both pass. A tree
 whose origin cannot be read or parsed is refused rather than passed.
 
+``--repo-path`` must itself be inside a git working tree (`require_repo_path_in_git_tree`):
+the one git top-level is the tree that is confirmed, read the gate from and synced.
+
 Which file is read is decided by ``merge.config_root`` (the tree's own, or the
 direct parent's when it declares the tree), so the file read is always one the
 confirmed tree vouches for.
@@ -18,14 +21,23 @@ The tracked gate file is read at the PR base commit and is not bound here.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from clagentic_loadout.git_origin import ConfigTreeBinding, OriginBindingError
-from clagentic_loadout.merge.config_root import MergeConfigRootRefusedError, resolve_merge_config_root
+from clagentic_loadout.merge.config_root import (
+    MergeConfigRootRefusedError,
+    resolve_merge_config_path,
+    resolve_merge_config_root,
+)
 from clagentic_loadout.merge.errors import MergeUsageError
 from clagentic_loadout.merge.post_merge_config import (
+    CONFIG_KEY_GIT_WORKING_TREE,
     PostMergeConfigError,
     load_post_merge_steps,
+    read_repo_merge_section,
 )
 from clagentic_loadout.platform_detect import DEFAULT_GITHUB_HOSTNAME, PLATFORM_GITHUB
+from clagentic_loadout.repo_config import find_git_top_level
 
 
 def config_binding_for(platform: str, git_host_base: str, repo_slug: str) -> ConfigTreeBinding:
@@ -33,6 +45,51 @@ def config_binding_for(platform: str, git_host_base: str, repo_slug: str) -> Con
     host of the resolved git-host base URL for Forgejo."""
     host = DEFAULT_GITHUB_HOSTNAME if platform == PLATFORM_GITHUB else git_host_base
     return ConfigTreeBinding(expected_host=host, slug=repo_slug)
+
+
+def _declared_tree_segment(repo_path: str) -> str | None:
+    """The single path segment *repo_path*'s own config declares as
+    ``merge.git_working_tree``, or None when it declares none or cannot be read.
+    Used only to word a hint, so a file that cannot be read is simply no hint."""
+    try:
+        config_path = resolve_merge_config_path(repo_path, warn=False)
+        declared = read_repo_merge_section(config_path).get(CONFIG_KEY_GIT_WORKING_TREE)
+    except (PostMergeConfigError, OSError):
+        return None
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip()
+    return None
+
+
+def require_repo_path_in_git_tree(repo_path: str) -> None:
+    """Raise MergeUsageError when *repo_path* is not inside a git working tree.
+
+    ``--repo-path`` names the git tree itself: the tree the origin is confirmed
+    for, the gate is read from, the tree sync advances and the post-merge steps
+    run in. A directory that only holds the tree (a wrapper) is no longer
+    accepted in its place; its config is still found, one level up, from the
+    tree. When the directory declares ``merge.git_working_tree``, the message
+    names ``<directory>/<that segment>`` as the path to pass.
+
+    Reads no remote, so no remote text can reach the message. Run first, before
+    the origin binding and before any credential or network call, whatever the
+    skip flags say.
+    """
+    if find_git_top_level(repo_path) is not None:
+        return
+    resolved = Path(repo_path).resolve()
+    segment = _declared_tree_segment(repo_path)
+    hint = (
+        f" This directory declares merge.git_working_tree {segment!r}: pass "
+        f"{str(resolved / segment)!r} instead."
+        if segment is not None
+        else ""
+    )
+    raise MergeUsageError(
+        f"--repo-path {str(resolved)!r} is not inside a git working tree. "
+        "--repo-path must be the git tree itself, not a directory that holds it."
+        f"{hint}"
+    )
 
 
 def require_confirmed_tree(binding: ConfigTreeBinding, repo_path: str, *, reading: str) -> None:
@@ -87,5 +144,6 @@ __all__ = [
     "config_binding_for",
     "require_confirmed_tree",
     "require_confirmed_tree_for_steps",
+    "require_repo_path_in_git_tree",
     "require_resolvable_config_root",
 ]

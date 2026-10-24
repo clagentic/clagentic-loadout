@@ -127,6 +127,29 @@ def test_a_config_above_the_tree_that_holds_only_settings_is_ignored(tmp_path):
     assert post_merge_config.load_post_merge_steps(repo.path) == []
 
 
+def test_the_synced_and_gate_tree_is_the_one_git_top_level(tmp_path):
+    _, repo = _wrapper_layout(tmp_path, {"git_working_tree": "tree"})
+    inside = repo.path / "sub"
+    inside.mkdir()
+
+    assert post_merge_config.resolve_git_working_tree(repo.path) == repo.path.resolve()
+    assert repo_gate_runtime.resolve_gate_git_tree(repo.path) == repo.path.resolve()
+    assert repo_gate_runtime.resolve_gate_git_tree(inside) == repo.path.resolve()
+
+
+def test_a_declaration_at_the_tree_that_names_another_directory_is_refused(tmp_path):
+    _, repo = _wrapper_layout(tmp_path, {})
+    (repo.path / "other").mkdir()
+    write_deployment_config(repo.path, {"git_working_tree": "other"})
+
+    with pytest.raises(PostMergeConfigError) as info:
+        post_merge_config.resolve_git_working_tree(repo.path)
+    with pytest.raises(PostMergeConfigError):
+        repo_gate_runtime.resolve_gate_git_tree(repo.path)
+
+    assert "not the git tree" in str(info.value)
+
+
 def test_a_path_that_is_in_no_git_tree_is_read_where_it_is(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()

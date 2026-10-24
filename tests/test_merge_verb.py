@@ -271,6 +271,7 @@ class TestModelAttestation:
 
     def test_opted_in_clean_verdict_missing_model_attested_refuses(self, tmp_path):
         _write_merge_config(tmp_path, {"require_model_attestation": True})
+        seed_base_commit(tmp_path)
         block = build_verdict_block("some-reviewer", "clean", _FULL_SHA, 1)
         argv = _base_args(
             **{
@@ -288,6 +289,7 @@ class TestModelAttestation:
 
     def test_opted_in_clean_verdict_bare_tier_alias_refuses(self, tmp_path):
         _write_merge_config(tmp_path, {"require_model_attestation": True})
+        seed_base_commit(tmp_path)
         block = build_verdict_block("some-reviewer", "clean", _FULL_SHA, 1, "gpt-flagship")
         argv = _base_args(
             **{
@@ -334,6 +336,7 @@ class TestModelAttestation:
                 "model_attestation_denylist": ["deprecated-fallback-4-0"],
             },
         )
+        seed_base_commit(tmp_path)
         block = build_verdict_block(
             "some-reviewer", "clean", _FULL_SHA, 1, "deprecated-fallback-4-0"
         )
@@ -357,6 +360,7 @@ class TestModelAttestation:
         # change the disposition of) a reviewer that correctly found a
         # blocking issue, regardless of model_attested.
         _write_merge_config(tmp_path, {"require_model_attestation": True})
+        seed_base_commit(tmp_path)
         block = build_verdict_block("some-reviewer", "blocking", _FULL_SHA, 1)
         argv = _base_args(
             **{
@@ -893,9 +897,8 @@ def _write_task_id_guard_config(repo_path, *, pattern: str, mode: str | None = N
     if mode is not None:
         push_section["task_id_guard_mode"] = mode
     # sync_tree_after_merge: false -- these tests point --repo-path at a
-    # plain tmp_path directory (no .git at all, deliberately -- see this
-    # class's own docstring), so step 10's working-tree sync would ALWAYS
-    # fail regardless of this guard's own outcome; --skip-post-merge alone
+    # bare one-commit git tree with no origin remote, so step 10's working-tree
+    # sync would ALWAYS fail regardless of this guard's own outcome; --skip-post-merge alone
     # does not suppress the sync (only the configured STEPS -- see
     # merge.verb's own "AFTER post_merge_steps run" docstring section), so
     # this key is required for a passing-path test in this class to reach
@@ -907,6 +910,8 @@ def _write_task_id_guard_config(repo_path, *, pattern: str, mode: str | None = N
         }),
         encoding="utf-8",
     )
+    # --repo-path must be inside a git tree before any later check runs.
+    seed_base_commit(repo_path)
 
 
 class TestTaskIdGuardCommitSubjectGate:
@@ -917,8 +922,8 @@ class TestTaskIdGuardCommitSubjectGate:
     --repo-path (the same repo-tier config root every other gate key in
     this module resolves through) -- these tests write a REAL
     `.clagentic/loadout/config.yaml` under tmp_path and point --repo-path at
-    it (a plain directory, not a git working tree: step 0's repo-path/slug
-    consistency check tolerates an unconfirmable tree, see
+    it (a git tree with no origin remote: step 0's repo-path/slug
+    consistency check tolerates an unconfirmable origin, see
     merge.repo_path_consistency's own docstring)."""
 
     def test_no_pattern_configured_matching_shape_subject_is_unaffected(self, tmp_path):

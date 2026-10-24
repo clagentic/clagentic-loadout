@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import importlib
 import re
+import subprocess
 from pathlib import Path
 from typing import Callable
 
@@ -453,9 +454,15 @@ _MINIMAL_ARGV_BY_SCRIPT: dict[str, list[str]] = {
     "loadout-close-pr": ["--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1"],
     "loadout-post-merge": [
         "--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1",
-        "--repo-path", "/nonexistent-conformance-path",
+        "--repo-path", "{git-tree}",
     ],
 }
+
+
+def _argv_with_git_tree(argv: list[str], tree: Path) -> list[str]:
+    """*argv* with the ``{git-tree}`` placeholder replaced by *tree*, a real git
+    working tree: --repo-path must be inside one before any later check runs."""
+    return [str(tree) if word == "{git-tree}" else word for word in argv]
 
 
 class TestBoundVerbsRefuseMismatchedIdentity:
@@ -507,11 +514,18 @@ class TestBoundVerbsRefuseMismatchedIdentity:
         )
 
     def test_mismatched_caller_or_role_refused_before_any_mint(
-        self, caller_role_verb_entry_points
+        self, caller_role_verb_entry_points, tmp_path
     ):
+        tree = tmp_path / "tree"
+        tree.mkdir()
+        subprocess.run(["git", "init", "-q", str(tree)], check=True, capture_output=True)
         for script_name, module_path, flag in caller_role_verb_entry_points:
             module = importlib.import_module(module_path)
-            argv = [flag, "conformance-test-caller", *_MINIMAL_ARGV_BY_SCRIPT[script_name]]
+            argv = [
+                flag,
+                "conformance-test-caller",
+                *_argv_with_git_tree(_MINIMAL_ARGV_BY_SCRIPT[script_name], tree),
+            ]
 
             kwargs = dict(
                 token_provider=_RefusingTokenProvider(),
@@ -544,7 +558,7 @@ class TestBoundVerbsRefuseMismatchedIdentity:
             )
 
     def test_omitted_caller_or_role_never_refused_by_binding(
-        self, caller_role_verb_entry_points, monkeypatch
+        self, caller_role_verb_entry_points, monkeypatch, tmp_path
     ):
         """The OTHER half of the contract this task requires preserved
         exactly: an OMITTED --caller/--role must NEVER be refused by
@@ -571,9 +585,13 @@ class TestBoundVerbsRefuseMismatchedIdentity:
             "sys.stdin.buffer.read", lambda: b'{"body": "conformance-test-body"}'
         )
 
+        tree = tmp_path / "tree"
+        tree.mkdir()
+        subprocess.run(["git", "init", "-q", str(tree)], check=True, capture_output=True)
         for script_name, module_path, _flag in caller_role_verb_entry_points:
             module = importlib.import_module(module_path)
-            argv = list(_MINIMAL_ARGV_BY_SCRIPT[script_name])  # no --caller/--role at all
+            # no --caller/--role at all
+            argv = _argv_with_git_tree(_MINIMAL_ARGV_BY_SCRIPT[script_name], tree)
 
             kwargs = dict(
                 token_provider=_PermissiveTokenProvider(),

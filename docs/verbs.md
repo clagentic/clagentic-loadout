@@ -2725,13 +2725,27 @@ the `pre_checks` readers) resolves the file through one resolver:
    parent, a direct parent that does not declare T (or declares a symlink, a multi-segment path
    or another directory), or a file above T that cannot be read. The refusal names the resolved
    tree, the config root and the remote. A file above T that holds only other settings is ignored.
-4. A `--repo-path` in no git tree is read where it is, and still refused when it declares steps
-   (it is not a confirmable clone).
+4. `--repo-path` must be inside a git work tree. A directory in no git tree (a non-git wrapper, a
+   path that does not exist) is refused up front, in both `loadout-merge` and
+   `loadout-post-merge`, with exit `1`, before the `--repo`/`--repo-path` consistency check, any
+   credential mint or network call, and whatever the skip flags (`--skip-post-merge`,
+   `--skip-pre-checks`, `--no-post-merge-tree`). The check reads no remote. When the directory
+   itself declares `merge.git_working_tree`, the message names `<directory>/<segment>` as the path
+   to pass instead.
 
-**Migration.** A deployment whose config sits in a wrapper directory must declare
-`merge.git_working_tree` in that file. Such a layout used to be read by a one-level hop with no
-declaration; an undeclared wrapper now refuses loudly (`1` before anything is merged) instead of
-being read without proof that it belongs to the tree.
+**One tree.** The git top-level T of `--repo-path` is the tree that is confirmed, that the gate is
+read from, that the post-merge sync advances and that steps run in (their working directory is
+`--repo-path`). `merge.git_working_tree` no longer selects a tree: it only has to name T, and a
+declaration that resolves to any other directory is a config error.
+
+**Migration (breaking).** `--repo-path` used to accept a non-git wrapper directory whose config
+declared `merge.git_working_tree`; the verbs followed the declaration to the inner tree. That is no
+longer accepted. A deployment that passes a wrapper as `--repo-path` must pass the git tree
+`<X>/<W>` instead; the config stays in the wrapper X, which keeps declaring
+`merge.git_working_tree: <W>`, and is found from T as in rule 2. A deployment whose config sits in a
+wrapper without that declaration must add it. Such a layout used to be read by a one-level hop with
+no declaration; an undeclared wrapper now refuses loudly instead of being read without proof that
+it belongs to the tree.
 
 A refusal names the resolved tree, the remote name `origin` with its parsed host and owner/name,
 and the configured host. For
@@ -2839,6 +2853,12 @@ re-run gets the exact same bounded-timeout/verified-liveness behavior a
 merge-embedded run would have, via the SAME
 `merge.post_merge_config.resolve_post_merge_step_timeout_seconds` call
 `loadout-merge`'s own post-merge tail makes.
+
+**`--repo-path` is the git tree.** A `--repo-path` in no git work tree (a non-git wrapper
+included) is refused with exit `1` before any credential mint or network call; when that
+directory declares `merge.git_working_tree`, the message names `<directory>/<segment>` as the
+path to pass. Steps run with the git tree as their working directory. See "Migration (breaking)"
+under `loadout-merge`.
 
 **`--repo-path` binding.** Once the PR is confirmed merged and before anything is
 checked out, a `--repo-path` whose deployment file declares `post_merge_steps`

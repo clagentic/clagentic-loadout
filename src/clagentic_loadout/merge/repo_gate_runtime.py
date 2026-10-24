@@ -137,7 +137,7 @@ from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     renamed_declared_role,
 )
-from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, find_git_top_level
 
 #: Keys that belong to the tracked gate file and are never honoured from the
 #: per-deployment working-tree file.
@@ -310,14 +310,20 @@ def gate_from_tracked_text(
 
 
 def resolve_gate_git_tree(repo_path: str | Path) -> Path:
-    """The git tree the tracked gate file is read from: the deployment's
-    `merge.git_working_tree` when it declares one, else *repo_path* itself.
+    """The git tree the tracked gate file is read from: the one git top-level of
+    *repo_path* (the tree the merge verbs confirm and sync). A
+    `merge.git_working_tree` declaration is only checked to name that tree;
+    *repo_path* itself when it is in no git tree.
 
     Raises:
-        PostMergeConfigError: `merge.git_working_tree` is malformed.
+        PostMergeConfigError: `merge.git_working_tree` is malformed or names a
+            directory other than the git tree.
     """
     declared_tree = resolve_git_working_tree(repo_path)
-    return declared_tree if declared_tree is not None else Path(repo_path)
+    if declared_tree is not None:
+        return declared_tree
+    git_top = find_git_top_level(repo_path)
+    return git_top if git_top is not None else Path(repo_path)
 
 
 def gate_from_deployment_config(

@@ -133,6 +133,7 @@ from clagentic_loadout.merge.post_merge_config import (
 from clagentic_loadout.merge.config_binding import (
     config_binding_for,
     require_confirmed_tree_for_steps,
+    require_repo_path_in_git_tree,
 )
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.tree_sync import (
@@ -462,6 +463,10 @@ def _run(
     # names a different owner/repo than --repo -- see
     # merge.repo_path_consistency's module docstring for the full
     # rationale and the '.github' org-profile shape this never flags.
+    #
+    # --repo-path must itself be inside a git tree; a wrapper directory that
+    # only holds the tree is refused first, before any mint or network call.
+    require_repo_path_in_git_tree(args.repo_path)
     assert_repo_path_consistent(args.repo, args.repo_path)
 
     # --role/attested-invoker fail-closed binding (lr-c75c9a, mirrors

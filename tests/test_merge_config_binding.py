@@ -11,7 +11,9 @@ Caller shapes (each against a real git tree with a real origin remote):
 
 from __future__ import annotations
 
+import ast
 import json
+from pathlib import Path
 
 import pytest
 
@@ -20,6 +22,7 @@ from clagentic_loadout.merge import post_merge_verb, verb
 from clagentic_loadout.merge.config_binding import (
     config_binding_for,
     require_confirmed_tree_for_steps,
+    require_repo_path_in_git_tree,
 )
 from clagentic_loadout.merge.errors import MergeUsageError
 from clagentic_loadout.merge.repo_gate_runtime import load_gate_at_commit, load_repo_gate_at_base
@@ -488,3 +491,101 @@ def test_post_merge_refuses_an_unconfirmable_tree_with_steps(tmp_path, capsys):
     code, _out, err = _post_merge(repo, capsys)
 
     assert code == post_merge_verb.EXIT_USAGE and "no readable 'origin'" in err
+
+
+# --- --repo-path is the git tree ------------------------------------------------------
+
+
+def _declared_wrapper(tmp_path, deployment, *, origin=f"https://{HOST}/{SLUG}"):
+    """A non-git wrapper X declaring the git tree X/tree (which holds no config)."""
+    wrapper = tmp_path / "wrapper"
+    wrapper.mkdir()
+    write_deployment_config(wrapper, {**deployment, "git_working_tree": "tree"})
+    repo = init_gate_repo(wrapper / "tree", tracked_gate=None)
+    (repo.path / ".clagentic" / "loadout" / "config.yaml").unlink()
+    git(repo.path, "remote", "add", "origin", origin)
+    return wrapper, repo
+
+
+def test_the_fallback_gate_declared_at_the_wrapper_is_read_for_the_git_tree(tmp_path, capsys):
+    # The supported form: X declares gate keys, --repo-path is T, and the
+    # binding is confirmed against T.
+    _wrapper, repo = _declared_wrapper(tmp_path, {**GATE, "sync_tree_after_merge": False})
+
+    _, err = _merge(repo, capsys)
+
+    assert FALLBACK_NOTICE in err
+    assert "are not used" not in err
+
+
+def test_the_fallback_gate_declared_at_the_wrapper_is_not_read_for_a_foreign_tree(tmp_path, capsys):
+    _wrapper, repo = _declared_wrapper(
+        tmp_path, {**GATE, "sync_tree_after_merge": False}, origin=f"https://other.example.test/{SLUG}"
+    )
+
+    code, err = _merge(repo, capsys)
+
+    assert code != verb.EXIT_OK
+    assert FALLBACK_NOTICE not in err and "other.example.test" in err
+
+
+def test_a_directory_outside_any_git_tree_is_refused_naming_it_and_no_remote(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    with pytest.raises(MergeUsageError) as info:
+        require_repo_path_in_git_tree(str(plain))
+
+    message = str(info.value)
+    assert str(plain.resolve()) in message and "not inside a git working tree" in message
+    assert "pass " not in message
+
+
+def test_a_declared_wrapper_is_refused_with_the_directory_to_pass(tmp_path):
+    wrapper, repo = _declared_wrapper(tmp_path, STEPS)
+
+    with pytest.raises(MergeUsageError) as info:
+        require_repo_path_in_git_tree(str(wrapper))
+
+    message = str(info.value)
+    assert f"pass {str(repo.path.resolve())!r} instead" in message
+    assert HOST not in message and SLUG not in message
+
+
+def test_a_tree_and_a_directory_inside_it_are_accepted(tmp_path):
+    repo = _repo(tmp_path, None, tracked_gate={})
+    inside = repo.path / "sub"
+    inside.mkdir()
+
+    require_repo_path_in_git_tree(str(repo.path))
+    require_repo_path_in_git_tree(str(inside))
+
+
+def test_a_path_that_does_not_exist_is_refused(tmp_path):
+    with pytest.raises(MergeUsageError) as info:
+        require_repo_path_in_git_tree(str(tmp_path / "absent"))
+
+    assert "not inside a git working tree" in str(info.value)
+
+
+def _called_names_in_run(module) -> list[tuple[str, int]]:
+    source = Path(module.__file__).read_text(encoding="utf-8")
+    run = next(
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef) and node.name == "_run"
+    )
+    return sorted(
+        (node.func.id, node.lineno)
+        for node in ast.walk(run)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    )
+
+
+@pytest.mark.parametrize("module", [verb, post_merge_verb], ids=["merge", "post-merge"])
+def test_both_verbs_require_the_git_tree_before_the_origin_binding_or_any_mint(module):
+    calls = _called_names_in_run(module)
+    first = {name: min(line for n, line in calls if n == name) for name, _ in calls}
+
+    assert "require_repo_path_in_git_tree" in first
+    assert first["require_repo_path_in_git_tree"] < first["assert_repo_path_consistent"]
+    assert first["require_repo_path_in_git_tree"] < first["_resolve_backend"]
