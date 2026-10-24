@@ -32,6 +32,9 @@ KIND_REVIEWER = "reviewer"
 KIND_PRE_CHECK = "pre_check"
 KIND_PUSH_VERIFY = "push.verify"
 GATE_CI = "ci"
+#: The gate a review's spec-coverage pass records under: whether every
+#: acceptance criterion of the sealed spec the review ran against was met.
+GATE_SPEC_COVERAGE = "spec-coverage"
 
 #: Source tags for the ``tool`` field of a record that was not written by the
 #: step that measured but derived from evidence that step left behind.
@@ -183,6 +186,7 @@ def build_record(
 
 __all__ = [
     "GATE_CI",
+    "GATE_SPEC_COVERAGE",
     "KIND_PRE_CHECK",
     "KIND_PUSH_VERIFY",
     "KIND_REVIEWER",

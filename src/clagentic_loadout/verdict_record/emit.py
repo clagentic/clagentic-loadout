@@ -31,6 +31,7 @@ def emit_record(
     finished: str,
     tree_sha: str | None = None,
     repo: str | None = None,
+    spec_hash: str | None = None,
     evidence_ref: str | None = None,
     root: Path | None = None,
     untrusted_roots: Sequence[Path] = (),
@@ -47,6 +48,7 @@ def emit_record(
         finished=finished,
         tree_sha=tree_sha,
         repo=repo,
+        spec_hash=spec_hash,
         evidence_ref=evidence_ref,
     )
     write_record(
