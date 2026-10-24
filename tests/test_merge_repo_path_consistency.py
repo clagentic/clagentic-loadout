@@ -197,7 +197,8 @@ class TestDegenerateCasesAreExplicitNeverSilent:
         tree = _make_tree_with_remote(tmp_path, "weird-remote", "not-a-real-remote-url")
         result = check_repo_path_consistency("some-owner/some-repo", str(tree))
         assert not result.checked
-        assert "not-a-real-remote-url" in result.reason
+        assert "not a parseable remote URL" in result.reason
+        assert "not-a-real-remote-url" not in result.reason
 
     def test_assert_never_raises_on_a_checked_false_result(self, tmp_path):
         # A degenerate (unconfirmable) tree must never be treated as a

@@ -19,7 +19,7 @@ import pytest
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.transport import provider_config
-from tests._gate_repo import git, init_gate_repo
+from tests._gate_repo import git, init_gate_repo, make_origin_confirmable
 from tests._support.merge_verb import (
     AllowingAuthorityProvider,
     RecordingTokenProvider,
@@ -58,7 +58,7 @@ def _marker_step(marker) -> dict:
     return {"cmd": [_PY, "-c", code], "on_failure": "fail"}
 
 
-def _repo_with_post_merge_step(tmp_path, marker):
+def _repo_with_post_merge_step(tmp_path, marker, *, confirmable=True):
     """A gate repo with a real origin and tree sync on, so a real merge would
     fetch the merged commit and run the configured post_merge_step."""
     repo = init_gate_repo(
@@ -73,6 +73,8 @@ def _repo_with_post_merge_step(tmp_path, marker):
     git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
     git(repo.path, "remote", "add", "origin", str(origin))
     git(repo.path, "push", "-q", "origin", "main")
+    if confirmable:
+        make_origin_confirmable(repo.path)
     return repo
 
 
@@ -151,6 +153,24 @@ class TestReportOnlyRefusals:
         ]
         code = verb.main(argv, token_provider=RecordingTokenProvider())
         assert code == verb.EXIT_AUTHORITY_DENIED
+
+    def test_the_original_local_path_origin_is_refused_for_steps_in_report_only_too(
+        self, tmp_path, capsys
+    ):
+        # The mergeable scenario above with the origin it had before the tree
+        # had to be confirmable: a local bare repository, which names no host.
+        marker = tmp_path / "post-merge-ran"
+        repo = _repo_with_post_merge_step(tmp_path, marker, confirmable=False)
+        opener, calls = _recording(make_opener(pr_info=repo.pr_info()))
+        argv = base_args(**{"--repo-path": repo.path}) + ["--report-only"]
+
+        code = _run(argv, opener)
+
+        err = capsys.readouterr().err
+        assert code == verb.EXIT_USAGE
+        assert _writes(calls) == [] and not marker.exists()
+        assert "not a parseable remote URL" in err
+        assert str(tmp_path / "origin.git") not in err
 
     def test_failing_pre_check_still_refuses_and_makes_no_write(self, tmp_path):
         failing = {"cmd": [_PY, "-c", "import sys; sys.exit(1)"], "on_failure": "fail"}

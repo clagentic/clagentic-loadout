@@ -46,9 +46,9 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from clagentic_loadout.merge.config_root import resolve_merge_config_path
 from clagentic_loadout.merge.post_merge import PostMergeConfigError
 from clagentic_loadout.merge.post_merge_config import CONFIG_SECTION_MERGE, read_repo_merge_section
-from clagentic_loadout.repo_config import resolve_repo_config_path
 from clagentic_loadout.transport.provider_config import load_user_config_section
 
 #: Key within the user-level `merge:` section holding the sandbox argv prefix.
@@ -139,8 +139,8 @@ def ignored_repo_sandbox_warnings(repo_path: str | Path | None) -> tuple[str, ..
     """
     if repo_path is None:
         return ()
-    config_path = resolve_repo_config_path(repo_path, warn=False)
     try:
+        config_path = resolve_merge_config_path(repo_path, warn=False)
         merge_section = read_repo_merge_section(config_path)
     except PostMergeConfigError:
         return ()

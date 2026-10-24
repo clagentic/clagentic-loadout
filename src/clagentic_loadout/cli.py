@@ -152,6 +152,12 @@ def _spec_main(argv: list[str]) -> int:
     return spec_main(argv)
 
 
+def _rules_main(argv: list[str]) -> int:
+    from clagentic_loadout.rules.verb import main as rules_main
+
+    return rules_main(argv)
+
+
 #: verb name -> (one-line summary, entry-point callable taking the verb's
 #: own argv and returning its process exit code). A verb with a
 #: single-word name (push, merge) dispatches directly; a verb with a
@@ -166,7 +172,11 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         _pr_review_main,
     ),
     "ruling": ("Record and list per-PR rulings on kept findings.", _ruling_main),
-    "profile": ("Validate a repo profile, or draft one for a repo with none.", _profile_main),
+    "profile": (
+        "Validate a repo profile, draft one, or print it shaped for a role (check, init, brief).",
+        _profile_main,
+    ),
+    "rules": ("Print the group rules that apply to a repository.", _rules_main),
     "merge": ("Run the merge-gate chain, then merge a PR.", _merge_main),
     "reviewer-login": (
         "Print the platform login each named reviewer posts under.",

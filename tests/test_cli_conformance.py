@@ -47,6 +47,7 @@ from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.review import profile_verb
 from clagentic_loadout.review import ruling_verb
 from clagentic_loadout.review import verb as review_verb
+from clagentic_loadout.rules import verb as rules_verb
 from clagentic_loadout.transport import git_host_api
 from clagentic_loadout.spec import verb as spec_verb
 from clagentic_loadout.transport import stage_body_verb
@@ -69,6 +70,7 @@ _ARGPARSE_VERBS = [
     ("loadout-review", review_cli.main, "--version"),
     ("ruling", ruling_verb.main, "--version"),
     ("profile", profile_verb.main, "--version"),
+    ("rules", rules_verb.main, "--version"),
     ("merge", merge_verb.main, "--version"),
     ("close-pr", merge_close_verb.main, "--version"),
     ("reviewer-login", reviewer_login_verb.main, "--version"),
@@ -203,6 +205,8 @@ def test_umbrella_unknown_grouped_subverb_reports_reserved_exit_code(capsys) -> 
         ["pr-review"],
         ["ruling"],
         ["profile"],
+        ["profile", "brief"],
+        ["rules"],
         ["reviewer-login"],
         ["git-host-api"],
         ["stage-body"],

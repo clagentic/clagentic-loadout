@@ -43,7 +43,7 @@ from clagentic_loadout.merge.pre_merge_canary import (
     run_pre_merge_canary,
 )
 from clagentic_loadout.transport import provider_config
-from tests._gate_repo import git, init_gate_repo
+from tests._gate_repo import git, init_gate_repo, make_origin_confirmable
 from tests._support.ci_gate import HEAD_SHA, forgejo_ci_opener, github_ci_opener, run_merge
 from tests._support.fakes import FakeResponse, RecordingTokenProvider
 from tests._support.merge_verb import AllowingAuthorityProvider
@@ -445,6 +445,7 @@ class TestPostMergeNeverRunsTheCanary:
         git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
         git(repo.path, "remote", "add", "origin", str(origin))
         git(repo.path, "push", "-q", "origin", "main")
+        make_origin_confirmable(repo.path)
         pr_info = {"merged": True, "merge_commit_sha": None, "base": {"ref": "main"}}
 
         def opener(req, timeout=15):

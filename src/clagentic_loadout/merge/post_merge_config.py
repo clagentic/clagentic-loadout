@@ -23,31 +23,21 @@ correct trust boundary (contrast with the credentials tier, where a cloned
 repo's config choosing the command that mints a caller's git-host TOKEN
 would be a privilege-escalation surface across repos).
 
-CONFIG-ROOT VS GIT-TREE-ROOT (lr-93d718): `--repo-path` (the caller-supplied
-root this whole module resolves config FROM) is not always a git working
-tree. A "wrapper layout" repo keeps its `.clagentic/loadout/config.yaml`
-alongside other non-git tooling state at a wrapper directory, while the ACTUAL
-git checkout (the `.git` directory `merge.tree_sync.advance_repo_to_merged_sha`
-needs to `git fetch`/`git checkout` in) lives at a subdirectory of that
-wrapper (e.g. `<wrapper>/repo/.git`). Before this task, `merge.verb._run`
-passed the SAME `--repo-path` to both `advance_repo_to_merged_sha` (which
-requires a git working tree) and `load_post_merge_steps` (which requires the
-config-bearing root) — no single value satisfies both for that layout: passing
-the wrapper fails tree_sync ("not a git repository", EXIT_POST_MERGE_FAILED);
-passing the git-tree subdirectory instead silently loads zero
-`post_merge_steps` (config discovery never finds it there).
+CONFIG-ROOT VS GIT-TREE-ROOT: a "wrapper layout" repo keeps its
+`.clagentic/loadout/config.yaml` alongside other non-git tooling state at a
+wrapper directory X, while the ACTUAL git checkout T (the `.git` directory
+`merge.tree_sync.advance_repo_to_merged_sha` needs to `git fetch`/`git
+checkout` in) lives at a subdirectory of that wrapper (e.g.
+`<wrapper>/repo/.git`). `--repo-path` is T: the merge verbs refuse a
+`--repo-path` in no git tree up front (`merge.config_binding.
+require_repo_path_in_git_tree`), and T is the one tree that is confirmed,
+read the gate from, synced and run steps in.
 
-`git_working_tree` (an OPTIONAL key inside the `merge:` section, read by
-`resolve_git_working_tree` below) closes this gap WITHOUT adding a second
-YAML-reading path: when present, it names a path RELATIVE to the resolved
-config root (e.g. `repo`) that `merge.verb._run` joins onto that root before
-calling `advance_repo_to_merged_sha` — config discovery itself (this module's
-`load_post_merge_steps`) is entirely unaffected and keeps reading from the
-config root exactly as before. When the key is ABSENT (the common, flat-
-layout case), `merge.verb._run`'s tree-sync target is UNCHANGED: `--repo-path`
-itself, exactly as before this task — this is a purely additive, narrowing-
-safe knob (absent key = old behavior, never a behavior change for a repo that
-never declares it).
+`git_working_tree` (a `merge:` key, read by `resolve_git_working_tree` below)
+is how X vouches for T: it names, as a single path segment relative to X, the
+directory that must resolve to exactly T. It does not select a tree; a
+declaration that names any other directory is a config error. A config found
+at T itself needs no declaration and wins with no hop.
 
 OPTIONS CONSIDERED (naming the trade-off, per this package's own CLAUDE.md
 "Principle conflict" rule): an upward `.git`-search from `--repo-path` (walk
@@ -223,13 +213,16 @@ from pathlib import Path
 
 import yaml
 
+from clagentic_loadout.merge.config_root import (
+    resolve_merge_config_path,
+    resolve_merge_config_root,
+)
 from clagentic_loadout.merge.post_merge import PostMergeConfigError, validate_post_merge_steps
 from clagentic_loadout.numeric_validation import is_finite_positive_number
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     LEGACY_CONFIG_RELATIVE_PATH,
-    resolve_repo_config_path,
-    resolve_repo_config_root,
+    find_git_top_level,
 )
 from clagentic_loadout.transport.provider_config import load_user_config_section
 
@@ -422,6 +415,13 @@ def load_post_merge_steps(
 ) -> list[dict]:
     """Resolve the post_merge_steps list for a repo.
 
+    The file is found by `merge.config_root.resolve_merge_config_path`: at the
+    git tree of *repo_root*, or in the directory holding the tree when that
+    config declares `merge.git_working_tree` naming the tree. Steps declared
+    anywhere else above the tree are refused, so a caller that has confirmed
+    the tree is a clone of the repository (git_origin.ConfigTreeBinding) never
+    executes steps from outside it.
+
     Reads `<repo_root>/<config_relative_path>` (default
     `.clagentic/loadout/config.yaml`, falling back to the legacy
     `.loadout/config.yaml` path when only that one exists — see
@@ -444,7 +444,7 @@ def load_post_merge_steps(
     if repo_root is None:
         return []
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -487,7 +487,7 @@ def resolve_git_tree_relative_config_paths(
     declares this knob, never comparable, regardless of any actual drift.
 
     THE FIX: resolve the config-bearing ROOT via the SAME
-    `resolve_repo_config_root` bounded-hop walk `resolve_repo_config_path`
+    `merge.config_root.resolve_merge_config_root` resolver
     (and therefore `load_post_merge_steps`) already uses for
     *config_root_hint*, then re-express each of that root's two candidate
     config paths (new, legacy) RELATIVE TO *git_tree_path* -- so a caller
@@ -516,8 +516,10 @@ def resolve_git_tree_relative_config_paths(
     precisely so that call is never attempted for an inherently-untrackable
     wrapper-layout config.
     """
-    config_root = resolve_repo_config_root(
-        config_root_hint, config_relative_path, legacy_relative_path
+    config_root = resolve_merge_config_root(
+        config_root_hint,
+        config_relative_path=config_relative_path,
+        legacy_relative_path=legacy_relative_path,
     ).resolve()
     git_tree_resolved = Path(git_tree_path).resolve()
 
@@ -888,7 +890,7 @@ def post_merge_steps_key_declared(
     if repo_root is None:
         return False
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1032,10 +1034,14 @@ def resolve_git_working_tree(
         it — the caller's contract in every one of these cases is "target
         `--repo-path` itself, unchanged from before this task."
       - `<config_root>/<git_working_tree>` (resolved via the SAME
-        `resolve_repo_config_path`-driven root `load_post_merge_steps` uses,
-        so a wrapper-hop repo's config root and its declared working-tree
+        `resolve_merge_config_root` root `load_post_merge_steps` uses, so a
+        wrapper-layout repo's config root and its declared working-tree
         path are always resolved relative to the SAME root) when the key is
-        present and resolves to a path within the config root.
+        present and resolves to a path within the config root and
+        *repo_root* is in no git tree.
+      - The git top-level of *repo_root* when it is in one: the declaration
+        then only has to name that tree, and one that names any other
+        directory raises.
 
     Raises:
         PostMergeConfigError: the config file exists but is unreadable/
@@ -1053,7 +1059,7 @@ def resolve_git_working_tree(
     if repo_root is None:
         return None
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root,
         config_relative_path=config_relative_path,
         legacy_relative_path=legacy_relative_path,
@@ -1077,26 +1083,12 @@ def resolve_git_working_tree(
         )
 
     # Re-derive the config ROOT (as opposed to config_path, the resolved
-    # FILE) via the SAME resolve_repo_config_root bounded-hop resolver
-    # resolve_repo_config_path itself calls internally, using the SAME
-    # (config_relative_path, legacy_relative_path) candidate pair this
-    # function's OWN resolve_repo_config_path call above just used (lr-cd3644
-    # fold-in #3, PR #30 re-review finding D) -- this function previously
-    # hardcoded the module-level LEGACY_CONFIG_RELATIVE_PATH constant
-    # directly here instead of threading its own *legacy_relative_path*
-    # parameter through, which only happened to agree with the
-    # resolve_repo_config_path call above because no caller today overrides
-    # the legacy path from its own default. Any caller that DID override
-    # *legacy_relative_path* (mirroring the override knob every other
-    # resolver in this module already exposes) would have hit a config-root
-    # resolution here that silently used a DIFFERENT legacy candidate than
-    # the config-file resolution immediately above it -- a latent
-    # inconsistency, now closed by passing the SAME parameter through both
-    # calls, so a wrapper-hop repo's config root here always agrees with
-    # load_post_merge_steps' own root for the same *repo_root*/legacy-path
-    # input, never a second/divergent walk.
-    config_root = resolve_repo_config_root(
-        repo_root, config_relative_path, legacy_relative_path
+    # FILE) through the same resolver, with the same candidate pair as the
+    # call above, so the root and the file can never come from two walks.
+    config_root = resolve_merge_config_root(
+        repo_root,
+        config_relative_path=config_relative_path,
+        legacy_relative_path=legacy_relative_path,
     )
     resolved = (config_root / working_tree).resolve()
     config_root_resolved = config_root.resolve()
@@ -1108,7 +1100,19 @@ def resolve_git_working_tree(
             f"would point tree_sync's git subprocess outside the config "
             f"root it was declared relative to."
         )
-    return config_root / working_tree
+    # The declaration only vouches for the tree; it never names a second one.
+    # With --repo-path inside a git tree, the tree synced and read is that
+    # tree's top-level, and the declared path must resolve to exactly it.
+    git_top = find_git_top_level(repo_root)
+    if git_top is None:
+        return config_root / working_tree
+    if resolved != git_top:
+        raise PostMergeConfigError(
+            f"{config_path}: {CONFIG_KEY_GIT_WORKING_TREE!r} value {working_tree!r} "
+            f"resolves to {resolved}, which is not the git tree {git_top} of "
+            f"--repo-path; the declaration must name that tree."
+        )
+    return git_top
 
 
 def resolve_sync_tree_after_merge(
@@ -1141,7 +1145,7 @@ def resolve_sync_tree_after_merge(
     if repo_root is None:
         return DEFAULT_SYNC_TREE_AFTER_MERGE
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1190,7 +1194,7 @@ def resolve_enforce_merge_shape(
     if repo_root is None:
         return DEFAULT_ENFORCE_MERGE_SHAPE
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1246,7 +1250,7 @@ def resolve_enforce_single_verdict_fence(
     if repo_root is None:
         return DEFAULT_ENFORCE_SINGLE_VERDICT_FENCE
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1296,7 +1300,7 @@ def resolve_require_model_attestation(
     if repo_root is None:
         return DEFAULT_REQUIRE_MODEL_ATTESTATION
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1343,7 +1347,7 @@ def resolve_model_attestation_denylist(
     if repo_root is None:
         return frozenset()
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1394,7 +1398,7 @@ def resolve_post_merge_step_timeout_seconds(
     if repo_root is None:
         return DEFAULT_POST_MERGE_STEP_TIMEOUT_SECONDS
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)

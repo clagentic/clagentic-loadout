@@ -29,7 +29,14 @@ import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
-from tests._gate_repo import GateRepo, commit_raw_gate_to_base, git, init_gate_repo, write_deployment_config
+from tests._gate_repo import (
+    GateRepo,
+    commit_raw_gate_to_base,
+    git,
+    init_gate_repo,
+    make_origin_confirmable,
+    write_deployment_config,
+)
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
@@ -301,8 +308,10 @@ class TestUnmigratedRepoReadsTheDeploymentConfig:
     config.yaml declares, exactly as before the gate moved. It is a notice, never
     a refusal, and never reads as IGNORED."""
 
-    def _unmigrated(self, tmp_path, steps):
+    def _unmigrated(self, tmp_path, steps, *, confirmable=True):
         repo = init_gate_repo(tmp_path, tracked_gate=None)
+        if confirmable:
+            make_origin_confirmable(tmp_path)
         write_deployment_config(
             tmp_path,
             {"sync_tree_after_merge": False, "required_reviewer_roles": [], "pre_checks": steps},
@@ -315,6 +324,27 @@ class TestUnmigratedRepoReadsTheDeploymentConfig:
         merge_calls: list[str] = []
         assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
         assert merge_calls == []
+
+    def test_the_same_scenario_on_a_tree_with_no_origin_is_refused_and_runs_nothing(
+        self, tmp_path, capsys
+    ):
+        # The scenario above as it was written before the tree had to be
+        # confirmable: no origin at all. The fallback gate it declares is no
+        # longer taken from such a tree, so the merge refuses instead of passing.
+        marker = tmp_path.parent / f"{tmp_path.name}-unconfirmed-ran.txt"
+        repo = self._unmigrated(
+            tmp_path,
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"], "on_failure": "fail"}],
+            confirmable=False,
+        )
+        merge_calls: list[str] = []
+
+        code = _merge(repo, merge_calls=merge_calls)
+
+        err = capsys.readouterr().err
+        assert code == verb.EXIT_PRE_CHECKS_FAILED
+        assert merge_calls == [] and not marker.exists()
+        assert "no readable 'origin'" in err and "the configured platform host is" in err
 
     def test_a_passing_deployment_pre_check_runs_in_the_repo_path_and_lets_the_merge_land(
         self, tmp_path, capsys
@@ -535,11 +565,11 @@ class TestNoGitTreeToReadTheGateFrom:
         write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "git_working_tree": 42})
         assert _merge(repo, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
 
-    def test_a_repo_path_that_is_not_a_git_tree_refuses_pre_checks(self, tmp_path):
+    def test_a_repo_path_that_is_not_a_git_tree_is_refused_before_the_merge(self, tmp_path):
         write_deployment_config(tmp_path, {"sync_tree_after_merge": False})
         repo = GateRepo(path=tmp_path, base_sha="a" * 40, head_sha="b" * 40)
         merge_calls: list[str] = []
-        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_USAGE
         assert merge_calls == []
 
 

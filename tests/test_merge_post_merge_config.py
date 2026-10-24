@@ -290,7 +290,7 @@ class TestResolveGitWorkingTree:
         legacy_path = wrapper / "custom" / "legacy-config.yaml"
         legacy_path.parent.mkdir(parents=True)
         legacy_path.write_text(
-            yaml.safe_dump({"merge": {"git_working_tree": "inner"}}),
+            yaml.safe_dump({"merge": {"git_working_tree": "repo"}}),
             encoding="utf-8",
         )
         resolved = resolve_git_working_tree(
@@ -298,7 +298,7 @@ class TestResolveGitWorkingTree:
             config_relative_path="custom/new-config.yaml",
             legacy_relative_path=custom_legacy,
         )
-        assert resolved == wrapper / "inner"
+        assert resolved == wrapper / "repo"
 
 
 class TestResolveSyncTreeAfterMerge:

@@ -130,6 +130,11 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_git_working_tree,
     resolve_post_merge_step_timeout_seconds,
 )
+from clagentic_loadout.merge.config_binding import (
+    config_binding_for,
+    require_confirmed_tree_for_steps,
+    require_repo_path_in_git_tree,
+)
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
@@ -458,6 +463,10 @@ def _run(
     # names a different owner/repo than --repo -- see
     # merge.repo_path_consistency's module docstring for the full
     # rationale and the '.github' org-profile shape this never flags.
+    #
+    # --repo-path must itself be inside a git tree; a wrapper directory that
+    # only holds the tree is refused first, before any mint or network call.
+    require_repo_path_in_git_tree(args.repo_path)
     assert_repo_path_consistent(args.repo, args.repo_path)
 
     # --role/attested-invoker fail-closed binding (lr-c75c9a, mirrors
@@ -546,6 +555,13 @@ def _run(
         f"post-merge: PR #{args.pr_number} in {owner}/{repo} confirmed "
         f"merged (merge_commit_sha={known_merged_sha!r})",
         file=sys.stderr,
+    )
+
+    # The steps this verb runs come from --repo-path's deployment file, and the
+    # tree is checked out next. Confirm before either that the tree is a clone
+    # of --repo on the configured host; an unconfirmable tree is refused.
+    require_confirmed_tree_for_steps(
+        config_binding_for(args.platform, git_host_base, args.repo), args.repo_path
     )
 
     # 5. Advance --repo-path to the merged SHA -- the SAME tree_sync call

@@ -45,7 +45,7 @@ import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.transport import provider_config
-from tests._gate_repo import seed_base_commit
+from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, make_origin_confirmable, seed_base_commit
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
@@ -55,6 +55,14 @@ _BASE_BRANCH = "main"
 def _run_git(args: list[str], *, cwd) -> None:
     result = subprocess.run(["git", *args], capture_output=True, text=True, cwd=str(cwd))
     assert result.returncode == 0, f"git {args!r} failed: {result.stderr}"
+
+
+def _head_sha(repo_dir) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(repo_dir)
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
 
 
 def _assert_landed_on_base_branch(repo_dir, expected_sha: str) -> None:
@@ -112,6 +120,7 @@ def _init_repo_with_origin(tmp_path):
     _run_git(["commit", "-m", "seed"], cwd=tmp_path)
     _run_git(["remote", "add", "origin", str(remote_dir)], cwd=tmp_path)
     _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=tmp_path)
+    make_origin_confirmable(tmp_path)
 
     rev_parse = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
@@ -463,6 +472,7 @@ class TestPostMergeRunsOnlyAfterSuccess:
             tmp_path,
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
         )
+        seed_base_commit(tmp_path)
         argv = _base_args(
             **{"--repo-path": str(tmp_path), "--allowed-namespace": "different-owner"}
         )
@@ -481,6 +491,7 @@ class TestPostMergeRunsOnlyAfterSuccess:
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
         )
         _record_base_sha(seed_base_commit(tmp_path))
+        make_origin_confirmable(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
@@ -497,6 +508,7 @@ class TestPostMergeRunsOnlyAfterSuccess:
             tmp_path,
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
         )
+        seed_base_commit(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
@@ -834,6 +846,7 @@ class TestSyncTreeAfterMergeDefaultOn:
         # post_merge_steps entry is configured so this invocation actually
         # takes the CHECKOUT path (lr-173768).
         merged_sha = _init_repo_with_origin(tmp_path)
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
@@ -855,6 +868,7 @@ class TestSyncTreeAfterMergeDefaultOn:
         # entry is configured so this invocation actually takes the CHECKOUT
         # path (lr-173768).
         merged_sha = _init_repo_with_origin(tmp_path)
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
@@ -947,7 +961,9 @@ class TestGitWorkingTreeConfigRootSplit:
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
             git_working_tree="repo",
         )
-        argv = _base_args(**{"--repo-path": str(wrapper_dir)})
+        # --repo-path is the git tree T; the wrapper X holding the config is
+        # found from it and vouches for T by declaring it.
+        argv = _base_args(**{"--repo-path": str(git_tree_dir)})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
@@ -955,23 +971,18 @@ class TestGitWorkingTreeConfigRootSplit:
             opener=_make_opener(),
         )
         assert code == verb.EXIT_OK
-        # The step ran with cwd=wrapper_dir (config root, per
-        # run_post_merge_steps' own contract) but tree_sync itself operated
-        # against git_tree_dir -- prove that by asserting the git tree
-        # actually advanced there.
+        # The step ran from the config at X while the tree sync operated
+        # against T -- prove that by asserting the git tree is readable there.
         assert marker.read_text() == "ok"
         rev_parse = subprocess.run(
             ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(git_tree_dir)
         )
         assert rev_parse.returncode == 0
 
-    def test_wrapper_layout_regression_case_end_to_end(self, tmp_path):
-        # (3) THE lr-93d718 REGRESSION ITSELF: config lives at the wrapper
-        # (alongside non-git tooling state), the real .git lives at a
-        # subdirectory of the wrapper -- no single --repo-path satisfied
-        # both before this fix. Passing the wrapper used to fail tree_sync
-        # ("not a git repository", EXIT_POST_MERGE_FAILED); this proves
-        # post_merge_steps now runs end-to-end against the merged SHA.
+    def test_a_wrapper_layout_that_declares_steps_is_refused(self, tmp_path, capsys):
+        # A non-git wrapper is no longer a valid --repo-path. The merge refuses
+        # up front, before any credential is minted, with a hint naming the
+        # directory to pass instead, and the git tree is left where it was.
         wrapper_dir = tmp_path / "wrapper"
         wrapper_dir.mkdir()
         (wrapper_dir / ".crew").mkdir()  # non-git wrapper-layout marker state
@@ -988,7 +999,44 @@ class TestGitWorkingTreeConfigRootSplit:
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
             git_working_tree="repo",
         )
+        head_before = _head_sha(git_tree_dir)
+        token_provider = _RecordingTokenProvider()
         argv = _base_args(**{"--repo-path": str(wrapper_dir)})
+        code = verb.main(
+            argv,
+            token_provider=token_provider,
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
+        assert not marker.exists()
+        assert _head_sha(git_tree_dir) == head_before
+        err = capsys.readouterr().err
+        assert "is not inside a git working tree" in err
+        assert f"pass {str((git_tree_dir).resolve())!r} instead" in err
+
+    def test_a_declared_wrapper_layout_with_the_git_tree_as_repo_path_runs_its_steps(self, tmp_path):
+        # The same setup as the refusal above, with --repo-path naming the git
+        # tree T (the direct child the wrapper config declares) instead of the
+        # non-git wrapper: the original assertions hold. The config at the
+        # wrapper X is accepted because it declares merge.git_working_tree
+        # naming T, steps run from X, and the tree sync runs in T.
+        wrapper_dir = tmp_path / "wrapper"
+        wrapper_dir.mkdir()
+        (wrapper_dir / ".crew").mkdir()
+        git_tree_dir = wrapper_dir / "repo"
+        git_tree_dir.mkdir()
+        _init_repo_with_origin(git_tree_dir)
+        assert not (wrapper_dir / ".git").exists()
+
+        marker = wrapper_dir / "post-merge-ran.txt"
+        _write_merge_config(
+            wrapper_dir,
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
+            git_working_tree="repo",
+        )
+        argv = _base_args(**{"--repo-path": str(git_tree_dir)})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
@@ -999,9 +1047,10 @@ class TestGitWorkingTreeConfigRootSplit:
         assert marker.read_text() == "ran"
 
     def test_knob_present_but_target_not_a_git_tree_fails_loud(self, tmp_path):
-        # A misconfigured knob (subpath does not actually contain a git tree)
-        # must still fail loud via tree_sync's own contract -- never a
-        # silent fallback to --repo-path.
+        # A --repo-path that is a directory holding no git tree (here the
+        # knob names a subpath that is not one) hits the same up-front refusal
+        # as any non-git wrapper: never a silent fallback, and no credential
+        # is minted.
         wrapper_dir = tmp_path
         (wrapper_dir / "not-a-repo").mkdir()
         _write_merge_config(
@@ -1009,21 +1058,20 @@ class TestGitWorkingTreeConfigRootSplit:
             [{"cmd": [_PY, "-c", "pass"]}],
             git_working_tree="not-a-repo",
         )
-        # The misconfigured tree cannot supply a gate declaration either, which
-        # refuses pre_checks first; skipping them reaches the tree-sync failure
-        # this test is about.
+        token_provider = _RecordingTokenProvider()
         argv = _base_args(**{"--repo-path": str(wrapper_dir)}) + ["--skip-pre-checks"]
         code = verb.main(
             argv,
-            token_provider=_RecordingTokenProvider(),
+            token_provider=token_provider,
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(),
         )
-        assert code == verb.EXIT_POST_MERGE_FAILED
+        assert code == verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
 
     def test_knob_present_but_target_not_a_git_tree_refuses_pre_checks(self, tmp_path):
-        # The same misconfiguration without the bypass: the tree cannot supply
-        # a gate declaration, so pre_checks refuse before anything merges.
+        # The same misconfiguration without the bypass is refused at the same
+        # place, before pre_checks are read.
         (tmp_path / "not-a-repo").mkdir()
         _write_merge_config(
             tmp_path,
@@ -1036,7 +1084,44 @@ class TestGitWorkingTreeConfigRootSplit:
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(),
         )
-        assert code == verb.EXIT_PRE_CHECKS_FAILED
+        assert code == verb.EXIT_USAGE
+
+    @pytest.mark.parametrize("skip_flag", [None, "--skip-post-merge", "--skip-pre-checks", "--no-post-merge-tree"])
+    def test_a_wrapper_with_no_config_is_refused_whatever_the_skip_flag(self, tmp_path, skip_flag):
+        # X holds the git tree but no config, and is not itself in a git tree.
+        wrapper_dir = tmp_path / "wrapper"
+        git_tree_dir = wrapper_dir / "repo"
+        git_tree_dir.mkdir(parents=True)
+        _init_repo_with_origin(git_tree_dir)
+        head_before = _head_sha(git_tree_dir)
+        token_provider = _RecordingTokenProvider()
+        argv = _base_args(**{"--repo-path": str(wrapper_dir)}) + ([skip_flag] if skip_flag else [])
+        code = verb.main(
+            argv,
+            token_provider=token_provider,
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
+        assert _head_sha(git_tree_dir) == head_before
+
+    @pytest.mark.parametrize("skip_flag", ["--skip-post-merge", "--skip-pre-checks"])
+    def test_a_declared_wrapper_is_refused_whatever_the_skip_flag(self, tmp_path, skip_flag):
+        wrapper_dir = tmp_path / "wrapper"
+        git_tree_dir = wrapper_dir / "repo"
+        git_tree_dir.mkdir(parents=True)
+        _init_repo_with_origin(git_tree_dir)
+        _write_merge_config(wrapper_dir, [], git_working_tree="repo")
+        token_provider = _RecordingTokenProvider()
+        code = verb.main(
+            _base_args(**{"--repo-path": str(wrapper_dir)}) + [skip_flag],
+            token_provider=token_provider,
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
 
     def test_drift_check_never_false_positives_in_wrapper_layout(self, tmp_path):
         """BOBBIE finding, lr-cd3644 fold-in #3: the config root (the
@@ -1046,10 +1131,9 @@ class TestGitWorkingTreeConfigRootSplit:
         tracked by IT at any commit), so `load_post_merge_steps_from_git_sha`
         must correctly resolve "not comparable" (None) for this split, same
         as the plain untracked-config case. The regression proof: a
-        wrapper-layout merge with post_merge_steps configured must still
-        exit OK and actually run its step -- proving the drift check's own
-        git-tree-relative resolution never interferes with the wrapper-layout
-        path it was already supposed to support (lr-93d718)."""
+        wrapper-layout merge with post_merge_steps configured, with
+        --repo-path naming the git tree, must still exit OK and actually run
+        its step."""
         wrapper_dir = tmp_path
         git_tree_dir = wrapper_dir / "repo"
         git_tree_dir.mkdir()
@@ -1061,7 +1145,7 @@ class TestGitWorkingTreeConfigRootSplit:
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
             git_working_tree="repo",
         )
-        argv = _base_args(**{"--repo-path": str(wrapper_dir)})
+        argv = _base_args(**{"--repo-path": str(git_tree_dir)})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
@@ -1071,27 +1155,14 @@ class TestGitWorkingTreeConfigRootSplit:
         assert code == verb.EXIT_OK
         assert marker.read_text() == "ok"
 
-    def test_drift_check_does_not_compare_against_an_unrelated_inner_tree_file(
-        self, tmp_path
-    ):
-        """BOBBIE finding, lr-cd3644 fold-in #3, THE PRECISE REGRESSION
-        PROOF: the INNER git tree happens to ALSO track a file at the exact
-        same relative path (`.clagentic/loadout/config.yaml`) the wrapper's
-        REAL config lives at -- an entirely UNRELATED file, coincidentally
-        same-named, declaring a DIFFERENT step (a distinct marker). Before
-        this fix, `load_post_merge_steps_from_git_sha` ran `git show
-        <sha>:.clagentic/loadout/config.yaml` with cwd=git_tree_path using
-        the BARE default relative path (as if git_tree_path were the config
-        root) -- which this fixture makes SUCCEED (that path genuinely
-        exists in the inner tree), so the drift check would compare the
-        wrapper's real pre-sync steps against this UNRELATED inner-tree
-        file's steps and could fire a bogus drift correction, running the
-        WRONG step. `resolve_git_tree_relative_config_paths` must resolve
-        (None, None) here instead (the wrapper's REAL config sits outside
-        the inner tree entirely), so the inner tree's own unrelated tracked
-        file at the same path is NEVER read as if it were the wrapper's
-        config -- only the wrapper's own real, pre-sync-resolved step must
-        run."""
+    def test_a_config_at_the_git_tree_wins_over_the_declared_wrapper_config(self, tmp_path):
+        """The INNER git tree tracks its own file at the exact same relative
+        path (`.clagentic/loadout/config.yaml`) the wrapper's config lives at,
+        declaring a DIFFERENT step (a distinct marker). With --repo-path naming
+        the inner tree, the config at the tree wins with no hop: its step runs
+        and the wrapper's never does, and the drift check compares the tree's
+        pre-sync file with the same file at the merged commit, never with the
+        wrapper's."""
         wrapper_dir = tmp_path
         git_tree_dir = wrapper_dir / "repo"
         git_tree_dir.mkdir()
@@ -1099,21 +1170,20 @@ class TestGitWorkingTreeConfigRootSplit:
         # relative path the wrapper's real config lives at (a coincidence a
         # correct implementation must never conflate with the wrapper's own
         # config).
-        wrong_marker = wrapper_dir / "wrong-step-ran.txt"
+        tree_marker = wrapper_dir / "tree-step-ran.txt"
         merged_sha = _init_repo_with_origin_and_tracked_config(
             git_tree_dir,
-            [{"cmd": [_PY, "-c", f"open(r'{wrong_marker}', 'w').write('WRONG')"]}],
+            [{"cmd": [_PY, "-c", f"open(r'{tree_marker}', 'w').write('tree')"]}],
         )
+        make_origin_confirmable(git_tree_dir, url=CONFIRMABLE_GITHUB_ORIGIN)
 
-        # The wrapper's REAL config (outside the inner tree) declares a
-        # DIFFERENT step.
-        right_marker = wrapper_dir / "right-step-ran.txt"
+        wrapper_marker = wrapper_dir / "wrapper-step-ran.txt"
         _write_merge_config(
             wrapper_dir,
-            [{"cmd": [_PY, "-c", f"open(r'{right_marker}', 'w').write('right')"]}],
+            [{"cmd": [_PY, "-c", f"open(r'{wrapper_marker}', 'w').write('wrapper')"]}],
             git_working_tree="repo",
         )
-        argv = _base_args(**{"--repo-path": str(wrapper_dir), "--platform": "github"})
+        argv = _base_args(**{"--repo-path": str(git_tree_dir), "--platform": "github"})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
@@ -1121,10 +1191,8 @@ class TestGitWorkingTreeConfigRootSplit:
             opener=_make_github_opener(merged_sha=merged_sha),
         )
         assert code == verb.EXIT_OK
-        # The wrapper's OWN real step ran -- never the inner tree's
-        # unrelated, coincidentally-same-path tracked file.
-        assert right_marker.read_text() == "right"
-        assert not wrong_marker.exists()
+        assert tree_marker.read_text() == "tree"
+        assert not wrapper_marker.exists()
 
     def test_malformed_git_working_tree_value_surfaces_exit_post_merge_failed(self, tmp_path):
         _init_repo_with_origin(tmp_path)
@@ -1438,6 +1506,7 @@ def _init_repo_with_origin_and_tracked_config(tmp_path, steps: list[dict]) -> st
     _run_git(["commit", "-m", "seed"], cwd=tmp_path)
     _run_git(["remote", "add", "origin", str(remote_dir)], cwd=tmp_path)
     _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=tmp_path)
+    make_origin_confirmable(tmp_path)
 
     rev_parse = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
@@ -1526,7 +1595,7 @@ def _push_deleted_tracked_config_commit_to_origin(
     new_sha = commit_tree.stdout.strip()
 
     push = subprocess.run(
-        ["git", "push", "origin", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
+        ["git", "push", "mirror", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
         capture_output=True, text=True, cwd=str(tmp_path),
     )
     assert push.returncode == 0, push.stderr
@@ -1610,7 +1679,7 @@ def _push_tracked_config_text_commit_to_origin(
     new_sha = commit_tree.stdout.strip()
 
     push = subprocess.run(
-        ["git", "push", "origin", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
+        ["git", "push", "mirror", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
         capture_output=True, text=True, cwd=str(tmp_path),
     )
     assert push.returncode == 0, push.stderr
@@ -1666,6 +1735,7 @@ class TestStalePreSyncConfigDriftCheck:
         # working tree must land on base_branch afterward, exactly like any
         # other successful post_merge_steps run.
         _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         marker = tmp_path / "installed-from-merged-commit.txt"
         merged_sha = _push_tracked_config_commit_to_origin(
             tmp_path,
@@ -1696,6 +1766,7 @@ class TestStalePreSyncConfigDriftCheck:
         # commit's own config does not parse. Must never silently run zero
         # steps or fall back to the stale pre-sync list either.
         _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         merged_sha = _push_malformed_tracked_config_commit_to_origin(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
@@ -1713,6 +1784,7 @@ class TestStalePreSyncConfigDriftCheck:
         # merge succeeds and the step still runs exactly as before this task.
         step = {"cmd": [_PY, "-c", "pass"]}
         _init_repo_with_origin_and_tracked_config(tmp_path, [step])
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         merged_sha = _push_tracked_config_commit_to_origin(tmp_path, [step])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
@@ -1804,6 +1876,7 @@ class TestStalePreSyncConfigDriftCheck:
         _init_repo_with_origin_and_tracked_config(
             tmp_path, [{"cmd": [_PY, "-c", "pass"]}]
         )
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         # Merged commit's own TRACKED config: explicitly zero steps -- an
         # informed choice at the commit actually being merged.
         merged_sha = _push_tracked_config_commit_to_origin(tmp_path, [])
@@ -1841,6 +1914,7 @@ class TestStalePreSyncConfigDriftCheck:
         _init_repo_with_origin_and_tracked_config(
             tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}]
         )
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         merged_sha = _push_deleted_tracked_config_commit_to_origin(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(

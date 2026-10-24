@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -36,6 +37,7 @@ import yaml
 from clagentic_loadout.merge import post_merge_verb
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
+from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, make_origin_confirmable
 
 _PY = sys.executable
 _OWNER = "some-owner"
@@ -67,6 +69,7 @@ def _init_repo_with_origin(tmp_path):
     _run_git(["commit", "-m", "seed"], cwd=tmp_path)
     _run_git(["remote", "add", "origin", str(remote_dir)], cwd=tmp_path)
     _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=tmp_path)
+    make_origin_confirmable(tmp_path)
 
     rev_parse = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
@@ -182,6 +185,12 @@ def _make_github_opener(*, merged=True, merge_commit_sha=_MERGED_SHA, base_ref=_
     return opener
 
 
+def _bare_git_tree(path) -> None:
+    """Make *path* an empty git tree: --repo-path must be inside one before the
+    guards under test run."""
+    _run_git(["init", "-b", _BASE_BRANCH, str(path)], cwd=path.parent)
+
+
 def _write_merge_config(repo_root, steps: list[dict]) -> None:
     config_dir = repo_root / ".clagentic" / "loadout"
     config_dir.mkdir(parents=True, exist_ok=True)
@@ -248,6 +257,7 @@ class TestMandatoryFlags:
 
 class TestGateOrdering:
     def test_namespace_guard_runs_before_any_credential_or_authority_check(self, tmp_path):
+        _bare_git_tree(tmp_path)
         argv = _base_args(str(tmp_path), **{"--allowed-namespace": "different-owner"})
         code = post_merge_verb.main(
             argv,
@@ -257,6 +267,7 @@ class TestGateOrdering:
         assert code == post_merge_verb.EXIT_NAMESPACE_DENIED
 
     def test_authority_denied_runs_before_any_credential_mint(self, tmp_path):
+        _bare_git_tree(tmp_path)
         argv = _base_args(str(tmp_path))
         code = post_merge_verb.main(
             argv,
@@ -266,6 +277,7 @@ class TestGateOrdering:
         assert code == post_merge_verb.EXIT_AUTHORITY_DENIED
 
     def test_token_fetch_failure_surfaces_exit_token_fetch_failed(self, tmp_path):
+        _bare_git_tree(tmp_path)
         argv = _base_args(str(tmp_path))
         code = post_merge_verb.main(
             argv,
@@ -278,6 +290,7 @@ class TestGateOrdering:
 class TestPrNotMergedRefusal:
     def test_open_pr_is_refused_never_treated_as_a_noop_success(self, tmp_path):
         marker = tmp_path / "should-not-run.txt"
+        _bare_git_tree(tmp_path)
         _write_merge_config(
             tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}]
         )
@@ -326,6 +339,7 @@ class TestPostMergeRerunAgainstAlreadyMergedPr:
 
     def test_github_platform_dispatches_to_github_backend(self, tmp_path):
         merged_sha = _init_repo_with_origin(tmp_path)
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         marker = tmp_path / "redeployed.txt"
         _write_merge_config(
             tmp_path,
@@ -542,3 +556,86 @@ class TestLandsOnBaseBranchAfterRerun:
             opener=_make_opener(merge_commit_sha=None),
         )
         assert code == post_merge_verb.EXIT_POST_MERGE_FAILED
+
+
+def _head_sha(repo_dir) -> str:
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(repo_dir)
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+def _wrapper_layout(tmp_path, steps: list[dict], *, declare: bool):
+    """A non-git wrapper X holding the config, and the git tree T = X/repo."""
+    wrapper = tmp_path / "wrapper"
+    tree = wrapper / "repo"
+    tree.mkdir(parents=True)
+    _init_repo_with_origin(tree)
+    config_dir = wrapper / ".clagentic" / "loadout"
+    config_dir.mkdir(parents=True)
+    merge_section: dict = {"post_merge_steps": steps}
+    if declare:
+        merge_section["git_working_tree"] = "repo"
+    (config_dir / "config.yaml").write_text(
+        yaml.safe_dump({"merge": merge_section}), encoding="utf-8"
+    )
+    return wrapper, tree
+
+
+class TestWrapperRepoPathIsRefusedUpFront:
+    """--repo-path must be the git tree. A non-git wrapper that only holds the
+    tree is refused before any credential is minted or the tree is touched."""
+
+    @pytest.mark.parametrize("declare", [True, False], ids=["declared", "undeclared"])
+    def test_a_wrapper_is_refused_before_any_mint_or_checkout(self, tmp_path, capsys, declare):
+        marker = tmp_path / "should-not-run.txt"
+        wrapper, tree = _wrapper_layout(
+            tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}], declare=declare
+        )
+        head_before = _head_sha(tree)
+        token_provider = _RecordingTokenProvider()
+        code = post_merge_verb.main(
+            _base_args(str(wrapper)),
+            token_provider=token_provider,
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
+        assert not marker.exists()
+        assert _head_sha(tree) == head_before
+        err = capsys.readouterr().err
+        assert "is not inside a git working tree" in err
+        assert (f"pass {str(tree.resolve())!r} instead" in err) is declare
+
+    def test_a_wrapper_with_no_config_is_refused_the_same_way(self, tmp_path):
+        wrapper = tmp_path / "wrapper"
+        tree = wrapper / "repo"
+        tree.mkdir(parents=True)
+        _init_repo_with_origin(tree)
+        token_provider = _RecordingTokenProvider()
+        code = post_merge_verb.main(
+            _base_args(str(wrapper)),
+            token_provider=token_provider,
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_USAGE
+        assert token_provider.resolved_for == []
+
+    def test_the_git_tree_is_accepted_and_runs_the_steps_from_the_declared_wrapper(self, tmp_path):
+        marker = tmp_path / "ran-in-cwd.txt"
+        wrapper, tree = _wrapper_layout(
+            tmp_path,
+            [{"cmd": [_PY, "-c", f"import os; open(r'{marker}', 'w').write(os.getcwd())"]}],
+            declare=True,
+        )
+        code = post_merge_verb.main(
+            _base_args(str(tree)),
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=None),
+        )
+        assert code == post_merge_verb.EXIT_OK
+        assert Path(marker.read_text()).resolve() == tree.resolve()

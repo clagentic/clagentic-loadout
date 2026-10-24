@@ -605,6 +605,12 @@ from clagentic_loadout.merge.repo_gate_runtime import (
     load_repo_gate_at_base,
     resolve_gate_git_tree,
 )
+from clagentic_loadout.merge.config_binding import (
+    config_binding_for,
+    require_confirmed_tree_for_steps,
+    require_repo_path_in_git_tree,
+    require_resolvable_config_root,
+)
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.required_reviewers import (
     parse_required_reviewers,
@@ -1404,6 +1410,12 @@ def _run(
     # blames the App installation. Compares against the remote, never the
     # directory name (the '.github' org-profile shape is correct and never
     # flagged) -- see merge.repo_path_consistency's module docstring.
+    #
+    # --repo-path must itself be inside a git tree; a wrapper directory that
+    # only holds the tree is refused first, whatever the skip flags say, so the
+    # one git top-level is the tree every later step reads and syncs.
+    if args.repo_path:
+        require_repo_path_in_git_tree(args.repo_path)
     assert_repo_path_consistent(args.repo, args.repo_path)
 
     # --role/attested-invoker fail-closed binding (lr-c75c9a, mirrors
@@ -1434,6 +1446,8 @@ def _run(
 
     required_reviewers = _parse_required_reviewers(args.required_reviewers, args.platform)
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
+
+    config_binding = config_binding_for(args.platform, git_host_base, args.repo)
 
     # 1. Namespace guard — runs FIRST, before any credential or network call.
     allowed_namespaces = resolve_allowed_namespaces(
@@ -1486,6 +1500,13 @@ def _run(
     except StaleHeadShaError as exc:
         _fail(str(exc), code=EXIT_STALE_HEAD_SHA)
 
+    # Every config reader below resolves --repo-path's file through
+    # merge.config_root. A config above the tree that holds merge settings and
+    # is not the declared wrapper config is refused here, before anything is
+    # read from it or merged, rather than degrading to an empty gate.
+    if args.repo_path:
+        require_resolvable_config_root(args.repo_path)
+
     # The repo's gate is read from the PR's BASE commit (merge.repo_gate_runtime),
     # which is why it can only be loaded now that the PR payload is in hand. Its
     # declared reviewer roles are a floor beneath --required-reviewer; a role
@@ -1494,6 +1515,7 @@ def _run(
         args.repo_path,
         base_sha=resolve_base_sha(pr_info),
         base_branch=resolve_base_branch(pr_info),
+        config_binding=config_binding,
     )
     # The same resolution loadout-ruling uses to attribute a fence to a required
     # role (merge.required_reviewers).
@@ -2105,6 +2127,15 @@ def _run(
             f"{record_refusal}\nRefusing to merge PR #{args.pr_number} in {owner}/{repo}.",
             code=EXIT_GATE_RESULT_BLOCKED,
         )
+
+    # post_merge_steps are commands this verb runs from --repo-path's deployment
+    # file, and that file is not content-addressed. Last check before anything
+    # irreversible: the tree must be a confirmed clone of --repo on the
+    # configured host, else it is refused and nothing is merged. The fallback
+    # gate keys are bound the same way where they are read
+    # (merge.repo_gate_runtime).
+    if args.repo_path and not args.skip_post_merge:
+        require_confirmed_tree_for_steps(config_binding, args.repo_path)
 
     # --report-only stops here: every gate above ran exactly as a real merge
     # would, and a refusal already exited with its own code. Nothing below
