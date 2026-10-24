@@ -248,7 +248,89 @@ class TestReviewAgainstASpec:
         assert env.opener_state["posted_body"] is None
 
 
+def _post_raw(env, tmp_path, capsys, *extra, status="clean"):
+    """A post whose stderr is kept, for the refusals that must say what failed."""
+    path = _write(tmp_path, "findings.json", [])
+    return env.invoke(
+        "post", "--findings", str(path), "--head-sha", HEAD_SHA, "--base-sha", env.base_sha,
+        "--status", status, *extra, capsys=capsys,
+    )
+
+
+class TestSpecNotResolvableFromTheCallersRoot:
+    """A caller whose specs root is not the one the spec was sealed under (a
+    spawn with a different home or user config root) gets a named refusal, never
+    a coverage record for a spec it could not read."""
+
+    def test_a_spec_sealed_under_another_root_is_refused_naming_the_hash_and_root(
+        self, env, tmp_path, capsys, monkeypatch
+    ):
+        sealed = _seal_spec()
+        callers_root = tmp_path / "other-identity-specs"
+        callers_root.mkdir()
+        monkeypatch.setenv(spec_store.SPECS_DIR_ENV_VAR, str(callers_root))
+
+        code, _, err = _post_raw(env, tmp_path, capsys, *_spec_args(sealed, tmp_path))
+
+        assert code == review_cli.EXIT_SPEC_UNAVAILABLE
+        assert sealed.spec_hash in err and str(callers_root) in err
+        assert env.opener_state["posted_body"] is None
+        assert not _records()
+
+    def test_an_unresolvable_hash_is_refused_with_the_existing_code_and_nothing_is_posted(
+        self, env, tmp_path, capsys
+    ):
+        code, _, err = _post_raw(
+            env, tmp_path, capsys,
+            "--spec-hash", "e" * 64, "--spec-coverage", str(_coverage(tmp_path)),
+        )
+
+        assert code == review_cli.EXIT_SPEC_UNAVAILABLE == 33
+        assert "e" * 64 in err
+        assert env.opener_state["posted_body"] is None
+        assert not _records()
+
+    def test_a_hash_that_fails_verification_on_read_is_refused_and_nothing_is_recorded(
+        self, env, tmp_path, capsys
+    ):
+        sealed = _seal_spec()
+        path = spec_store.specs_root() / SPEC_HEAD / f"{sealed.spec_hash}.json"
+        path.write_bytes(sealed.data.replace(b"Add a thing.", b"Add anything."))
+
+        code, _, err = _post_raw(env, tmp_path, capsys, *_spec_args(sealed, tmp_path))
+
+        assert code == review_cli.EXIT_SPEC_UNAVAILABLE
+        assert "hashes to" in err
+        assert env.opener_state["posted_body"] is None
+        assert not _records()
+
+
 class TestReviewWithoutASpec:
+    def test_no_spec_hash_gives_the_same_output_whatever_the_specs_root_is(
+        self, env, tmp_path, capsys, monkeypatch
+    ):
+        # Without a spec hash the specs store is never consulted: a root that
+        # would be refused if it were read changes neither the exit code, the
+        # posted comment nor the printed result.
+        base_body = base_payload = None
+        for label, specs_root in (("usable", tmp_path / "specs"), ("refused", env.repo / "s")):
+            if label == "usable":
+                deployment = env
+            else:
+                (tmp_path / label).mkdir()
+                deployment = Env(tmp_path / label)
+            monkeypatch.setenv(spec_store.SPECS_DIR_ENV_VAR, str(specs_root))
+            code, payload = _post(deployment, tmp_path, capsys, [_finding()])
+            assert code == 0
+            body = deployment.opener_state["posted_body"].replace(deployment.base_sha, "BASE")
+            payload = {k: v for k, v in payload.items() if k != "verdict_record_id"}
+            if base_body is None:
+                base_body, base_payload = body, payload
+            else:
+                assert body == base_body
+                assert payload == base_payload
+
+
     def test_a_review_given_no_spec_is_exactly_what_it_was(self, env, tmp_path, capsys):
         # A tag in the file is not read without a spec hash: it is dropped like
         # any unknown key, and nothing about the post changes.
@@ -335,19 +417,20 @@ class TestFenceFields:
 
     def test_the_published_schema_accepts_the_fields_and_names_the_tag_vocabulary(self):
         from clagentic_loadout.envelope import validate_against_schema
-        from clagentic_loadout.merge.verdict import _VERDICT_SCHEMA_PATH
+        from clagentic_loadout.merge.verdict import verdict_schema_path
 
+        schema_path = verdict_schema_path()
         fence = {
             "reviewer": "r", "review_status": "clean", "head_sha": HEAD_SHA, "pr_number": 1,
             **self._normalize(),
         }
-        assert validate_against_schema(fence, _VERDICT_SCHEMA_PATH) == []
-        schema = json.loads(_VERDICT_SCHEMA_PATH.read_text(encoding="utf-8"))
+        assert validate_against_schema(fence, schema_path) == []
+        schema = json.loads(schema_path.read_text(encoding="utf-8"))
         tag_enum = schema["properties"]["spec_tags"]["items"]["properties"]["spec_tag"]["enum"]
         assert tuple(tag_enum) == fence_state.SPEC_TAGS
         assert schema["properties"]["fence_schema_version"]["enum"] == [1, 2, 3, 4]
         fence["spec_tags"][0]["spec_tag"] = "elsewhere"
-        assert validate_against_schema(fence, _VERDICT_SCHEMA_PATH)
+        assert validate_against_schema(fence, schema_path)
 
 
 class TestFindingTag:
