@@ -146,8 +146,8 @@ def test_an_undeclared_wrapper_config_is_refused_naming_the_tree_the_root_and_th
 
     message = str(info.value)
     assert str(repo.path.resolve()) in message and str(wrapper.resolve()) in message
-    assert f"https://{HOST}/{SLUG}.git" in message
-    assert "s3cr3t" not in message
+    assert repr(SLUG) in message and repr(HOST) in message
+    assert "https://" not in message and "s3cr3t" not in message
 
 
 def test_an_undeclared_wrapper_config_is_a_config_error_not_an_empty_list(tmp_path):
@@ -268,7 +268,8 @@ def test_merge_refuses_an_undeclared_wrapper_layout_before_merging(tmp_path, cap
     code, err, calls = _merge(repo, capsys)
 
     assert code == verb.EXIT_USAGE
-    assert str(wrapper.resolve()) in err and str(repo.path.resolve()) in err and ORIGIN in err
+    assert str(wrapper.resolve()) in err and str(repo.path.resolve()) in err
+    assert repr(SLUG) in err and ORIGIN not in err
     assert not [call for call in calls if call.endswith("/merge")]
 
 
@@ -397,15 +398,18 @@ def test_no_merge_module_reads_the_config_through_the_generic_resolvers():
     assert not offenders, offenders
 
 
-def test_describe_origin_drops_credentials_and_names_a_missing_origin(tmp_path):
-    from clagentic_loadout.git_origin import describe_origin
+def test_a_config_root_refusal_names_a_missing_or_unparseable_origin_without_its_text(tmp_path):
+    wrapper, repo = _wrapper_layout(tmp_path, STEPS, origin=None)
 
-    repo = init_gate_repo(tmp_path / "tree", tracked_gate={})
-    assert describe_origin(repo.path) == "<no readable origin>"
-    git(repo.path, "remote", "add", "origin", f"https://user:s3cr3t@{HOST}/{SLUG}.git")
+    with pytest.raises(MergeConfigRootRefusedError) as missing:
+        post_merge_config.load_post_merge_steps(repo.path)
+    git(repo.path, "remote", "add", "origin", f"https://{HOST}/{SLUG}?token=s3cr3t")
+    with pytest.raises(MergeConfigRootRefusedError) as unparseable:
+        post_merge_config.load_post_merge_steps(repo.path)
 
-    assert describe_origin(repo.path) == f"https://{HOST}/{SLUG}.git"
-    assert describe_origin(tmp_path / "missing") == "<no readable origin>"
+    for info in (missing, unparseable):
+        assert "not a readable, parseable remote URL" in str(info.value)
+        assert str(wrapper.resolve()) in str(info.value) and "s3cr3t" not in str(info.value)
 
 
 def test_the_resolver_vocabulary_covers_every_gate_key():

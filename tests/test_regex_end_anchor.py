@@ -123,12 +123,6 @@ ALLOWLIST = {
         "detector: a match means refuse",
     ("push/git_hermeticity.py", r"^url\..*\.(insteadof|pushinsteadof)$"):
         "detector: a match means refuse",
-    ("merge/repo_path_consistency.py", r"^[^@]+@[^:/]+:(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"):
-        "parses a stripped git remote URL from tool output",
-    ("merge/repo_path_consistency.py", r"^https?://(?:[^@/]+@)?[^/]+/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"):
-        "parses a stripped git remote URL from tool output",
-    ("merge/repo_path_consistency.py", r"^ssh://[^@]+@[^/]+(?::\d+)?/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"):
-        "parses a stripped git remote URL from tool output",
     ("release/detector.py", r"^https?://[^/]+/([^/]+)/([^/]+?)(?:\.git)?/?$"):
         "parses a stripped git remote URL from tool output",
     ("push/git_push.py", r"^\s*!\s*\[(?:rejected|remote rejected)\]\s+\S+\s+->\s+\S+\s+\((?P<reason>[^)]+)\)\s*$"):

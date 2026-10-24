@@ -95,14 +95,14 @@ def test_the_fallback_gate_is_not_read_from_the_same_owner_and_name_on_another_h
     assert code != verb.EXIT_OK
     assert FALLBACK_NOTICE not in err
     assert "other.example.test" in err and HOST in err
-    assert f"https://other.example.test/{SLUG}.git" in err
+    assert repr(SLUG) in err and f"https://other.example.test/{SLUG}.git" not in err
 
 
 @pytest.mark.parametrize(
     "origin, needle",
     [
         (None, "no readable 'origin'"),
-        ("/srv/mirror/some-owner/some-repo.git", "not a recognised"),
+        ("/srv/mirror/some-owner/some-repo.git", "not a parseable remote URL"),
         (f"https://{HOST}@other.example.test/{SLUG}", "other.example.test"),
     ],
     ids=["no-origin", "local-path-origin", "userinfo-naming-the-host"],
@@ -334,7 +334,7 @@ def test_a_refused_origin_carrying_a_token_never_prints_it(tmp_path, capsys, ori
     assert "--repo-path" in err or "gate keys" in err
 
 
-def test_a_refused_origin_carrying_a_token_still_names_the_remote_and_the_hosts(tmp_path, capsys):
+def test_a_refused_origin_carrying_a_token_names_the_parsed_parts_and_the_hosts(tmp_path, capsys):
     repo = _repo(
         tmp_path,
         f"https://user:{TOKEN}@other.example.test/{SLUG}.git",
@@ -345,7 +345,8 @@ def test_a_refused_origin_carrying_a_token_still_names_the_remote_and_the_hosts(
     code, out, err = _merge_both_streams(repo, capsys)
 
     assert code == verb.EXIT_USAGE
-    assert f"https://other.example.test/{SLUG}.git" in err and HOST in err
+    assert "other.example.test" in err and repr(SLUG) in err and HOST in err
+    assert f"https://other.example.test/{SLUG}.git" not in err
     assert TOKEN not in out and TOKEN not in err
 
 
@@ -357,10 +358,11 @@ def test_post_merge_refusal_of_an_origin_carrying_a_token_never_prints_it(tmp_pa
         deployment_merge=STEPS,
     )
 
-    code, err = _post_merge(repo, capsys)
+    code, out, err = _post_merge(repo, capsys)
 
     assert code == post_merge_verb.EXIT_USAGE
-    assert "other.example.test" in err and TOKEN not in err
+    assert "other.example.test" in err
+    assert TOKEN not in out and TOKEN not in err
 
 
 def test_the_slug_consistency_refusal_does_not_print_a_token_either(tmp_path, capsys):
@@ -439,7 +441,8 @@ def test_steps_declared_above_the_tree_without_a_declaration_are_refused_not_dro
 
     message = str(info.value)
     assert str(repo.path) in message and str(wrapper) in message
-    assert f"https://{HOST}/{SLUG}" in message
+    assert repr(SLUG) in message and repr(HOST) in message
+    assert f"https://{HOST}/{SLUG}" not in message
 
 
 # --- post_merge_steps: loadout-post-merge (M4) -------------------------------------
@@ -463,7 +466,7 @@ def _post_merge(repo, capsys):
         opener=opener,
     )
     captured = capsys.readouterr()
-    return code, captured.err + captured.out
+    return code, captured.out, captured.err
 
 
 def test_post_merge_refuses_a_foreign_tree_before_any_checkout(tmp_path, capsys):
@@ -472,7 +475,7 @@ def test_post_merge_refuses_a_foreign_tree_before_any_checkout(tmp_path, capsys)
     )
     head_before = git(repo.path, "rev-parse", "HEAD")
 
-    code, err = _post_merge(repo, capsys)
+    code, _out, err = _post_merge(repo, capsys)
 
     assert code == post_merge_verb.EXIT_USAGE
     assert "other.example.test" in err and HOST in err
@@ -482,6 +485,6 @@ def test_post_merge_refuses_a_foreign_tree_before_any_checkout(tmp_path, capsys)
 def test_post_merge_refuses_an_unconfirmable_tree_with_steps(tmp_path, capsys):
     repo = _repo(tmp_path, None, tracked_gate={}, deployment_merge=STEPS)
 
-    code, err = _post_merge(repo, capsys)
+    code, _out, err = _post_merge(repo, capsys)
 
     assert code == post_merge_verb.EXIT_USAGE and "no readable 'origin'" in err

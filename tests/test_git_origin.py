@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from clagentic_loadout.git_origin import (
@@ -10,7 +12,6 @@ from clagentic_loadout.git_origin import (
     host_of,
     parse_origin_url,
     read_origin_target,
-    redact_remote_url,
 )
 from tests._gate_repo import git
 
@@ -80,6 +81,14 @@ def test_the_host_is_the_parsed_hostname_never_a_substring(url, expected_host):
     assert target.host != HOST
 
 
+def test_the_dot_github_org_profile_repository_parses_and_dot_segments_do_not():
+    target = parse_origin_url(f"https://{HOST}/some-owner/.github.git")
+
+    assert target is not None and target.name == ".github"
+    assert parse_origin_url(f"https://{HOST}/some-owner/..") is None
+    assert parse_origin_url(f"git@{HOST}:some-owner/.") is None
+
+
 def test_host_of_reads_a_bare_host_or_a_url():
     assert host_of("Git-Host.Example.Test") == HOST
     assert host_of(f"http://{HOST}:3000") == HOST
@@ -110,7 +119,7 @@ def test_read_origin_target_reads_origin_at_the_git_top_level_from_a_subdirector
     "origin_url, needle",
     [
         (None, "no readable 'origin'"),
-        ("/srv/mirror/some-owner/some-repo.git", "not a recognised"),
+        ("/srv/mirror/some-owner/some-repo.git", "not a parseable remote URL"),
     ],
 )
 def test_an_unreadable_or_unparseable_origin_is_an_error_naming_the_tree(tmp_path, origin_url, needle):
@@ -159,7 +168,8 @@ def test_binding_refuses_the_same_owner_and_name_on_another_host_naming_both(tmp
 
     message = str(info.value)
     assert "other.example.test" in message and HOST in message
-    assert "https://other.example.test/some-owner/some-repo.git" in message
+    assert "'some-owner/some-repo'" in message and "origin" in message
+    assert "https://" not in message
 
 
 def test_binding_refuses_a_different_repository_on_the_expected_host(tmp_path):
@@ -198,28 +208,41 @@ def test_binding_with_no_expected_host_refuses_rather_than_passing(tmp_path):
         ConfigTreeBinding(expected_host="", slug="some-owner/some-repo").confirm(tree)
 
 
-@pytest.mark.parametrize(
-    "url, expected",
-    [
-        (f"https://user:secret@{HOST}/some-owner/some-repo.git", f"https://{HOST}/some-owner/some-repo.git"),
-        (f"https://secret@{HOST}:3000/some-owner/some-repo", f"https://{HOST}:3000/some-owner/some-repo"),
-        (f"https://a@b:secret@{HOST}/some-owner/some-repo", f"https://{HOST}/some-owner/some-repo"),
-        (f"https://{HOST}/some-owner/some-repo?token=secret#frag", f"https://{HOST}/some-owner/some-repo"),
-        (f"ssh://git@{HOST}/some-owner/some-repo", f"ssh://{HOST}/some-owner/some-repo"),
-        (f"git@{HOST}:some-owner/some-repo.git", f"{HOST}:some-owner/some-repo.git"),
-        (f"user:secret@{HOST}:some-owner/some-repo", f"{HOST}:some-owner/some-repo"),
-        (f"https://user:secret@{HOST}/a/b/c/d", f"https://{HOST}/a/b/c/d"),
-        ("/srv/local/some-repo.git", "/srv/local/some-repo.git"),
-    ],
-)
-def test_redact_remote_url_drops_credentials_and_keeps_the_location(url, expected):
-    assert redact_remote_url(url) == expected
+def test_the_url_echoing_helpers_and_the_target_url_field_are_gone():
+    import clagentic_loadout.git_origin as git_origin
 
-
-def test_a_parsed_target_carries_only_the_redacted_url():
+    for name in ("redact_remote_url", "describe_origin"):
+        assert not hasattr(git_origin, name), name
+        assert name not in git_origin.__all__
     target = parse_origin_url(f"https://user:secret@{HOST}/some-owner/some-repo.git")
+    assert target is not None
+    assert "url" not in {field.name for field in dataclasses.fields(target)}
+    assert not hasattr(target, "url")
+    assert "secret" not in repr(target)
 
-    assert target is not None and "secret" not in target.url and target.url.startswith("https://")
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"https://{HOST}/some-owner/some-repo?token=secret",
+        f"https://{HOST}/some-owner/some-repo#secret",
+        f"ssh://git@{HOST}/some-owner/some-repo?secret",
+        f"git@{HOST}:some-owner/some-repo?token=secret",
+        f"git@{HOST}:some-owner/some-repo#secret",
+        f"git@{HOST}:some-owner/secret/some-repo",
+        "secret/not-a-remote",
+    ],
+    ids=["https-query", "https-fragment", "ssh-query", "scp-query", "scp-fragment", "scp-path", "junk"],
+)
+def test_an_unparseable_origin_is_reported_without_its_text(tmp_path, url):
+    tree = _clone(tmp_path, url)
+
+    with pytest.raises(OriginBindingError) as info:
+        ConfigTreeBinding(HOST, "some-owner/some-repo").confirm(tree)
+
+    message = str(info.value)
+    assert "secret" not in message
+    assert "not a parseable remote URL" in message and str(tree.resolve()) in message
 
 
 def test_the_binding_error_for_an_unparseable_origin_names_the_configured_host(tmp_path):

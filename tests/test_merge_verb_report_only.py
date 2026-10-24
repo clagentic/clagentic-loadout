@@ -169,7 +169,8 @@ class TestReportOnlyRefusals:
         err = capsys.readouterr().err
         assert code == verb.EXIT_USAGE
         assert _writes(calls) == [] and not marker.exists()
-        assert str(tmp_path / "origin.git") in err and "the configured platform host is" in err
+        assert "not a parseable remote URL" in err
+        assert str(tmp_path / "origin.git") not in err
 
     def test_failing_pre_check_still_refuses_and_makes_no_write(self, tmp_path):
         failing = {"cmd": [_PY, "-c", "import sys; sys.exit(1)"], "on_failure": "fail"}

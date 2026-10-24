@@ -995,6 +995,36 @@ class TestGitWorkingTreeConfigRootSplit:
         assert code == verb.EXIT_USAGE
         assert not marker.exists()
 
+    def test_a_declared_wrapper_layout_with_the_git_tree_as_repo_path_runs_its_steps(self, tmp_path):
+        # The same setup as the refusal above, with --repo-path naming the git
+        # tree T (the direct child the wrapper config declares) instead of the
+        # non-git wrapper: the original assertions hold. The config at the
+        # wrapper X is accepted because it declares merge.git_working_tree
+        # naming T, steps run from X, and the tree sync runs in T.
+        wrapper_dir = tmp_path / "wrapper"
+        wrapper_dir.mkdir()
+        (wrapper_dir / ".crew").mkdir()
+        git_tree_dir = wrapper_dir / "repo"
+        git_tree_dir.mkdir()
+        _init_repo_with_origin(git_tree_dir)
+        assert not (wrapper_dir / ".git").exists()
+
+        marker = wrapper_dir / "post-merge-ran.txt"
+        _write_merge_config(
+            wrapper_dir,
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
+            git_working_tree="repo",
+        )
+        argv = _base_args(**{"--repo-path": str(git_tree_dir)})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(),
+        )
+        assert code == verb.EXIT_OK
+        assert marker.read_text() == "ran"
+
     def test_knob_present_but_target_not_a_git_tree_fails_loud(self, tmp_path):
         # A misconfigured knob (subpath does not actually contain a git tree)
         # must still fail loud via tree_sync's own contract -- never a
