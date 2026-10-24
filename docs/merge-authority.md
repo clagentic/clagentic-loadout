@@ -598,6 +598,18 @@ head is the PR's current head. Consequences:
   recorded CLEAN is then refused, naming the missing input. There is no fallback from one
   source to the other.
 
+### Docs-only waivers at the gate
+
+A fence that took the lighter docs-only review ([verbs.md](verbs.md#docs-only-review)) is
+judged exactly like any other: the gate requires a verdict for every required reviewer role
+and for every one of them the checks above, and it computes the outcome from the
+`evaluated_findings` the fence carries (on the lighter path, only what the reviewer judged, so
+a possible secret blocks and advisory findings are not in the set). Nothing about the lighter
+path relaxes a gate. What the gate adds is the audit: for each fence whose `docs_only` object
+records an accepted justification it prints one `merge: WAIVER -- ...` line, and the
+merge-completion attestation carries the lines in a `Docs-only waivers` row. A rejected
+justification shows none.
+
 ### Per-PR rulings at the gate
 
 When a ruling registry is configured ([review-evaluator.md](review-evaluator.md), "Per-PR

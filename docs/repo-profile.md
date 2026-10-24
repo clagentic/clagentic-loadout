@@ -30,6 +30,10 @@ deny:                           # optional; released-tool only
 tool_packages: [some_tool]      # optional; internal only
 test:                           # optional; the commands `clagentic-loadout test run` uses
   full: [python3, -m, pytest, "--junitxml={junit}"]
+review:                         # optional; read only by gates, from the merge base
+  docs_only:
+    paths: ["docs/**/*.md"]     # files that may count as documentation
+    depended_on: ["docs/README.md"]  # globs that are code although they look like docs
 exposure: local_or_ci_only      # risk posture, read only by gates; see below
 data: public_or_none
 visibility: public
@@ -63,6 +67,36 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
 - **`test`** declares the argv `clagentic-loadout test run` uses for `full`, `impacted` and
   `files`, a default `base`, and named `tiers`. Review ignores it. Its shape and use are in
   [repo-test.md](repo-test.md).
+
+- **`review`** holds `docs_only`, the docs allowlist (next section). Review reads it; nothing
+  else does.
+
+## The docs allowlist (`review.docs_only`)
+
+`review.docs_only` declares which changed files may count as documentation, so a change that
+touches nothing else can take the lighter docs-only review
+([verbs.md](verbs.md#docs-only-review)). It is read only by gates and
+`loadout-changeset classify`, from the **merge base**, so a pull request that edits it is
+judged by the list it started from, and a change to the profile is itself code.
+
+| Key | Meaning |
+|---|---|
+| `paths` | Path globs (`*` and `?` stay in one segment, `**` spans segments) whose files may be documentation. |
+| `depended_on` | Path globs that are code even though they look like docs: the agent and instruction files and the specs or docs other work depends on. They win over `paths`. |
+
+Absent means nothing is docs-only: every change is code. A path that matches `paths` is still
+code when it is a configuration or data file (`yaml`, `yml`, `json`, `toml`, `ini`, `cfg`), sits
+in a CI or host workflow directory or the loadout configuration directory, is a hook, a script or
+other source file or a dotfile, or is an executable, symlink or submodule entry. The tool names no
+agent or instruction file; list yours in `depended_on`. The schema is as strict as the rest of the
+profile: an unknown key, a non-list, an empty or absolute glob or one with a `..` segment makes the
+whole file invalid.
+
+A repository adopting the list lands it on the base branch first, in a change of its own: the
+profile is read at the merge base, so the change that adds it is not classified by it. The
+release that reads `review` must be installed wherever the profile is read, because an older
+release reads an unknown key as an invalid profile; that is why this repository declares the
+list only once the release that reads it is the one installed.
 
 ## Risk posture
 
