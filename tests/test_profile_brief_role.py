@@ -157,6 +157,26 @@ def test_a_gate_role_does_not_need_a_profile(tmp_path, capsys):
     assert code == pv.EXIT_OK and result["shaped_for"] == "gate"
 
 
+@pytest.mark.parametrize("role", ["reviewer", "release-manager", "merger"])
+def test_a_gate_role_with_a_ref_that_does_not_exist_exits_62_naming_it(tmp_path, capsys, role):
+    repo = profile_repo(tmp_path)
+
+    code, result, err = _run(
+        capsys, "brief", "--role", role, "--repo-path", str(repo), "--ref", "no-such-revision"
+    )
+
+    assert code == pv.EXIT_IO_FAILED == 62 and result is None
+    assert "no-such-revision" in err
+
+
+def test_a_gate_role_with_a_ref_that_exists_reports_it_as_read(tmp_path, capsys):
+    repo = profile_repo(tmp_path)
+
+    code, result, _ = _run(capsys, "brief", "--role", "reviewer", "--repo-path", str(repo), "--ref", "HEAD")
+
+    assert code == pv.EXIT_OK and result["at"] == "HEAD" and result["shaped_for"] == "gate"
+
+
 def test_other_classes_get_the_class_and_its_rules_for_context(tmp_path, capsys):
     repo = profile_repo(tmp_path)
 

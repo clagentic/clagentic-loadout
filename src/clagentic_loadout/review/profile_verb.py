@@ -265,16 +265,22 @@ def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
         resolution = resolve_role(args.role, load_role_classes(config_root))
     except RoleVocabularyError as exc:
         raise ProfileVerbError(str(exc), EXIT_USAGE) from exc
-    base = _WORKING_TREE if args.ref is None else args.ref
-    if resolution.role_class == CLASS_GATE:
-        # A gate's read of the profile is its own, at the merge base.
-        print(json.dumps({"result": "brief", "at": base, **role_brief(None, resolution)}))
-        return EXIT_OK
     reader, base = _reader(args)
     try:
         present = set(reader.list_paths(base))
     except PolicyReadError as exc:
-        raise ProfileVerbError(f"cannot list {args.repo_path!r} at {base}: {exc}", EXIT_IO_FAILED) from exc
+        if resolution.role_class == CLASS_GATE and args.ref is None:
+            present = set()
+        else:
+            raise ProfileVerbError(
+                f"cannot list {args.repo_path!r} at {base}: {exc}", EXIT_IO_FAILED
+            ) from exc
+    if resolution.role_class == CLASS_GATE:
+        # A gate's read of the profile is its own, at the merge base. The tree
+        # is listed above so a --ref that does not exist is refused rather than
+        # reported as read; without --ref a gate brief needs no tree at all.
+        print(json.dumps({"result": "brief", "at": base, **role_brief(None, resolution)}))
+        return EXIT_OK
     profile, state, problem = read_repo_profile(reader, base, present)
     if state == PROFILE_MISSING:
         print(json.dumps({"result": "missing", "path": PROFILE_PATH, "at": base}))
