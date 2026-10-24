@@ -152,6 +152,19 @@ documented step ordering):
      (EXIT_PRE_MERGE_CANARY_FAILED) naming the command and its output tail.
      No key, no run, no output. Not lifted by --skip-pre-checks or
      --ignore-repo-gate; runs under --report-only like step 8b.
+  8d. Verdict records (merge.record_gate, verdict_record) -- a gate output is a
+     record or a refusal. This verb records its own CI read and pre-merge
+     checks for the head it is about to merge, then reads, through the one
+     verdict_record reader, a record at EXACTLY that head for every gate the
+     configuration requires: each required reviewer role, each configured
+     pre-merge check, the CI read, and each `push.verify` entry when the
+     repository configures it. A gate with no record at the head (or a record
+     only for another head) is NOT MEASURED and refuses with
+     EXIT_GATE_RESULT_BLOCKED, naming the gate, the head expected and the head
+     of the record found; a record that did not pass refuses the same way. A
+     reviewer verdict fence that steps 5/5a accepted at the exact head counts as
+     that role's record (a verdict posted before records existed). Runs under
+     --report-only like the gates above.
   9. Only after ALL of the above pass: execute the merge via the resolved
      backend's merge_pr (Forgejo or GitHub, both via a redirect-hardened
      transport), passing args.merge_method THROUGH to the backend (lr-14f704
@@ -597,6 +610,13 @@ from clagentic_loadout.merge.required_reviewers import (
     parse_required_reviewers,
     resolve_required_reviewers,
 )
+from clagentic_loadout.merge.record_gate import (
+    GateRun,
+    check_gate_records,
+    emit_merge_records,
+    required_gates,
+    unmeasured_reviewer_message,
+)
 from clagentic_loadout.merge.reviewer_login import resolve_reviewer_login
 from clagentic_loadout.merge.stale_sha import check_stale_head_sha
 from clagentic_loadout.merge.tree_sync import (
@@ -622,6 +642,7 @@ from clagentic_loadout.push.namespace_guard import (
     check_namespace_allowed,
     resolve_allowed_namespaces,
 )
+from clagentic_loadout.push.verify_config import InvalidVerifyConfigError, load_verify_entries
 from clagentic_loadout.review.errors import ReviewPostError, ReviewVerifyError
 from clagentic_loadout.review.forgejo_backend import post_and_verify_comment as _forgejo_post_and_verify_comment
 from clagentic_loadout.review.github_backend import post_and_verify_review as _github_post_and_verify_review
@@ -650,6 +671,16 @@ from clagentic_loadout.transport.git_host_api import (
 )
 from clagentic_loadout.transport.provider_config import resolve_platform_provider
 from clagentic_loadout.transport.readback_envelope import READBACK_ENVELOPE_KEY
+from clagentic_loadout.sha import compare_sha_values
+from clagentic_loadout.verdict_record.reader import record_from_fence
+from clagentic_loadout.verdict_record.record import (
+    KIND_REVIEWER,
+    RecordFormatError,
+    VerdictRecord,
+    gate_name,
+    utc_timestamp,
+)
+from clagentic_loadout.verdict_record.store import StoreError
 
 # ---------------------------------------------------------------------------
 # Exit codes — one reserved range for the merge verb.
@@ -1495,6 +1526,9 @@ def _run(
 
     # 5. Reviewer-verdict fences — for each required reviewer.
     gate_evaluations: list[GateEvaluation] = []
+    # Records read from fences the checks below accepted at the exact head, for a
+    # verdict posted before verdict records existed (verdict_record.reader).
+    fence_records: dict[str, list[VerdictRecord]] = {}
     if required_reviewers:
         if not current_head_sha:
             _fail(
@@ -1687,7 +1721,21 @@ def _run(
                     if from_repo_gate
                     else ""
                 )
-                _fail(f"{exc}{hint}", code=EXIT_GATE_RESULT_BLOCKED)
+                # A role with no verdict at the head is also a gate that was not
+                # measured there; say so, naming the gate and both heads.
+                unmeasured = (
+                    unmeasured_reviewer_message(
+                        reviewer_name,
+                        head_sha=current_head_sha,
+                        repo=f"{owner}/{repo}",
+                        untrusted_roots=((Path(args.repo_path),) if args.repo_path else ()),
+                    )
+                    if isinstance(exc, (VerdictMissingError, VerdictStaleError))
+                    else None
+                )
+                lead = f"{unmeasured}\n" if unmeasured else ""
+                _fail(f"{lead}{exc}{hint}", code=EXIT_GATE_RESULT_BLOCKED)
+            comment_times ={c.get("id"): c.get("created_at") for c in comments}
             for verdict_obj in head_fences:
                 print(
                     f"merge: {reviewer_name!r} verdict PASSED -- "
@@ -1696,6 +1744,23 @@ def _run(
                     f"comment_id={verdict_obj.comment_id}",
                     file=sys.stderr,
                 )
+                # The fence passed every check above at the PR head, which makes
+                # it that head's passing measurement for this role (exit 0 even
+                # when the fence itself records a blocking status that a standing
+                # ruling or disposition cleared). The record carries the full head
+                # the gate compared against, never the fence's own possibly
+                # abbreviated spelling.
+                if compare_sha_values(verdict_obj.head_sha, current_head_sha):
+                    fence_records.setdefault(gate_name(KIND_REVIEWER, reviewer_name), []).append(
+                        record_from_fence(
+                            gate=gate_name(KIND_REVIEWER, reviewer_name),
+                            head_sha=current_head_sha,
+                            exit=0,
+                            comment_id=verdict_obj.comment_id,
+                            created_at=comment_times.get(verdict_obj.comment_id),
+                            repo=f"{owner}/{repo}",
+                        )
+                    )
 
     # 6. Diff-scope cap.
     try:
@@ -1807,6 +1872,7 @@ def _run(
         dict.fromkeys((*repo_gate.required_ci_checks, *(args.required_ci_checks or ())))
     )
     ci_strict = repo_gate.ci_strict or args.ci_strict
+    ci_started = utc_timestamp()
     try:
         ci_result = backend.fetch_ci_status(owner, repo, current_head_sha)
     except GateFactUnavailableError as exc:
@@ -1836,6 +1902,7 @@ def _run(
         )
     except CiStatusFailedError as exc:
         _fail(str(exc), code=EXIT_CI_STATUS_FAILED)
+    ci_run = GateRun(started=ci_started, finished=utc_timestamp())
 
     # 8b. Pre-merge checks gate (merge.pre_checks_config, lr-843900) -- see
     # this module's docstring, "PRE-MERGE CHECKS", for the full contract.
@@ -1846,6 +1913,7 @@ def _run(
     # this PR lands. No local tree
     # (--no-post-merge-tree/--skip-post-merge) declares no checks, the same
     # pre-existing boundary every other repo-tier key has.
+    pre_checks_run: GateRun | None = None
     if args.skip_pre_checks:
         print(
             f"merge: pre_checks gate BYPASSED via --skip-pre-checks for "
@@ -1861,6 +1929,7 @@ def _run(
         )
     elif repo_gate.pre_checks:
         pre_checks = list(repo_gate.pre_checks)
+        pre_checks_started = utc_timestamp()
         try:
             gate_git_tree = resolve_gate_git_tree(args.repo_path)
         except PostMergeConfigError:
@@ -1948,6 +2017,7 @@ def _run(
             f"PASSED for PR #{args.pr_number} in {owner}/{repo}",
             file=sys.stderr,
         )
+        pre_checks_run = GateRun(started=pre_checks_started, finished=utc_timestamp())
 
     # 8c. Operator-configured pre-merge canary (merge.pre_merge_canary). Read
     # from the user-level config, so neither the PR nor a repo flag controls it:
@@ -1985,6 +2055,55 @@ def _run(
         print(
             f"merge: pre-merge canary -- PASSED for PR #{args.pr_number} in {owner}/{repo}",
             file=sys.stderr,
+        )
+
+    # 8d. Verdict records (merge.record_gate): a gate output is a record or a
+    # refusal. This verb's own CI read and pre-merge checks are recorded now, for
+    # the head about to be merged, and every required gate is then read back at
+    # exactly that head through the one reader. A gate with no record there is
+    # not measured, and a gate that is not measured is never a pass.
+    pre_check_steps = list(repo_gate.pre_checks) if pre_checks_run is not None else []
+    try:
+        push_verify_names = (
+            [entry.name for entry in load_verify_entries(Path(args.repo_path))] if args.repo_path else []
+        )
+    except InvalidVerifyConfigError as exc:
+        _fail(
+            f"push.verify config FAILED to load -- {exc} -- the gates this repository requires "
+            f"cannot be known, so PR #{args.pr_number} in {owner}/{repo} is not merged.",
+            code=EXIT_GATE_RESULT_BLOCKED,
+        )
+    record_untrusted_roots = (Path(args.repo_path),) if args.repo_path else ()
+    try:
+        emit_merge_records(
+            head_sha=current_head_sha,
+            repo=f"{owner}/{repo}",
+            ci=ci_run,
+            pre_check_steps=pre_check_steps,
+            pre_checks=pre_checks_run,
+            untrusted_roots=record_untrusted_roots,
+        )
+        record_refusal = check_gate_records(
+            required_gates(
+                reviewer_names=list(required_reviewers),
+                pre_check_steps=pre_check_steps,
+                push_verify_names=push_verify_names,
+            ),
+            head_sha=current_head_sha,
+            repo=f"{owner}/{repo}",
+            adapted=fence_records,
+            untrusted_roots=record_untrusted_roots,
+        )
+    except (StoreError, RecordFormatError) as exc:
+        _fail(
+            f"verdict records could not be written or read -- {exc} -- refusing to merge "
+            f"PR #{args.pr_number} in {owner}/{repo}: a gate with no record is not measured.",
+            code=EXIT_GATE_RESULT_BLOCKED,
+        )
+    if record_refusal is not None:
+        _fail(
+            f"{record_refusal}\nRefusing to merge PR #{args.pr_number} in {owner}/{repo}.",
+            code=EXIT_GATE_RESULT_BLOCKED,
         )
 
     # --report-only stops here: every gate above ran exactly as a real merge

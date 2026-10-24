@@ -49,6 +49,7 @@ from clagentic_loadout.review import ruling_verb
 from clagentic_loadout.review import verb as review_verb
 from clagentic_loadout.transport import git_host_api
 from clagentic_loadout.transport import stage_body_verb
+from clagentic_loadout.verdict_record import verb as record_verb
 from clagentic_loadout.wait import cli as wait_cli
 
 _PACKAGE_VERSION = get_version()
@@ -77,6 +78,7 @@ _ARGPARSE_VERBS = [
     ("provision-allowlist", provisioning_cli.main, "--version"),
     ("doctor", doctor_cli.main, "--version"),
     ("test", test_verb.main, "--version"),
+    ("record", record_verb.main, "--version"),
 ]
 
 
@@ -158,7 +160,7 @@ def test_umbrella_help_exits_ok_and_lists_verbs(capsys) -> None:
     rc = umbrella_main(["--help"])
     assert rc == 0
     out = capsys.readouterr().out
-    for expected in ("push", "merge", "review", "reviewer-login", "git-host-api", "stage-body", "provision-allowlist", "doctor", "test", "release dispatch", "release detect", "wait poll", "wait scoped-test"):
+    for expected in ("push", "merge", "review", "reviewer-login", "git-host-api", "stage-body", "provision-allowlist", "doctor", "test", "record", "release dispatch", "release detect", "wait poll", "wait scoped-test"):
         assert expected in out, f"umbrella --help missing verb listing for {expected!r}"
 
 
@@ -207,6 +209,9 @@ def test_umbrella_unknown_grouped_subverb_reports_reserved_exit_code(capsys) -> 
         ["test"],
         ["test", "run"],
         ["test", "report"],
+        ["record"],
+        ["record", "show"],
+        ["record", "list"],
     ],
     ids=lambda argv: " ".join(argv),
 )

@@ -140,6 +140,12 @@ def _test_main(argv: list[str]) -> int:
     return test_main(argv)
 
 
+def _record_main(argv: list[str]) -> int:
+    from clagentic_loadout.verdict_record.verb import main as record_main
+
+    return record_main(argv)
+
+
 #: verb name -> (one-line summary, entry-point callable taking the verb's
 #: own argv and returning its process exit code). A verb with a
 #: single-word name (push, merge) dispatches directly; a verb with a
@@ -177,6 +183,7 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         "Run a repo's declared tests (run); read results by run id (report).",
         _test_main,
     ),
+    "record": ("Read the verdict records gates left for a commit (show, list).", _record_main),
 }
 
 #: Parent verb name -> {subverb name: (summary, callable)}.

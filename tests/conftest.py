@@ -316,6 +316,23 @@ def _isolate_user_config_root(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_verdict_records_root(monkeypatch, tmp_path):
+    """Autouse repo-wide: verdict records are written and read in a directory
+    of the test's own, never the host's.
+
+    The directory is a SIBLING of tmp_path rather than a child. A test that
+    names tmp_path (or a directory in it) as the repository under review would
+    otherwise put the records inside that repository, which the store refuses
+    as a place the pull request could write. The sibling name matches the
+    pattern the tmp_path cleanup below removes with tmp_path itself. A test of
+    the default location deletes the variable, which wins."""
+    monkeypatch.setenv(
+        "CLAGENTIC_LOADOUT_VERDICT_RECORDS_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-verdict-records"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _confine_git_discovery_to_tmp(monkeypatch, tmp_path):
     """Autouse repo-wide: git's upward repo discovery never leaves the
     pytest temp tree.
