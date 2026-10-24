@@ -2702,8 +2702,12 @@ of `--repo` on the platform's configured host:
 - One tree supplies all three: the origin, the fallback gate keys and the steps are read for
   the git top-level T of `--repo-path`. The tree that is confirmed is always T, never a tree a
   config file names.
-- Any remote shown in a refusal has its credentials removed: userinfo, query and fragment are
-  dropped, leaving `scheme://host/owner/name`.
+- No error, log line or JSON output of these verbs echoes the `origin` URL, raw or redacted.
+  A refusal names only parsed parts: the remote name `origin`, the parsed host and owner/name,
+  and the resolved paths. An `origin` that does not parse (including one carrying a query or
+  fragment) is reported as "not a parseable remote URL" without its text, so a token embedded in
+  any part of the URL cannot reach stdout, stderr or a log. The `--repo` / `--repo-path`
+  consistency check uses the same parser and the same rule.
 
 **Which config file is read.** Every merge-verb reader of the deployment file (`post_merge_steps`
 and `post_merge_steps` presence, the fallback gate keys, `merge_requirements`,
@@ -2729,8 +2733,8 @@ the `pre_checks` readers) resolves the file through one resolver:
 declaration; an undeclared wrapper now refuses loudly (`1` before anything is merged) instead of
 being read without proof that it belongs to the tree.
 
-A refusal names the resolved tree, its `origin` (without credentials), its host, and the
-configured host. For
+A refusal names the resolved tree, the remote name `origin` with its parsed host and owner/name,
+and the configured host. For
 `post_merge_steps`, the verb exits `1` as the last check before the merge call, so nothing is
 merged (the check applies only when the file declares steps, and not with `--skip-post-merge`). For the
 fallback gate, the keys are not used and the merge is refused through the same path as an

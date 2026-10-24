@@ -84,7 +84,7 @@ from pathlib import Path
 
 import yaml
 
-from clagentic_loadout.git_origin import describe_origin
+from clagentic_loadout.git_origin import OriginBindingError, read_origin_target
 
 #: Canonical relative path (from a repo root) to the single sectioned
 #: per-repo loadout config file. Every loadout verb that reads repo-local
@@ -378,7 +378,7 @@ def _config_file_at(
 class ConfigRootRefusedError(ValueError):
     """A config file above the git tree cannot be accepted as that tree's config.
     The message names the resolved tree, the directory holding the file and the
-    tree's origin (credentials removed)."""
+    tree's origin as parsed host and owner/name only, never the remote's URL text."""
 
 
 def _refusal(
@@ -389,10 +389,15 @@ def _refusal(
     section: str,
     declaration_key: str,
 ) -> ConfigRootRefusedError:
+    try:
+        target = read_origin_target(tree)
+        remote = f"remote origin {target.slug!r} on host {target.host!r}"
+    except OriginBindingError:
+        remote = "remote origin is not a readable, parseable remote URL"
     return ConfigRootRefusedError(
         f"the config file {config_file} above the git tree is refused: {why}. "
         f"Resolved git tree {str(tree)!r}, config root {str(directory)!r}, "
-        f"origin {describe_origin(tree)!r}. A config in the directory holding the git "
+        f"{remote}. A config in the directory holding the git "
         f"tree must declare {section}.{declaration_key} naming that tree; any other "
         f"config above the tree that holds merge settings is not used."
     )
@@ -458,7 +463,7 @@ def resolve_bound_config_root(
       3. Any config file anywhere above T whose *section* holds one of
          *guarded_keys* or the declaration, and which rule 2 does not accept, is
          refused with ConfigRootRefusedError naming T, its directory and T's
-         origin. A file above T that cannot be read is refused the same way,
+         parsed origin host and owner/name. A file above T that cannot be read is refused the same way,
          because what it would have declared cannot be known. Files above T that
          hold none of those keys are ignored.
       4. Otherwise *repo_root* (resolved), as when no config exists.

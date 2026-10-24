@@ -346,7 +346,8 @@ def gate_from_deployment_config(
     in the directory holding the tree when that file declares
     `merge.git_working_tree` naming it. A file above the tree that holds gate
     keys and is not accepted that way makes the result the "nothing readable"
-    gate, naming the tree, the config root and the remote.
+    gate, naming the tree, the config root and the parsed origin host and
+    owner/name.
 
     With *config_binding*, a file that declares gate keys is used only if the
     git top-level of *repo_path* (the tree the file is read for, never a tree a

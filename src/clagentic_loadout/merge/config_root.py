@@ -32,7 +32,8 @@ from clagentic_loadout.repo_config import (
 
 class MergeConfigRootRefusedError(PostMergeConfigError):
     """A config file above the git tree of ``--repo-path`` cannot be used. The
-    message names the resolved tree, the config root and the tree's origin."""
+    message names the resolved tree, the config root and the tree's parsed origin
+    host and owner/name, never the remote's URL text."""
 
 
 def _vocabulary() -> dict:

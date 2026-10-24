@@ -36,7 +36,8 @@ def config_binding_for(platform: str, git_host_base: str, repo_slug: str) -> Con
 
 
 def require_confirmed_tree(binding: ConfigTreeBinding, repo_path: str, *, reading: str) -> None:
-    """Raise MergeUsageError, naming the resolved tree, remote and host, when
+    """Raise MergeUsageError, naming the resolved tree, the remote name origin
+    and the parsed host and owner/name (never the remote's URL text), when
     *repo_path* is not a confirmed clone for *binding*. *reading* names what
     would have been read from it.
 
@@ -56,7 +57,7 @@ def require_resolvable_config_root(repo_path: str) -> None:
     """Raise MergeUsageError when a config file above the git tree of
     *repo_path* holds merge settings that cannot be accepted (see
     `merge.config_root`). The message names the resolved tree, the config root
-    and the remote. Run before anything is merged or checked out, so the
+    and the parsed origin host and owner/name. Run before anything is merged or checked out, so the
     refusal is never a half-finished merge."""
     try:
         resolve_merge_config_root(repo_path)

@@ -53,38 +53,24 @@ check_repo_path_consistency docstring.
 
 from __future__ import annotations
 
-import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from clagentic_loadout.git_origin import redact_remote_url
+from clagentic_loadout.git_origin import parse_origin_url
 from clagentic_loadout.merge.errors import MergeUsageError
-
-#: Matches an SSH-form git remote: git@host:owner/repo[.git], or the
-#: ssh://git@host/owner/repo[.git] long form. Captures (owner, repo).
-_SSH_SHORT_FORM_RE = re.compile(
-    r"^[^@]+@[^:/]+:(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
-)
-_SSH_LONG_FORM_RE = re.compile(
-    r"^ssh://[^@]+@[^/]+(?::\d+)?/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
-)
-#: HTTPS/HTTP-form git remote: scheme://[userinfo@]host[:port]/owner/repo[.git]
-_HTTPS_FORM_RE = re.compile(
-    r"^https?://(?:[^@/]+@)?[^/]+/(?P<owner>[^/]+)/(?P<repo>[^/]+?)(?:\.git)?/?$"
-)
 
 
 def _parse_owner_repo_from_remote(remote_url: str) -> tuple[str, str] | None:
-    """Extract (owner, repo) from a git remote URL in either SSH or HTTPS
-    form. Returns None (never raises) on a shape this module does not
-    recognize -- the caller treats that as "unparseable", not a crash."""
-    url = remote_url.strip()
-    for pattern in (_HTTPS_FORM_RE, _SSH_LONG_FORM_RE, _SSH_SHORT_FORM_RE):
-        match = pattern.match(url)
-        if match:
-            return match.group("owner"), match.group("repo")
-    return None
+    """Extract (owner, repo) from a git remote URL with the one anchored
+    parser every merge-verb origin read shares (`git_origin.parse_origin_url`).
+    Returns None (never raises) on a shape it does not accept, including a
+    remote carrying a query or fragment -- the caller treats that as
+    "unparseable" and never prints the remote's text."""
+    target = parse_origin_url(remote_url)
+    if target is None:
+        return None
+    return target.owner, target.name
 
 
 def _normalize_owner_repo(owner: str, repo: str) -> str:
@@ -176,8 +162,7 @@ def check_repo_path_consistency(
             checked=False,
             matches=False,
             reason=(
-                f"{repo_path!r}'s origin remote {redact_remote_url(remote_url)!r} does not match "
-                f"a recognized SSH or HTTPS git remote shape "
+                f"{repo_path!r}'s origin remote is not a parseable remote URL "
                 f"(<scheme>://<host>/<owner>/<repo>[.git] or "
                 f"<user>@<host>:<owner>/<repo>[.git])."
             ),

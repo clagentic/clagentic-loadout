@@ -17,6 +17,11 @@ Accepted remote shapes (host is compared by equality, never by substring):
 
 The SSH and HTTPS forms of one host therefore bind identically. Anything else
 is unparseable and is refused, never passed.
+
+No message, log line or JSON output built here echoes the origin URL, raw or
+redacted. A refusal names only parsed parts: the remote name ``origin``, the
+parsed host and owner/name, and the resolved paths. An unparseable origin is
+reported without its text.
 """
 
 from __future__ import annotations
@@ -29,53 +34,33 @@ from urllib.parse import urlsplit
 
 _GIT_TIMEOUT_SECONDS = 10
 _URL_SCHEMES = frozenset({"http", "https", "ssh", "git", "git+ssh", "ssh+git"})
-_SEGMENT_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._-]*\Z")
+# One leading dot is allowed so the ".github" org-profile repository parses;
+# "." and ".." cannot, since a segment must contain an alphanumeric first.
+_SEGMENT_RE = re.compile(r"\A\.?[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 _SCP_RE = re.compile(r"\A(?:[^@/:\s]+@)?(?P<host>[^@/:\s\[\]]+):(?P<path>[^\s:][^\s]*)\Z")
 
 
 class OriginBindingError(Exception):
     """The tree cannot be confirmed as a clone of the named repository on the
-    expected host. The message names the resolved tree, remote and host."""
+    expected host. The message names the resolved tree, the remote name and the
+    parsed host and owner/name, never the remote's URL text."""
 
 
 @dataclass(frozen=True)
 class OriginTarget:
     """What one ``origin`` URL says: its lowercased host, owner and name (the
-    ``.git`` suffix removed), the URL with any userinfo removed (never the raw
-    string, so it is safe to print) and the git top-level it was read at
-    (empty for a bare parse)."""
+    ``.git`` suffix removed) and the git top-level it was read at (empty for a
+    bare parse). The URL string itself is deliberately not kept, so nothing
+    that prints a target can print a credential embedded in the remote."""
 
     host: str
     owner: str
     name: str
-    url: str
     top_level: str = ""
 
     @property
     def slug(self) -> str:
         return f"{self.owner}/{self.name}"
-
-
-_AUTHORITY_RE = re.compile(r"\A(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<authority>[^/?#]*)(?P<rest>.*)\Z", re.S)
-
-
-def redact_remote_url(url: str) -> str:
-    """*url* with everything that can carry a credential removed, for any
-    message, log line or JSON output that names a remote.
-
-    Userinfo (user, password, token) is dropped from a URL or an scp-like
-    remote, and so are a query and a fragment, leaving ``scheme://host/path``
-    (or ``host:path``). Works on a string that does not parse as a remote,
-    which is the case an error message most needs it for. Never raises."""
-    text = url.strip()
-    match = _AUTHORITY_RE.match(text)
-    if match is not None:
-        authority = match.group("authority").rpartition("@")[2]
-        path = re.split(r"[?#]", match.group("rest"), maxsplit=1)[0]
-        return f"{match.group('scheme')}{authority}{path}"
-    if "@" in text.split("/", 1)[0]:
-        return text.rpartition("@")[2]
-    return text
 
 
 def host_of(value: str) -> str:
@@ -128,7 +113,7 @@ def parse_origin_url(url: str) -> OriginTarget | None:
         host = match.group("host").lower()
     if pair is None:
         return None
-    return OriginTarget(host=host, owner=pair[0], name=pair[1], url=redact_remote_url(text))
+    return OriginTarget(host=host, owner=pair[0], name=pair[1])
 
 
 def _git(tree: str, *args: str) -> tuple[int, str, str]:
@@ -166,20 +151,9 @@ def read_origin_target(tree: str | Path) -> OriginTarget:
     target = parse_origin_url(url)
     if target is None:
         raise OriginBindingError(
-            f"the origin remote {redact_remote_url(url)!r} of the git tree {top!r} is not a "
-            "recognised https, ssh:// or scp-like remote naming owner/name"
+            f"the origin remote of the git tree {top!r} is not a parseable remote URL"
         )
-    return OriginTarget(target.host, target.owner, target.name, target.url, top)
-
-
-def describe_origin(tree: str | Path) -> str:
-    """The ``origin`` remote of *tree* with credentials removed, for a message
-    that must name the remote; a short reason in angle brackets when there is
-    none to name. Never raises."""
-    code, url, _err = _git(str(tree), "remote", "get-url", "origin")
-    if code != 0 or not url:
-        return "<no readable origin>"
-    return redact_remote_url(url)
+    return OriginTarget(target.host, target.owner, target.name, top)
 
 
 @dataclass(frozen=True)
@@ -203,18 +177,18 @@ class ConfigTreeBinding:
             ) from exc
         if not wanted_host:
             raise OriginBindingError(
-                f"the configured platform host {self.expected_host!r} names no host to compare "
-                f"against origin {target.url!r} of the git tree {target.top_level!r}"
+                "the configured platform host names no host to compare against the origin "
+                f"remote of the git tree {target.top_level!r}"
             )
         if target.host != wanted_host:
             raise OriginBindingError(
-                f"the git tree {target.top_level!r} has origin {target.url!r} on host "
-                f"{target.host!r}, but the configured platform host is {wanted_host!r}"
+                f"the remote origin of the git tree {target.top_level!r} is {target.slug!r} on "
+                f"host {target.host!r}, but the configured platform host is {wanted_host!r}"
             )
         if target.slug.lower() != self.slug.strip().lower():
             raise OriginBindingError(
-                f"the git tree {target.top_level!r} has origin {target.url!r}, which is "
-                f"{target.slug!r} on host {target.host!r}, not {self.slug!r}"
+                f"the remote origin of the git tree {target.top_level!r} is {target.slug!r} on "
+                f"host {target.host!r}, not {self.slug!r}"
             )
         return target
 
@@ -223,9 +197,7 @@ __all__ = [
     "ConfigTreeBinding",
     "OriginBindingError",
     "OriginTarget",
-    "describe_origin",
     "host_of",
     "parse_origin_url",
     "read_origin_target",
-    "redact_remote_url",
 ]
