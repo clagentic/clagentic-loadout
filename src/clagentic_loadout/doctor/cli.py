@@ -39,6 +39,7 @@ from clagentic_loadout.doctor.checks import (
     check_pre_checks_sandbox,
     check_repo_loadout_schema,
 )
+from clagentic_loadout.doctor.roles_groups_check import check_roles_and_groups
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -67,7 +68,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "-- an unsatisfiable gate; the same mismatch WARNs instead when "
             "the repo declares no roles: section at all, since that check "
             "falls back to a reference role taxonomy rather than this "
-            "repo's own declaration). Also flags post_merge_steps declared "
+            "repo's own declaration). Checks the user-level role_classes "
+            "section and the groups file for loadout-rules, and, inside a "
+            "repo, reports a profile class that disagrees with the class the "
+            "groups file assigns it as an advisory only. Also flags post_merge_steps declared "
             "in a file matching the deployment's merge.foreign_config_globs "
             "(user-level config; none by default) when the repo's own "
             ".clagentic/loadout/config.yaml declares none -- that key is "
@@ -166,6 +170,11 @@ def main(argv: list[str] | None = None) -> int:
     results.append(check_builder_identity_config(config_root=config_root))
     results.append(check_attestation_source_configured(config_root=config_root))
     results.append(check_pre_checks_sandbox(config_root=config_root))
+    results.append(
+        check_roles_and_groups(
+            Path(repo_root) if repo_root is not None else None, config_root=config_root
+        )
+    )
     if repo_root is not None:
         results.append(check_repo_loadout_schema(Path(repo_root)))
         results.append(

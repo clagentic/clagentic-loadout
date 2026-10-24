@@ -46,6 +46,27 @@ roles:
     - git-host-api
 
 # ---------------------------------------------------------------------------
+# Role vocabulary and classes (docs/verbs.md "Roles and classes"). The roles
+# above are the legacy words; each is an alias of a role in the final
+# vocabulary (security = security-reviewer, merger = release-manager,
+# lead = project-orchestrator) and every role belongs to a class (coordinate,
+# scope, build, gate, inform, host). A feature keys on the class where
+# behaviour is shared and on the role where it is not -- never on an agent name.
+#
+# The class of a role is overridden, and a role of your own given a class, in
+# the USER-LEVEL config file (~/.config/clagentic/loadout/config.yaml), never
+# here: a repo's own file must not steer what its roles may do. There:
+#
+#   role_classes:
+#     <your-role>: build
+#
+# The same file names the groups file `loadout-rules` reads:
+#
+#   rules:
+#     groups_file: <path to a groups file kept outside any repo>
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
 # merge: -- merge-gate declarations (docs/provisioning.md "Merge-gate config
 # homes"). Every key here is REPO-TIER policy (never an identity/login/
 # credential -- those live in the deployment-tier user config instead).
