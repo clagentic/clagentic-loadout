@@ -1729,6 +1729,123 @@ environment, not the caller's own: `PATH`, `HOME`, `LANG`, `LC_*` and `TMPDIR` o
 tokens and API keys in the pushing process are not inherited, and the minted push
 credential is never added. An entry that needs more names them in `env_passthrough`.
 
+### Verdict records
+
+A **verdict record** is what one gate measured of one exact commit. The steps that
+already measure a commit each write one, and `loadout-merge` reads them back for
+the head it is about to merge. A gate that did not run has no record, and the
+merge reads that absence as a refusal. Absence is never a pass.
+
+**The record.** The published contract is
+[`verdict-record.schema.json`](../src/clagentic_loadout/schemas/verdict-record.schema.json)
+(`schema_version` 1). Fields:
+
+| field | meaning |
+| --- | --- |
+| `schema_version` | version of this shape (`1`) |
+| `id` | `YYYYMMDDTHHMMSSZ-<8 hex>`; the handle `loadout-record show` reads by |
+| `gate` | which gate measured: `reviewer:<role>`, `pre_check:<label>`, `push.verify:<entry name>`, or the bare `ci` |
+| `head_sha` | the exact commit measured (40 or 64 hex digits). For a push, the head read back from the remote after the push |
+| `tree_sha` | the tree of `head_sha`, when known (null otherwise) |
+| `repo` | `owner/repo`, when known. A record naming another repository does not count |
+| `spec_hash` | hash of the acceptance specification measured against; **null until a specification is attached to the change** (the slot exists, nothing writes it yet) |
+| `tool` | what measured (`loadout-push`, `loadout-review-post`, `loadout-merge`, or `verdict-fence`) |
+| `exit` | `0` passes; anything else is a failed measurement |
+| `started`, `finished` | UTC timestamps, to the second |
+| `evidence_ref` | where the evidence lives (`comment:<id>` for a posted verdict), or null |
+| `waiver` | reserved for the merge record: a stated reason a gate was waived. Null; nothing writes it yet |
+
+Gate names come from configuration the caller already holds: reviewer roles from
+`merge.required_reviewer_roles` and `--required-reviewer`, pre-check labels from
+`merge.pre_checks` (the step's `description`, else its command), entry names from
+`push.verify`. No role or check is listed in the code.
+
+**Where each record is written.**
+
+| gate | written by | when | `head_sha` |
+| --- | --- | --- | --- |
+| `push.verify:<name>` | `loadout-push` | create path: after the post-push remote readback, only when the remote head read back equals the commit the checks ran against. `--update-pr`: after the checks run at a checkout proven to be the PR head, pass or fail | the head the remote holds / the PR head |
+| `reviewer:<role>` | `loadout-review-post` (and so `loadout-review post`) | after a verdict post whose landed fence read back byte-identical | the `--verdict-head-sha` |
+| `pre_check:<label>`, `ci` | `loadout-merge` itself | at merge time, after the check passed, for the head about to be merged; `--report-only` writes them too | the PR's live head |
+
+A step that cannot leave a record (the store is unwritable, the remote head could
+not be read back) says so on stderr and does not undo the work it already did;
+the gate then reads as not measured. `loadout-push` never records against a head
+it could not confirm: a run that completed but whose pushed head cannot be read
+back leaves no record. A create-path run that fails its checks pushes nothing and
+records nothing; an `--update-pr` run that fails its checks records the failure
+and refuses.
+
+**Where records live.** One file per record, `<root>/<head sha>/<id>.json`, written
+atomically and readable by every user on the host (the identities that measure are
+not one process). The root is, in order: `CLAGENTIC_LOADOUT_VERDICT_RECORDS_DIR`,
+the user-level `verdict_records.dir` setting, then
+`<user config root>/state/verdict-records`, so an unconfigured deployment writes
+and reads records with no setup. A deployment whose identities do not share one
+home directory points all of them at one shared location with the variable or the
+setting. A root inside the checkout under review is refused, since the pull request
+could write it; code running as the same user as the reader can still write the
+root (the optional pre-checks sandbox, `merge.pre_checks_sandbox`, is the control).
+
+**How the merge reads them.** For the head it is merging, and for each required
+gate, `loadout-merge` reads the records filed under exactly that head (a record at
+any other head says nothing about this one). The newest record by finish time
+decides: passing is measured, anything else is a failed gate, and no record at all
+is **not measured**. The refusal names every such gate, the head expected and the
+head of the record found (or `none`):
+
+```
+not-measured: 1 required gate(s) have no passing verdict record at the exact head <sha> being merged. ...
+  - gate 'reviewer:some-reviewer': expected a record at head <sha>, record found for head <older sha>
+```
+
+The refusal uses the merge verb's existing gate-refusal exit code,
+`EXIT_GATE_RESULT_BLOCKED` (`24`). No flag was added, removed or renamed, and no
+exit code changed. The existing fence checks are not weakened: a reviewer role
+still needs a passing verdict fence at the head, and the record is additional.
+
+**What is required** is exactly what the merge configuration already requires:
+
+- one record per required reviewer role (the union of `--required-reviewer` and the
+  repository's declared roles; roles lifted by `--ignore-repo-gate` are not required);
+- one per configured pre-merge check, unless `--skip-pre-checks` was given;
+- the CI read;
+- one per `push.verify` entry, when the repository configures `push.verify` in the
+  config file under `--repo-path`. A `push.verify` declaration that cannot be read
+  refuses the merge: the gates the repository requires cannot be known.
+
+**Upgrading with pull requests in flight.**
+
+- *Reviewer roles.* A verdict fence posted by an earlier release that the fence
+  checks already accept, and whose head is exactly the PR head, is read as that
+  role's record (`tool` is `verdict-fence`, `evidence_ref` is the comment). It goes
+  through the same reader as a stored record; it is not stored. A fence for another
+  head stays not measured, and the refusal names the gate and both heads. A role
+  with no fence at the head is refused as before, with the not-measured line added.
+- *Pre-merge checks and the CI read.* `loadout-merge` writes these itself at merge
+  time, so a pull request whose other gates ran under an earlier release needs
+  nothing for them.
+- *`push.verify`.* A pull request pushed before the upgrade has no verification
+  record, and a repository that configures `push.verify` now requires one. It can
+  be re-measured at the same head, with no new commit, through an existing path:
+  from a clean checkout of exactly the PR head run
+  `loadout-push --update-pr --pr <n> --append-body` (with a staged body), which
+  re-runs the configured commands and leaves their records. The refusal message
+  says so.
+
+**Reading a record.** `loadout-record` (also `clagentic-loadout record`) is read-only:
+records are written by the steps that measure, never by hand.
+
+```
+loadout-record show RECORD_ID
+loadout-record list --head SHA [--gate GATE]
+```
+
+`show` prints one record by id; `list` prints the records filed under one commit,
+and names any file in that directory that did not read as a valid record. Exit
+codes: `0` ok, `1` usage, `3` the records root cannot be used, `40` no record has
+that id, `41` the record exists but is not valid.
+
 ### `loadout-merge` — the merge gate
 
 `clagentic_loadout.merge.verb`. **This is the load-bearing release gate**
@@ -1775,6 +1892,14 @@ on both platforms:
    is a `GateFactUnavailableError` exactly like every other gate-fact fetch
    here — a read failure is never conflated with the genuine empty-CI pass
    case. See `merge.ci_status`'s module docstring for the full decision.
+8d. **Verdict records.** A gate output is a record or a refusal. For the exact
+   head about to be merged, every gate the configuration requires must have a
+   passing record: each required reviewer role, each configured pre-merge
+   check, the CI read, and each `push.verify` entry when the repository
+   configures it. A gate with no record at that head is **not measured** and
+   refuses with `EXIT_GATE_RESULT_BLOCKED` (`24`), the existing gate-refusal
+   exit code. See "Verdict records" below for the schema, where each record
+   is written and how this step reads them.
 9. Only if every gate above passes: execute the merge via the resolved
    platform's `merge_pr` (Forgejo or GitHub, both through the
    redirect-hardened shared transport).
