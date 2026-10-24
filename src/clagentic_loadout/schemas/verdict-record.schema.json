@@ -9,8 +9,8 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "const": 1,
-      "description": "Version of this record shape."
+      "enum": [1, 2],
+      "description": "Version of this record shape. Version 2 adds the optional docs_only object and is the version of a record that carries it; a record without it is version 1. Readers accept both."
     },
     "id": {
       "type": "string",
@@ -71,6 +71,31 @@
       "type": ["string", "null"],
       "minLength": 1,
       "description": "Reserved for the merge record: a stated reason a gate was waived for this commit. Null otherwise."
+    },
+    "docs_only": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "allowlist_source", "justification", "spec_hash", "accepted", "rejection_reason"],
+      "description": "Version 2. Present on a review record that took the lighter docs-only path, or that rejected the justification for taking it. The same object the verdict fence carries.",
+      "properties": {
+        "classification": {"type": "string", "enum": ["docs-only", "code"], "description": "What the changeset classified as, by the base revision's docs allowlist."},
+        "allowlist_source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base_sha", "path"],
+          "description": "Where the docs allowlist was read from.",
+          "properties": {
+            "base_sha": {"type": "string", "minLength": 1, "description": "The base revision the allowlist was read at."},
+            "path": {"type": "string", "minLength": 1, "description": "The repo profile path the allowlist was read from."}
+          }
+        },
+        "justification": {"type": "string", "minLength": 1, "description": "The requesting agent's docs-only justification, verbatim from the sealed spec."},
+        "spec_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The sealed spec the justification came from."},
+        "accepted": {"type": "boolean", "description": "Whether the reviewer accepted the justification."},
+        "rejection_reason": {"type": ["string", "null"], "minLength": 1, "description": "Why the reviewer rejected the justification; null when it was accepted."}
+      }
     }
-  }
+  },
+  "if": {"required": ["docs_only"]},
+  "then": {"properties": {"schema_version": {"const": 2}}}
 }

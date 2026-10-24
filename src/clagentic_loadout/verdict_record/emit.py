@@ -12,6 +12,7 @@ from __future__ import annotations
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from clagentic_loadout.verdict_record.record import (
     RecordFormatError,
@@ -33,6 +34,7 @@ def emit_record(
     repo: str | None = None,
     spec_hash: str | None = None,
     evidence_ref: str | None = None,
+    docs_only: dict[str, Any] | None = None,
     root: Path | None = None,
     untrusted_roots: Sequence[Path] = (),
 ) -> VerdictRecord:
@@ -50,6 +52,7 @@ def emit_record(
         repo=repo,
         spec_hash=spec_hash,
         evidence_ref=evidence_ref,
+        docs_only=docs_only,
     )
     write_record(
         root if root is not None else records_root(), record, untrusted_roots=untrusted_roots

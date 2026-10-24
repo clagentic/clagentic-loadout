@@ -5,8 +5,10 @@ push verification run, the review verdict post, the merge verb's own pre-merge
 checks and CI read) writes one record per gate it ran; the merge verb reads them
 back for the exact head it is about to merge, and a gate with no record at that
 head is not measured. The shape is the published contract
-``schemas/verdict-record.schema.json`` (``SCHEMA_VERSION`` 1); this module builds
-and validates instances of it and names the gates.
+``schemas/verdict-record.schema.json`` (``SCHEMA_VERSION`` 2); this module builds
+and validates instances of it and names the gates. Version 2 adds the optional
+``docs_only`` object, so a record that carries it is version 2 and every other
+record is still written as version 1; readers accept both.
 
 Gate names are ``<kind>:<name>`` for a gate the configuration names (a reviewer
 role, a pre-merge check, a push verification entry) and the bare ``ci`` for the
@@ -25,7 +27,9 @@ from typing import Any
 
 from clagentic_loadout.envelope import validate_against_schema
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+#: The version of a record that carries none of the fields added since.
+BASE_SCHEMA_VERSION = 1
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "verdict-record.schema.json"
 
 KIND_REVIEWER = "reviewer"
@@ -96,14 +100,15 @@ class VerdictRecord:
     spec_hash: str | None = None
     evidence_ref: str | None = None
     waiver: str | None = None
+    docs_only: dict[str, Any] | None = None
 
     @property
     def passed(self) -> bool:
         return self.exit == 0
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "schema_version": SCHEMA_VERSION,
+        data: dict[str, Any] = {
+            "schema_version": BASE_SCHEMA_VERSION,
             "id": self.id,
             "gate": self.gate,
             "head_sha": self.head_sha,
@@ -117,6 +122,10 @@ class VerdictRecord:
             "evidence_ref": self.evidence_ref,
             "waiver": self.waiver,
         }
+        if self.docs_only is not None:
+            data["schema_version"] = SCHEMA_VERSION
+            data["docs_only"] = self.docs_only
+        return data
 
 
 def validate_record_dict(data: object) -> VerdictRecord:
@@ -146,6 +155,7 @@ def validate_record_dict(data: object) -> VerdictRecord:
         spec_hash=data.get("spec_hash"),
         evidence_ref=data.get("evidence_ref"),
         waiver=data.get("waiver"),
+        docs_only=data.get("docs_only"),
     )
 
 
@@ -162,6 +172,7 @@ def build_record(
     spec_hash: str | None = None,
     evidence_ref: str | None = None,
     waiver: str | None = None,
+    docs_only: dict[str, Any] | None = None,
     record_id: str | None = None,
 ) -> VerdictRecord:
     """A new, validated record. Raises RecordFormatError for a value the schema
@@ -180,11 +191,13 @@ def build_record(
         spec_hash=spec_hash,
         evidence_ref=evidence_ref,
         waiver=waiver,
+        docs_only=docs_only,
     )
     return validate_record_dict(candidate.as_dict())
 
 
 __all__ = [
+    "BASE_SCHEMA_VERSION",
     "GATE_CI",
     "GATE_SPEC_COVERAGE",
     "KIND_PRE_CHECK",

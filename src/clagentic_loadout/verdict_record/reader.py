@@ -152,6 +152,7 @@ def record_from_fence(
     comment_id: object,
     created_at: object,
     repo: str | None = None,
+    docs_only: dict | None = None,
 ) -> VerdictRecord:
     """The record an accepted verdict fence amounts to. *head_sha* is the head
     the gate compared the fence against; *exit* is the outcome the gate reached
@@ -171,6 +172,7 @@ def record_from_fence(
         finished=moment,
         repo=repo,
         evidence_ref=f"comment:{comment_id}",
+        docs_only=docs_only,
     )
 
 
