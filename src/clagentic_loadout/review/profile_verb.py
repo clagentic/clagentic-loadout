@@ -2,6 +2,15 @@
 
   loadout-profile check [--repo-path DIR] [--ref REV]
   loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
+  loadout-profile brief --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
+
+``brief`` prints the profile shaped for the role that will read it: for a role of
+the scope class (a planner) the class and group rules as acceptance-criteria
+candidates, for a build role (a builder) what the build envelope carries, and for
+a gate role only the statement that a gate reads policy from the merge base by
+its own path. Risk posture is never part of a brief. The role is any word of the
+role vocabulary (role_vocabulary), a legacy alias, or a role the deployment's
+``role_classes`` names.
 
 The profile is ``.clagentic/loadout/profile.yaml`` (see review.repo_profile).
 ``check`` reads it from the working tree, or from revision REV when given (the
@@ -15,11 +24,11 @@ need no credential and bind no caller.
 Exit codes (the reserved range for this verb; git's own exit codes are never
 passed through):
 
-  0   valid (check), or written / printed (init)
-  1   usage error
-  60  check: there is no profile
-  61  check: the profile is invalid
-  62  the repository, the revision or the file could not be read or written
+  0   valid (check), or written / printed (init), or printed (brief)
+  1   usage error, including a role no vocabulary knows (brief)
+  60  check, brief: there is no profile
+  61  check, brief: the profile is invalid
+  62  the repository, the revision, the file or the groups file could not be read or written
   63  init: the profile already exists (use --force to replace it)
 """
 
@@ -45,7 +54,15 @@ from clagentic_loadout.review.policy_source import (
     PROFILE_PATH,
     read_repo_profile,
 )
+from clagentic_loadout.review.profile_role_brief import role_brief
 from clagentic_loadout.review.profile_rules import classes_in_effect, rule_statements
+from clagentic_loadout.role_vocabulary import (
+    CLASS_GATE,
+    CLASS_SCOPE,
+    RoleVocabularyError,
+    load_role_classes,
+    resolve_role,
+)
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -145,6 +162,27 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--stdout", action="store_true", help="Print the draft and write nothing."
     )
+
+    brief = sub.add_parser(
+        "brief",
+        help="Print the repo profile shaped for a role.",
+        description="Print the repo profile shaped for the role that will read it, as one JSON "
+        "object. A scope role gets acceptance-criteria candidates, a build role gets the "
+        "envelope, a gate role gets the statement that its read is unchanged. Risk posture is "
+        "never printed.",
+    )
+    add_common(brief)
+    brief.add_argument("--role", required=True, help="The role (or legacy role word) to shape for.")
+    brief.add_argument(
+        "--repo",
+        default=None,
+        help="Repository name for group rules (default: the name of the origin of --repo-path).",
+    )
+    brief.add_argument(
+        "--groups-file",
+        default=None,
+        help="The groups file for group rules; see `loadout-rules --help` for the other sources.",
+    )
     return parser
 
 
@@ -191,6 +229,77 @@ def _check(args: argparse.Namespace) -> int:
     return EXIT_PROFILE_INVALID
 
 
+def _group_rules(
+    args: argparse.Namespace, profile: rp.RepoProfile, config_root: str | Path | None
+) -> tuple[list[dict[str, object]], str | None]:
+    """``(rules, note)``: the group rules that apply to the repository, and a
+    line saying why there are none when they could not be resolved."""
+    # Imported here: rules.verb reads profiles through review.profile_brief,
+    # which imports this module.
+    from clagentic_loadout.git_origin import OriginBindingError, read_origin_target
+    from clagentic_loadout.rules import groups as gr
+    from clagentic_loadout.rules.verb import build_result
+
+    name = gr.bare_repo_name(args.repo) if args.repo else ""
+    if not name:
+        try:
+            name = read_origin_target(args.repo_path).name
+        except OriginBindingError:
+            return [], "group rules not resolved: no --repo and no readable origin to name it"
+    location = gr.resolve_groups_location(args.groups_file, config_root=config_root)
+    try:
+        groups = gr.load_groups_file(location.path) if location.path else None
+    except gr.GroupsFileError as exc:
+        raise ProfileVerbError(str(exc), EXIT_IO_FAILED) from exc
+    result = build_result(
+        name, location, groups, args.repo_path, known_class=profile.repo_class
+    )
+    if result["result"] == "empty":
+        return [], f"no group rules: {result['reason']}"
+    rules = [rule for group in result["groups"] for rule in group["rules"]]
+    return rules, None
+
+
+def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
+    try:
+        resolution = resolve_role(args.role, load_role_classes(config_root))
+    except RoleVocabularyError as exc:
+        raise ProfileVerbError(str(exc), EXIT_USAGE) from exc
+    base = _WORKING_TREE if args.ref is None else args.ref
+    if resolution.role_class == CLASS_GATE:
+        # A gate's read of the profile is its own, at the merge base.
+        print(json.dumps({"result": "brief", "at": base, **role_brief(None, resolution)}))
+        return EXIT_OK
+    reader, base = _reader(args)
+    try:
+        present = set(reader.list_paths(base))
+    except PolicyReadError as exc:
+        raise ProfileVerbError(f"cannot list {args.repo_path!r} at {base}: {exc}", EXIT_IO_FAILED) from exc
+    profile, state, problem = read_repo_profile(reader, base, present)
+    if state == PROFILE_MISSING:
+        print(json.dumps({"result": "missing", "path": PROFILE_PATH, "at": base}))
+        print(
+            f"loadout-profile: no profile at {PROFILE_PATH} in {args.repo_path!r} ({base}); "
+            "run `loadout-profile init` to draft one.",
+            file=sys.stderr,
+        )
+        return EXIT_PROFILE_MISSING
+    if state != PROFILE_OK or profile is None:
+        print(json.dumps({"result": "invalid", "path": PROFILE_PATH, "at": base, "problem": problem}))
+        print(
+            f"loadout-profile: {PROFILE_PATH} in {args.repo_path!r} is invalid: {problem}",
+            file=sys.stderr,
+        )
+        return EXIT_PROFILE_INVALID
+    rules: list[dict[str, object]] = []
+    note = None
+    if resolution.role_class == CLASS_SCOPE:
+        rules, note = _group_rules(args, profile, config_root)
+    result = role_brief(profile, resolution, group_rules=rules, group_note=note)
+    print(json.dumps({"result": "brief", "path": PROFILE_PATH, "at": base, **result}))
+    return EXIT_OK
+
+
 def _init(args: argparse.Namespace) -> int:
     ref = args.ref if args.ref is not None else "HEAD"
     try:
@@ -222,8 +331,9 @@ def _init(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def main(argv: list[str] | None = None) -> int:
-    """CLI entrypoint. Returns the process exit code."""
+def main(argv: list[str] | None = None, *, config_root: str | Path | None = None) -> int:
+    """CLI entrypoint. Returns the process exit code. *config_root* is for tests
+    and embedding callers."""
     if argv is None:
         argv = sys.argv[1:]
     parser = _build_arg_parser()
@@ -234,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.ref is not None and args.ref.startswith("-"):
             raise ProfileVerbError(f"--ref must be a revision, got {args.ref!r}", EXIT_USAGE)
+        if args.command == "brief":
+            return _brief(args, config_root)
         return _check(args) if args.command == "check" else _init(args)
     except ProfileVerbError as exc:
         print(f"loadout-profile: {exc}", file=sys.stderr)
