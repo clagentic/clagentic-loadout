@@ -5,8 +5,8 @@
   loadout-spec show HASH [--chain]
 
 `new` writes a draft for ROLE: the sections the repo profile can fill (the class
-rules and the declared test commands) are filled from it, and every other
-section is present and empty. The draft is an ordinary file for the author to
+rules, the declared test commands and the profile completeness items) are filled
+from it, and every other section is present and empty. The draft is an ordinary file for the author to
 edit. With --supersedes it starts from a sealed spec instead, which is the only
 way to change one.
 
@@ -45,6 +45,7 @@ Exit codes (the reserved range for this verb):
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import subprocess
 import sys
@@ -53,7 +54,12 @@ from pathlib import Path
 from clagentic_loadout._version import get_version
 from clagentic_loadout.artifact_store import RootUnreadableError, StoreError
 from clagentic_loadout.review.policy_source import PROFILE_INVALID, PROFILE_MISSING, PROFILE_PATH
-from clagentic_loadout.review.profile_brief import ProfileReadError, profile_brief, read_profile
+from clagentic_loadout.review.profile_brief import (
+    ProfileReadError,
+    profile_brief,
+    read_completeness,
+    read_profile,
+)
 from clagentic_loadout.spec import model
 from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.verdict_record.record import is_full_sha, utc_timestamp
@@ -115,8 +121,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     new = sub.add_parser(
         "new",
         help="Write a draft spec for a role.",
-        description="Write a draft spec as JSON. The class rules and the declared test "
-        "commands are filled from the repo profile; every other section is present and empty.",
+        description="Write a draft spec as JSON. The class rules, the declared test "
+        "commands and the profile completeness items are filled from the repo profile; "
+        "every other section is present and empty.",
     )
     new.add_argument("--role", required=True, help="The role authoring the spec, an opaque key.")
     new.add_argument(
@@ -218,7 +225,7 @@ def _load(root: Path, spec_hash: str, untrusted: tuple[Path, ...]) -> spec_store
         raise SpecVerbError(str(exc), _store_error_code(exc)) from exc
 
 
-def _new(args: argparse.Namespace, root: Path) -> int:
+def _new(args: argparse.Namespace, root: Path, now: dt.datetime | None = None) -> int:
     try:
         draft = model.new_draft(args.role)
     except model.SpecFormatError as exc:
@@ -248,6 +255,11 @@ def _new(args: argparse.Namespace, root: Path) -> int:
         draft = model.apply_brief(
             draft, None, absent_note=f"{reason} at {PROFILE_PATH} in {args.repo_path!r}"
         )
+    try:
+        items = read_completeness(args.repo_path, args.ref, now=now)
+    except ProfileReadError as exc:
+        raise SpecVerbError(str(exc), EXIT_IO_FAILED) from exc
+    draft = model.apply_completeness(draft, [item.render() for item in items])
     text = json.dumps(draft, indent=2) + "\n"
     if args.out is None:
         sys.stdout.write(text)
@@ -349,9 +361,15 @@ def _show(args: argparse.Namespace, root: Path) -> int:
     return EXIT_OK
 
 
-def main(argv: list[str] | None = None, *, config_root: str | Path | None = None) -> int:
-    """CLI entrypoint. Returns the process exit code. *config_root* is for tests
-    and embedding callers."""
+def main(
+    argv: list[str] | None = None,
+    *,
+    config_root: str | Path | None = None,
+    now: dt.datetime | None = None,
+) -> int:
+    """CLI entrypoint. Returns the process exit code. *config_root* and *now*
+    (the clock the profile completeness is measured against) are for tests and
+    embedding callers."""
     if argv is None:
         argv = sys.argv[1:]
     parser = _build_arg_parser()
@@ -362,7 +380,7 @@ def main(argv: list[str] | None = None, *, config_root: str | Path | None = None
     root = spec_store.specs_root(config_root=config_root)
     try:
         if args.command == "new":
-            return _new(args, root)
+            return _new(args, root, now)
         if args.command == "seal":
             return _seal(args, root)
         return _show(args, root)

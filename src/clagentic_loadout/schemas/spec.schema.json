@@ -164,7 +164,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["source", "note", "items"],
-      "description": "What the repo profile is still missing. No source exists yet; the section is authored or left empty.",
+      "description": "What the repo profile is still missing or has wrong (missing posture keys, an expired confirmation, a retired file), one line per item, filled when a draft is created.",
       "properties": {
         "source": {"type": ["string", "null"], "description": "Where the items came from; null while there is no source."},
         "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},

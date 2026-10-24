@@ -9,7 +9,7 @@ import pytest
 
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.review import evaluate_verb as verb
-from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH, STAKES_PATH
+from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH, PROFILE_PATH, STAKES_PATH
 
 from _review_evaluate_support import (
     HEAD,
@@ -18,6 +18,7 @@ from _review_evaluate_support import (
     facts,
     finding,
     make_repo,
+    posture_profile,
 )
 
 BY_DESIGN_ENTRY = textwrap.dedent(
@@ -31,7 +32,8 @@ BY_DESIGN_ENTRY = textwrap.dedent(
         at: 2099-01-01
     """
 )
-INTERNAL_PROFILE = "profile: svc\nprofiles:\n  svc:\n    exposure: internal\n    data_class: internal\n    merge_control: controlled\n"
+INTERNAL_PROFILE = posture_profile()
+RETIRED_STAKES = "profile: svc\nprofiles:\n  svc:\n    exposure: internal\n    data_class: internal\n    merge_control: controlled\n"
 
 
 def write_findings(path, items, **top):
@@ -62,7 +64,7 @@ def serious() -> dict:
 
 def test_blocked_exit_code_json_and_rendering(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE, "src/a.py": "x = 1\n"})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE, "src/a.py": "x = 1\n"})
     items = write_findings(tmp_path / "f.json", [finding(fact=serious())])
     code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
     assert code == verb.EXIT_BLOCKED == 40
@@ -75,7 +77,7 @@ def test_blocked_exit_code_json_and_rendering(tmp_path, capsys):
 def test_base_disposition_demotes_and_the_finding_is_still_printed(tmp_path, capsys):
     repo = make_repo(tmp_path)
     base = commit_files(
-        repo, {STAKES_PATH: INTERNAL_PROFILE, DISPOSITIONS_PATH: BY_DESIGN_ENTRY, "src/a.py": "x\n"}
+        repo, {PROFILE_PATH: INTERNAL_PROFILE, DISPOSITIONS_PATH: BY_DESIGN_ENTRY, "src/a.py": "x\n"}
     )
     items = write_findings(tmp_path / "f.json", [finding(fact=serious())])
     code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
@@ -89,7 +91,7 @@ def test_base_disposition_demotes_and_the_finding_is_still_printed(tmp_path, cap
 
 def test_same_entry_present_only_in_the_head_does_not_apply(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE, "src/a.py": "x\n"})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE, "src/a.py": "x\n"})
     commit_files(repo, {DISPOSITIONS_PATH: BY_DESIGN_ENTRY})
     items = write_findings(tmp_path / "f.json", [finding(fact=serious())])
     code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
@@ -102,7 +104,7 @@ def test_floor_finding_on_a_tree_exposed_path_stays_blocking_under_by_design(tmp
     base = commit_files(
         repo,
         {
-            STAKES_PATH: INTERNAL_PROFILE,
+            PROFILE_PATH: INTERNAL_PROFILE,
             DISPOSITIONS_PATH: BY_DESIGN_ENTRY,
             "src/edge/ingress.yaml": "kind: Ingress\n",
             "src/edge/a.py": "x\n",
@@ -123,7 +125,7 @@ def test_floor_finding_on_a_tree_exposed_path_stays_blocking_under_by_design(tmp
 def test_profile_claiming_internal_is_treated_as_exposed_when_the_tree_says_exposed(tmp_path, capsys):
     repo = make_repo(tmp_path)
     base = commit_files(
-        repo, {STAKES_PATH: INTERNAL_PROFILE, "src/ingress.yaml": "k: v\n", "src/a.py": "x\n"}
+        repo, {PROFILE_PATH: INTERNAL_PROFILE, "src/ingress.yaml": "k: v\n", "src/a.py": "x\n"}
     )
     items = write_findings(tmp_path / "f.json", [finding(fact=serious())])
     _, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
@@ -132,7 +134,7 @@ def test_profile_claiming_internal_is_treated_as_exposed_when_the_tree_says_expo
 
 def test_expected_head_mismatch_is_stale(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     items = write_findings(tmp_path / "f.json", [])
     code, out, _ = call(
         tmp_path, repo, items, base, "--expected-head", OTHER_HEAD, capsys=capsys
@@ -143,7 +145,7 @@ def test_expected_head_mismatch_is_stale(tmp_path, capsys):
 
 def test_findings_recorded_for_another_head_than_the_current_one_are_stale(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     path = tmp_path / "f.json"
     path.write_text(json.dumps({"head_sha": OTHER_HEAD, "findings": []}), encoding="utf-8")
     code, out, _ = call(tmp_path, repo, str(path), base, capsys=capsys)
@@ -152,7 +154,7 @@ def test_findings_recorded_for_another_head_than_the_current_one_are_stale(tmp_p
 
 def test_missing_facts_is_degraded_naming_the_finding(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     items = write_findings(tmp_path / "f.json", [finding(file="src/q.py", line=9, rule_id="RQ")])
     code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
     body = parsed(out)
@@ -163,7 +165,7 @@ def test_missing_facts_is_degraded_naming_the_finding(tmp_path, capsys):
 
 def test_bare_array_uses_the_head_argument(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     path = tmp_path / "f.json"
     path.write_text(json.dumps([finding(fact=facts())]), encoding="utf-8")
     code, out, _ = call(tmp_path, repo, str(path), base, capsys=capsys)
@@ -173,7 +175,7 @@ def test_bare_array_uses_the_head_argument(tmp_path, capsys):
 
 def test_text_format_prints_only_the_rendering(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     items = write_findings(tmp_path / "f.json", [])
     code, out, _ = call(tmp_path, repo, items, base, "--format", "text", capsys=capsys)
     assert code == 0
@@ -232,7 +234,7 @@ def _config(tmp_path, text):
 
 def test_block_at_comes_from_user_config(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     medium = facts(integrity="full", precondition="can_merge")
     items = write_findings(tmp_path / "f.json", [finding(fact=medium)])
     code, _, _ = call(tmp_path, repo, items, base, capsys=capsys)
@@ -257,7 +259,7 @@ def test_repo_level_config_cannot_set_the_threshold(tmp_path, capsys):
     base = commit_files(
         repo,
         {
-            STAKES_PATH: INTERNAL_PROFILE,
+            PROFILE_PATH: INTERNAL_PROFILE,
             ".clagentic/loadout/config.yaml": "review:\n  evaluator:\n    block_at: critical\n",
         },
     )
@@ -269,7 +271,7 @@ def test_repo_level_config_cannot_set_the_threshold(tmp_path, capsys):
 
 def test_required_scanner_failure_in_the_findings_file_is_degraded(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     cfg = _config(tmp_path, "review:\n  evaluator:\n    required_scanners: [secret-scan]\n")
     items = write_findings(
         tmp_path / "f.json",
@@ -283,7 +285,7 @@ def test_required_scanner_failure_in_the_findings_file_is_degraded(tmp_path, cap
 
 def test_required_scanner_with_status_timeout_is_degraded_naming_it(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     cfg = _config(tmp_path, "review:\n  evaluator:\n    required_scanners: [secret-scan]\n")
     items = write_findings(
         tmp_path / "f.json", [], scanners_run=[{"scanner": "secret-scan", "status": "timeout"}]
@@ -297,9 +299,9 @@ def test_codeowners_covering_a_path_without_a_profile_claim_is_the_worst_case_pr
     tmp_path, capsys
 ):
     repo = make_repo(tmp_path)
-    profile = "profile: svc\nprofiles:\n  svc:\n    exposure: internal\n    data_class: internal\n"
+    profile = posture_profile(drop=("merge_control",))
     base = commit_files(
-        repo, {STAKES_PATH: profile, ".github/CODEOWNERS": "* @org/team\n", "src/a.py": "x\n"}
+        repo, {PROFILE_PATH: profile, ".github/CODEOWNERS": "* @org/team\n", "src/a.py": "x\n"}
     )
     stated = facts(integrity="full", precondition="can_merge")
     items = write_findings(tmp_path / "f.json", [finding(fact=stated)])
@@ -312,7 +314,7 @@ def test_codeowners_covering_a_path_without_a_profile_claim_is_the_worst_case_pr
 
 def test_praise_duplicate_beside_an_equal_scored_blocking_finding_is_blocked(tmp_path, capsys):
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE, "src/a.py": "x\n"})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE, "src/a.py": "x\n"})
     items = write_findings(
         tmp_path / "f.json",
         [finding(fact=serious(), severity="praise"), finding(fact=serious())],
@@ -322,23 +324,59 @@ def test_praise_duplicate_beside_an_equal_scored_blocking_finding_is_blocked(tmp
     assert parsed(out)["outcome"] == "BLOCKED"
 
 
-def test_nested_paths_key_in_a_stakes_path_entry_is_degraded_naming_the_key_path(tmp_path, capsys):
+def test_a_retired_stakes_file_at_the_base_is_ignored_and_the_stakes_are_the_worst_case(
+    tmp_path, capsys
+):
     repo = make_repo(tmp_path)
-    doc = (
-        "profile: svc\nprofiles:\n  svc:\n    exposure: internal\n    paths:\n"
-        "      'src/**':\n        paths: {}\n"
-    )
-    base = commit_files(repo, {STAKES_PATH: doc, "src/a.py": "x\n"})
-    items = write_findings(tmp_path / "f.json", [finding(fact=facts())])
+    base = commit_files(repo, {STAKES_PATH: RETIRED_STAKES, "src/a.py": "x\n"})
+    items = write_findings(tmp_path / "f.json", [finding(fact=serious())])
     code, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
-    assert code == verb.EXIT_DEGRADED
-    assert any("profiles.svc.paths.src/**.paths" in r for r in parsed(out)["degraded"])
+    body = parsed(out)
+    assert code == verb.EXIT_BLOCKED
+    assert body["degraded"] == []
+    stakes = body["blocking"][0]["stakes"]
+    assert (stakes["exposure"], stakes["data_class"], stakes["merge_control"]) == (
+        "exposed",
+        "regulated",
+        "uncontrolled",
+    )
+    assert stakes["exposure_source"] == "unstated (worst case)"
+    assert "stakes: exposure=exposed (unstated (worst case)), data_class=regulated" in body["rendering"]
+
+
+def test_profile_posture_is_the_stakes_with_the_profile_as_their_source(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE, "src/a.py": "x\n"})
+    items = write_findings(tmp_path / "f.json", [finding(fact=serious())])
+    _, out, _ = call(tmp_path, repo, items, base, capsys=capsys)
+    stakes = parsed(out)["blocking"][0]["stakes"]
+    assert (stakes["exposure"], stakes["data_class"], stakes["merge_control"]) == (
+        "internal",
+        "internal",
+        "controlled",
+    )
+    assert {stakes["exposure_source"], stakes["data_class_source"], stakes["merge_control_source"]} == {
+        "profile"
+    }
+
+
+def test_the_deprecated_profile_flag_is_accepted_selects_nothing_and_says_so(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE, "src/a.py": "x\n"})
+    items = write_findings(tmp_path / "f.json", [finding(fact=serious())])
+    plain_code, plain_out, plain_err = call(tmp_path, repo, items, base, capsys=capsys)
+    code, out, err = call(tmp_path, repo, items, base, "--profile", "anything", capsys=capsys)
+    assert plain_err == ""
+    assert code == plain_code
+    assert parsed(out) == parsed(plain_out)
+    assert err.strip() == verb.PROFILE_FLAG_NOTICE
+    assert "deprecated" in err
 
 
 def test_repo_whose_only_marker_is_pyproject_has_no_exposed_path(tmp_path, capsys):
     repo = make_repo(tmp_path)
     base = commit_files(
-        repo, {STAKES_PATH: INTERNAL_PROFILE, "pyproject.toml": "[project]\n", "src/a.py": "x\n"}
+        repo, {PROFILE_PATH: INTERNAL_PROFILE, "pyproject.toml": "[project]\n", "src/a.py": "x\n"}
     )
     floor = facts(category="injection", integrity="partial", precondition="has_host_access")
     items = write_findings(tmp_path / "f.json", [finding(fact=floor)])
@@ -357,7 +395,7 @@ def test_evaluate_help_and_version_exit_ok(capsys):
 def test_evaluate_makes_no_host_call_and_needs_no_identity(tmp_path, capsys):
     """No opener, token provider or identity provider is passed and none is needed."""
     repo = make_repo(tmp_path)
-    base = commit_files(repo, {STAKES_PATH: INTERNAL_PROFILE})
+    base = commit_files(repo, {PROFILE_PATH: INTERNAL_PROFILE})
     items = write_findings(tmp_path / "f.json", [])
     code = review_cli.main(
         ["evaluate", "--findings", items, "--base", base, "--head", HEAD, "--repo-path", str(repo)],

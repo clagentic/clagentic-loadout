@@ -15,7 +15,9 @@ role vocabulary (role_vocabulary), a legacy alias, or a role the deployment's
 The profile is ``.clagentic/loadout/profile.yaml`` (see review.repo_profile).
 ``check`` reads it from the working tree, or from revision REV when given (the
 way the review reads it from the base revision), and reports the class, the
-rules that class carries and the per-path overrides. ``init`` drafts a profile
+rules that class carries, the per-path overrides and the completeness items:
+posture keys that are missing, unrecognised or unconfirmed (review.profile_posture),
+and a retired stakes file still present. Completeness items are reporting only. ``init`` drafts a profile
 for a repository that has none from the file list of a revision (default HEAD)
 and writes it for a person to review; it never overwrites a file without
 ``--force``. Both are local and read-only apart from ``init``'s one write; they
@@ -35,6 +37,7 @@ passed through):
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import json
 import sys
 from pathlib import Path
@@ -52,6 +55,8 @@ from clagentic_loadout.review.policy_source import (
     PROFILE_MISSING,
     PROFILE_OK,
     PROFILE_PATH,
+    STAKES_PATH,
+    profile_completeness,
     read_repo_profile,
 )
 from clagentic_loadout.review.profile_role_brief import role_brief
@@ -90,7 +95,7 @@ class WorkingTreeReader:
         self._root = root
 
     def list_paths(self, base: str) -> list[str]:
-        return [PROFILE_PATH] if (self._root / PROFILE_PATH).is_file() else []
+        return [path for path in (PROFILE_PATH, STAKES_PATH) if (self._root / path).is_file()]
 
     def read_text(self, base: str, path: str) -> str:
         try:
@@ -144,7 +149,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "check",
         help="Validate the repo profile and print what it declares.",
         description="Validate the repo profile and print its class, the rules the class "
-        "carries, and its overrides, as one JSON object.",
+        "carries, its overrides, and what is missing from its risk posture (completeness "
+        "items; reporting only, they never change the exit code), as one JSON object.",
     )
     add_common(check)
 
@@ -206,25 +212,51 @@ def _describe(profile: rp.RepoProfile) -> dict[str, object]:
     }
 
 
-def _check(args: argparse.Namespace) -> int:
+def _check(args: argparse.Namespace, now: dt.datetime | None = None) -> int:
     reader, base = _reader(args)
     try:
         present = set(reader.list_paths(base))
     except PolicyReadError as exc:
         raise ProfileVerbError(f"cannot list {args.repo_path!r} at {base}: {exc}", EXIT_IO_FAILED) from exc
     profile, state, problem = read_repo_profile(reader, base, present)
+    _, items = profile_completeness(
+        profile, state, problem, stakes_present=STAKES_PATH in present, now=now
+    )
+    completeness = [item.as_dict() for item in items]
+    for item in items:
+        print(f"loadout-profile: incomplete profile: {item.render()}", file=sys.stderr)
     if state == PROFILE_OK and profile is not None:
-        print(json.dumps({"result": "valid", "path": PROFILE_PATH, "at": base, **_describe(profile)}))
+        print(
+            json.dumps(
+                {
+                    "result": "valid",
+                    "path": PROFILE_PATH,
+                    "at": base,
+                    **_describe(profile),
+                    "completeness": completeness,
+                }
+            )
+        )
         return EXIT_OK
     if state == PROFILE_MISSING:
-        print(json.dumps({"result": "missing", "path": PROFILE_PATH, "at": base}))
+        print(json.dumps({"result": "missing", "path": PROFILE_PATH, "at": base, "completeness": completeness}))
         print(
             f"loadout-profile: no profile at {PROFILE_PATH} in {args.repo_path!r} ({base}); "
             "run `loadout-profile init` to draft one.",
             file=sys.stderr,
         )
         return EXIT_PROFILE_MISSING
-    print(json.dumps({"result": "invalid", "path": PROFILE_PATH, "at": base, "problem": problem}))
+    print(
+        json.dumps(
+            {
+                "result": "invalid",
+                "path": PROFILE_PATH,
+                "at": base,
+                "problem": problem,
+                "completeness": completeness,
+            }
+        )
+    )
     print(f"loadout-profile: {PROFILE_PATH} in {args.repo_path!r} is invalid: {problem}", file=sys.stderr)
     return EXIT_PROFILE_INVALID
 
@@ -337,9 +369,15 @@ def _init(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def main(argv: list[str] | None = None, *, config_root: str | Path | None = None) -> int:
-    """CLI entrypoint. Returns the process exit code. *config_root* is for tests
-    and embedding callers."""
+def main(
+    argv: list[str] | None = None,
+    *,
+    config_root: str | Path | None = None,
+    now: dt.datetime | None = None,
+) -> int:
+    """CLI entrypoint. Returns the process exit code. *config_root* and *now*
+    (the clock the posture's confirmation age is measured against) are for
+    tests and embedding callers."""
     if argv is None:
         argv = sys.argv[1:]
     parser = _build_arg_parser()
@@ -352,7 +390,7 @@ def main(argv: list[str] | None = None, *, config_root: str | Path | None = None
             raise ProfileVerbError(f"--ref must be a revision, got {args.ref!r}", EXIT_USAGE)
         if args.command == "brief":
             return _brief(args, config_root)
-        return _check(args) if args.command == "check" else _init(args)
+        return _check(args, now) if args.command == "check" else _init(args)
     except ProfileVerbError as exc:
         print(f"loadout-profile: {exc}", file=sys.stderr)
         return exc.code

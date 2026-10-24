@@ -8,19 +8,25 @@ therefore cannot apply to that diff: the base does not contain it. That is
 structural, not a check that could be skipped.
 
 Also read from the base tree: exposure markers (see stakes.EXPOSURE_MARKER_GLOBS),
-CODEOWNERS, and the repo profile (``profile.yaml``, see review.repo_profile). A
-missing or invalid profile is carried as state, never as a degraded reason: it is
-reported as a finding and must not hold a merge. The one host-derived input, repository visibility, is passed in
-by the caller, which already fetched the repository record.
+CODEOWNERS, and the repo profile (``profile.yaml``, see review.repo_profile),
+whose posture keys (see review.profile_posture) are the stakes a repository
+claims. A missing or invalid profile is carried as state, never as a degraded
+reason: it is reported as a finding and must not hold a merge. The one
+host-derived input, repository visibility, is passed in by the caller, which
+already fetched the repository record. ``stakes.yaml`` is retired: it is never
+read, and its presence at the base is only a completeness item.
 
 Failure posture: a file that is absent is simply no policy. A file that cannot
 be read, decoded or parsed resolves to no policy AND a reason, which the
 evaluator reports as a DEGRADED verdict; the only effect of "no policy" is that
-nothing is demoted and every stake stays at its worst case.
+nothing is demoted and every stake stays at its worst case. Posture that is
+missing, unrecognised or unconfirmed is likewise worst case, but is reported as
+completeness items rather than a degraded reason.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,6 +34,7 @@ from typing import Any
 import yaml
 
 from clagentic_loadout.review import dispositions as disp
+from clagentic_loadout.review import profile_posture as pp
 from clagentic_loadout.review import stakes as stk
 from clagentic_loadout.review import repo_profile as rp
 from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader, PolicyReadError
@@ -57,6 +64,9 @@ class PolicySource:
     repo_profile: rp.RepoProfile | None = None
     profile_state: str = PROFILE_UNREAD
     profile_problem: str | None = None
+    #: What the repo profile is missing or has wrong, for reporting. Never a
+    #: reason to hold a merge.
+    completeness: tuple[pp.CompletenessItem, ...] = ()
 
 
 def _yaml(text: str, path: str) -> Any:
@@ -70,27 +80,25 @@ def read_policy(
     repo_path: str | Path,
     base: str,
     *,
-    profile: str | None = None,
     visibility: str | None = None,
+    now: dt.datetime | None = None,
 ) -> PolicySource:
     """Policy at the *base* commit of the local repository at *repo_path*."""
-    return read_policy_from(
-        GitPolicyReader(repo_path), base, profile=profile, visibility=visibility
-    )
+    return read_policy_from(GitPolicyReader(repo_path), base, visibility=visibility, now=now)
 
 
 def read_policy_from(
     reader: PolicyReader,
     base: str,
     *,
-    profile: str | None = None,
     visibility: str | None = None,
+    now: dt.datetime | None = None,
 ) -> PolicySource:
     """Policy at the *base* commit, read through *reader*.
 
-    *profile* selects a stakes profile by name (default: the file's own
-    ``profile`` key). *visibility* is the repository's host-reported visibility.
-    Never raises for a policy problem; see the module docstring."""
+    *visibility* is the repository's host-reported visibility. *now* is the
+    clock the posture's ``confirmed_at`` age is measured against (default: the
+    current time). Never raises for a policy problem; see the module docstring."""
     reasons: list[str] = []
     if not FULL_SHA_RE.match(base):
         reasons.append(f"base revision {base!r} is not a full 40-character commit SHA")
@@ -112,23 +120,6 @@ def read_policy_from(
         except (PolicyReadError, disp.DispositionsFormatError) as exc:
             reasons.append(f"dispositions ignored: {exc}")
 
-    selected: stk.StakesProfile | None = None
-    profiles: dict[str, stk.StakesProfile] = {}
-    default_name: str | None = None
-    if STAKES_PATH in present:
-        try:
-            profiles, default_name = stk.parse_stakes_document(
-                _yaml(reader.read_text(base, STAKES_PATH), STAKES_PATH)
-            )
-        except (PolicyReadError, stk.StakesFormatError) as exc:
-            reasons.append(f"stakes profile ignored: {exc}")
-            profiles, default_name = {}, None
-    wanted = profile or default_name
-    if wanted is not None:
-        selected = profiles.get(wanted)
-        if selected is None and not any("stakes profile ignored" in r for r in reasons):
-            reasons.append(f"stakes profile {wanted!r} is not defined in {STAKES_PATH} at the base")
-
     codeowners: tuple[stk.CodeownersRule, ...] | None = None
     for location in stk.CODEOWNERS_LOCATIONS:
         if location not in present:
@@ -143,14 +134,67 @@ def read_policy_from(
         exposed_dirs=stk.exposed_dirs_from_paths(paths), codeowners=codeowners
     )
     repo_profile, profile_state, profile_problem = read_repo_profile(reader, base, present)
+    claims, items = profile_completeness(
+        repo_profile,
+        profile_state,
+        profile_problem,
+        stakes_present=STAKES_PATH in present,
+        host_visibility=visibility,
+        now=now,
+    )
+    claimed = stk.StakesProfile(
+        name="profile",
+        exposure=claims.exposure,
+        data_class=claims.data_class,
+        merge_control=claims.merge_control,
+    )
     return PolicySource(
         dispositions,
-        stk.Stakes(profile=selected, tree=tree, visibility=visibility),
+        stk.Stakes(
+            profile=claimed,
+            tree=tree,
+            visibility=pp.raised_visibility(claims.declared_visibility, visibility),
+        ),
         tuple(reasons),
         repo_profile,
         profile_state,
         profile_problem,
+        items,
     )
+
+
+def profile_completeness(
+    profile: rp.RepoProfile | None,
+    state: str,
+    problem: str | None,
+    *,
+    stakes_present: bool,
+    host_visibility: str | None = None,
+    now: dt.datetime | None = None,
+) -> tuple[pp.PostureClaims, tuple[pp.CompletenessItem, ...]]:
+    """``(claims, items)`` for a profile read by ``read_repo_profile``: the
+    posture it resolves to and what is missing from it, in a fixed order (the
+    profile file, each posture key, the visibility check, the retired file).
+    The single computation behind ``loadout-profile check``, the push
+    verification report, the standard spec and the evaluator's stakes."""
+    items: list[pp.CompletenessItem] = []
+    file_item = pp.profile_file_item(state, problem, PROFILE_PATH)
+    if file_item is not None:
+        items.append(file_item)
+    claims = pp.PostureClaims()
+    if state in (PROFILE_OK, PROFILE_MISSING):
+        claims = pp.resolve_posture(
+            profile.posture_values() if profile is not None else None,
+            now=now,
+            profile_path=PROFILE_PATH,
+        )
+        items.extend(claims.items)
+        mismatch = pp.visibility_item(claims.declared_visibility, host_visibility)
+        if mismatch is not None:
+            items.append(mismatch)
+    if stakes_present:
+        items.append(pp.retired_stakes_item(STAKES_PATH, PROFILE_PATH))
+    return claims, tuple(items)
 
 
 def read_repo_profile(
@@ -179,6 +223,7 @@ __all__ = [
     "PROFILE_UNREAD",
     "STAKES_PATH",
     "PolicySource",
+    "profile_completeness",
     "read_policy",
     "read_policy_from",
     "read_repo_profile",

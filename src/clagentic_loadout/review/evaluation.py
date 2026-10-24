@@ -99,7 +99,6 @@ class EvaluationContext:
     policy_reader: PolicyReader | None = None
     policy_base_sha: str | None = None
     visibility: str | None = None
-    stakes_profile: str | None = None
     #: Where per-PR rulings are read from, and the one repository and pull
     #: request they are for. With either missing no ruling is applied: a ruling
     #: that cannot be tied to this pull request must not clear anything.
@@ -140,12 +139,7 @@ def read_context_policy(context: EvaluationContext) -> PolicySource:
     if reader is None:
         reason = "no policy source is available, so no policy was read"
         return PolicySource((), Stakes(visibility=visibility), (reason,))
-    return read_policy_from(
-        reader,
-        context.policy_base_sha,
-        profile=context.stakes_profile,
-        visibility=visibility,
-    )
+    return read_policy_from(reader, context.policy_base_sha, visibility=visibility)
 
 
 def _rulings(context: EvaluationContext) -> RulingRead:

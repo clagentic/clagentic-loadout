@@ -303,6 +303,7 @@ from clagentic_loadout.push.remote_readback import (
     read_remote_head,
     verify_remote_authorship,
 )
+from clagentic_loadout.push import profile_report
 from clagentic_loadout.push.verify_config import (
     InvalidVerifyConfigError,
     load_verify_entries,
@@ -1414,6 +1415,7 @@ def _run_verification_outcome(
     both are mapped to exit codes in main().
     """
     entries = load_verify_entries(project_root)
+    profile_report.print_items(profile_report.read_items(project_root))
     if not entries:
         return body, VERIFICATION_NONE, None
     if skip:
@@ -1478,6 +1480,7 @@ def _emit_verify_records(
     if not results:
         return []
     tree_sha = _tree_sha_of(project_root, head_sha)
+    evidence = profile_report.evidence_ref(profile_report.read_items(project_root))
     ids: list[str] = []
     for result in results:
         record = try_emit_record(
@@ -1490,6 +1493,7 @@ def _emit_verify_records(
             finished=result.finished or utc_timestamp(),
             tree_sha=tree_sha,
             repo=f"{owner}/{repo}",
+            evidence_ref=evidence,
             untrusted_roots=(project_root,),
         )
         if record is not None:

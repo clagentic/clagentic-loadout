@@ -12,12 +12,19 @@ the working tree or a revision, through the same loader the review uses.
 
 from __future__ import annotations
 
+import datetime as dt
 from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.repo_test.spec import DeclaredTests
-from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReadError
-from clagentic_loadout.review.policy_source import PROFILE_PATH, read_repo_profile
+from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader, PolicyReadError
+from clagentic_loadout.review.policy_source import (
+    PROFILE_PATH,
+    STAKES_PATH,
+    profile_completeness,
+    read_repo_profile,
+)
+from clagentic_loadout.review.profile_posture import CompletenessItem
 from clagentic_loadout.review.profile_rules import classes_in_effect, rule_statements
 from clagentic_loadout.review.profile_verb import WorkingTreeReader
 from clagentic_loadout.review.repo_profile import RepoProfile
@@ -67,7 +74,13 @@ def read_profile(
     working tree, or revision *ref* when given. *state* is one of the
     review.policy_source PROFILE_* values. Raises ProfileReadError when the
     repository cannot be listed."""
+    reader, base, present = _open(repo_path, ref)
+    return read_repo_profile(reader, base, present)
+
+
+def _open(repo_path: str | Path, ref: str | None) -> tuple[PolicyReader, str, set[str]]:
     root = Path(repo_path)
+    reader: PolicyReader
     if ref is not None:
         reader = GitPolicyReader(root)
         base = ref
@@ -78,7 +91,32 @@ def read_profile(
         present = set(reader.list_paths(base))
     except PolicyReadError as exc:
         raise ProfileReadError(f"cannot list {str(repo_path)!r} at {base}: {exc}") from exc
-    return read_repo_profile(reader, base, present)
+    return reader, base, present
+
+
+def read_completeness(
+    repo_path: str | Path,
+    ref: str | None = None,
+    *,
+    host_visibility: str | None = None,
+    now: dt.datetime | None = None,
+) -> tuple[CompletenessItem, ...]:
+    """What the repo profile of the repository at *repo_path* is missing, read
+    the way ``read_profile`` reads it. For reporting only: neither the push
+    verification report nor the spec is a gate input, and the gates read the
+    merge base through ``read_policy``. Raises ProfileReadError when the
+    repository cannot be listed."""
+    reader, base, present = _open(repo_path, ref)
+    profile, state, problem = read_repo_profile(reader, base, present)
+    _, items = profile_completeness(
+        profile,
+        state,
+        problem,
+        stakes_present=STAKES_PATH in present,
+        host_visibility=host_visibility,
+        now=now,
+    )
+    return items
 
 
 __all__ = [
@@ -86,5 +124,6 @@ __all__ = [
     "ProfileReadError",
     "declared_tests",
     "profile_brief",
+    "read_completeness",
     "read_profile",
 ]
