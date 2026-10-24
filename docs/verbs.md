@@ -3246,7 +3246,7 @@ Both answers exit 0. Exit codes: `0` classified, `1` usage, `62` the repository,
 revision or the changed paths could not be read. It is local, read-only and binds no caller.
 
 `loadout-review run` records the same classification of the **whole pull request** in its
-result and in the findings document, under `changeset`: `classification`,
+result (not in the findings file), under `changeset`: `classification`,
 `allowlist_source`, `path_count`, up to twenty `code_paths` with the reason each is code,
 `lighter_review_available` and a `note`. A delta run classifies the whole pull request, not
 the slice since the last reviewed head. The earlier verdicts on the pull request are read

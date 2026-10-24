@@ -645,7 +645,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "'resolved', 'range' and 'engines' are accepted the same way; they are shown in "
         "the body (a finding's own optional 'failure_sequence' under its "
         "bullet, a 'Dropped candidates' section, 'Resolved' and 'Resolved "
-        "by caller' sections, 'range:' and 'engine:' lines) and copied into the fence without raising its version.",
+        "by caller' sections, 'range:' and 'engine:' lines) and copied into the fence without raising its version. "
+        "The 'docs_only' object (a lighter docs-only review and its waiver) is accepted "
+        "the same way, is shown as one line, and raises the fence to fence_schema_version 5.",
     )
     parser.add_argument(
         "--verdict-head-sha",

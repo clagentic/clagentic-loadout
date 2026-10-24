@@ -24,13 +24,11 @@ from clagentic_loadout.review.docs_only_policy import ChangedPath, merge_changed
 UNREADABLE_PATH = "/unreadable-diff-header"
 
 _HEADER = "diff --git "
-_SAME_SIDES_RE = re.compile(r"^diff --git a/(.+) b/(.+)$")
-_MODE_RE = re.compile(
-    r"^(?:old mode|new mode|new file mode|deleted file mode) (\d{6})$"
-)
-_INDEX_MODE_RE = re.compile(r"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ (\d{6})$")
-_RENAME_RE = re.compile(r"^(?:rename|copy) (?:from|to) (.+)$")
-_SIDE_RE = re.compile(r"^(?:--- a/|\+\+\+ b/)(.+?)(?:\t.*)?$")
+_SAME_SIDES_RE = re.compile(r"\Adiff --git a/(.+) b/(.+)\Z")
+_MODE_RE = re.compile(r"\A(?:old mode|new mode|new file mode|deleted file mode) (\d{6})\Z")
+_INDEX_MODE_RE = re.compile(r"\Aindex [0-9a-fA-F]+\.\.[0-9a-fA-F]+ (\d{6})\Z")
+_RENAME_RE = re.compile(r"\A(?:rename|copy) (?:from|to) (.+)\Z")
+_SIDE_RE = re.compile(r"\A(?:--- a/|\+\+\+ b/)(.+?)(?:\t.*)?\Z")
 
 
 def _section_paths(lines: list[str]) -> set[str]:

@@ -100,8 +100,8 @@ KEY_PRIOR_LINE = "prior_line"
 #: Key, on a chunk record and in the run summary, of the class rules evidence.
 KEY_CLASS_RULES = "class_rules"
 
-#: Key, in the run summary and the findings document, of the classification of
-#: the whole pull request.
+#: Key, in the run summary, of the classification of the whole pull request. It
+#: is not written to the findings document, which a post must not depend on.
 KEY_CHANGESET = "changeset"
 
 REASON_ACQUIRE_INVALID = "ACQUIRE_INVALID"
@@ -455,7 +455,7 @@ def run_review(
     it the verdict is computed with no policy base, which is DEGRADED.
     *changeset* describes the whole pull request, which a delta *acquired*
     does not; it is classified by the base profile's docs allowlist and the
-    classification is recorded in the result and the findings document."""
+    classification is recorded in the result."""
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, status: str, **fields: Any) -> None:
@@ -736,7 +736,6 @@ def run_review(
             for chunk in chunks
         ],
         **verdict_document_fields(verdict, context),
-        **({KEY_CHANGESET: changeset_block} if changeset_block is not None else {}),
         "findings": findings,
     }
     try:

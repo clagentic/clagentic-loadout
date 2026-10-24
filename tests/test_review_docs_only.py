@@ -65,9 +65,11 @@ class World:
     host: ReviewHost
     root: Path
 
-    def review(self, command: str, *extra: str, capsys, local_repo: bool = True):
+    def review(
+        self, command: str, *extra: str, capsys, local_repo: bool = True, caller: str = "reviewer"
+    ):
         argv = [
-            command, "--caller", "reviewer", "--repo", "some-owner/some-repo",
+            command, "--caller", caller, "--repo", "some-owner/some-repo",
             *self.host.platform_args(),
             *(["--repo-path", str(self.env.repo)] if local_repo else []),
             *extra,
@@ -77,7 +79,7 @@ class World:
             argv,
             token_provider=self.env.token_provider,
             opener=self.host.opener,
-            identity_provider=identity_provider("reviewer"),
+            identity_provider=identity_provider(caller),
             config_root=self.env.cfg,
             run_root=self.env.runs,
         )
@@ -278,6 +280,33 @@ class TestTheLighterPath:
         assert result["status"] == "clean"
         assert world.fence()["docs_only"]["accepted"] is True
 
+    def test_a_security_reviewer_role_takes_the_same_path_under_its_own_gate(
+        self, world, capsys
+    ):
+        world.env.cfg.mkdir(parents=True, exist_ok=True)
+        (world.env.cfg / "config.yaml").write_text(
+            yaml.safe_dump({"review": {"evaluator": {"required_scanners": ["secret-scan"]}}}),
+            encoding="utf-8",
+        )
+        spec = world.seal()
+        state = world.write(
+            "state.json", {"scanners_run": [{"scanner": "secret-scan", "status": "ran"}]}
+        )
+
+        code, result, _ = world.post(
+            [_finding(3, SECRET, rule_id="SECRET"), _finding(4)],
+            "--state-file", state, spec=spec, capsys=capsys, caller="security-reviewer",
+        )
+
+        assert code == 0 and result["blocking_count"] == 1
+        fence = world.fence()
+        assert fence["reviewer"] == "security-reviewer"
+        assert fence["docs_only"]["accepted"] is True
+        assert [e["rule_id"] for e in fence["findings_open"]] == ["SECRET"]
+        assert [r.gate for r in world.records() if r.docs_only is not None] == [
+            "reviewer:security-reviewer"
+        ]
+
 
 class TestFullReview:
     """Every way the lighter path does not apply gives the review it always gave."""
@@ -470,8 +499,9 @@ class TestRun:
         }
         assert block["code_paths"] == [] and block["path_count"] == 1
         assert block["lighter_review_available"] is True
+        # The findings a post reads do not depend on the classification.
         document = json.loads(Path(result["findings_file"]).read_text(encoding="utf-8"))
-        assert document["changeset"] == block
+        assert "changeset" not in document
 
     def test_a_delta_run_classifies_the_whole_pull_request_not_the_slice_it_reviews(
         self, world, capsys
