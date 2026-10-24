@@ -223,13 +223,15 @@ from pathlib import Path
 
 import yaml
 
+from clagentic_loadout.merge.config_root import (
+    resolve_merge_config_path,
+    resolve_merge_config_root,
+)
 from clagentic_loadout.merge.post_merge import PostMergeConfigError, validate_post_merge_steps
 from clagentic_loadout.numeric_validation import is_finite_positive_number
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     LEGACY_CONFIG_RELATIVE_PATH,
-    resolve_repo_config_path,
-    resolve_repo_config_root,
 )
 from clagentic_loadout.transport.provider_config import load_user_config_section
 
@@ -419,14 +421,15 @@ def load_post_merge_steps(
     repo_root: str | Path | None,
     *,
     config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
-    wrapper_hop: bool = True,
 ) -> list[dict]:
     """Resolve the post_merge_steps list for a repo.
 
-    *wrapper_hop* False reads only from *repo_root* and its own git top-level,
-    never from the directory above it: a caller that has confirmed the tree is
-    a clone of the repository (git_origin.ConfigTreeBinding) must not execute
-    steps declared outside that tree.
+    The file is found by `merge.config_root.resolve_merge_config_path`: at the
+    git tree of *repo_root*, or in the directory holding the tree when that
+    config declares `merge.git_working_tree` naming the tree. Steps declared
+    anywhere else above the tree are refused, so a caller that has confirmed
+    the tree is a clone of the repository (git_origin.ConfigTreeBinding) never
+    executes steps from outside it.
 
     Reads `<repo_root>/<config_relative_path>` (default
     `.clagentic/loadout/config.yaml`, falling back to the legacy
@@ -450,8 +453,8 @@ def load_post_merge_steps(
     if repo_root is None:
         return []
 
-    config_path = resolve_repo_config_path(
-        repo_root, config_relative_path=config_relative_path, wrapper_hop=wrapper_hop
+    config_path = resolve_merge_config_path(
+        repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
 
@@ -493,7 +496,7 @@ def resolve_git_tree_relative_config_paths(
     declares this knob, never comparable, regardless of any actual drift.
 
     THE FIX: resolve the config-bearing ROOT via the SAME
-    `resolve_repo_config_root` bounded-hop walk `resolve_repo_config_path`
+    `merge.config_root.resolve_merge_config_root` resolver
     (and therefore `load_post_merge_steps`) already uses for
     *config_root_hint*, then re-express each of that root's two candidate
     config paths (new, legacy) RELATIVE TO *git_tree_path* -- so a caller
@@ -522,8 +525,10 @@ def resolve_git_tree_relative_config_paths(
     precisely so that call is never attempted for an inherently-untrackable
     wrapper-layout config.
     """
-    config_root = resolve_repo_config_root(
-        config_root_hint, config_relative_path, legacy_relative_path
+    config_root = resolve_merge_config_root(
+        config_root_hint,
+        config_relative_path=config_relative_path,
+        legacy_relative_path=legacy_relative_path,
     ).resolve()
     git_tree_resolved = Path(git_tree_path).resolve()
 
@@ -894,7 +899,7 @@ def post_merge_steps_key_declared(
     if repo_root is None:
         return False
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1038,8 +1043,8 @@ def resolve_git_working_tree(
         it — the caller's contract in every one of these cases is "target
         `--repo-path` itself, unchanged from before this task."
       - `<config_root>/<git_working_tree>` (resolved via the SAME
-        `resolve_repo_config_path`-driven root `load_post_merge_steps` uses,
-        so a wrapper-hop repo's config root and its declared working-tree
+        `resolve_merge_config_root` root `load_post_merge_steps` uses, so a
+        wrapper-layout repo's config root and its declared working-tree
         path are always resolved relative to the SAME root) when the key is
         present and resolves to a path within the config root.
 
@@ -1059,7 +1064,7 @@ def resolve_git_working_tree(
     if repo_root is None:
         return None
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root,
         config_relative_path=config_relative_path,
         legacy_relative_path=legacy_relative_path,
@@ -1083,26 +1088,12 @@ def resolve_git_working_tree(
         )
 
     # Re-derive the config ROOT (as opposed to config_path, the resolved
-    # FILE) via the SAME resolve_repo_config_root bounded-hop resolver
-    # resolve_repo_config_path itself calls internally, using the SAME
-    # (config_relative_path, legacy_relative_path) candidate pair this
-    # function's OWN resolve_repo_config_path call above just used (lr-cd3644
-    # fold-in #3, PR #30 re-review finding D) -- this function previously
-    # hardcoded the module-level LEGACY_CONFIG_RELATIVE_PATH constant
-    # directly here instead of threading its own *legacy_relative_path*
-    # parameter through, which only happened to agree with the
-    # resolve_repo_config_path call above because no caller today overrides
-    # the legacy path from its own default. Any caller that DID override
-    # *legacy_relative_path* (mirroring the override knob every other
-    # resolver in this module already exposes) would have hit a config-root
-    # resolution here that silently used a DIFFERENT legacy candidate than
-    # the config-file resolution immediately above it -- a latent
-    # inconsistency, now closed by passing the SAME parameter through both
-    # calls, so a wrapper-hop repo's config root here always agrees with
-    # load_post_merge_steps' own root for the same *repo_root*/legacy-path
-    # input, never a second/divergent walk.
-    config_root = resolve_repo_config_root(
-        repo_root, config_relative_path, legacy_relative_path
+    # FILE) through the same resolver, with the same candidate pair as the
+    # call above, so the root and the file can never come from two walks.
+    config_root = resolve_merge_config_root(
+        repo_root,
+        config_relative_path=config_relative_path,
+        legacy_relative_path=legacy_relative_path,
     )
     resolved = (config_root / working_tree).resolve()
     config_root_resolved = config_root.resolve()
@@ -1147,7 +1138,7 @@ def resolve_sync_tree_after_merge(
     if repo_root is None:
         return DEFAULT_SYNC_TREE_AFTER_MERGE
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1196,7 +1187,7 @@ def resolve_enforce_merge_shape(
     if repo_root is None:
         return DEFAULT_ENFORCE_MERGE_SHAPE
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1252,7 +1243,7 @@ def resolve_enforce_single_verdict_fence(
     if repo_root is None:
         return DEFAULT_ENFORCE_SINGLE_VERDICT_FENCE
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1302,7 +1293,7 @@ def resolve_require_model_attestation(
     if repo_root is None:
         return DEFAULT_REQUIRE_MODEL_ATTESTATION
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1349,7 +1340,7 @@ def resolve_model_attestation_denylist(
     if repo_root is None:
         return frozenset()
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)
@@ -1400,7 +1391,7 @@ def resolve_post_merge_step_timeout_seconds(
     if repo_root is None:
         return DEFAULT_POST_MERGE_STEP_TIMEOUT_SECONDS
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     merge_section = read_repo_merge_section(config_path)

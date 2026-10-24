@@ -109,6 +109,7 @@ from typing import Iterable
 
 from clagentic_loadout.git_origin import ConfigTreeBinding, OriginBindingError
 from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
+from clagentic_loadout.merge.config_root import MergeConfigRootRefusedError, resolve_merge_config_path
 from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_CI_STRICT,
     CONFIG_KEY_EVALUATOR,
@@ -136,7 +137,7 @@ from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     renamed_declared_role,
 )
-from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, resolve_repo_config_path
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 
 #: Keys that belong to the tracked gate file and are never honoured from the
 #: per-deployment working-tree file.
@@ -194,10 +195,10 @@ def ignored_deployment_gate_warnings(repo_path: str | Path) -> tuple[str, ...]:
     An unreadable deployment file yields nothing here: the loaders that own it
     report that failure themselves, and it carries no gate to warn about.
     """
-    config_path = resolve_repo_config_path(repo_path, warn=False)
     try:
+        config_path = resolve_merge_config_path(repo_path, warn=False)
         merge_section = read_merge_section(config_path)
-    except InvalidMergeGateConfigError:
+    except (InvalidMergeGateConfigError, MergeConfigRootRefusedError):
         return ()
     return tuple(
         f"merge.{key} in {config_path} is IGNORED -- repo gate keys are read only from "
@@ -341,16 +342,22 @@ def gate_from_deployment_config(
     post-merge loaders reread the same file. When gate keys are read, the result
     carries a notice naming the source.
 
-    With *config_binding*, the file is read only from *repo_path* and its own git
-    top-level (never the directory above), and a file that declares gate keys is
-    used only if the git top-level of *repo_path* (the tree the file is read
-    from, never a tree a config file declares) is a confirmed clone; otherwise
-    the result is the "nothing readable" gate. A file that declares nothing
-    needs no confirmation, because nothing is taken from it.
+    The file is found by `merge.config_root`: at the git tree of *repo_path*, or
+    in the directory holding the tree when that file declares
+    `merge.git_working_tree` naming it. A file above the tree that holds gate
+    keys and is not accepted that way makes the result the "nothing readable"
+    gate, naming the tree, the config root and the remote.
+
+    With *config_binding*, a file that declares gate keys is used only if the
+    git top-level of *repo_path* (the tree the file is read for, never a tree a
+    config file declares) is a confirmed clone; otherwise the result is the
+    "nothing readable" gate. A file that declares nothing needs no
+    confirmation, because nothing is taken from it.
     """
-    config_path = resolve_repo_config_path(
-        repo_path, warn=False, wrapper_hop=config_binding is None
-    )
+    try:
+        config_path = resolve_merge_config_path(repo_path, warn=False)
+    except MergeConfigRootRefusedError as exc:
+        return _nothing_readable((), str(exc))
     try:
         text = config_path.read_text(encoding="utf-8")
     except FileNotFoundError:

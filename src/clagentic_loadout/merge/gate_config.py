@@ -145,11 +145,12 @@ from pathlib import Path
 
 import yaml
 
-from clagentic_loadout.merge.post_merge_config import CONFIG_SECTION_MERGE
-from clagentic_loadout.repo_config import (
-    DEFAULT_CONFIG_RELATIVE_PATH,
-    resolve_repo_config_path,
+from clagentic_loadout.merge.config_root import (
+    MergeConfigRootRefusedError,
+    resolve_merge_config_path,
 )
+from clagentic_loadout.merge.post_merge_config import CONFIG_SECTION_MERGE
+from clagentic_loadout.repo_config import DEFAULT_CONFIG_RELATIVE_PATH
 
 #: Key within the `merge:` section holding the merge-requirements mapping
 #: (tests_pass / ci_pass / max_changed_files).
@@ -278,9 +279,12 @@ def _read_merge_section_with_presence(
     distinction `load_required_reviewer_roles` needs to tell "no merge:
     section at all" (nothing to be explicit about) apart from "merge:
     section present but this key omitted" (an ambiguous gate)."""
-    config_path = resolve_repo_config_path(
-        repo_root, config_relative_path=config_relative_path
-    )
+    try:
+        config_path = resolve_merge_config_path(
+            repo_root, config_relative_path=config_relative_path
+        )
+    except MergeConfigRootRefusedError as exc:
+        raise InvalidMergeGateConfigError(str(exc)) from exc
     raw = _read_yaml_mapping(config_path)
     merge_section, section_present = _merge_section_from_mapping(raw, config_path)
     return config_path, merge_section, section_present

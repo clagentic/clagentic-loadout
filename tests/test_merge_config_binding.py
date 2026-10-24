@@ -193,7 +193,7 @@ def test_an_unbound_library_caller_keeps_the_fallback_it_always_had(tmp_path):
     assert gate.notices and not gate.pre_checks_error
 
 
-def test_the_fallback_gate_does_not_hop_to_the_directory_above_a_bound_tree(tmp_path):
+def test_the_fallback_gate_above_a_tree_without_a_declaration_refuses_bound_or_not(tmp_path):
     outer = tmp_path / "wrapper"
     outer.mkdir()
     write_deployment_config(outer, GATE)
@@ -207,8 +207,9 @@ def test_the_fallback_gate_does_not_hop_to_the_directory_above_a_bound_tree(tmp_
     )
     unbound = load_gate_at_commit(repo.path, repo.base_sha, deployment_repo_path=repo.path)
 
-    assert not bound.notices and not bound.pre_checks_error
-    assert unbound.notices and FALLBACK_NOTICE in unbound.notices[0]
+    for gate in (bound, unbound):
+        assert not gate.notices
+        assert gate.pre_checks_error and str(outer) in gate.pre_checks_error
 
 
 # --- post_merge_steps: loadout-merge ------------------------------------------------
@@ -423,15 +424,22 @@ def test_a_directory_that_is_not_a_git_tree_with_steps_is_refused_naming_it(tmp_
     assert str(plain) in str(info.value) and "not inside a git work tree" in str(info.value)
 
 
-def test_steps_declared_above_the_tree_are_not_taken_from_the_wrapper_directory(tmp_path):
+def test_steps_declared_above_the_tree_without_a_declaration_are_refused_not_dropped(tmp_path):
     wrapper = tmp_path / "wrapper"
     wrapper.mkdir()
     write_deployment_config(wrapper, STEPS)
     repo = init_gate_repo(wrapper / "tree", tracked_gate={})
     (repo.path / ".clagentic" / "loadout" / "config.yaml").unlink()
+    git(repo.path, "remote", "add", "origin", f"https://{HOST}/{SLUG}")
 
-    # No steps reach the tree itself, so it is not asked for an origin.
-    require_confirmed_tree_for_steps(config_binding_for("forgejo", f"http://{HOST}:3000", SLUG), str(repo.path))
+    with pytest.raises(MergeUsageError) as info:
+        require_confirmed_tree_for_steps(
+            config_binding_for("forgejo", f"http://{HOST}:3000", SLUG), str(repo.path)
+        )
+
+    message = str(info.value)
+    assert str(repo.path) in message and str(wrapper) in message
+    assert f"https://{HOST}/{SLUG}" in message
 
 
 # --- post_merge_steps: loadout-post-merge (M4) -------------------------------------

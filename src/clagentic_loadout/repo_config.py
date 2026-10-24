@@ -55,9 +55,20 @@ carries its OWN config file is a dead end for the hop (steps 2/3 never run)
 — the bound is exactly one hop past a self-contained repo, never further,
 and never past a repo that already answers for itself.
 
-This module intentionally owns ONLY the path/fallback/hop concern — it does
-not parse YAML, does not know about any verb's own section name, and does
-not validate section content. Each verb's own loader keeps that
+BOUND DISCOVERY FOR THE MERGE VERBS: the hop above is right for settings, and
+wrong for a config that supplies commands or gate keys, because a directory
+above the git tree is not covered by the tree's origin binding.
+`resolve_bound_config_root` / `resolve_bound_config_path` are the one resolver
+those readers use. A config at the tree wins; a config in the tree's direct
+parent counts only when it declares which single child directory is the tree
+and that child resolves to exactly the tree; any other config above the tree
+that holds one of the caller's guarded keys is refused, never read as empty.
+The caller names its section, declaration key and guarded keys, so this module
+still knows no verb's vocabulary.
+
+Apart from that bound resolver this module owns ONLY the path/fallback/hop
+concern — it does not validate section content, and it reads a section's keys
+only to apply the bound rules above. Each verb's own loader keeps that
 responsibility (mirrors this package's existing "caller fetches/validates,
 this module is a pure policy/path check" split — see
 provisioning.model_routing's own docstring for the same pattern applied to
@@ -68,8 +79,12 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
+
+import yaml
+
+from clagentic_loadout.git_origin import describe_origin
 
 #: Canonical relative path (from a repo root) to the single sectioned
 #: per-repo loadout config file. Every loadout verb that reads repo-local
@@ -215,7 +230,6 @@ def resolve_repo_config_root(
     repo_root: str | Path,
     *relative_paths: str,
     exists_check: Callable[[Path], bool] = _default_exists_check,
-    wrapper_hop: bool = True,
 ) -> Path:
     """Resolve the directory that carries one of *relative_paths* (per
     *exists_check*), trying *repo_root* itself and then exactly ONE
@@ -269,11 +283,6 @@ def resolve_repo_config_root(
     if git_top != repo_root and _present(git_top):
         return git_top
 
-    if not wrapper_hop:
-        # A caller that has bound the tree to its origin must not read a file
-        # from outside that tree.
-        return repo_root
-
     wrapper = git_top.parent
     if wrapper == git_top:
         # git_top is the filesystem root; no parent to hop to.
@@ -290,7 +299,6 @@ def resolve_repo_config_path(
     config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
     legacy_relative_path: str = LEGACY_CONFIG_RELATIVE_PATH,
     warn: bool = True,
-    wrapper_hop: bool = True,
 ) -> Path:
     """Resolve the sectioned repo-local loadout config file's path for
     *repo_root*, applying the transitional legacy-path fallback (see module
@@ -333,9 +341,22 @@ def resolve_repo_config_path(
     """
     repo_root = Path(repo_root)
     config_root = resolve_repo_config_root(
-        repo_root, config_relative_path, legacy_relative_path, wrapper_hop=wrapper_hop
+        repo_root, config_relative_path, legacy_relative_path
+    )
+    return _config_file_at(
+        config_root, repo_root, config_relative_path, legacy_relative_path, warn
     )
 
+
+def _config_file_at(
+    config_root: Path,
+    repo_root: Path,
+    config_relative_path: str,
+    legacy_relative_path: str,
+    warn: bool,
+) -> Path:
+    """The new-path-then-legacy-path choice at an already settled *config_root*;
+    *repo_root*'s own new path when neither exists."""
     new_path = config_root / config_relative_path
     if new_path.exists():
         return new_path
@@ -354,13 +375,190 @@ def resolve_repo_config_path(
     return repo_root / config_relative_path
 
 
+class ConfigRootRefusedError(ValueError):
+    """A config file above the git tree cannot be accepted as that tree's config.
+    The message names the resolved tree, the directory holding the file and the
+    tree's origin (credentials removed)."""
+
+
+def _refusal(
+    config_file: Path,
+    directory: Path,
+    tree: Path,
+    why: str,
+    section: str,
+    declaration_key: str,
+) -> ConfigRootRefusedError:
+    return ConfigRootRefusedError(
+        f"the config file {config_file} above the git tree is refused: {why}. "
+        f"Resolved git tree {str(tree)!r}, config root {str(directory)!r}, "
+        f"origin {describe_origin(tree)!r}. A config in the directory holding the git "
+        f"tree must declare {section}.{declaration_key} naming that tree; any other "
+        f"config above the tree that holds merge settings is not used."
+    )
+
+
+def _section_of(config_file: Path, section: str) -> dict:
+    """The *section* mapping of the YAML file *config_file*; ``{}`` when absent.
+
+    Raises ValueError when the file cannot be read or is not a mapping."""
+    try:
+        raw = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"{config_file} could not be read as YAML: {exc}") from exc
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{config_file}: top-level document must be a mapping")
+    value = raw.get(section)
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"{config_file}: {section!r} section must be a mapping")
+    return value
+
+
+def _declared_tree_problem(
+    declared: object, config_dir: Path, tree: Path, section: str, declaration_key: str
+) -> str:
+    """Why *declared* does not name *tree* as a direct child of *config_dir*;
+    '' when it does."""
+    label = f"{section}.{declaration_key}"
+    if not isinstance(declared, str) or not declared or declared != declared.strip():
+        return f"{label} must be a single path segment naming the git tree, got {declared!r}"
+    if declared in (".", "..") or "/" in declared or "\\" in declared:
+        return f"{label} must be a single path segment, got {declared!r}"
+    candidate = config_dir / declared
+    if candidate.is_symlink():
+        return f"{label} {declared!r} is a symlink"
+    if candidate.resolve() != tree:
+        return f"{label} {declared!r} resolves to {candidate.resolve()}, not the git tree"
+    return ""
+
+
+def resolve_bound_config_root(
+    repo_root: str | Path,
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+    legacy_relative_path: str = LEGACY_CONFIG_RELATIVE_PATH,
+    *,
+    section: str,
+    declaration_key: str,
+    guarded_keys: Iterable[str],
+) -> Path:
+    """The directory whose config file a verb that executes or enforces what the
+    file says may read for *repo_root*, tied to the git tree it names.
+
+    T is the git top-level of *repo_root*. In order:
+
+      1. A config file at *repo_root* or at T wins; nothing above T is consulted
+         for it. A *repo_root* in no git tree is returned unchanged.
+      2. A config file in T's direct parent X is accepted only when its
+         *section* declares *declaration_key* as a single path segment W naming
+         a real directory (not a symlink) that resolves to exactly T.
+      3. Any config file anywhere above T whose *section* holds one of
+         *guarded_keys* or the declaration, and which rule 2 does not accept, is
+         refused with ConfigRootRefusedError naming T, its directory and T's
+         origin. A file above T that cannot be read is refused the same way,
+         because what it would have declared cannot be known. Files above T that
+         hold none of those keys are ignored.
+      4. Otherwise *repo_root* (resolved), as when no config exists.
+
+    This is the single resolver for the merge verbs' config readers; verbs that
+    only read settings keep `resolve_repo_config_root`.
+
+    Raises:
+        ConfigRootRefusedError: rule 3.
+    """
+    root = Path(repo_root).resolve()
+    names = (config_relative_path, legacy_relative_path)
+
+    def _file_in(directory: Path) -> Path | None:
+        for name in names:
+            if (directory / name).is_file():
+                return directory / name
+        return None
+
+    if _file_in(root) is not None:
+        return root
+    tree = find_git_top_level(root)
+    if tree is None:
+        return root
+    if tree != root and _file_in(tree) is not None:
+        return tree
+
+    watched = (*guarded_keys, declaration_key)
+    accepted: Path | None = None
+    for directory in tree.parents:
+        config_file = _file_in(directory)
+        if config_file is None:
+            continue
+
+        try:
+            held_section = _section_of(config_file, section)
+        except ValueError as exc:
+            raise _refusal(config_file, directory, tree, str(exc), section, declaration_key) from exc
+        held = [key for key in watched if key in held_section]
+        if not held:
+            continue
+        if directory != tree.parent:
+            raise _refusal(
+                config_file,
+                directory,
+                tree,
+                f"it declares {held} but is not in the directory holding the git tree",
+                section,
+                declaration_key,
+            )
+        problem = _declared_tree_problem(
+            held_section.get(declaration_key), directory, tree, section, declaration_key
+        )
+        if problem:
+            raise _refusal(
+                config_file, directory, tree, f"it declares {held} and {problem}", section, declaration_key
+            )
+        accepted = directory
+    return accepted if accepted is not None else root
+
+
+def resolve_bound_config_path(
+    repo_root: str | Path,
+    *,
+    section: str,
+    declaration_key: str,
+    guarded_keys: Iterable[str],
+    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+    legacy_relative_path: str = LEGACY_CONFIG_RELATIVE_PATH,
+    warn: bool = True,
+) -> Path:
+    """The config file for *repo_root* under `resolve_bound_config_root`, with the
+    same legacy-path fallback and deprecation notice as `resolve_repo_config_path`.
+
+    Raises:
+        ConfigRootRefusedError: as `resolve_bound_config_root`.
+    """
+    config_root = resolve_bound_config_root(
+        repo_root,
+        config_relative_path,
+        legacy_relative_path,
+        section=section,
+        declaration_key=declaration_key,
+        guarded_keys=guarded_keys,
+    )
+    return _config_file_at(
+        config_root, Path(repo_root), config_relative_path, legacy_relative_path, warn
+    )
+
+
 __all__ = [
+    "ConfigRootRefusedError",
     "DEFAULT_CONFIG_RELATIVE_PATH",
     "LEGACY_CONFIG_MARKER",
     "LEGACY_CONFIG_RELATIVE_PATH",
     "TRACKED_GATE_RELATIVE_PATH",
     "find_git_top_level",
     "find_git_top_level_down_hop",
+    "resolve_bound_config_path",
+    "resolve_bound_config_root",
     "resolve_repo_config_path",
     "resolve_repo_config_root",
 ]

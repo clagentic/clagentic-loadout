@@ -9,12 +9,17 @@ host the platform is configured for, and owner/name must equal ``--repo``,
 case-insensitively. The SSH and HTTPS remotes of one host both pass. A tree
 whose origin cannot be read or parsed is refused rather than passed.
 
+Which file is read is decided by ``merge.config_root`` (the tree's own, or the
+direct parent's when it declares the tree), so the file read is always one the
+confirmed tree vouches for.
+
 The tracked gate file is read at the PR base commit and is not bound here.
 """
 
 from __future__ import annotations
 
 from clagentic_loadout.git_origin import ConfigTreeBinding, OriginBindingError
+from clagentic_loadout.merge.config_root import MergeConfigRootRefusedError, resolve_merge_config_root
 from clagentic_loadout.merge.errors import MergeUsageError
 from clagentic_loadout.merge.post_merge_config import (
     PostMergeConfigError,
@@ -47,15 +52,29 @@ def require_confirmed_tree(binding: ConfigTreeBinding, repo_path: str, *, readin
         ) from exc
 
 
+def require_resolvable_config_root(repo_path: str) -> None:
+    """Raise MergeUsageError when a config file above the git tree of
+    *repo_path* holds merge settings that cannot be accepted (see
+    `merge.config_root`). The message names the resolved tree, the config root
+    and the remote. Run before anything is merged or checked out, so the
+    refusal is never a half-finished merge."""
+    try:
+        resolve_merge_config_root(repo_path)
+    except MergeConfigRootRefusedError as exc:
+        raise MergeUsageError(f"--repo-path {repo_path!r} is refused: {exc}") from exc
+
+
 def require_confirmed_tree_for_steps(binding: ConfigTreeBinding, repo_path: str) -> None:
-    """Refuse, before anything is merged or checked out, a *repo_path* that
-    declares ``post_merge_steps`` but is not a confirmed clone.
+    """Refuse, before anything is merged or checked out, a *repo_path* whose
+    config cannot be accepted, or that declares ``post_merge_steps`` but is not
+    a confirmed clone.
 
     A tree that declares no steps runs nothing, so it is not asked to prove
     where it came from. A declaration this cannot read is left to the loader
     that reports it with its own exit code."""
+    require_resolvable_config_root(repo_path)
     try:
-        steps = load_post_merge_steps(repo_path, wrapper_hop=False)
+        steps = load_post_merge_steps(repo_path)
     except PostMergeConfigError:
         return
     if not steps:
@@ -67,4 +86,5 @@ __all__ = [
     "config_binding_for",
     "require_confirmed_tree",
     "require_confirmed_tree_for_steps",
+    "require_resolvable_config_root",
 ]

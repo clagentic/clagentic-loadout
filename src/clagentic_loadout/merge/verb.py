@@ -608,6 +608,7 @@ from clagentic_loadout.merge.repo_gate_runtime import (
 from clagentic_loadout.merge.config_binding import (
     config_binding_for,
     require_confirmed_tree_for_steps,
+    require_resolvable_config_root,
 )
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.required_reviewers import (
@@ -1492,6 +1493,13 @@ def _run(
     except StaleHeadShaError as exc:
         _fail(str(exc), code=EXIT_STALE_HEAD_SHA)
 
+    # Every config reader below resolves --repo-path's file through
+    # merge.config_root. A config above the tree that holds merge settings and
+    # is not the declared wrapper config is refused here, before anything is
+    # read from it or merged, rather than degrading to an empty gate.
+    if args.repo_path:
+        require_resolvable_config_root(args.repo_path)
+
     # The repo's gate is read from the PR's BASE commit (merge.repo_gate_runtime),
     # which is why it can only be loaded now that the PR payload is in hand. Its
     # declared reviewer roles are a floor beneath --required-reviewer; a role
@@ -2340,7 +2348,7 @@ def _run(
                 steps: list[dict] = []
             else:
                 try:
-                    steps = load_post_merge_steps(args.repo_path, wrapper_hop=False)
+                    steps = load_post_merge_steps(args.repo_path)
                 except PostMergeConfigError as exc:
                     _fail(
                         f"post-merge config FAILED to load -- {exc}",

@@ -172,6 +172,16 @@ def read_origin_target(tree: str | Path) -> OriginTarget:
     return OriginTarget(target.host, target.owner, target.name, target.url, top)
 
 
+def describe_origin(tree: str | Path) -> str:
+    """The ``origin`` remote of *tree* with credentials removed, for a message
+    that must name the remote; a short reason in angle brackets when there is
+    none to name. Never raises."""
+    code, url, _err = _git(str(tree), "remote", "get-url", "origin")
+    if code != 0 or not url:
+        return "<no readable origin>"
+    return redact_remote_url(url)
+
+
 @dataclass(frozen=True)
 class ConfigTreeBinding:
     """The identity a tree must have before its configuration is read: a clone
@@ -213,6 +223,7 @@ __all__ = [
     "ConfigTreeBinding",
     "OriginBindingError",
     "OriginTarget",
+    "describe_origin",
     "host_of",
     "parse_origin_url",
     "read_origin_target",

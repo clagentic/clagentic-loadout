@@ -620,7 +620,7 @@ def _run(
     original_exc: BaseException | None = None
     try:
         try:
-            steps = load_post_merge_steps(args.repo_path, wrapper_hop=False)
+            steps = load_post_merge_steps(args.repo_path)
         except PostMergeConfigError as exc:
             _fail(
                 f"post-merge config FAILED to load -- {exc}",

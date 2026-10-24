@@ -57,14 +57,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.merge.config_root import resolve_merge_config_path
 from clagentic_loadout.merge.post_merge import PostMergeConfigError, validate_post_merge_steps
 from clagentic_loadout.merge.post_merge_config import CONFIG_SECTION_MERGE, read_repo_merge_section
 from clagentic_loadout.merge.pre_check_env import is_git_location_name
 from clagentic_loadout.merge.tracked_file import git_tracks_path
-from clagentic_loadout.repo_config import (
-    DEFAULT_CONFIG_RELATIVE_PATH,
-    resolve_repo_config_path,
-)
+from clagentic_loadout.repo_config import DEFAULT_CONFIG_RELATIVE_PATH
 
 #: Key within the `merge:` section holding the ordered pre-merge check list.
 #: Sibling of CONFIG_KEY_POST_MERGE_STEPS within the SAME `merge:` section —
@@ -111,7 +109,7 @@ def load_pre_checks(
     if repo_root is None:
         return []
 
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     return pre_checks_from_section(read_repo_merge_section(config_path))
@@ -153,7 +151,7 @@ def resolve_pre_checks_env_passthrough(
     """
     if repo_root is None:
         return ()
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path, warn=False
     )
     value = read_repo_merge_section(config_path).get(CONFIG_KEY_PRE_CHECKS_ENV_PASSTHROUGH)
@@ -207,7 +205,7 @@ def decide_pre_checks_env_passthrough(
     names = resolve_pre_checks_env_passthrough(repo_root, config_relative_path=config_relative_path)
     if not names or repo_root is None:
         return PassthroughDecision()
-    config_path = resolve_repo_config_path(
+    config_path = resolve_merge_config_path(
         repo_root, config_relative_path=config_relative_path, warn=False
     )
     tracked = git_tracks_path(repo_root, config_path)
