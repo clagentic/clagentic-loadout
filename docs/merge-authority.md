@@ -580,7 +580,7 @@ a block on its own authority.
 
 ### Policy is read at the live base
 
-Dispositions and stakes are read from the PR's **live base revision**, where the base is the
+Dispositions and the repo profile (whose posture keys are the stakes) are read from the PR's **live base revision**, where the base is the
 one the host reports for the PR at merge time. They are read through the host API with the
 run's own credential, so no local checkout is needed; an explicit `--repo-path` is an optional
 local source (`git show <base>:<path>`), used instead of the host when given, the same choice

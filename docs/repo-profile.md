@@ -13,7 +13,7 @@ Two classes:
 | `released-tool` | The tree ships to people outside the deployment that built it. | No agent or deployment names, hostnames, domains or usernames in the shipped tree. No absolute host paths. Other tools are optional and pluggable, never a hard requirement. A released tool never adds, removes or changes the tools or permissions of a particular agent or consumer based on its identity, and never names or special-cases a consumer. Behaviour that affects permissions for all sessions is a documented setting the user controls. |
 | `internal` | The tree stays inside a deployment. | Other tools are consumed only through their documented interfaces: an installed command, or the top level of a package, never one of its internal modules. |
 
-The profile is read from the **base revision**, like `stakes.yaml` and `dispositions.yaml`
+The profile is read from the **base revision**, like `dispositions.yaml`
 (see [review-evaluator.md](review-evaluator.md)). A profile added or loosened in the change
 under review does not apply to that change; land it first.
 
@@ -30,6 +30,11 @@ deny:                           # optional; released-tool only
 tool_packages: [some_tool]      # optional; internal only
 test:                           # optional; the commands `clagentic-loadout test run` uses
   full: [python3, -m, pytest, "--junitxml={junit}"]
+exposure: local_or_ci_only      # risk posture, read only by gates; see below
+data: public_or_none
+visibility: public
+merge_control: unrestricted
+confirmed_at: 2026-10-24
 ```
 
 A complete example, kept valid by the test suite, is
@@ -58,6 +63,63 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
 - **`test`** declares the argv `clagentic-loadout test run` uses for `full`, `impacted` and
   `files`, a default `base`, and named `tiers`. Review ignores it. Its shape and use are in
   [repo-test.md](repo-test.md).
+
+## Risk posture
+
+Five optional keys state how much a repository matters. They are read only by gate roles
+(the reviewers and the merge gate), from the **merge base**: a pull request that edits them
+does not change the posture it is judged by until the edit lands. `loadout-profile brief` never
+prints them to a planner or a builder, and neither does any other brief.
+
+| Key | Values | Evaluator value |
+|---|---|---|
+| `exposure` | `internet` | exposed |
+| | `internal_authenticated`, `local_or_ci_only` | internal |
+| `data` | `regulated_or_customer` | regulated |
+| | `internal` | internal |
+| | `public_or_none` | public |
+| `merge_control` | `code_owner_review_required`, `review_required` | controlled |
+| | `unrestricted` | uncontrolled |
+| `visibility` | `public`, `private` | a claim; see below |
+| `confirmed_at` | a date (`YYYY-MM-DD`), at most 180 days old and not in the future | |
+
+- **Worst case.** A key that is missing, has an unrecognised value, or sits in a profile whose
+  `confirmed_at` is missing, not a date, in the future, or more than 180 days old resolves to
+  the worst case: exposed, regulated, uncontrolled. An unrecognised or unconfirmed posture
+  never makes the file invalid and never holds a merge by itself; it is stricter, and it is
+  reported.
+- **Overrides.** A tree exposure marker, or a public repository as the host reports it,
+  still marks a path exposed whatever the profile says. A profile can raise stakes, never
+  hide them.
+- **`visibility`** is a declared claim. The host's record stays authoritative for the gate. A
+  declared `public` raises the exposure even where the host reports otherwise; a declared
+  value that disagrees with the host is reported as a completeness item.
+- **`merge_control`** is the profile's claim about review enforcement. Branch protection is not
+  read, and CODEOWNERS never changes it.
+
+### Completeness
+
+`loadout-profile check` lists what is missing from the profile as `completeness` items, each
+with a `key`, a `reason` and a `fix`, in a fixed order: the profile file itself, each posture
+key, the visibility check, then a retired `stakes.yaml`. The same items are printed by the push
+verification step (`push.verify`) and the verification records it leaves carry
+`profile-completeness:<keys>` as their evidence; `loadout-spec new` writes them into the draft's
+`profile_completeness` section. Items are for reporting: `check` still exits `0` for a valid
+profile with items, and none of them blocks a push or a merge. Fix them in `profile.yaml`
+rather than living with the worst-case defaults.
+
+### Migrating from `stakes.yaml`
+
+`stakes.yaml` is retired and no longer read; this is a breaking change for a repository that
+relied on it. See [review-evaluator.md](review-evaluator.md#stakesyaml-is-retired) for the key
+mapping. A leftover file is ignored and reported as a completeness item.
+
+### What is configured elsewhere
+
+`merge_requirements` and `authorized_roles` are not profile keys, and nothing about them is
+removed. They are configured in the `merge:` section of the loadout config (`config.yaml`),
+loaded by the merge gate configuration module; see
+[merge-authority.md](merge-authority.md) for who reads them.
 
 ## What review does with it
 
