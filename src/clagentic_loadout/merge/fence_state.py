@@ -610,6 +610,11 @@ def normalize_docs_only(value: Any) -> dict[str, Any]:
     accepted = value["accepted"]
     if not isinstance(accepted, bool):
         raise ValueError(f"{where}.accepted must be true or false, got {accepted!r}")
+    if accepted and classification != CLASSIFICATION_DOCS_ONLY:
+        raise ValueError(
+            f"{where}.accepted may be true only when the classification is "
+            f"{CLASSIFICATION_DOCS_ONLY!r}, got {classification!r}"
+        )
     reason = value["rejection_reason"]
     if accepted and reason is not None:
         raise ValueError(f"{where}.rejection_reason must be null when the justification is accepted")
@@ -639,6 +644,15 @@ def docs_only_waiver_line(reviewer: str, docs_only: Mapping[str, Any]) -> str | 
     shown on one line, cut to a bounded length; the fence holds it verbatim."""
     if docs_only.get("accepted") is not True:
         return None
+    # A fence read from a comment is not re-normalized, so the invariant that
+    # normalize_docs_only enforces is checked again here: anything short of it
+    # earns no waiver line (the review stands as a full one).
+    if docs_only.get("classification") != CLASSIFICATION_DOCS_ONLY:
+        return None
+    for key in ("justification", "spec_hash"):
+        field = docs_only.get(key)
+        if not isinstance(field, str) or not field.strip():
+            return None
     source = docs_only["allowlist_source"]
     justification = " ".join(str(docs_only["justification"]).split())
     if len(justification) > _MAX_WAIVER_JUSTIFICATION_CHARS:

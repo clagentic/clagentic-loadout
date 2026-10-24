@@ -217,4 +217,13 @@ class TestWaiverLine:
     def test_a_long_multi_line_justification_is_shown_on_one_bounded_line(self):
         line = docs_only_waiver_line("r", _docs_only(justification="word " * 200 + "\nend"))
 
-        assert "\n" not in line and line.endswith("...")
+        justification = line.split("justification (spec ", 1)[1].split("): ", 1)[1]
+        assert "\n" not in line and justification.endswith("...")
+        assert len(justification) == 300
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"classification": "code"}, {"justification": "  "}, {"spec_hash": ""}],
+    )
+    def test_an_accepted_object_that_breaks_the_invariant_earns_no_waiver_line(self, overrides):
+        assert docs_only_waiver_line("r", _docs_only(**overrides)) is None

@@ -135,14 +135,16 @@ class TestVerdictRecordVersions:
 
         assert load_record(tmp_path / "records", record.id) == record
 
-    def test_the_fence_adapter_carries_the_object_and_the_reader_reports_the_gate_measured(self):
+    def test_the_fence_adapter_carries_the_object_and_the_reader_reports_the_gate_measured(
+        self, tmp_path
+    ):
         adapted = record_from_fence(
             gate="reviewer:agent-alpha", head_sha=HEAD, exit=0, comment_id=7,
             created_at="2026-01-01T00:00:03Z", docs_only=_docs_only(),
         )
 
         readings, _ = read_gates(
-            Path("/nonexistent-records-root"),
+            tmp_path / "missing-records-root",
             [RequiredGate("reviewer:agent-alpha")],
             HEAD,
             adapted={"reviewer:agent-alpha": [adapted]},
@@ -321,11 +323,21 @@ class TestNormalizeDocsOnly:
             {"allowlist_source": {"base_sha": "a" * 40, "path": ""}},
             {"allowlist_source": []},
             {"unknown": 1},
+            {"classification": "code"},
         ],
     )
     def test_a_malformed_object_is_refused(self, overrides):
         with pytest.raises(ValueError):
             normalize_docs_only(_docs_only(**overrides))
+
+    def test_a_waiver_on_a_change_classified_as_code_is_refused_by_name(self):
+        with pytest.raises(ValueError, match="accepted may be true only"):
+            normalize_docs_only(_docs_only(classification="code"))
+
+    def test_a_rejection_may_state_that_the_change_is_code(self):
+        rejected = _docs_only(classification="code", accepted=False, rejection_reason="it is code")
+
+        assert normalize_docs_only(rejected) == rejected
 
     @pytest.mark.parametrize("value", [None, [], "docs-only", 3])
     def test_a_value_that_is_not_an_object_is_refused(self, value):
