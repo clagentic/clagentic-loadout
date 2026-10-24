@@ -78,6 +78,57 @@ class TestVocabulary:
     def test_confirmed_at_forms(self, value, expected):
         assert pp.parse_confirmed_at(value) == expected
 
+    @pytest.mark.parametrize(
+        "value, expected",
+        [
+            # +14:00 puts local midnight-plus a day ahead of UTC; -12:00 behind it.
+            ("2026-10-25T00:30:00+14:00", dt.date(2026, 10, 24)),
+            ("2026-10-24T22:00:00-12:00", dt.date(2026, 10, 25)),
+            ("2026-10-24T01:00:00+02:00", dt.date(2026, 10, 23)),
+            (
+                dt.datetime(2026, 10, 25, 0, 30, tzinfo=dt.timezone(dt.timedelta(hours=14))),
+                dt.date(2026, 10, 24),
+            ),
+            (
+                dt.datetime(2026, 10, 24, 22, 0, tzinfo=dt.timezone(dt.timedelta(hours=-12))),
+                dt.date(2026, 10, 25),
+            ),
+            # An offset that carries the moment off the calendar names no date.
+            ("0001-01-01T00:00:00+14:00", None),
+        ],
+    )
+    def test_an_offset_aware_moment_is_converted_to_utc_before_its_date_is_taken(
+        self, value, expected
+    ):
+        assert pp.parse_confirmed_at(value) == expected
+
+    @pytest.mark.parametrize(
+        "confirmed_at, reason_start",
+        [
+            # Already past in UTC (2026-10-24T10:30Z), though its local date is tomorrow's.
+            ("2026-10-25T00:30:00+14:00", None),
+            # Still ahead in UTC (2026-10-25T10:00Z), though its local date is today's.
+            ("2026-10-24T22:00:00-12:00", "in the future"),
+            # 181 days old in UTC (2026-04-26T10:30Z), though its local date is 180 days back.
+            ("2026-04-27T00:30:00+14:00", "expired"),
+            # 180 days old in UTC (2026-04-27T10:00Z), though its local date is 181 days back.
+            ("2026-04-26T22:00:00-12:00", None),
+        ],
+    )
+    def test_age_and_future_are_judged_on_the_utc_date_whatever_the_offset(
+        self, confirmed_at, reason_start
+    ):
+        now = dt.datetime(2026, 10, 24, 12, 0, tzinfo=dt.timezone.utc)
+        claims = pp.resolve_posture(
+            {**FULL, "confirmed_at": confirmed_at}, now=now, profile_path="p.yaml"
+        )
+        if reason_start is None:
+            assert claims.items == () and claims.exposure == "internal"
+        else:
+            (item,) = claims.items
+            assert item.key == "confirmed_at" and item.reason.startswith(reason_start)
+            assert claims.exposure is None
+
     def test_the_clock_is_utc_and_a_naive_moment_is_taken_as_utc(self):
         assert pp.today_utc(dt.datetime(2026, 10, 24, 23, 59)) == dt.date(2026, 10, 24)
         offset = dt.timezone(dt.timedelta(hours=5))

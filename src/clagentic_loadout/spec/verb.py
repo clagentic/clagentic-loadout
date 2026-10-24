@@ -56,9 +56,9 @@ from clagentic_loadout.artifact_store import RootUnreadableError, StoreError
 from clagentic_loadout.review.policy_source import PROFILE_INVALID, PROFILE_MISSING, PROFILE_PATH
 from clagentic_loadout.review.profile_brief import (
     ProfileReadError,
+    completeness_of,
     profile_brief,
-    read_completeness,
-    read_profile,
+    read_snapshot,
 )
 from clagentic_loadout.spec import model
 from clagentic_loadout.spec import store as spec_store
@@ -239,26 +239,25 @@ def _new(args: argparse.Namespace, root: Path, now: dt.datetime | None = None) -
                 EXIT_REFUSED,
             )
         draft = model.draft_from_sealed(prior.doc, prior.spec_hash)
+    # One read feeds both sections: a second read of a ref that moved in between
+    # would describe another commit.
     try:
-        profile, state, problem = read_profile(args.repo_path, args.ref)
+        snapshot = read_snapshot(args.repo_path, args.ref)
     except ProfileReadError as exc:
         raise SpecVerbError(str(exc), EXIT_IO_FAILED) from exc
-    if state == PROFILE_INVALID:
+    if snapshot.state == PROFILE_INVALID:
         raise SpecVerbError(
-            f"the repo profile {PROFILE_PATH} in {args.repo_path!r} is invalid: {problem}",
+            f"the repo profile {PROFILE_PATH} in {args.repo_path!r} is invalid: {snapshot.problem}",
             EXIT_PROFILE_INVALID,
         )
-    if profile is not None:
-        draft = model.apply_brief(draft, profile_brief(profile), absent_note="")
+    if snapshot.profile is not None:
+        draft = model.apply_brief(draft, profile_brief(snapshot.profile), absent_note="")
     else:
-        reason = "no repo profile" if state == PROFILE_MISSING else "the repo profile was not read"
+        reason = "no repo profile" if snapshot.state == PROFILE_MISSING else "the repo profile was not read"
         draft = model.apply_brief(
             draft, None, absent_note=f"{reason} at {PROFILE_PATH} in {args.repo_path!r}"
         )
-    try:
-        items = read_completeness(args.repo_path, args.ref, now=now)
-    except ProfileReadError as exc:
-        raise SpecVerbError(str(exc), EXIT_IO_FAILED) from exc
+    items = completeness_of(snapshot, now=now)
     draft = model.apply_completeness(draft, [item.render() for item in items])
     text = json.dumps(draft, indent=2) + "\n"
     if args.out is None:

@@ -192,11 +192,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _reader(args: argparse.Namespace) -> tuple[PolicyReader, str]:
+def _reader(args: argparse.Namespace) -> tuple[PolicyReader, str, str]:
+    """``(reader, base, label)``: *base* is what every read is made at, and
+    *label* is what the output reports. A --ref is resolved to one commit here
+    so that listing the tree and reading the profile cannot see two commits."""
     root = Path(args.repo_path)
-    if args.ref is not None:
-        return GitPolicyReader(root), args.ref
-    return WorkingTreeReader(root), _WORKING_TREE
+    if args.ref is None:
+        return WorkingTreeReader(root), _WORKING_TREE, _WORKING_TREE
+    git_reader = GitPolicyReader(root)
+    try:
+        commit = git_reader.resolve_commit(args.ref)
+    except PolicyReadError as exc:
+        raise ProfileVerbError(
+            f"cannot list {args.repo_path!r} at {args.ref}: {exc}", EXIT_IO_FAILED
+        ) from exc
+    return git_reader, commit, args.ref
 
 
 def _describe(profile: rp.RepoProfile) -> dict[str, object]:
@@ -213,12 +223,12 @@ def _describe(profile: rp.RepoProfile) -> dict[str, object]:
 
 
 def _check(args: argparse.Namespace, now: dt.datetime | None = None) -> int:
-    reader, base = _reader(args)
+    reader, read_at, base = _reader(args)
     try:
-        present = set(reader.list_paths(base))
+        present = set(reader.list_paths(read_at))
     except PolicyReadError as exc:
         raise ProfileVerbError(f"cannot list {args.repo_path!r} at {base}: {exc}", EXIT_IO_FAILED) from exc
-    profile, state, problem = read_repo_profile(reader, base, present)
+    profile, state, problem = read_repo_profile(reader, read_at, present)
     _, items = profile_completeness(
         profile, state, problem, stakes_present=STAKES_PATH in present, now=now
     )
@@ -297,9 +307,9 @@ def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
         resolution = resolve_role(args.role, load_role_classes(config_root))
     except RoleVocabularyError as exc:
         raise ProfileVerbError(str(exc), EXIT_USAGE) from exc
-    reader, base = _reader(args)
+    reader, read_at, base = _reader(args)
     try:
-        present = set(reader.list_paths(base))
+        present = set(reader.list_paths(read_at))
     except PolicyReadError as exc:
         if resolution.role_class == CLASS_GATE and args.ref is None:
             present = set()
@@ -313,7 +323,7 @@ def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
         # reported as read; without --ref a gate brief needs no tree at all.
         print(json.dumps({"result": "brief", "at": base, **role_brief(None, resolution)}))
         return EXIT_OK
-    profile, state, problem = read_repo_profile(reader, base, present)
+    profile, state, problem = read_repo_profile(reader, read_at, present)
     if state == PROFILE_MISSING:
         print(json.dumps({"result": "missing", "path": PROFILE_PATH, "at": base}))
         print(

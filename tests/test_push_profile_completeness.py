@@ -107,6 +107,31 @@ class TestCreatePath:
             "profile-completeness:exposure,data,visibility,merge_control,confirmed_at"
         )
 
+    def test_the_profile_is_read_once_and_the_records_carry_the_items_that_were_printed(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, remote = repo_with_remote
+        _commit_profile(repo, "class: internal\n")
+        _write_verify(repo)
+        reads = []
+        real = profile_report.read_items
+
+        def read_once_then_report_complete(project_root):
+            reads.append(project_root)
+            return real(project_root) if len(reads) == 1 else ()
+
+        monkeypatch.setattr(profile_report, "read_items", read_once_then_report_complete)
+
+        assert _create(repo, monkeypatch) == verb.EXIT_OK
+
+        assert len(reads) == 1
+        assert INCOMPLETE_LINE in capsys.readouterr().err
+        pushed = _git(remote, "rev-parse", "refs/heads/feature")
+        (record,) = records_at_head(records_root(), pushed).records
+        assert record.evidence_ref == (
+            "profile-completeness:exposure,data,visibility,merge_control,confirmed_at"
+        )
+
     def test_a_complete_profile_prints_nothing_and_leaves_no_evidence(
         self, repo_with_remote, monkeypatch, capsys
     ):
