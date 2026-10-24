@@ -101,6 +101,30 @@ class GitPolicyReader:
         raw = self._git(["show", f"{base}:{path}"], f"{path} at {base[:12]}")
         return decode_policy_bytes(raw, path, base)
 
+    def changed_paths(self, base: str, head: str) -> list[tuple[str, tuple[str, ...]]]:
+        """Every path changed between the merge base of *base* and *head* and
+        *head*, each with the file modes of its two sides. A rename is reported as
+        the deletion of the old path and the addition of the new one, so both
+        names are seen."""
+        out = self._git(
+            ["diff", "--raw", "-z", "--no-renames", "--no-abbrev", f"{base}...{head}", "--"],
+            f"the changed paths of {base[:12]}...{head[:12]}",
+        )
+        tokens = out.decode("utf-8", "replace").split("\0")
+        changed: list[tuple[str, tuple[str, ...]]] = []
+        position = 0
+        while position + 1 < len(tokens):
+            meta, path = tokens[position], tokens[position + 1]
+            position += 2
+            fields = meta.lstrip(":").split()
+            if len(fields) < 5 or not path:
+                raise PolicyReadError(
+                    f"cannot read the changed paths of {base[:12]}...{head[:12]}: "
+                    f"unexpected git output {meta[:40]!r}"
+                )
+            changed.append((path, (fields[0], fields[1])))
+        return changed
+
 
 class HostPolicyReader:
     """Reads from the host API through an acquisition backend, which already

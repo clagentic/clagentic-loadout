@@ -262,6 +262,23 @@ class PolicyFileBackend(Protocol):
         ...
 
 
+@runtime_checkable
+class CommentBackend(Protocol):
+    """Optional capability of a transport: read every comment on a PR from the
+    host API. Separate from AcquireBackend for the same reason as
+    RangeDiffBackend."""
+
+    def fetch_issue_comments(self, *, owner: str, repo: str, pr_number: int) -> list[dict]:
+        """Every comment on the PR, in full.
+
+        Raises:
+            acquire.errors.AcquireFetchError: the list could not be read in
+                full (non-2xx, network failure, a page that proves the list
+                incomplete, or an unexpected response shape).
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class RangeDiff:
     """The change between two commits of one repository, from the host API.
@@ -305,6 +322,7 @@ __all__ = [
     "AcquireBackend",
     "AcquiredPr",
     "ChangedFile",
+    "CommentBackend",
     "PolicyFileBackend",
     "RangeDiff",
     "RangeDiffBackend",

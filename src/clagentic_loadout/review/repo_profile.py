@@ -31,6 +31,11 @@ with no internal path)::
                                     # through their top level; no check flags it
     test: {full: [...]}             # optional; the commands ``clagentic-loadout
                                     # test run`` uses (see repo_test.spec)
+    review:                         # optional; read only by gates, from the merge base
+      docs_only:                    # absent means nothing is docs-only
+        paths: ["docs/**/*.md"]     # globs whose files may be documentation
+        depended_on: ["docs/README.md"]  # globs that are code although they look like docs
+                                    # (see review.docs_only_policy)
     exposure: local_or_ci_only      # optional posture keys, read only by gates from
     data: public_or_none            # the merge base (see review.profile_posture).
     visibility: public              # A missing, unrecognised or unconfirmed value
@@ -50,6 +55,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from clagentic_loadout.repo_test.spec import DeclaredTests, TestBlockError, parse_test_block
+from clagentic_loadout.review.docs_only_policy import (
+    DocsOnlyFormatError,
+    DocsOnlyPolicy,
+    parse_review_block,
+)
 from clagentic_loadout.review.path_glob import path_matches
 from clagentic_loadout.review.profile_posture import POSTURE_KEY_ORDER
 
@@ -149,6 +159,8 @@ class RepoProfile:
     #: The posture keys as written, unvalidated: an unrecognised value is a
     #: completeness item (review.profile_posture), not an invalid profile.
     posture: tuple[tuple[str, Any], ...] = ()
+    #: The docs allowlist (``review.docs_only``); None when none is declared.
+    docs_only: DocsOnlyPolicy | None = None
 
     def posture_values(self) -> dict[str, Any]:
         return dict(self.posture)
@@ -243,7 +255,7 @@ def parse_profile_document(doc: Any) -> RepoProfile:
     half-applied."""
     if not isinstance(doc, dict):
         raise ProfileFormatError("the profile must be a mapping with a class")
-    allowed = ("class", "paths", "deny", "tool_packages", "test", *POSTURE_KEY_ORDER)
+    allowed = ("class", "paths", "deny", "tool_packages", "test", "review", *POSTURE_KEY_ORDER)
     unknown = sorted(str(k) for k in doc if k not in allowed)
     if unknown:
         raise ProfileFormatError(f"unknown or misplaced key: {', '.join(unknown)}")
@@ -256,6 +268,10 @@ def parse_profile_document(doc: Any) -> RepoProfile:
     try:
         declared_tests = parse_test_block(doc.get("test"))
     except TestBlockError as exc:
+        raise ProfileFormatError(str(exc)) from exc
+    try:
+        docs_only = parse_review_block(doc.get("review"))
+    except DocsOnlyFormatError as exc:
         raise ProfileFormatError(str(exc)) from exc
     # A field only means something where its class is in effect: the top-level
     # class or a path override. Anywhere else it would be silently ignored.
@@ -275,6 +291,7 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         tool_packages=tool_packages,
         test=declared_tests if declared_tests.declared_keys() else None,
         posture=tuple((key, doc[key]) for key in POSTURE_KEY_ORDER if key in doc),
+        docs_only=docs_only,
     )
 
 

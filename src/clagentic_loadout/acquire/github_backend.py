@@ -31,6 +31,9 @@ Endpoint shapes (real, documented GitHub REST API):
   - GET /repos/{owner}/{repo}/git/trees/{sha}?recursive=1
         -> {"tree": [{"path", "type"}, ...], "truncated": bool}; with the
            contents endpoint above, the policy-file read of review.policy_reader.
+  - GET /repos/{owner}/{repo}/issues/{pull_number}/comments?per_page=&page=
+        -> [{"id", "user", "body", "created_at"}, ...], paged and read in full
+           by transport.comment_paging; the verdict comments a PR already holds.
 """
 
 from __future__ import annotations
@@ -49,7 +52,12 @@ from clagentic_loadout.acquire.contract import (
     tree_file_paths,
 )
 from clagentic_loadout.acquire.errors import AcquireFetchError
-from clagentic_loadout.transport.github_client import GITHUB_API_BASE, request_json
+from clagentic_loadout.transport import comment_paging
+from clagentic_loadout.transport.github_client import (
+    GITHUB_API_BASE,
+    request_json,
+    request_json_with_headers,
+)
 from clagentic_loadout.transport.redirect_guard import no_redirect_opener
 
 #: Accept header requesting the raw unified diff instead of the ordinary
@@ -220,6 +228,40 @@ def fetch_range_diff(
     )
 
 
+def fetch_issue_comments(
+    owner: str, repo: str, pr_number: int, token: str, *, opener=None
+) -> list[dict]:
+    """Every comment on the PR, all pages (GET .../issues/{n}/comments), through
+    the one paged reader every comment site shares. An incomplete list is a
+    failure, never a shorter answer."""
+
+    def fetch_page(url: str):
+        try:
+            return request_json_with_headers(
+                "GET",
+                url,
+                token,
+                parse_mode="content_type",
+                opener=opener,
+                opener_factory=no_redirect_opener,
+            )
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise AcquireFetchError(f"GET {url} returned a body that is not valid JSON") from exc
+
+    try:
+        return comment_paging.list_github_issue_comments(
+            owner, repo, pr_number, fetch_page, api_base=GITHUB_API_BASE
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise AcquireFetchError(
+            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
+    except comment_paging.CommentListError as exc:
+        raise AcquireFetchError(
+            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
+
+
 def fetch_pr_content(
     owner: str,
     repo: str,
@@ -313,9 +355,13 @@ class GithubAcquireBackend:
     def fetch_file_bytes(self, *, owner: str, repo: str, path: str, ref: str) -> bytes:
         return fetch_file_bytes(owner, repo, path, ref, self._token, opener=self._opener)
 
+    def fetch_issue_comments(self, *, owner: str, repo: str, pr_number: int) -> list[dict]:
+        return fetch_issue_comments(owner, repo, pr_number, self._token, opener=self._opener)
+
 
 __all__ = [
     "GithubAcquireBackend",
+    "fetch_issue_comments",
     "fetch_file_bytes",
     "fetch_pr_content",
     "fetch_tree_paths",

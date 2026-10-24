@@ -66,6 +66,12 @@ def _profile_main(argv: list[str]) -> int:
     return profile_main(argv)
 
 
+def _changeset_main(argv: list[str]) -> int:
+    from clagentic_loadout.review.changeset_verb import main as changeset_main
+
+    return changeset_main(argv)
+
+
 def _merge_main(argv: list[str]) -> int:
     from clagentic_loadout.merge.verb import main as merge_main
 
@@ -175,6 +181,10 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "profile": (
         "Validate a repo profile, draft one, or print it shaped for a role (check, init, brief).",
         _profile_main,
+    ),
+    "changeset": (
+        "Classify a change as docs-only or code from the base's docs allowlist (classify).",
+        _changeset_main,
     ),
     "rules": ("Print the group rules that apply to a repository.", _rules_main),
     "merge": ("Run the merge-gate chain, then merge a PR.", _merge_main),
