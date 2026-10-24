@@ -215,6 +215,7 @@ def resolve_repo_config_root(
     repo_root: str | Path,
     *relative_paths: str,
     exists_check: Callable[[Path], bool] = _default_exists_check,
+    wrapper_hop: bool = True,
 ) -> Path:
     """Resolve the directory that carries one of *relative_paths* (per
     *exists_check*), trying *repo_root* itself and then exactly ONE
@@ -268,6 +269,11 @@ def resolve_repo_config_root(
     if git_top != repo_root and _present(git_top):
         return git_top
 
+    if not wrapper_hop:
+        # A caller that has bound the tree to its origin must not read a file
+        # from outside that tree.
+        return repo_root
+
     wrapper = git_top.parent
     if wrapper == git_top:
         # git_top is the filesystem root; no parent to hop to.
@@ -284,6 +290,7 @@ def resolve_repo_config_path(
     config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
     legacy_relative_path: str = LEGACY_CONFIG_RELATIVE_PATH,
     warn: bool = True,
+    wrapper_hop: bool = True,
 ) -> Path:
     """Resolve the sectioned repo-local loadout config file's path for
     *repo_root*, applying the transitional legacy-path fallback (see module
@@ -326,7 +333,7 @@ def resolve_repo_config_path(
     """
     repo_root = Path(repo_root)
     config_root = resolve_repo_config_root(
-        repo_root, config_relative_path, legacy_relative_path
+        repo_root, config_relative_path, legacy_relative_path, wrapper_hop=wrapper_hop
     )
 
     new_path = config_root / config_relative_path

@@ -419,8 +419,14 @@ def load_post_merge_steps(
     repo_root: str | Path | None,
     *,
     config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+    wrapper_hop: bool = True,
 ) -> list[dict]:
     """Resolve the post_merge_steps list for a repo.
+
+    *wrapper_hop* False reads only from *repo_root* and its own git top-level,
+    never from the directory above it: a caller that has confirmed the tree is
+    a clone of the repository (git_origin.ConfigTreeBinding) must not execute
+    steps declared outside that tree.
 
     Reads `<repo_root>/<config_relative_path>` (default
     `.clagentic/loadout/config.yaml`, falling back to the legacy
@@ -445,7 +451,7 @@ def load_post_merge_steps(
         return []
 
     config_path = resolve_repo_config_path(
-        repo_root, config_relative_path=config_relative_path
+        repo_root, config_relative_path=config_relative_path, wrapper_hop=wrapper_hop
     )
     merge_section = read_repo_merge_section(config_path)
 

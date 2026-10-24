@@ -36,6 +36,7 @@ import yaml
 from clagentic_loadout.merge import post_merge_verb
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
+from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, make_origin_confirmable
 
 _PY = sys.executable
 _OWNER = "some-owner"
@@ -67,6 +68,7 @@ def _init_repo_with_origin(tmp_path):
     _run_git(["commit", "-m", "seed"], cwd=tmp_path)
     _run_git(["remote", "add", "origin", str(remote_dir)], cwd=tmp_path)
     _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=tmp_path)
+    make_origin_confirmable(tmp_path)
 
     rev_parse = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
@@ -326,6 +328,7 @@ class TestPostMergeRerunAgainstAlreadyMergedPr:
 
     def test_github_platform_dispatches_to_github_backend(self, tmp_path):
         merged_sha = _init_repo_with_origin(tmp_path)
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         marker = tmp_path / "redeployed.txt"
         _write_merge_config(
             tmp_path,

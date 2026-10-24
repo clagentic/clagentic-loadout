@@ -19,7 +19,7 @@ import pytest
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.transport import provider_config
-from tests._gate_repo import git, init_gate_repo
+from tests._gate_repo import git, init_gate_repo, make_origin_confirmable
 from tests._support.merge_verb import (
     AllowingAuthorityProvider,
     RecordingTokenProvider,
@@ -73,6 +73,7 @@ def _repo_with_post_merge_step(tmp_path, marker):
     git(tmp_path, "init", "-q", "--bare", "-b", "main", str(origin))
     git(repo.path, "remote", "add", "origin", str(origin))
     git(repo.path, "push", "-q", "origin", "main")
+    make_origin_confirmable(repo.path)
     return repo
 
 

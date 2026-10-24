@@ -605,6 +605,10 @@ from clagentic_loadout.merge.repo_gate_runtime import (
     load_repo_gate_at_base,
     resolve_gate_git_tree,
 )
+from clagentic_loadout.merge.config_binding import (
+    config_binding_for,
+    require_confirmed_tree_for_steps,
+)
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.required_reviewers import (
     parse_required_reviewers,
@@ -1435,6 +1439,8 @@ def _run(
     required_reviewers = _parse_required_reviewers(args.required_reviewers, args.platform)
     git_host_base = _resolve_git_host_base(args.git_host_base_url)
 
+    config_binding = config_binding_for(args.platform, git_host_base, args.repo)
+
     # 1. Namespace guard — runs FIRST, before any credential or network call.
     allowed_namespaces = resolve_allowed_namespaces(
         frozenset(args.allowed_namespaces) if args.allowed_namespaces else None
@@ -1494,6 +1500,7 @@ def _run(
         args.repo_path,
         base_sha=resolve_base_sha(pr_info),
         base_branch=resolve_base_branch(pr_info),
+        config_binding=config_binding,
     )
     # The same resolution loadout-ruling uses to attribute a fence to a required
     # role (merge.required_reviewers).
@@ -2106,6 +2113,15 @@ def _run(
             code=EXIT_GATE_RESULT_BLOCKED,
         )
 
+    # post_merge_steps are commands this verb runs from --repo-path's deployment
+    # file, and that file is not content-addressed. Last check before anything
+    # irreversible: the tree must be a confirmed clone of --repo on the
+    # configured host, else it is refused and nothing is merged. The fallback
+    # gate keys are bound the same way where they are read
+    # (merge.repo_gate_runtime).
+    if args.repo_path and not args.skip_post_merge:
+        require_confirmed_tree_for_steps(config_binding, args.repo_path)
+
     # --report-only stops here: every gate above ran exactly as a real merge
     # would, and a refusal already exited with its own code. Nothing below
     # mutates the host, the tree or any task state.
@@ -2324,7 +2340,7 @@ def _run(
                 steps: list[dict] = []
             else:
                 try:
-                    steps = load_post_merge_steps(args.repo_path)
+                    steps = load_post_merge_steps(args.repo_path, wrapper_hop=False)
                 except PostMergeConfigError as exc:
                     _fail(
                         f"post-merge config FAILED to load -- {exc}",

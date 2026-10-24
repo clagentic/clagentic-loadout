@@ -57,6 +57,32 @@ def seed_base_commit(path: Path) -> str:
     return git(path, "rev-parse", "HEAD")
 
 
+#: An origin the merge verbs confirm under their default Forgejo host.
+CONFIRMABLE_ORIGIN = "http://127.0.0.1:3000/some-owner/some-repo.git"
+#: The same for `--platform github`.
+CONFIRMABLE_GITHUB_ORIGIN = "git@github.com:some-owner/some-repo.git"
+
+
+def make_origin_confirmable(tree: Path, *, url: str = CONFIRMABLE_ORIGIN, branch: str = "main") -> None:
+    """Give *tree* an `origin` the merge verbs can bind to (an https or ssh remote
+    on the configured host) while real fetches keep working.
+
+    A fixture's `origin` is often a local bare repository, which names no host.
+    That remote is renamed `mirror` and made the base branch's tracking remote,
+    which is the one the post-merge tree sync fetches from, and `origin` becomes
+    *url*. Called again, it only replaces the URL."""
+    remotes = git(tree, "remote").split()
+    if "origin" in remotes and "mirror" not in remotes:
+        git(tree, "remote", "rename", "origin", "mirror")
+        git(tree, "config", f"branch.{branch}.remote", "mirror")
+        git(tree, "config", f"branch.{branch}.merge", f"refs/heads/{branch}")
+        remotes = git(tree, "remote").split()
+    if "origin" in remotes:
+        git(tree, "remote", "set-url", "origin", url)
+    else:
+        git(tree, "remote", "add", "origin", url)
+
+
 def write_deployment_config(repo: Path, merge_section: dict) -> None:
     path = repo / DEFAULT_CONFIG_RELATIVE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)

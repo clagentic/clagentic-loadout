@@ -107,6 +107,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable
 
+from clagentic_loadout.git_origin import ConfigTreeBinding, OriginBindingError
 from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
 from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_CI_STRICT,
@@ -318,7 +319,12 @@ def resolve_gate_git_tree(repo_path: str | Path) -> Path:
     return declared_tree if declared_tree is not None else Path(repo_path)
 
 
-def gate_from_deployment_config(repo_path: str | Path) -> RepoGate:
+def gate_from_deployment_config(
+    repo_path: str | Path,
+    *,
+    config_binding: ConfigTreeBinding | None = None,
+    binding_tree: str | Path | None = None,
+) -> RepoGate:
     """The gate the deployment `config.yaml` declares, for a repo whose PR base
     commit has no tracked gate file.
 
@@ -335,8 +341,16 @@ def gate_from_deployment_config(repo_path: str | Path) -> RepoGate:
     there would let a merge land ungated and fail only afterwards, when the
     post-merge loaders reread the same file. When gate keys are read, the result
     carries a notice naming the source.
+
+    With *config_binding*, the file is read only from *repo_path* and its own git
+    top-level (never the directory above), and a file that declares gate keys is
+    used only if *binding_tree* is a confirmed clone for the binding; otherwise
+    the result is the "nothing readable" gate. A file that declares nothing
+    needs no confirmation, because nothing is taken from it.
     """
-    config_path = resolve_repo_config_path(repo_path, warn=False)
+    config_path = resolve_repo_config_path(
+        repo_path, warn=False, wrapper_hop=config_binding is None
+    )
     try:
         text = config_path.read_text(encoding="utf-8")
     except FileNotFoundError:
@@ -350,6 +364,14 @@ def gate_from_deployment_config(repo_path: str | Path) -> RepoGate:
     declared = [key for key in GATE_KEYS if key in merge_section]
     if not declared:
         return RepoGate()
+    if config_binding is not None:
+        try:
+            config_binding.confirm(binding_tree if binding_tree is not None else repo_path)
+        except OriginBindingError as exc:
+            return _nothing_readable(
+                (),
+                f"the gate keys ({', '.join(declared)}) in {config_path} are not used: {exc}",
+            )
     gate = gate_from_tracked_text(text, source=str(config_path))
     notice = (
         f"gate keys read from deployment config.yaml; no tracked gate.yaml at base "
@@ -365,6 +387,7 @@ def load_gate_at_commit(
     *,
     base_branch: str = "",
     deployment_repo_path: str | Path | None = None,
+    config_binding: ConfigTreeBinding | None = None,
 ) -> RepoGate:
     """Read the tracked gate file at *sha* in *git_tree* and apply
     `gate_from_tracked_text`. A commit or file that cannot be read is the same
@@ -374,6 +397,13 @@ def load_gate_at_commit(
     `config.yaml` is consulted: it is the gate when the tracked file is absent
     at *sha* (`gate_from_deployment_config`), and its gate keys are reported as
     IGNORED when the tracked file is present or unreadable.
+
+    *config_binding*, when given, is checked against *git_tree* before that
+    fallback's gate keys are used: a tree that is not a clone of the named
+    repository on the configured host, or whose origin cannot be read, yields
+    the "nothing readable" gate (the merge refuses). The tracked file read above
+    is content-addressed at *sha*, so it needs no binding. None keeps the
+    fallback unbound for a library caller; the merge verbs always pass one.
     """
     source = f"{Path(git_tree).resolve()}@{sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"
     try:
@@ -381,7 +411,9 @@ def load_gate_at_commit(
     except CommitFileReadError as exc:
         return _nothing_readable(_ignored_or_none(deployment_repo_path), f"{source}: {exc}")
     if text is None and deployment_repo_path is not None:
-        return gate_from_deployment_config(deployment_repo_path)
+        return gate_from_deployment_config(
+            deployment_repo_path, config_binding=config_binding, binding_tree=git_tree
+        )
     return gate_from_tracked_text(
         text, source=source, ignored_warnings=_ignored_or_none(deployment_repo_path)
     )
@@ -392,7 +424,11 @@ def _ignored_or_none(repo_path: str | Path | None) -> tuple[str, ...]:
 
 
 def load_repo_gate_at_base(
-    repo_path: str | Path | None, *, base_sha: str, base_branch: str = ""
+    repo_path: str | Path | None,
+    *,
+    base_sha: str,
+    base_branch: str = "",
+    config_binding: ConfigTreeBinding | None = None,
 ) -> RepoGate:
     """Load the repo's declared gate from the PR base commit.
 
@@ -431,7 +467,11 @@ def load_repo_gate_at_base(
         # are read from *repo_path*'s own tree at the base commit, so declared
         # checks still run and a tree that cannot supply them refuses.
         from_repo_path = load_gate_at_commit(
-            Path(repo_path), base_sha, base_branch=base_branch, deployment_repo_path=repo_path
+            Path(repo_path),
+            base_sha,
+            base_branch=base_branch,
+            deployment_repo_path=repo_path,
+            config_binding=config_binding,
         )
         # Keep only the IGNORED notices the source itself raised: none when the
         # deployment file is the gate, because then nothing in it is ignored.
@@ -445,7 +485,11 @@ def load_repo_gate_at_base(
     if not base_sha:
         return _nothing_readable(ignored, "the PR payload carried no base commit SHA to read it at")
     return load_gate_at_commit(
-        git_tree, base_sha, base_branch=base_branch, deployment_repo_path=repo_path
+        git_tree,
+        base_sha,
+        base_branch=base_branch,
+        deployment_repo_path=repo_path,
+        config_binding=config_binding,
     )
 
 

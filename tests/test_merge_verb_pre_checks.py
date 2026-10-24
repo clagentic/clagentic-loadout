@@ -29,7 +29,14 @@ import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
-from tests._gate_repo import GateRepo, commit_raw_gate_to_base, git, init_gate_repo, write_deployment_config
+from tests._gate_repo import (
+    GateRepo,
+    commit_raw_gate_to_base,
+    git,
+    init_gate_repo,
+    make_origin_confirmable,
+    write_deployment_config,
+)
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
@@ -303,6 +310,7 @@ class TestUnmigratedRepoReadsTheDeploymentConfig:
 
     def _unmigrated(self, tmp_path, steps):
         repo = init_gate_repo(tmp_path, tracked_gate=None)
+        make_origin_confirmable(tmp_path)
         write_deployment_config(
             tmp_path,
             {"sync_tree_after_merge": False, "required_reviewer_roles": [], "pre_checks": steps},

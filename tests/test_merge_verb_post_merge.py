@@ -45,7 +45,7 @@ import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.transport import provider_config
-from tests._gate_repo import seed_base_commit
+from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, make_origin_confirmable, seed_base_commit
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
@@ -112,6 +112,7 @@ def _init_repo_with_origin(tmp_path):
     _run_git(["commit", "-m", "seed"], cwd=tmp_path)
     _run_git(["remote", "add", "origin", str(remote_dir)], cwd=tmp_path)
     _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=tmp_path)
+    make_origin_confirmable(tmp_path)
 
     rev_parse = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
@@ -481,6 +482,7 @@ class TestPostMergeRunsOnlyAfterSuccess:
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
         )
         _record_base_sha(seed_base_commit(tmp_path))
+        make_origin_confirmable(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
@@ -834,6 +836,7 @@ class TestSyncTreeAfterMergeDefaultOn:
         # post_merge_steps entry is configured so this invocation actually
         # takes the CHECKOUT path (lr-173768).
         merged_sha = _init_repo_with_origin(tmp_path)
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
@@ -855,6 +858,7 @@ class TestSyncTreeAfterMergeDefaultOn:
         # entry is configured so this invocation actually takes the CHECKOUT
         # path (lr-173768).
         merged_sha = _init_repo_with_origin(tmp_path)
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         _write_merge_config(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
@@ -1104,6 +1108,7 @@ class TestGitWorkingTreeConfigRootSplit:
             git_tree_dir,
             [{"cmd": [_PY, "-c", f"open(r'{wrong_marker}', 'w').write('WRONG')"]}],
         )
+        make_origin_confirmable(git_tree_dir, url=CONFIRMABLE_GITHUB_ORIGIN)
 
         # The wrapper's REAL config (outside the inner tree) declares a
         # DIFFERENT step.
@@ -1438,6 +1443,7 @@ def _init_repo_with_origin_and_tracked_config(tmp_path, steps: list[dict]) -> st
     _run_git(["commit", "-m", "seed"], cwd=tmp_path)
     _run_git(["remote", "add", "origin", str(remote_dir)], cwd=tmp_path)
     _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=tmp_path)
+    make_origin_confirmable(tmp_path)
 
     rev_parse = subprocess.run(
         ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
@@ -1526,7 +1532,7 @@ def _push_deleted_tracked_config_commit_to_origin(
     new_sha = commit_tree.stdout.strip()
 
     push = subprocess.run(
-        ["git", "push", "origin", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
+        ["git", "push", "mirror", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
         capture_output=True, text=True, cwd=str(tmp_path),
     )
     assert push.returncode == 0, push.stderr
@@ -1610,7 +1616,7 @@ def _push_tracked_config_text_commit_to_origin(
     new_sha = commit_tree.stdout.strip()
 
     push = subprocess.run(
-        ["git", "push", "origin", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
+        ["git", "push", "mirror", f"{new_sha}:refs/heads/{_BASE_BRANCH}"],
         capture_output=True, text=True, cwd=str(tmp_path),
     )
     assert push.returncode == 0, push.stderr
@@ -1666,6 +1672,7 @@ class TestStalePreSyncConfigDriftCheck:
         # working tree must land on base_branch afterward, exactly like any
         # other successful post_merge_steps run.
         _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         marker = tmp_path / "installed-from-merged-commit.txt"
         merged_sha = _push_tracked_config_commit_to_origin(
             tmp_path,
@@ -1696,6 +1703,7 @@ class TestStalePreSyncConfigDriftCheck:
         # commit's own config does not parse. Must never silently run zero
         # steps or fall back to the stale pre-sync list either.
         _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         merged_sha = _push_malformed_tracked_config_commit_to_origin(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
@@ -1713,6 +1721,7 @@ class TestStalePreSyncConfigDriftCheck:
         # merge succeeds and the step still runs exactly as before this task.
         step = {"cmd": [_PY, "-c", "pass"]}
         _init_repo_with_origin_and_tracked_config(tmp_path, [step])
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         merged_sha = _push_tracked_config_commit_to_origin(tmp_path, [step])
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(
@@ -1804,6 +1813,7 @@ class TestStalePreSyncConfigDriftCheck:
         _init_repo_with_origin_and_tracked_config(
             tmp_path, [{"cmd": [_PY, "-c", "pass"]}]
         )
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         # Merged commit's own TRACKED config: explicitly zero steps -- an
         # informed choice at the commit actually being merged.
         merged_sha = _push_tracked_config_commit_to_origin(tmp_path, [])
@@ -1841,6 +1851,7 @@ class TestStalePreSyncConfigDriftCheck:
         _init_repo_with_origin_and_tracked_config(
             tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}]
         )
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
         merged_sha = _push_deleted_tracked_config_commit_to_origin(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
         code = verb.main(

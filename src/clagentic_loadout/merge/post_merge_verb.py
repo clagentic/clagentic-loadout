@@ -130,6 +130,10 @@ from clagentic_loadout.merge.post_merge_config import (
     resolve_git_working_tree,
     resolve_post_merge_step_timeout_seconds,
 )
+from clagentic_loadout.merge.config_binding import (
+    config_binding_for,
+    require_confirmed_tree_for_steps,
+)
 from clagentic_loadout.merge.repo_path_consistency import assert_repo_path_consistent
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
@@ -548,6 +552,13 @@ def _run(
         file=sys.stderr,
     )
 
+    # The steps this verb runs come from --repo-path's deployment file, and the
+    # tree is checked out next. Confirm before either that the tree is a clone
+    # of --repo on the configured host; an unconfirmable tree is refused.
+    require_confirmed_tree_for_steps(
+        config_binding_for(args.platform, git_host_base, args.repo), args.repo_path
+    )
+
     # 5. Advance --repo-path to the merged SHA -- the SAME tree_sync call
     # merge.verb's own step 10 makes, so a re-run step sees exactly what
     # landed on the base branch, never a stale local ref.
@@ -609,7 +620,7 @@ def _run(
     original_exc: BaseException | None = None
     try:
         try:
-            steps = load_post_merge_steps(args.repo_path)
+            steps = load_post_merge_steps(args.repo_path, wrapper_hop=False)
         except PostMergeConfigError as exc:
             _fail(
                 f"post-merge config FAILED to load -- {exc}",

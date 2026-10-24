@@ -19,7 +19,7 @@ from clagentic_loadout.merge.repo_gate_runtime import load_repo_gate_at_base
 from clagentic_loadout.merge.verdict import build_verdict_block, read_reviewer_verdict
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.transport import provider_config
-from tests._gate_repo import git, init_gate_repo, write_deployment_config
+from tests._gate_repo import git, init_gate_repo, make_origin_confirmable, write_deployment_config
 from tests._support.merge_verb import (
     AllowingAuthorityProvider as _AllowingAuthorityProvider,
     RecordingTokenProvider as _RecordingTokenProvider,
@@ -697,6 +697,7 @@ class TestTheGateComesFromBaseNotTheWorkingTree:
         self, tmp_path, capsys
     ):
         init_gate_repo(tmp_path, tracked_gate=None)
+        make_origin_confirmable(tmp_path)
         write_deployment_config(
             tmp_path, {"sync_tree_after_merge": False, "required_reviewer_roles": ["never-posts"]}
         )
@@ -711,6 +712,7 @@ class TestTheGateComesFromBaseNotTheWorkingTree:
     ):
         TestRepoReviewerFloor._only_ghost_is_unresolvable(monkeypatch)
         init_gate_repo(tmp_path, tracked_gate=None)
+        make_origin_confirmable(tmp_path)
         write_deployment_config(
             tmp_path,
             {
