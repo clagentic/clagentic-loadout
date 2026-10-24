@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clagentic.ai/schemas/loadout/verdict-record.schema.json",
+  "title": "verdict record",
+  "description": "One measurement a gate made of one exact commit. A gate that did not run has no record, and the merge verb reads the absence as a refusal. Written by the step that ran the gate (push verification, the review verdict post, the merge verb's own checks) and read back by id or by head commit. schema_version is bumped on any change that an older reader would misread.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "gate", "head_sha", "tool", "exit", "started", "finished"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Version of this record shape."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$",
+      "description": "Record id: the UTC time it was written and eight random hex digits. Unique per record; the handle `show` reads by."
+    },
+    "gate": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[^\\r\\n]+$",
+      "description": "Which gate measured. The kind, a colon and the configured name for a named gate: reviewer:<role>, pre_check:<label>, push.verify:<entry name>; the CI read is the bare name ci. Names come from the repository's and the deployment's own configuration."
+    },
+    "head_sha": {
+      "type": "string",
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "description": "The exact commit the gate measured (a full SHA-1 or SHA-256 object name):for a push, the head read back from the remote after the push, not the head before commits were re-authored. A consumer matches this and no other commit."
+    },
+    "tree_sha": {
+      "type": ["string", "null"],
+      "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$",
+      "description": "The tree object of head_sha, when known."
+    },
+    "repo": {
+      "type": ["string", "null"],
+      "pattern": "^[^/\\s]+/[^/\\s]+$",
+      "description": "owner/repo the commit belongs to, when known. A record naming another repository does not count for this one."
+    },
+    "spec_hash": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Hash of the acceptance specification the gate measured against. Null until a specification is attached to the change."
+    },
+    "tool": {
+      "type": "string",
+      "minLength": 1,
+      "description": "What measured: the verb or reader that produced the result."
+    },
+    "exit": {
+      "type": "integer",
+      "description": "Result of the measurement. Zero passes; anything else is a failed measurement. A gate that never ran leaves no record at all."
+    },
+    "started": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "UTC time the measurement began, to the second."
+    },
+    "finished": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "UTC time the measurement ended, to the second."
+    },
+    "evidence_ref": {
+      "type": ["string", "null"],
+      "description": "Where the evidence lives: a posted comment (comment:<id>), a test run id, a check name. Null when the record is its own evidence."
+    },
+    "waiver": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Reserved for the merge record: a stated reason a gate was waived for this commit. Null otherwise."
+    }
+  }
+}
