@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,39 @@ class SpecReviewError(Exception):
     names the file or hash and what was found."""
 
 
+@dataclass(frozen=True)
+class SpecFacts:
+    """What a review reads from a sealed spec: its acceptance criterion ids, in
+    spec order, and the requesting agent's docs-only justification (None when
+    the spec claims none)."""
+
+    criterion_ids: tuple[str, ...]
+    docs_only_justification: str | None
+
+
+def load_spec_facts(
+    spec_hash: str,
+    *,
+    config_root: str | Path | None = None,
+    untrusted_roots: Sequence[Path] = (),
+) -> SpecFacts:
+    """The facts of the sealed spec *spec_hash*. Raises SpecReviewError when the
+    spec is not in the store, does not verify against its hash, or the store
+    cannot be used."""
+    root = spec_store.specs_root(config_root=config_root)
+    try:
+        stored = spec_store.load_sealed(root, spec_hash, untrusted_roots=untrusted_roots)
+    except StoreError as exc:
+        raise SpecReviewError(str(exc)) from exc
+    justification = stored.doc.get("docs_only_justification")
+    return SpecFacts(
+        criterion_ids=tuple(criterion["id"] for criterion in stored.doc["acceptance_criteria"]),
+        docs_only_justification=(
+            justification if isinstance(justification, str) and justification.strip() else None
+        ),
+    )
+
+
 def load_spec_criterion_ids(
     spec_hash: str,
     *,
@@ -45,14 +79,10 @@ def load_spec_criterion_ids(
     untrusted_roots: Sequence[Path] = (),
 ) -> tuple[str, ...]:
     """The acceptance criterion ids of the sealed spec *spec_hash*, in spec order.
-    Raises SpecReviewError when the spec is not in the store, does not verify
-    against its hash, or the store cannot be used."""
-    root = spec_store.specs_root(config_root=config_root)
-    try:
-        stored = spec_store.load_sealed(root, spec_hash, untrusted_roots=untrusted_roots)
-    except StoreError as exc:
-        raise SpecReviewError(str(exc)) from exc
-    return tuple(criterion["id"] for criterion in stored.doc["acceptance_criteria"])
+    Raises SpecReviewError as ``load_spec_facts`` does."""
+    return load_spec_facts(
+        spec_hash, config_root=config_root, untrusted_roots=untrusted_roots
+    ).criterion_ids
 
 
 def load_coverage(path: str, criterion_ids: Sequence[str]) -> list[dict[str, str]]:
@@ -120,8 +150,10 @@ def tags_for_fence(findings: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]
 
 
 __all__ = [
+    "SpecFacts",
     "SpecReviewError",
     "load_coverage",
     "load_spec_criterion_ids",
+    "load_spec_facts",
     "tags_for_fence",
 ]

@@ -54,6 +54,7 @@ from clagentic_loadout.review.delta import (
     reviewer_resolved_positions,
 )
 from clagentic_loadout.merge.fence_state import KEY_VERDICT_OUTCOME, KEY_VERDICT_REASONS
+from clagentic_loadout.review.docs_only_review import ChangesetInput, summarize_changeset
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
 from clagentic_loadout.review.evaluation import (
     EvaluationContext,
@@ -98,6 +99,10 @@ KEY_PRIOR_LINE = "prior_line"
 
 #: Key, on a chunk record and in the run summary, of the class rules evidence.
 KEY_CLASS_RULES = "class_rules"
+
+#: Key, in the run summary and the findings document, of the classification of
+#: the whole pull request.
+KEY_CHANGESET = "changeset"
 
 REASON_ACQUIRE_INVALID = "ACQUIRE_INVALID"
 REASON_DIFF_EMPTY = "DIFF_EMPTY"
@@ -438,6 +443,7 @@ def run_review(
     delta_stage: dict[str, str] | None = None,
     unknown_resolutions: Sequence[str] | None = None,
     evaluation: EvaluationContext | None = None,
+    changeset: ChangesetInput | None = None,
 ) -> RunOutcome:
     """Drive one invocation of the review pipeline for *acquired*. With
     *delta*, *acquired* already holds the delta diff and each chunk is framed
@@ -446,7 +452,10 @@ def run_review(
     when the caller supplied rulings, lists those that matched no prior
     finding; it is reported in the result. *evaluation* carries what the
     verdict depends on besides the findings (see review.evaluation); without
-    it the verdict is computed with no policy base, which is DEGRADED."""
+    it the verdict is computed with no policy base, which is DEGRADED.
+    *changeset* describes the whole pull request, which a delta *acquired*
+    does not; it is classified by the base profile's docs allowlist and the
+    classification is recorded in the result and the findings document."""
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, status: str, **fields: Any) -> None:
@@ -485,7 +494,12 @@ def run_review(
     # diff below, and the evaluator judges all findings under the same read.
     context = evaluation if evaluation is not None else EvaluationContext()
     policy = read_context_policy(context)
-    class_rules = {chunk.index: chunk_class_rules(policy, chunk) for chunk in chunks}
+    changeset_block = (
+        summarize_changeset(changeset, policy, context.policy_base_sha)
+        if changeset is not None
+        else None
+    )
+    class_rules ={chunk.index: chunk_class_rules(policy, chunk) for chunk in chunks}
     class_rules_sent = {
         chunk.index: class_rules_evidence(policy, chunk, class_rules[chunk.index])
         for chunk in chunks
@@ -722,6 +736,7 @@ def run_review(
             for chunk in chunks
         ],
         **verdict_document_fields(verdict, context),
+        **({KEY_CHANGESET: changeset_block} if changeset_block is not None else {}),
         "findings": findings,
     }
     try:
@@ -747,6 +762,7 @@ def run_review(
             KEY_VERDICT_REASONS: document[KEY_VERDICT_REASONS],
             "carried_count": len(carried),
             KEY_CLASS_RULES: _class_rules_summary(records),
+            **({KEY_CHANGESET: changeset_block} if changeset_block is not None else {}),
             **(
                 _accounting_fields(prior_open, len(kept) + len(left_open), resolved)
                 if delta is not None

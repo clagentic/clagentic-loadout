@@ -163,6 +163,7 @@ from clagentic_loadout.merge.errors import VerdictMalformedError
 from clagentic_loadout.merge.fence_state import (
     COVERAGE_UNMET,
     EVIDENCE_KEYS,
+    KEY_DOCS_ONLY,
     KEY_DROPPED,
     KEY_FENCE_SCHEMA_VERSION,
     KEY_SPEC_COVERAGE,
@@ -1373,6 +1374,7 @@ def _run(
             repo=f"{owner}/{repo}",
             spec_hash=spec_hash,
             evidence_ref=f"comment:{verified.id}",
+            docs_only=parsed.get(KEY_DOCS_ONLY),
         )
         if record is not None:
             result["verdict_record_id"] = record.id

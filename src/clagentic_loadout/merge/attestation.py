@@ -135,6 +135,7 @@ def build_attestation_body(
     issue_number: int | None = None,
     version: str | None = None,
     verdict_evaluations: "list[str] | tuple[str, ...]" = (),
+    docs_only_waivers: "list[str] | tuple[str, ...]" = (),
 ) -> str:
     """Build the merge-completion attestation comment body.
 
@@ -185,6 +186,10 @@ def build_attestation_body(
         applied or DEGRADED verdict allowed to pass. Rendered as a `Verdicts`
         row so a degradation that did not stop the merge is never silent; the
         row is omitted when empty.
+      - `docs_only_waivers`: one line per reviewer fence that accepted a
+        docs-only justification, from merge.fence_state.docs_only_waiver_line.
+        Rendered as a `Docs-only waivers` row, the audited record that a
+        lighter review was accepted; omitted when empty.
       - `version`: the clagentic-loadout package version. Defaults to
         `clagentic_loadout._version.get_version()` when omitted -- a caller
         overrides only for testing against a pinned version string.
@@ -217,6 +222,10 @@ def build_attestation_body(
     if verdict_evaluations:
         rows.append(
             ("Verdicts", "<br>".join(_escape_table_cell(line) for line in verdict_evaluations))
+        )
+    if docs_only_waivers:
+        rows.append(
+            ("Docs-only waivers", "<br>".join(_escape_table_cell(line) for line in docs_only_waivers))
         )
     rows.append(("CI status", _escape_table_cell(ci_disposition)))
     if task_id:
