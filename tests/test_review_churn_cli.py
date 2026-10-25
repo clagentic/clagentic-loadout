@@ -451,6 +451,27 @@ class TestThePostedCommentIsUntouched:
         assert "STOP." not in world.host.last_body
 
 
+class TestChurnVerbConformance:
+    def test_help_and_version_exit_zero(self, capsys):
+        for argv in (["churn", "--help"], ["--version"]):
+            assert review_cli.main(argv) == review_cli.EXIT_OK
+            assert capsys.readouterr().out
+
+    def test_the_help_describes_the_verb_without_internal_references(self, capsys):
+        review_cli.main(["churn", "--help"])
+
+        out = " ".join(capsys.readouterr().out.split())
+        assert "never refuses" in out and "--spec-hash" in out and "lr-" not in out
+
+    def test_a_missing_required_argument_is_a_usage_error_not_a_reserved_code(self, capsys):
+        assert review_cli.main(["churn", "--repo", "some-owner/some-repo"]) == review_cli.EXIT_USAGE
+
+    def test_a_malformed_repo_is_a_usage_error(self, capsys):
+        code = review_cli.main(["churn", "--repo", "no-slash", "--pr", "1"])
+
+        assert code == review_cli.EXIT_USAGE
+
+
 class TestTheChurnVerb:
     @pytest.fixture
     def login(self, world, tmp_path):
