@@ -184,7 +184,7 @@ def test_a_command_that_drops_to_an_unprivileged_user_still_yields_a_report(
 
     code, summary = _run(capsys, repo)
 
-    assert code == exits.EXIT_OK
+    assert code == exits.EXIT_OK, summary.get("problem")
     assert summary["counts"] == {"collected": 1, "passed": 1, "failed": 0, "skipped": 0}
 
 
