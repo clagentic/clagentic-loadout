@@ -25,9 +25,12 @@ nothing is stored; the stored run record carries what was verified.
 Residual risk: a stranger who learns the path from the process list can still
 create the report name before the command does. That is caught by the owner check
 unless the stranger runs as the same user as the caller or as a user the command
-itself switched to. A user the command switched to for less than the sampling
-interval is not seen, which refuses a genuine report rather than trusting a
-forged one. Group-writable reports are accepted, because a default umask of 002 is
+itself switched to. A user that a descendant of the command switched to, and
+exited under, between two samples is not seen, which refuses a genuine report
+rather than trusting a forged one. The command's own leader process is sampled
+once more after it exits and before it is reaped, so a leader that drops user and
+exits is seen; on a platform that cannot wait without reaping, that final sample
+is skipped and the leader falls under the same residual. Group-writable reports are accepted, because a default umask of 002 is
 common; members of the report's group could rewrite it in place. Nothing here
 needs root or knows a user name.
 
