@@ -14,7 +14,11 @@ one to post its judgement, and nothing else:
         the tool-constructed verdict fence, and verify the landed comment.
         The comment carries structured findings only; there is deliberately
         no free-form body input. The verdict posted is the one the evaluator
-        computes (review.evaluation), never a status the caller asserts.
+        computes (review.evaluation), never a status the caller asserts. The
+        result also carries a ``churn`` object (review.churn_report): advisory
+        output that never refuses a post.
+  churn read-only: the same churn object, computed from the reviewer's own
+        posted fences, for a caller that did not run the post.
 
 Both bind --caller to the attested invoking identity before any I/O, exactly
 like every other verb. Profiles come from deployment config
@@ -65,8 +69,14 @@ from clagentic_loadout.merge.fence_state import (
     failure_sequences_of,
     normalize_findings_state,
 )
-from clagentic_loadout.review import changeset_paths, spec_review
+from clagentic_loadout.merge.reviewer_login import (
+    ReviewerLoginNotConfiguredError,
+    resolve_declared_role,
+)
+from clagentic_loadout.review import changeset_paths, churn_report, spec_review
 from clagentic_loadout.review import verb as review_post_verb
+from clagentic_loadout.review.churn_ledger import ChurnLedgerError
+from clagentic_loadout.review.churn_verb import churn_after_post, churn_on_demand
 from clagentic_loadout.review.delta import resolve_delta
 from clagentic_loadout.review.docs_only_review import (
     ADVISORY_NOTE,
@@ -119,6 +129,7 @@ from clagentic_loadout.review.run_evidence import evidence_from_document
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
     ReviewProfileError,
+    load_escalation_round,
     load_review_profile,
     load_run_root_override,
 )
@@ -226,7 +237,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "again), 20 blocked.\n"
             "\n"
             "`evaluate` computes a verdict from a findings file offline; see "
-            "`loadout-review evaluate --help`."
+            "`loadout-review evaluate --help`.\n"
+            "`churn` reports how many consecutive rounds this role's posted reviews have "
+            "blocked on the same rule and file; see `loadout-review churn --help`."
         ),
     )
     parser.add_argument(
@@ -412,6 +425,35 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "required. Requires a --spec-hash spec that carries a justification.",
     )
 
+    post.add_argument(
+        "--profile",
+        default=None,
+        help="Review profile name under review.profiles in the loadout config, read for "
+        "escalation_round (default: the --caller role).",
+    )
+
+    churn = subparsers.add_parser(
+        "churn",
+        help="Report the churn of this role's posted reviews on a pull request.",
+        description="Read-only. Counts the consecutive review rounds this role's own posted "
+        "verdicts have blocked on the same rule and file, and prints the churn object: the "
+        "level (none, brief or stop), the net delta since the chain began and, at the brief "
+        "and stop levels, the builder brief. Advisory output; it never refuses anything.",
+    )
+    add_common(churn)
+    churn.add_argument(
+        "--profile",
+        default=None,
+        help="Review profile name under review.profiles in the loadout config, read for "
+        "escalation_round (default: the --caller role).",
+    )
+    churn.add_argument(
+        "--spec-hash",
+        default=None,
+        help="The sealed spec (its sha256, as printed by `loadout-spec seal`) the review is "
+        "against. When given, step 1 of the brief quotes the spec's goal and scope.",
+    )
+
     add_evaluate_parser(subparsers)
     return parser
 
@@ -562,10 +604,12 @@ def _emit_stage(name: str, status: str, **fields: Any) -> None:
     )
 
 
-def _run_justification(args: argparse.Namespace, config_root) -> str | None:
-    """The docs-only justification of the sealed spec `run` was given, or None
-    when it was given no spec or the spec states none. The spec must be in the
-    specs store and verify against its hash; checked before any host call."""
+def _spec_facts_of_flag(
+    args: argparse.Namespace, config_root
+) -> spec_review.SpecFacts | None:
+    """The facts of the sealed spec named by --spec-hash, or None when the flag
+    is absent. The spec must be in the specs store and verify against its hash;
+    checked before any host call."""
     if args.spec_hash is None:
         return None
     if not is_spec_hash(args.spec_hash):
@@ -573,14 +617,20 @@ def _run_justification(args: argparse.Namespace, config_root) -> str | None:
             f"--spec-hash must be 64 lowercase hex characters, got {args.spec_hash!r}", EXIT_USAGE
         )
     try:
-        facts = spec_review.load_spec_facts(
+        return spec_review.load_spec_facts(
             args.spec_hash,
             config_root=config_root,
             untrusted_roots=(Path(args.repo_path),) if args.repo_path else (),
         )
     except spec_review.SpecReviewError as exc:
         _fail(str(exc), EXIT_SPEC_UNAVAILABLE)
-    return facts.docs_only_justification
+
+
+def _run_justification(args: argparse.Namespace, config_root) -> str | None:
+    """The docs-only justification of the sealed spec `run` was given, or None
+    when it was given no spec or the spec states none."""
+    facts = _spec_facts_of_flag(args, config_root)
+    return facts.docs_only_justification if facts is not None else None
 
 
 def _run_command(
@@ -1039,6 +1089,87 @@ def _spec_fence_fields(
     return {**spec_fields, KEY_SPEC_TAGS: spec_review.tags_for_fence(findings)}
 
 
+def _post_churn(
+    args: argparse.Namespace,
+    *,
+    owner: str,
+    repo: str,
+    caller: str,
+    platform: str,
+    token_provider,
+    opener,
+    login: Any,
+    head_sha: str,
+    verdict: Verdict,
+    escalation_round: int,
+    spec_facts: spec_review.SpecFacts | None,
+) -> dict[str, Any]:
+    """The churn object of a post that has landed. Advisory: whatever goes wrong
+    reading the host is reported inside the object, never as a failed post."""
+    try:
+        backend = _build_acquire_backend(
+            args, owner=owner, repo=repo, caller=caller, platform=platform,
+            token_provider=token_provider, opener=opener,
+        )
+    except ReviewCliError as exc:
+        return churn_report.unavailable(escalation_round, str(exc))
+    return churn_after_post(
+        backend,
+        owner=owner, repo=repo, pr_number=args.pr,
+        login=login if isinstance(login, str) else None,
+        head_sha=head_sha,
+        blocking={(item.rule_id, item.file) for item in verdict.blocking},
+        escalation_round=escalation_round,
+        spec=churn_report.spec_quote(spec_facts),
+    )
+
+
+def _churn_command(
+    args: argparse.Namespace,
+    caller: str,
+    *,
+    owner: str,
+    repo: str,
+    platform: str,
+    token_provider,
+    opener,
+    config_root,
+) -> int:
+    """`churn`: the churn object from the role's own posted fences, read-only."""
+    try:
+        escalation_round = load_escalation_round(args.profile or caller, config_root=config_root)
+    except ReviewProfileError as exc:
+        _fail(str(exc), EXIT_PROFILE_INVALID)
+    facts = _spec_facts_of_flag(args, config_root)
+    try:
+        login = resolve_declared_role(caller, platform).login
+    except ReviewerLoginNotConfiguredError as exc:
+        _fail(str(exc), EXIT_PROFILE_INVALID)
+    backend = _build_acquire_backend(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener,
+    )
+    try:
+        report, head = churn_on_demand(
+            backend, owner=owner, repo=repo, pr_number=args.pr, login=login,
+            escalation_round=escalation_round, spec=churn_report.spec_quote(facts),
+        )
+    except ChurnLedgerError as exc:
+        _fail(str(exc), EXIT_ACQUIRE_FAILED)
+    print(
+        json.dumps(
+            {
+                "result": "churn",
+                "pr_number": args.pr,
+                "reviewer_login": login,
+                "head_sha": head,
+                "churn": report,
+            }
+        )
+    )
+    return EXIT_OK
+
+
 def _post_command(
     args: argparse.Namespace,
     caller: str,
@@ -1061,6 +1192,11 @@ def _post_command(
         carry_spec_tag=spec_fields is not None,
     )
     _check_base_sha_flag(args)
+    # Read before anything is posted, so a bad setting costs nothing.
+    try:
+        escalation_round = load_escalation_round(args.profile or caller, config_root=config_root)
+    except ReviewProfileError as exc:
+        _fail(str(exc), EXIT_PROFILE_INVALID)
     try:
         evaluation = context_from_config(config_root)
     except EvaluateError as exc:
@@ -1343,6 +1479,12 @@ def _post_command(
         )
         if "spec_coverage_record_id" in posted:
             result["spec_coverage_record_id"] = posted["spec_coverage_record_id"]
+    result["churn"] = _post_churn(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener, login=posted.get("verified_by_login"),
+        head_sha=head_sha, verdict=verdict, escalation_round=escalation_round,
+        spec_facts=spec_facts,
+    )
 
     # The late re-read above narrows the GitHub race but cannot close it: a
     # push can still land between that read and the post. The comment cannot
@@ -1423,6 +1565,11 @@ def main(
                 args, caller, owner=owner, repo=repo, platform=platform,
                 repo_path=repo_path, token_provider=token_provider, opener=opener,
                 config_root=config_root, run_root=run_root, runner=runner,
+            )
+        if args.command == "churn":
+            return _churn_command(
+                args, caller, owner=owner, repo=repo, platform=platform,
+                token_provider=token_provider, opener=opener, config_root=config_root,
             )
         return _post_command(
             args, caller, owner=owner, repo=repo, platform=platform, repo_path=repo_path,
