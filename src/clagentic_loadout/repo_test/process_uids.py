@@ -7,14 +7,18 @@ every user id it sees; the report's owner must be one of them (or the caller).
 
 Sampling is best effort: a process that held a user id for less time than the
 sampling interval is not seen. That fails closed (the report is refused with the
-owner named), never open.
+owner named), never open. The leader is the exception: the runner waits for it to
+exit without reaping it and takes one final sample from the zombie's /proc entry,
+so the user id a leader exits with is always seen. Where the platform cannot wait
+without reaping, the leader is sampled on the ticks only.
 
 The host-wide scan for new session members is the expensive part, so its interval
 backs off while the session is stable: every scan that finds nothing new doubles
 the wait up to a ceiling, and any new process or user id resets it. Processes
 already known are re-checked every fast tick, so a user switch by a known process
-is seen at the fast interval; only a process that is born and switches user within
-one backed-off interval, with nothing else changing, can be missed.
+is seen at the fast interval. What can still be missed is a non-leader descendant
+that changes user id and exits between ticks, or that is born and switches user
+within one backed-off interval, with nothing else changing.
 """
 
 from __future__ import annotations
@@ -88,9 +92,15 @@ class UidWatcher:
         self._sample()
         self._thread.start()
 
-    def stop(self) -> frozenset[int]:
+    def stop(self, sample_leader_last: bool = False) -> frozenset[int]:
+        """End sampling and return the user ids seen. *sample_leader_last* takes
+        one more sample of the leader after the sampler thread has ended; the
+        caller must only set it while the leader is exited but not yet reaped, so
+        the pid cannot have been reused."""
         self._stop.set()
         self._thread.join()
+        if sample_leader_last:
+            self._record(self._leader)
         return frozenset(self._uids)
 
     def _record(self, pid: int) -> bool:
