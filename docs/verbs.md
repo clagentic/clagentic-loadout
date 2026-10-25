@@ -3274,9 +3274,11 @@ these hold; otherwise the change gets the full review, however plainly it is doc
 
 On the lighter path the post is still a real reviewer verdict, and `loadout-merge` still
 requires one for every required reviewer role. The findings it states are posted as
-**advisory** (`blocking: false`), never enter `findings_open`, and are not handed to the
-gate's evaluator (`evaluated_findings` holds only what was judged), so the computed verdict
-cannot block on them. **A secret is the exception.** A finding is advisory only when its
+**advisory** (`blocking: false`) and never enter `findings_open`. `evaluated_findings` lists
+every finding, advisory ones included, as it does for a full review; the poster and the
+gate's re-evaluation both apply the same rule to that list when the fence's `docs_only`
+object is an accepted, well-formed one, so the computed verdict cannot block on an advisory
+finding. **A secret is the exception.** A finding is advisory only when its
 stated `category` is something other than `secrets_exposure`; a finding with that category,
 with none, or with one outside the vocabulary is judged exactly as in a full review, so a
 possible secret still blocks. The scanner outcomes the deployment requires
@@ -3327,6 +3329,17 @@ every earlier version.
 A reader that predates a version refuses a fence or record that carries it, which is why
 the versions moved; an upgrade needs every reader of a deployment to be at this release
 before a reviewer posts a docs-only verdict.
+
+**Rolling back.** An installed release that predates this one refuses a fence at version 5 or
+a record at version 2. Rolling back past this release therefore requires that no opt-in
+docs-only post has been made, or that those pull requests get a fresh full-review post after
+the rollback. A post without `--spec-hash` and a sealed justification still writes the
+versions it always did.
+
+A `docs_only` object that is not well formed in every field the waiver line reads (for
+example a missing `allowlist_source`) is not an accepted waiver: that fence is treated as a
+full review, with no waiver line and no lighter treatment of its findings, and does not stop
+merge processing.
 
 ## Not yet landed
 

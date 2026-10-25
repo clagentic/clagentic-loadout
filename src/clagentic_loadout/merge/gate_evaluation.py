@@ -58,7 +58,7 @@ from clagentic_loadout.merge.errors import (
     VerdictNotEvaluatedError,
     VerdictStaleError,
 )
-from clagentic_loadout.merge.fence_state import docs_only_waiver_line
+from clagentic_loadout.merge.fence_state import docs_only_accepted, docs_only_waiver_line
 from clagentic_loadout.merge.gate_config import EvaluatorGate
 from clagentic_loadout.merge.verdict import ReviewerVerdict
 from clagentic_loadout.review.evaluate import (
@@ -73,6 +73,7 @@ from clagentic_loadout.review.evaluate_render import (
     ruling_provenance,
     unapplied_ruling_line,
 )
+from clagentic_loadout.review.docs_only_review import split_findings
 from clagentic_loadout.review.evaluate_verb import EvaluateError
 from clagentic_loadout.review.evaluation import (
     context_from_config,
@@ -338,8 +339,14 @@ def _recompute(
             f"cannot re-check the verdict in comment #{verdict.comment_id} on PR "
             f"#{verdict.pr_number}: the evaluator configuration is invalid ({exc})"
         ) from exc
+    judged = _finding_dicts(state.evaluated_findings)
+    if docs_only_accepted(state.docs_only):
+        # A lighter-path fence lists every finding, advisory ones included; the
+        # same rule the poster applied picks the ones that are judged (any that
+        # is or may be a secret), so the two computations agree.
+        judged, _ = split_findings(judged)
     return evaluate_findings(
-        _finding_dicts(state.evaluated_findings),
+        judged,
         verdict.head_sha,
         context,
         expected_head=current_head_sha,

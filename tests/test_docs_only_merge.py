@@ -13,7 +13,7 @@ import json
 import pytest
 
 from clagentic_loadout.merge import verb
-from clagentic_loadout.merge.fence_state import docs_only_waiver_line
+from clagentic_loadout.merge.fence_state import docs_only_accepted, docs_only_waiver_line
 from clagentic_loadout.transport import provider_config
 from tests._review_evaluate_support import facts
 from tests._ruling_support import HEAD, NAME
@@ -227,3 +227,110 @@ class TestWaiverLine:
     )
     def test_an_accepted_object_that_breaks_the_invariant_earns_no_waiver_line(self, overrides):
         assert docs_only_waiver_line("r", _docs_only(**overrides)) is None
+
+
+class TestAMalformedObjectIsAFullReviewNeverACrash:
+    """A fence read from a comment is not re-normalized, so every field the waiver
+    reads is checked before it is subscripted."""
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"allowlist_source": None},
+            {"allowlist_source": "profile.yaml"},
+            {"allowlist_source": {}},
+            {"allowlist_source": {"base_sha": "a" * 40}},
+            {"allowlist_source": {"path": "p.yaml"}},
+            {"allowlist_source": {"base_sha": 7, "path": "p.yaml"}},
+            {"allowlist_source": {"base_sha": "a" * 40, "path": ""}},
+            {"justification": 12},
+            {"spec_hash": None},
+        ],
+    )
+    def test_the_waiver_line_is_none(self, overrides):
+        assert docs_only_waiver_line("r", _docs_only(**overrides)) is None
+        assert docs_only_accepted(_docs_only(**overrides)) is False
+
+    def test_a_missing_allowlist_source_is_none(self):
+        value = _docs_only()
+        del value["allowlist_source"]
+
+        assert docs_only_waiver_line("r", value) is None
+
+    def test_a_well_formed_accepted_object_is_accepted(self):
+        assert docs_only_accepted(_docs_only()) is True
+        assert docs_only_accepted(None) is False
+
+    def test_a_fence_whose_docs_only_object_lacks_the_source_does_not_abort_the_merge(
+        self, tmp_path, capsys
+    ):
+        repo = _repo(tmp_path)
+        body = _accepted_fence(repo)
+        broken = body.replace('"allowlist_source"', '"allowlist_sourcf"')
+        assert broken != body
+
+        run = _merge([_comment(1, broken)], repo, capsys)
+
+        assert "Traceback" not in run.err and "KeyError" not in run.err
+        assert "WAIVER" not in run.err
+        assert run.posted == [] or "Docs-only waivers" not in run.posted[0]
+
+
+class TestTheGateAppliesTheLighterRuleToTheListedFindings:
+    """A lighter-path fence lists every finding, advisory ones included, and the
+    gate's re-evaluation applies the docs-only rule to that list."""
+
+    ADVISORY = {"category": "injection", "confidentiality": "full", "integrity": "full",
+                "availability": "full"}
+
+    def _advisory(self):
+        from tests._ruling_support import evaluated_finding
+
+        return evaluated_finding(facts(**self.ADVISORY), fingerprint=None)
+
+    def test_an_accepted_docs_only_fence_with_an_advisory_finding_computes_clean(
+        self, tmp_path, capsys
+    ):
+        repo = _repo(tmp_path)
+        fence = _fence(
+            "CLEAN", findings=[self._advisory()], base=_tip(repo), docs_only=_docs_only()
+        )
+
+        run = _merge([_comment(1, fence)], repo, capsys)
+
+        assert run.code == verb.EXIT_OK, run.err
+        assert "WAIVER" in run.err
+
+    def test_the_same_listed_finding_blocks_a_fence_that_is_not_docs_only(self, tmp_path, capsys):
+        repo = _repo(tmp_path)
+        fence = _fence("CLEAN", findings=[self._advisory()], base=_tip(repo))
+
+        run = _merge([_comment(1, fence)], repo, capsys)
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+
+    def test_a_rejected_docs_only_fence_gets_no_lighter_rule(self, tmp_path, capsys):
+        repo = _repo(tmp_path)
+        fence = _fence(
+            "CLEAN", findings=[self._advisory()], base=_tip(repo),
+            docs_only=_docs_only(accepted=False),
+        )
+
+        run = _merge([_comment(1, fence)], repo, capsys)
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+
+    def test_a_possible_secret_still_computes_blocked_beside_an_advisory_finding(
+        self, tmp_path, capsys
+    ):
+        from tests._ruling_support import evaluated_finding
+
+        repo = _repo(tmp_path)
+        secret = evaluated_finding(SECRET, fingerprint=None, rule_id="SECRET")
+        fence = _fence(
+            "CLEAN", findings=[self._advisory(), secret], base=_tip(repo), docs_only=_docs_only()
+        )
+
+        run = _merge([_comment(1, fence)], repo, capsys)
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED

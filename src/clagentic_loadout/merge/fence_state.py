@@ -638,21 +638,37 @@ def normalize_docs_only(value: Any) -> dict[str, Any]:
 _MAX_WAIVER_JUSTIFICATION_CHARS = 300
 
 
+def _nonblank_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def docs_only_accepted(docs_only: Mapping[str, Any] | None) -> bool:
+    """Whether *docs_only* records an accepted docs-only justification that is
+    well formed in every field the waiver reads.
+
+    A fence read from a comment is not re-normalized, so the invariant that
+    normalize_docs_only enforces is checked again here. Anything short of it is
+    not an accepted waiver: the review stands as a full one, with no waiver line
+    and no lighter treatment of its findings, and never raises."""
+    if not isinstance(docs_only, Mapping) or docs_only.get("accepted") is not True:
+        return False
+    if docs_only.get("classification") != CLASSIFICATION_DOCS_ONLY:
+        return False
+    if not all(_nonblank_text(docs_only.get(key)) for key in ("justification", "spec_hash")):
+        return False
+    source = docs_only.get("allowlist_source")
+    return isinstance(source, Mapping) and all(
+        _nonblank_text(source.get(key)) for key in ("base_sha", "path")
+    )
+
+
 def docs_only_waiver_line(reviewer: str, docs_only: Mapping[str, Any]) -> str | None:
     """The one-line audit statement for a docs-only waiver a reviewer accepted,
-    or None when the object records no accepted waiver. The justification is
-    shown on one line, cut to a bounded length; the fence holds it verbatim."""
-    if docs_only.get("accepted") is not True:
+    or None when the object records no accepted waiver (see docs_only_accepted).
+    The justification is shown on one line, cut to a bounded length; the fence
+    holds it verbatim."""
+    if not docs_only_accepted(docs_only):
         return None
-    # A fence read from a comment is not re-normalized, so the invariant that
-    # normalize_docs_only enforces is checked again here: anything short of it
-    # earns no waiver line (the review stands as a full one).
-    if docs_only.get("classification") != CLASSIFICATION_DOCS_ONLY:
-        return None
-    for key in ("justification", "spec_hash"):
-        field = docs_only.get(key)
-        if not isinstance(field, str) or not field.strip():
-            return None
     source = docs_only["allowlist_source"]
     justification = " ".join(str(docs_only["justification"]).split())
     if len(justification) > _MAX_WAIVER_JUSTIFICATION_CHARS:
@@ -956,6 +972,7 @@ __all__ = [
     "DOCS_ONLY_FENCE_SCHEMA_VERSION",
     "FENCE_SCHEMA_VERSIONS",
     "KEY_DOCS_ONLY",
+    "docs_only_accepted",
     "docs_only_waiver_line",
     "normalize_docs_only",
     "render_docs_only",

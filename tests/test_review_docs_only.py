@@ -169,9 +169,10 @@ class TestTheLighterPath:
         assert "docs-only: lighter review, justification accepted" in body
         fence = world.fence()
         assert fence["review_status"] == "clean" and fence["verdict_outcome"] == "CLEAN"
-        # Nothing is held open, and nothing advisory is handed to the gate to judge.
+        # Nothing is held open; the advisory finding is listed as in a full review,
+        # and the gate applies the docs-only rule to the list.
         assert "findings_open" not in fence
-        assert fence["evaluated_findings"] == []
+        assert [(e["file"], e["line"]) for e in fence["evaluated_findings"]] == [("docs/guide.md", 3)]
 
     def test_the_waiver_object_names_the_allowlist_source_and_the_justification_verbatim(
         self, world, capsys
@@ -218,7 +219,7 @@ class TestTheLighterPath:
         assert result["status"] == "blocking" and result["blocking_count"] == 1
         fence = world.fence()
         assert [e["rule_id"] for e in fence["findings_open"]] == ["SECRET"]
-        assert [e["rule_id"] for e in fence["evaluated_findings"]] == ["SECRET"]
+        assert [e["rule_id"] for e in fence["evaluated_findings"]] == ["SECRET", "R1"]
         assert fence["verdict_outcome"] == "BLOCKED"
         body = world.host.last_body
         assert "Blocking findings (1):" in body and "Advisory findings (1):" in body
@@ -319,6 +320,24 @@ class TestFullReview:
         assert "docs_only" not in result
         [reviewer] = [r for r in world.records() if r.gate == "reviewer:reviewer"]
         assert reviewer.docs_only is None and reviewer.as_dict()["schema_version"] == 1
+
+    def test_a_plain_post_keeps_the_versions_it_always_emitted(self, world, capsys):
+        # Fence v5 and record v2 are emitted only for a post with a spec hash and a
+        # sealed justification; any other post stays at the versions below.
+        world.post([_finding()], "--status", "blocking", capsys=capsys)
+
+        assert world.fence()["fence_schema_version"] == fence_state.EVALUATED_FENCE_SCHEMA_VERSION == 3
+        [reviewer] = [r for r in world.records() if r.gate == "reviewer:reviewer"]
+        assert reviewer.as_dict()["schema_version"] == 1
+
+    def test_a_spec_without_a_justification_stays_at_the_spec_fence_version(self, world, capsys):
+        spec = world.seal(justification=None)
+
+        world.post([_finding()], spec=spec, capsys=capsys)
+
+        assert world.fence()["fence_schema_version"] == fence_state.SPEC_FENCE_SCHEMA_VERSION == 4
+        [reviewer] = [r for r in world.records() if r.gate == "reviewer:reviewer"]
+        assert reviewer.as_dict()["schema_version"] == 1
 
     def test_a_spec_with_no_justification_means_a_full_review(self, world, capsys):
         spec = world.seal(justification=None)

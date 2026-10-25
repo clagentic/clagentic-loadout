@@ -1232,8 +1232,10 @@ def _post_command(
         **fence_fields,
         **_spec_fence_fields(spec_fields, [*annotated, *advisory]),
         **({KEY_DOCS_ONLY: docs_decision.evidence} if docs_decision.evidence is not None else {}),
+        # Every finding, as a full review lists them: on the lighter path the
+        # advisory ones are carried too, and the gate applies the same split.
         KEY_EVALUATED_FINDINGS: evaluated_findings_for_fence(
-            judged, with_fingerprint=evaluation.ruling_provider is not None
+            findings, with_fingerprint=evaluation.ruling_provider is not None
         ),
     }
     try:
