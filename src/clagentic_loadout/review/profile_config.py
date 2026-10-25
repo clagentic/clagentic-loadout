@@ -18,6 +18,7 @@ which is normally the reviewer role):
           fallback_timeout_seconds: 400
           max_attempts: 3
           parallel: 4
+          escalation_round: 2                         # 0 turns the churn breaker off
 
 Two tiers, with a deliberate asymmetry. The USER-LEVEL file
 (``~/.config/clagentic/loadout/config.yaml``) is the host default and owns
@@ -27,7 +28,10 @@ every key. The REPO-LEVEL file may override only the bounds (``chunk_lines``,
 repo-level ``carrier`` or ``fallback`` is REJECTED with a stderr warning and
 never honored: those keys name a command this process will execute, and a
 cloned repository must never choose what runs on the operator's machine (the
-same direction the credential-provider config takes).
+same direction the credential-provider config takes). ``escalation_round`` is
+deployment-only as well, for a different reason: it switches the churn breaker
+(review.churn) off, which a repository under review must not be able to do. A
+repo-level value is ignored with a stderr warning.
 
 The carrier contract: the argv is executed directly (no shell), the chunk
 prompt is written to its stdin, and the reply is read from its stdout. Exit
@@ -64,6 +68,10 @@ CONFIG_KEY_RUN_ROOT = "run_root"
 DEFAULT_TIMEOUT_SECONDS = 480.0
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_PARALLEL = 4
+#: The blocked round at which the churn breaker briefs the builder; 0 is off.
+DEFAULT_ESCALATION_ROUND = 2
+MAX_ESCALATION_ROUND = 10
+CONFIG_KEY_ESCALATION_ROUND = "escalation_round"
 
 _REPO_OVERRIDABLE_KEYS = (
     "chunk_lines",
@@ -74,6 +82,7 @@ _REPO_OVERRIDABLE_KEYS = (
     "rulebook",
 )
 _REPO_REFUSED_KEYS = ("carrier", "fallback", "carrier_model", "fallback_model")
+_REPO_DEPLOYMENT_ONLY_KEYS = (CONFIG_KEY_ESCALATION_ROUND,)
 _MAX_LABEL_CHARS = 100
 
 
@@ -127,6 +136,35 @@ class ReviewProfile:
     parallel: int
     carrier_model: str | None = None
     fallback_model: str | None = None
+    escalation_round: int = DEFAULT_ESCALATION_ROUND
+
+
+def _escalation_round(value: object, profile: str) -> int:
+    """*value* as the escalation round: an integer from 0 to MAX_ESCALATION_ROUND.
+    A bool is not an integer here, since YAML `yes` must not read as round 1."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 0 <= value <= MAX_ESCALATION_ROUND
+    ):
+        raise ReviewProfileError(
+            f"review profile {profile!r}: {CONFIG_KEY_ESCALATION_ROUND!r} must be an integer "
+            f"from 0 to {MAX_ESCALATION_ROUND} (0 turns the churn breaker off), got {value!r}"
+        )
+    return value
+
+
+def load_escalation_round(name: str, *, config_root: str | Path | None = None) -> int:
+    """The churn breaker's escalation round for profile *name*, from the
+    user-level config only. A deployment with no such profile, or one that does
+    not state the key, gets DEFAULT_ESCALATION_ROUND. Raises ReviewProfileError
+    for a value that is not an integer from 0 to MAX_ESCALATION_ROUND."""
+    entry = _profile_entry(
+        load_user_config_section(CONFIG_SECTION_REVIEW, config_root=config_root), name
+    )
+    return _escalation_round(
+        entry.get(CONFIG_KEY_ESCALATION_ROUND, DEFAULT_ESCALATION_ROUND), name
+    )
 
 
 def _label(value: object, key: str, profile: str) -> str | None:
@@ -258,6 +296,13 @@ def load_review_profile(
                     f"from the user-level config only.",
                     file=sys.stderr,
                 )
+        for deployment_only in _REPO_DEPLOYMENT_ONLY_KEYS:
+            if deployment_only in repo_entry:
+                print(
+                    f"clagentic-loadout: ignoring review.profiles.{name}.{deployment_only} in "
+                    f"the repo-level config: it is honored from the user-level config only.",
+                    file=sys.stderr,
+                )
 
     merged = dict(user_entry)
     # The rulebook's SOURCE decides how its path is read, not whether a repo
@@ -333,4 +378,7 @@ def load_review_profile(
         ),
         carrier_model=_label(merged.get("carrier_model"), "carrier_model", name),
         fallback_model=_label(merged.get("fallback_model"), "fallback_model", name),
+        escalation_round=_escalation_round(
+            merged.get(CONFIG_KEY_ESCALATION_ROUND, DEFAULT_ESCALATION_ROUND), name
+        ),
     )

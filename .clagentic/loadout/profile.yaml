@@ -12,6 +12,13 @@ data: public_or_none
 visibility: public
 merge_control: unrestricted
 confirmed_at: 2026-10-24
+review:
+  # The lighter docs-only review is open to a change that touches only these
+  # paths. The files listed under depended_on are read as instructions by other
+  # tools, so a change to one of them is reviewed as code.
+  docs_only:
+    paths: ["docs/**/*.md", "README.md"]
+    depended_on: ["CLAUDE.md", "AGENTS.md", "docs/README.md"]
 paths:
   # Deployment config that ships as disaster-recovery data and carries its own
   # cast identifiers by design.

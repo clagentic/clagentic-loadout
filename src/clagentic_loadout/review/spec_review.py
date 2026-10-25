@@ -47,6 +47,10 @@ class SpecFacts:
 
     criterion_ids: tuple[str, ...]
     docs_only_justification: str | None
+    #: The spec's goal and scope, which the churn brief quotes.
+    goal: str = ""
+    scope_in: tuple[str, ...] = ()
+    scope_out: tuple[str, ...] = ()
 
 
 def load_spec_facts(
@@ -64,11 +68,15 @@ def load_spec_facts(
     except StoreError as exc:
         raise SpecReviewError(str(exc)) from exc
     justification = stored.doc.get("docs_only_justification")
+    scope = stored.doc["scope"]
     return SpecFacts(
         criterion_ids=tuple(criterion["id"] for criterion in stored.doc["acceptance_criteria"]),
         docs_only_justification=(
             justification if isinstance(justification, str) and justification.strip() else None
         ),
+        goal=stored.doc["goal"],
+        scope_in=tuple(scope["in"]),
+        scope_out=tuple(scope["out"]),
     )
 
 

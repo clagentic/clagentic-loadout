@@ -166,7 +166,7 @@ class _Piece:
     files: tuple[str, ...]
 
 
-def _read_quoted(text: str) -> tuple[str, str]:
+def read_quoted(text: str) -> tuple[str, str]:
     """Split a leading C-quoted token (``text[0] == '"'``) into its raw inner
     text and whatever follows the closing quote."""
     position = 1
@@ -180,7 +180,7 @@ def _read_quoted(text: str) -> tuple[str, str]:
     return text[1:], ""
 
 
-def _unquote_c(inner: str) -> str:
+def unquote_c(inner: str) -> str:
     """Decode the C-style escapes git uses when it quotes a path: single-char
     escapes and 1-3 digit octal bytes (a UTF-8 path arrives as octal bytes)."""
     out = bytearray()
@@ -212,7 +212,7 @@ def _unquote_c(inner: str) -> str:
 def _path_token(token: str) -> str:
     """A path as written in a diff header: unquoted when C-quoted."""
     if token.startswith('"'):
-        return _unquote_c(_read_quoted(token)[0])
+        return unquote_c(read_quoted(token)[0])
     return token.strip()
 
 
@@ -227,7 +227,7 @@ def _file_name(header_line: str) -> str:
     rest = header_line[len(_FILE_MARKER):]
     b_side: str | None = None
     if rest.startswith('"'):
-        b_side = _read_quoted(rest)[1].lstrip(" ")
+        b_side = read_quoted(rest)[1].lstrip(" ")
     elif _QUOTED_B_SEPARATOR in rest:
         b_side = '"b/' + rest.rsplit(_QUOTED_B_SEPARATOR, 1)[1]
     if b_side is not None:

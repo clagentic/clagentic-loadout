@@ -631,6 +631,9 @@ loadout-review run  --caller <role> --repo <owner/repo> --pr <n> [--platform git
 loadout-review post --caller <role> --repo <owner/repo> --pr <n> --findings <path>
                     [--status clean|blocking] [--head-sha <sha>] [--base-sha <sha>]
                     [--platform ...] [--repo-path <dir>] [--resolved-findings <path>]
+                    [--profile <name>]
+loadout-review churn --caller <role> --repo <owner/repo> --pr <n> [--platform ...]
+                    [--repo-path <dir>] [--profile <name>] [--spec-hash <sha256>]
 ```
 
 `--caller` binds to the attested invoking identity before any I/O, exactly like
@@ -946,6 +949,7 @@ review:
       fallback_timeout_seconds: 400
       max_attempts: 3
       parallel: 4
+      escalation_round: 2                         # optional; 0 turns the churn breaker off
 ```
 
 The repo-level config (`.clagentic/loadout/config.yaml`, same
@@ -963,7 +967,10 @@ command: they only let a posted verdict name the model that answered). Repo-leve
 clamped with a warning: `parallel` at most 16, `max_attempts` at most 10,
 `timeout_seconds` and `fallback_timeout_seconds` at most 3600, `chunk_lines` at
 least 50. Values in the user-level config are not clamped. A repo-level config
-file that cannot be parsed is ignored with a warning on stderr.
+file that cannot be parsed is ignored with a warning on stderr. `escalation_round`
+(see [Churn breaker](#churn-breaker)) is deployment-only: a repo-level value is
+ignored with a warning, since a repository under review must not be able to switch
+the breaker off.
 
 **`post`** stages the findings and posts them through the existing
 `loadout-review-post` structured-findings route (`--verdict-findings`), so the
@@ -1177,6 +1184,102 @@ each engine's saved stderr path (`carrier_stderr_file`, `fallback_stderr_file`;
 own error with the carrier's failure as context. Saved stderr lives in the run
 directory's `carrier-logs/`, created at mode 0700 with files at 0600, and an engine's
 output is read through a bounded tail, so memory stays flat however much it writes.
+
+#### Churn breaker
+
+A review that blocks on the same rule in the same file round after round is usually
+a design problem, not a fix problem. The breaker counts those rounds and, from a
+configured round, hands the caller a brief for the next attempt; one round later it
+asks the caller to stop and offers a choice. It is advisory output: it adds fields to
+the `post` result and to the `churn` verb, never refuses a post, and is not read by
+`loadout-merge`. The decision is the project lead's; loadout only offers the options.
+
+**Setting.** `review.profiles.<name>.escalation_round`, in the user-level config only
+(the profile is `--profile`, default the `--caller` role). An integer from 0 to 10;
+default **2**; **0** turns the breaker off. Anything else (a negative number, above
+10, a float, a string, a boolean) is a profile error naming the value: `post` exits
+**3** before it posts. A repo-level value is ignored with a warning.
+
+**Ledger.** The role's own earlier verdict fences on the pull request, read from the
+host's comment listing. Only comments whose author is the posting role's login count:
+for `post`, the login the host reported for the comment just posted; for `churn`, the
+role's login as resolved for the platform (see `loadout-reviewer-login`). A *round*
+is one distinct `head_sha`, in post order; several fences at one head count once, as
+the last of them. A *key* is `(rule_id, file)`. The fields read from a fence are
+`pr_number`, `head_sha`, `review_status`, `findings_open[].id` and `.rule_id`, and
+`evaluated_findings[]` / `failure_sequences[]` (`file`, `line`, `rule_id`) to join
+each `findings_open` id to its file. A key churns when it is blocking in consecutive
+rounds that end in the current one. A round in which it is absent ends the chain,
+and so does a fence whose blocking keys cannot be read; a comment with no fence, or
+with a fence for another pull request, is not a round. Undercounting is the safe
+direction, so every ambiguity reads as "not blocking".
+
+**Levels.** The highest-round key decides, with N the `escalation_round`:
+
+| level | when | output |
+| --- | --- | --- |
+| `none` | N is 0, or no key has N rounds | no brief, no options |
+| `brief` | the highest key has exactly N rounds | net delta and the 8-step brief |
+| `stop` | the highest key has more than N rounds | the same, led by a stop line, and the options |
+
+**Output.** `post` adds `churn` to its result JSON, and `churn` prints it under
+`"churn"` beside `result`, `pr_number`, `reviewer_login` and the `head_sha` of the
+role's last fence (null when it has none). Every key below is always present:
+
+```json
+"churn": {
+  "escalation_round": 2,
+  "keys": [{"rule_id": "R1", "file": "src/a.py", "rounds": 2, "heads": ["<sha>", "<sha>"]}],
+  "level": "none | brief | stop",
+  "net_delta": {"from_head": "<sha>", "to_head": "<sha>",
+                "files": [{"path": "src/a.py", "added": 3, "removed": 1}]},
+  "brief": "<text>",
+  "options": ["simplify", "ship", "continue"]
+}
+```
+
+`keys` lists the keys with at least two rounds (one, when N is 1), most rounds first.
+`net_delta` is the change from the first head of the deciding key's chain to the
+current head, per file, read from the host's range diff; `brief` is null and
+`options` is `[]` below the brief level, and `options` is `[]` at the brief level.
+When the delta cannot be read (the host cannot compare, the read fails, or the
+history was rewritten so the current head is not a fast-forward of the chain's first
+head) `net_delta` is null and `net_delta_unavailable` states why; the brief is still
+given. When the pull request's comments cannot be read, `post` still succeeds and
+`churn` is the none-level object with `ledger_unavailable` stating why; the `churn`
+verb exits **5**. Nothing about the churn is written into the posted comment or its
+fence.
+
+**The brief.** Fixed text. At the stop level it is led by `STOP. Do not start another
+fix round yet. The project lead decides what happens next, and chooses one of:` and
+the three options (`simplify`: cut the change back to the smallest design that meets
+the spec; `ship`: accept the remaining findings as known and merge what is there;
+`continue`: make one more attempt, following the brief). Then a line naming the rule,
+file and round count, and the eight steps:
+
+1. Restate the brief. With `--spec-hash` on `post` (or on `churn`) this step quotes the
+   sealed spec's goal and scope; without one it says no sealed spec was given and
+   asks for the task description to be restated.
+2. Classify each finding as in-spec, fix-caused (introduced by an earlier fix in this
+   change) or out-of-spec.
+3. Re-architect rather than patch: a finding that returns after a fix means the design
+   is wrong at that point, so change the design instead of adding another guard.
+4. Add no new mechanism (flag, layer, retry or special case) without stating what
+   requires it that the existing code cannot do.
+5. Fix the class once: find every site with the same defect shape and fix them
+   together with one shared change.
+6. Send out-of-spec findings to the roadmap as follow-ups; do not fix them in this
+   change.
+7. Write test fixtures as rows of one table, not as copies of a test body.
+8. Do not call a failure flaky without a reproduction; record the reproduction with
+   the claim.
+
+**`churn`** is the same computation on demand, for a caller that did not run the post:
+read-only, bound to `--caller` like every verb, and it takes the role's last fence as
+the current round. Exit codes: **0** computed, **1** usage, **3** profile invalid or
+the role's login not resolvable, **4** wrong platform, **5** comments not readable,
+**7** caller/attested-identity mismatch, **33** `--spec-hash` not in the specs store.
+The fields and exit codes are additive; no existing field or code changed.
 
 ### `loadout-ruling` — record and list per-PR rulings on kept findings
 
