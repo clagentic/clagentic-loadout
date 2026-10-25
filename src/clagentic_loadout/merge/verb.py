@@ -1666,6 +1666,14 @@ def _run(
                 # Recorded as soon as it is computed, so a fence refused by a
                 # later check below still has its evaluation carried.
                 gate_evaluations.append(evaluation)
+                # An accepted docs-only justification is shown here, in the
+                # merge output, and in the attestation: the one place a waiver
+                # appears. It changes no gate; this is the audit line.
+                if evaluation.docs_only_waiver is not None:
+                    print(
+                        f"merge: WAIVER -- {label}{evaluation.docs_only_waiver}",
+                        file=sys.stderr,
+                    )
                 # A fence the evaluator computed as anything but CLEAN carries
                 # status blocking by construction; reaching here means the gate
                 # passed that outcome on a trusted basis, so the status is not
@@ -1781,6 +1789,7 @@ def _run(
                             comment_id=verdict_obj.comment_id,
                             created_at=comment_times.get(verdict_obj.comment_id),
                             repo=f"{owner}/{repo}",
+                            docs_only=verdict_obj.state.docs_only,
                         )
                     )
 
@@ -2143,6 +2152,8 @@ def _run(
     if args.report_only:
         for gate_evaluation in gate_evaluations:
             print(f"merge: report-only -- verdict {gate_evaluation.attestation_line()}")
+            if gate_evaluation.docs_only_waiver is not None:
+                print(f"merge: report-only -- waiver {gate_evaluation.docs_only_waiver}")
         print(
             f"merge: report-only -- all gates PASSED; PR #{args.pr_number} in "
             f"{owner}/{repo} would be merged (method={args.merge_method!r}, "
@@ -2233,6 +2244,9 @@ def _run(
         task_id=args.task_id,
         issue_number=issue_number,
         verdict_evaluations=[e.attestation_line() for e in gate_evaluations],
+        docs_only_waivers=[
+            e.docs_only_waiver for e in gate_evaluations if e.docs_only_waiver is not None
+        ],
     )
     verified_comment_id: "str | int | None" = None
     try:

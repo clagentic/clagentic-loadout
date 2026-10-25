@@ -44,6 +44,7 @@ and refuses.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -57,6 +58,7 @@ from clagentic_loadout.merge.errors import (
     VerdictNotEvaluatedError,
     VerdictStaleError,
 )
+from clagentic_loadout.merge.fence_state import docs_only_accepted, docs_only_waiver_line
 from clagentic_loadout.merge.gate_config import EvaluatorGate
 from clagentic_loadout.merge.verdict import ReviewerVerdict
 from clagentic_loadout.review.evaluate import (
@@ -71,6 +73,7 @@ from clagentic_loadout.review.evaluate_render import (
     ruling_provenance,
     unapplied_ruling_line,
 )
+from clagentic_loadout.review.docs_only_review import split_findings
 from clagentic_loadout.review.evaluate_verb import EvaluateError
 from clagentic_loadout.review.evaluation import (
     context_from_config,
@@ -104,6 +107,9 @@ class GateEvaluation:
     degraded_allowed: bool = False
     #: Lines for the operator on stderr.
     notices: tuple[str, ...] = ()
+    #: The audited waiver line when the reviewer accepted a docs-only
+    #: justification (see merge.fence_state.docs_only_waiver_line); None otherwise.
+    docs_only_waiver: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -119,6 +125,8 @@ class GateEvaluation:
             out["applied_rulings"] = list(self.applied_rulings)
         if self.unapplied_rulings:
             out["unapplied_rulings"] = list(self.unapplied_rulings)
+        if self.docs_only_waiver is not None:
+            out["docs_only_waiver"] = self.docs_only_waiver
         return out
 
     def attestation_line(self) -> str:
@@ -331,8 +339,14 @@ def _recompute(
             f"cannot re-check the verdict in comment #{verdict.comment_id} on PR "
             f"#{verdict.pr_number}: the evaluator configuration is invalid ({exc})"
         ) from exc
+    judged = _finding_dicts(state.evaluated_findings)
+    if docs_only_accepted(state.docs_only):
+        # A lighter-path fence lists every finding, advisory ones included; the
+        # same rule the poster applied picks the ones that are judged (any that
+        # is or may be a secret), so the two computations agree.
+        judged, _ = split_findings(judged)
     return evaluate_findings(
-        _finding_dicts(state.evaluated_findings),
+        judged,
         verdict.head_sha,
         context,
         expected_head=current_head_sha,
@@ -378,12 +392,48 @@ def evaluate_at_gate(
 ) -> GateEvaluation:
     """Apply the decision table in the module docstring to *verdict*, the
     reviewer's newest valid fence (read by merge.verdict.read_reviewer_verdict,
-    which has already refused a fence for another head).
+    which has already refused a fence for another head), then attach the
+    waiver line when the fence records an accepted docs-only justification. The
+    waiver changes nothing about the decision: the required gates are exactly
+    what they are for any other review, and a docs-only fence is judged by the
+    findings it carries like any other fence.
 
     Raises one of merge.errors' Verdict* refusals, each naming what it refused
     on: VerdictNotEvaluatedError, VerdictStaleError, VerdictBlockingError,
     VerdictGateDisagreementError, VerdictDegradedError.
     """
+    evaluation = _apply_decision_table(
+        verdict,
+        reviewer_name,
+        current_head_sha=current_head_sha,
+        live_base_sha=live_base_sha,
+        policy_reader=policy_reader,
+        visibility=visibility,
+        evaluator=evaluator,
+        config_root=config_root,
+        today=today,
+        ruling_scope=ruling_scope,
+    )
+    if verdict.state.docs_only is None:
+        return evaluation
+    waiver = docs_only_waiver_line(reviewer_name, verdict.state.docs_only)
+    return dataclasses.replace(evaluation, docs_only_waiver=waiver)
+
+
+def _apply_decision_table(
+    verdict: ReviewerVerdict,
+    reviewer_name: str,
+    *,
+    current_head_sha: str,
+    live_base_sha: str,
+    policy_reader: PolicyReader | None,
+    visibility: str | None,
+    evaluator: EvaluatorGate,
+    config_root: str | Path | None = None,
+    today: dt.date | None = None,
+    ruling_scope: RulingScope | None = None,
+) -> GateEvaluation:
+    """The decision table of the module docstring, without the waiver line."""
     state = verdict.state
     label = reviewer_name.upper()
     where = f"comment #{verdict.comment_id} on PR #{verdict.pr_number}"

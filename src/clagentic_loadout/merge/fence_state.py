@@ -74,6 +74,23 @@ They are present together or not at all. A version 4 fence is a superset of
 version 3: it says nothing about evaluation by itself, so a fence that carries
 both reads as evaluated exactly as a version 3 fence does.
 
+DOCS-ONLY field records a review that took the lighter docs-only path, or that
+rejected the justification for taking it, and is what a fence_schema_version 5
+fence adds. It is evidence, like the fields above it: it holds no finding open,
+clears none, and the merge gate does not read it to decide anything; the merge
+verb only prints it as a waiver line.
+
+  docs_only       {classification, allowlist_source, justification, spec_hash,
+                   accepted, rejection_reason}
+                                         what the changeset classified as, the
+                                         base revision and profile path the docs
+                                         allowlist was read from, the requesting
+                                         agent's justification verbatim, the
+                                         sealed spec it came from, whether the
+                                         reviewer accepted it, and why not
+
+A version 5 fence is a superset of version 4, for the same reason.
+
 COMPATIBILITY. A version-1 fence (no state fields) stays valid and readable.
 It reads as "no findings asserted open at that fence", never as an error: an
 absent field is silence, not a malformed verdict.
@@ -108,6 +125,13 @@ EVALUATED_FENCE_SCHEMA_VERSION = 3
 #: Version stamped on a fence that carries the spec fields. A superset of
 #: version 3, for the same reason version 3 is a superset of version 2.
 SPEC_FENCE_SCHEMA_VERSION = 4
+
+#: Version stamped on a fence that carries the docs-only field. A superset of
+#: version 4.
+DOCS_ONLY_FENCE_SCHEMA_VERSION = 5
+
+#: Every fence_schema_version a reader accepts.
+FENCE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5)
 
 KEY_FENCE_SCHEMA_VERSION = "fence_schema_version"
 KEY_FINDINGS_OPEN = "findings_open"
@@ -166,6 +190,13 @@ COVERAGE_MET = "met"
 COVERAGE_UNMET = "unmet"
 COVERAGE_STATUSES = (COVERAGE_MET, COVERAGE_UNMET)
 
+KEY_DOCS_ONLY = "docs_only"
+
+#: The classifications a docs-only object may state.
+CLASSIFICATION_DOCS_ONLY = "docs-only"
+CLASSIFICATION_CODE = "code"
+CLASSIFICATIONS = (CLASSIFICATION_DOCS_ONLY, CLASSIFICATION_CODE)
+
 EVIDENCE_KEYS = (
     KEY_FAILURE_SEQUENCES,
     KEY_DROPPED,
@@ -174,6 +205,7 @@ EVIDENCE_KEYS = (
     KEY_ENGINES,
     *EVALUATION_KEYS,
     *SPEC_KEYS,
+    KEY_DOCS_ONLY,
 )
 
 RANGE_BASIS_BASE_HEAD = "base..head"
@@ -216,6 +248,8 @@ class FindingsState:
     #: The findings the outcome was computed from; None when the fence does not
     #: carry them, which is different from a fence that carries none.
     evaluated_findings: tuple[dict[str, Any], ...] | None = None
+    #: The docs-only object the fence carries; None when it carries none.
+    docs_only: dict[str, Any] | None = None
 
     @property
     def evaluated(self) -> bool:
@@ -531,7 +565,126 @@ def normalize_findings_state(
     if any(key in raw for key in SPEC_KEYS):
         out.update(_normalize_spec(raw))
         out[KEY_FENCE_SCHEMA_VERSION] = SPEC_FENCE_SCHEMA_VERSION
+    if KEY_DOCS_ONLY in raw:
+        out[KEY_DOCS_ONLY] = normalize_docs_only(raw[KEY_DOCS_ONLY])
+        out[KEY_FENCE_SCHEMA_VERSION] = DOCS_ONLY_FENCE_SCHEMA_VERSION
     return out
+
+
+_DOCS_ONLY_KEYS = (
+    "classification",
+    "allowlist_source",
+    "justification",
+    "spec_hash",
+    "accepted",
+    "rejection_reason",
+)
+
+
+def normalize_docs_only(value: Any) -> dict[str, Any]:
+    """Validate a docs-only object and return it as the fence renders it.
+
+    The justification is the requesting agent's own text and may run to several
+    lines; every string still goes through the fence-syntax check, like all
+    caller text. A rejected justification states why; an accepted one states no
+    reason. Raises ValueError on anything else."""
+    where = KEY_DOCS_ONLY
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{where} must be a JSON object, got {type(value).__name__}")
+    _exact_keys(value, _DOCS_ONLY_KEYS, where)
+    missing = [key for key in _DOCS_ONLY_KEYS if key not in value]
+    if missing:
+        raise ValueError(f"{where} is missing {missing}")
+    classification = value["classification"]
+    if classification not in CLASSIFICATIONS:
+        raise ValueError(
+            f"{where}.classification must be one of {list(CLASSIFICATIONS)}, got {classification!r}"
+        )
+    source = value["allowlist_source"]
+    if not isinstance(source, Mapping):
+        raise ValueError(f"{where}.allowlist_source must be a JSON object")
+    _exact_keys(source, ("base_sha", "path"), f"{where}.allowlist_source")
+    spec_hash = value["spec_hash"]
+    if not (isinstance(spec_hash, str) and _SPEC_HASH_RE.match(spec_hash)):
+        raise ValueError(f"{where}.spec_hash must be 64 lowercase hex characters, got {spec_hash!r}")
+    accepted = value["accepted"]
+    if not isinstance(accepted, bool):
+        raise ValueError(f"{where}.accepted must be true or false, got {accepted!r}")
+    if accepted and classification != CLASSIFICATION_DOCS_ONLY:
+        raise ValueError(
+            f"{where}.accepted may be true only when the classification is "
+            f"{CLASSIFICATION_DOCS_ONLY!r}, got {classification!r}"
+        )
+    reason = value["rejection_reason"]
+    if accepted and reason is not None:
+        raise ValueError(f"{where}.rejection_reason must be null when the justification is accepted")
+    if not accepted and reason is None:
+        raise ValueError(f"{where}.rejection_reason is required when the justification is rejected")
+    return {
+        "classification": classification,
+        "allowlist_source": {
+            "base_sha": _head(source.get("base_sha"), f"{where}.allowlist_source.base_sha"),
+            "path": _text(source.get("path"), f"{where}.allowlist_source.path"),
+        },
+        "justification": _text(
+            value["justification"], f"{where}.justification", single_line=False
+        ),
+        "spec_hash": spec_hash,
+        "accepted": accepted,
+        "rejection_reason": None if reason is None else _text(reason, f"{where}.rejection_reason"),
+    }
+
+
+_MAX_WAIVER_JUSTIFICATION_CHARS = 300
+
+
+def _nonblank_text(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def docs_only_accepted(docs_only: Mapping[str, Any] | None) -> bool:
+    """Whether *docs_only* records an accepted docs-only justification that is
+    well formed in every field the waiver reads.
+
+    A fence read from a comment is not re-normalized, so the invariant that
+    normalize_docs_only enforces is checked again here. Anything short of it is
+    not an accepted waiver: the review stands as a full one, with no waiver line
+    and no lighter treatment of its findings, and never raises."""
+    if not isinstance(docs_only, Mapping) or docs_only.get("accepted") is not True:
+        return False
+    if docs_only.get("classification") != CLASSIFICATION_DOCS_ONLY:
+        return False
+    if not all(_nonblank_text(docs_only.get(key)) for key in ("justification", "spec_hash")):
+        return False
+    source = docs_only.get("allowlist_source")
+    return isinstance(source, Mapping) and all(
+        _nonblank_text(source.get(key)) for key in ("base_sha", "path")
+    )
+
+
+def docs_only_waiver_line(reviewer: str, docs_only: Mapping[str, Any]) -> str | None:
+    """The one-line audit statement for a docs-only waiver a reviewer accepted,
+    or None when the object records no accepted waiver (see docs_only_accepted).
+    The justification is shown on one line, cut to a bounded length; the fence
+    holds it verbatim."""
+    if not docs_only_accepted(docs_only):
+        return None
+    source = docs_only["allowlist_source"]
+    justification = " ".join(str(docs_only["justification"]).split())
+    if len(justification) > _MAX_WAIVER_JUSTIFICATION_CHARS:
+        justification = justification[: _MAX_WAIVER_JUSTIFICATION_CHARS - 3] + "..."
+    return (
+        f"{reviewer}: docs-only review waiver accepted: classified {docs_only['classification']} "
+        f"against the allowlist in {source['path']} at base {source['base_sha'][:_SHORT_SHA]}; "
+        f"justification (spec {docs_only['spec_hash'][:_SHORT_SHA]}): {justification}"
+    )
+
+
+def render_docs_only(docs_only: Mapping[str, Any]) -> str:
+    """The verdict line for a normalized docs-only object."""
+    if docs_only["accepted"]:
+        return "docs-only: lighter review, justification accepted; findings are advisory"
+    return f"docs-only: justification rejected, full review: {docs_only['rejection_reason']}"
 
 
 def _normalize_spec(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -693,7 +846,8 @@ def has_findings_state(data: Mapping[str, Any]) -> bool:
 
 _RAW_VERSION_2_RE = re.compile(
     rf"{KEY_FENCE_SCHEMA_VERSION}\W+"
-    rf"(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION}|{SPEC_FENCE_SCHEMA_VERSION})\b"
+    rf"(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION}|{SPEC_FENCE_SCHEMA_VERSION}"
+    rf"|{DOCS_ONLY_FENCE_SCHEMA_VERSION})\b"
 )
 
 
@@ -723,6 +877,7 @@ def state_from_fence(data: Mapping[str, Any]) -> FindingsState:
             if isinstance(data.get(KEY_EVALUATED_FINDINGS), list)
             else None
         ),
+        docs_only=data[KEY_DOCS_ONLY] if isinstance(data.get(KEY_DOCS_ONLY), dict) else None,
     )
 
 
@@ -811,6 +966,16 @@ def with_derived_failure_sequences(
 
 
 __all__ = [
+    "CLASSIFICATIONS",
+    "CLASSIFICATION_CODE",
+    "CLASSIFICATION_DOCS_ONLY",
+    "DOCS_ONLY_FENCE_SCHEMA_VERSION",
+    "FENCE_SCHEMA_VERSIONS",
+    "KEY_DOCS_ONLY",
+    "docs_only_accepted",
+    "docs_only_waiver_line",
+    "normalize_docs_only",
+    "render_docs_only",
     "with_derived_failure_sequences",
     "COVERAGE_MET",
     "COVERAGE_STATUSES",

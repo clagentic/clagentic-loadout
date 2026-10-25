@@ -54,7 +54,7 @@ checkout."
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Protocol, runtime_checkable
+from typing import Protocol, TypedDict, runtime_checkable
 
 from clagentic_loadout.acquire.errors import AcquireFetchError
 
@@ -262,6 +262,33 @@ class PolicyFileBackend(Protocol):
         ...
 
 
+class IssueComment(TypedDict, total=False):
+    """The keys of a PR comment that callers of ``CommentBackend`` read. The host
+    returns more; only these are part of the contract."""
+
+    id: int
+    body: str
+
+
+@runtime_checkable
+class CommentBackend(Protocol):
+    """Optional capability of a transport: read every comment on a PR from the
+    host API. Separate from AcquireBackend for the same reason as
+    RangeDiffBackend."""
+
+    def fetch_issue_comments(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> list[IssueComment]:
+        """Every comment on the PR, in full.
+
+        Raises:
+            acquire.errors.AcquireFetchError: the list could not be read in
+                full (non-2xx, network failure, a page that proves the list
+                incomplete, or an unexpected response shape).
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class RangeDiff:
     """The change between two commits of one repository, from the host API.
@@ -305,6 +332,8 @@ __all__ = [
     "AcquireBackend",
     "AcquiredPr",
     "ChangedFile",
+    "CommentBackend",
+    "IssueComment",
     "PolicyFileBackend",
     "RangeDiff",
     "RangeDiffBackend",

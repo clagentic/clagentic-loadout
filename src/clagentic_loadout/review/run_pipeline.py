@@ -54,6 +54,11 @@ from clagentic_loadout.review.delta import (
     reviewer_resolved_positions,
 )
 from clagentic_loadout.merge.fence_state import KEY_VERDICT_OUTCOME, KEY_VERDICT_REASONS
+from clagentic_loadout.review.docs_only_review import (
+    ChangesetInput,
+    render_justification_note,
+    summarize_changeset,
+)
 from clagentic_loadout.review.engine_breaker import BREAKER_FILENAME, EngineBreaker
 from clagentic_loadout.review.evaluation import (
     EvaluationContext,
@@ -98,6 +103,10 @@ KEY_PRIOR_LINE = "prior_line"
 
 #: Key, on a chunk record and in the run summary, of the class rules evidence.
 KEY_CLASS_RULES = "class_rules"
+
+#: Key, in the run summary, of the classification of the whole pull request. It
+#: is not written to the findings document, which a post must not depend on.
+KEY_CHANGESET = "changeset"
 
 REASON_ACQUIRE_INVALID = "ACQUIRE_INVALID"
 REASON_DIFF_EMPTY = "DIFF_EMPTY"
@@ -175,6 +184,7 @@ def _resume_key(
     head_sha: str,
     delta_note: str = "",
     class_rules: str = "",
+    docs_note: str = "",
 ) -> str:
     digest = hashlib.sha256()
     for part in (
@@ -182,6 +192,7 @@ def _resume_key(
         head_sha,
         delta_note,
         class_rules,
+        docs_note,
         json.dumps(profile.carrier),
         json.dumps(profile.fallback),
         json.dumps([profile.carrier_model, profile.fallback_model]),
@@ -438,6 +449,7 @@ def run_review(
     delta_stage: dict[str, str] | None = None,
     unknown_resolutions: Sequence[str] | None = None,
     evaluation: EvaluationContext | None = None,
+    changeset: ChangesetInput | None = None,
 ) -> RunOutcome:
     """Drive one invocation of the review pipeline for *acquired*. With
     *delta*, *acquired* already holds the delta diff and each chunk is framed
@@ -446,7 +458,10 @@ def run_review(
     when the caller supplied rulings, lists those that matched no prior
     finding; it is reported in the result. *evaluation* carries what the
     verdict depends on besides the findings (see review.evaluation); without
-    it the verdict is computed with no policy base, which is DEGRADED."""
+    it the verdict is computed with no policy base, which is DEGRADED.
+    *changeset* describes the whole pull request, which a delta *acquired*
+    does not; it is classified by the base profile's docs allowlist and the
+    classification is recorded in the result."""
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, status: str, **fields: Any) -> None:
@@ -485,6 +500,18 @@ def run_review(
     # diff below, and the evaluator judges all findings under the same read.
     context = evaluation if evaluation is not None else EvaluationContext()
     policy = read_context_policy(context)
+    changeset_block = (
+        summarize_changeset(changeset, policy, context.policy_base_sha)
+        if changeset is not None
+        else None
+    )
+    # The justification is quoted into every chunk prompt of a run the lighter path
+    # is open to, so the resume key binds it.
+    docs_note = (
+        render_justification_note(changeset_block, changeset.justification)
+        if changeset is not None and changeset_block is not None
+        else ""
+    )
     class_rules = {chunk.index: chunk_class_rules(policy, chunk) for chunk in chunks}
     class_rules_sent = {
         chunk.index: class_rules_evidence(policy, chunk, class_rules[chunk.index])
@@ -494,7 +521,7 @@ def run_review(
     resume_rules = "\0".join(class_rules[chunk.index] for chunk in chunks)
     state_dir = (
         run_dir
-        / f"state-{_resume_key(chunks, profile, acquired.head_sha, resume_note, resume_rules)}"
+        / f"state-{_resume_key(chunks, profile, acquired.head_sha, resume_note, resume_rules, docs_note)}"
     )
     try:
         state_dir.mkdir(parents=True, exist_ok=True)
@@ -570,6 +597,7 @@ def run_review(
                     delta_note=delta_notes.get(chunk.index, ""),
                     breaker=breaker,
                     class_rules=class_rules[chunk.index],
+                    docs_note=docs_note,
                 )
             finally:
                 discard_chunk_workdir(chunk_cwd)
@@ -747,6 +775,7 @@ def run_review(
             KEY_VERDICT_REASONS: document[KEY_VERDICT_REASONS],
             "carried_count": len(carried),
             KEY_CLASS_RULES: _class_rules_summary(records),
+            **({KEY_CHANGESET: changeset_block} if changeset_block is not None else {}),
             **(
                 _accounting_fields(prior_open, len(kept) + len(left_open), resolved)
                 if delta is not None

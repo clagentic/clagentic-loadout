@@ -33,6 +33,9 @@ endpoints):
         -> {"tree": [{"path", "type"}, ...], "truncated": bool}, paged; with
            the contents endpoint above, the policy-file read of
            review.policy_reader.
+  - GET  /api/v1/repos/{owner}/{repo}/issues/{index}/comments
+        -> [{"id", "user", "body", "created_at"}, ...], the whole list in one
+           response; the verdict comments a PR already holds.
 """
 
 from __future__ import annotations
@@ -44,13 +47,14 @@ from typing import Any
 from clagentic_loadout.acquire.contract import (
     AcquiredPr,
     ChangedFile,
+    IssueComment,
     RangeDiff,
     pr_text,
     repository_visibility,
     tree_file_paths,
 )
 from clagentic_loadout.acquire.errors import AcquireFetchError
-from clagentic_loadout.transport import git_host_api
+from clagentic_loadout.transport import comment_paging, git_host_api
 
 
 def _parse_json(raw: bytes, expect: type, what: str) -> Any:
@@ -375,6 +379,22 @@ def fetch_range_diff(
     )
 
 
+def fetch_issue_comments(
+    git_host_base: str, token: str, owner: str, repo: str, pr_number: int, *, opener=None
+) -> list[dict[str, Any]]:
+    """Every comment on the PR (GET .../issues/{n}/comments, which Forgejo
+    answers in full), through the one reader every comment site shares. An
+    unreadable list is a failure, never a shorter answer."""
+    try:
+        return comment_paging.list_forgejo_issue_comments(
+            git_host_api.request, git_host_base, owner, repo, pr_number, token, opener=opener
+        )
+    except (git_host_api.GitHostApiError, comment_paging.CommentListError) as exc:
+        raise AcquireFetchError(
+            f"cannot read comments for PR #{pr_number} in {owner}/{repo}: {exc}"
+        ) from exc
+
+
 def fetch_pr_content(
     git_host_base: str,
     token: str,
@@ -482,9 +502,17 @@ class ForgejoAcquireBackend:
             self._git_host_base, self._token, owner, repo, path, ref, opener=self._opener
         )
 
+    def fetch_issue_comments(
+        self, *, owner: str, repo: str, pr_number: int
+    ) -> list[IssueComment]:
+        return fetch_issue_comments(
+            self._git_host_base, self._token, owner, repo, pr_number, opener=self._opener
+        )
+
 
 __all__ = [
     "ForgejoAcquireBackend",
+    "fetch_issue_comments",
     "fetch_file_bytes",
     "fetch_pr_content",
     "fetch_tree_paths",

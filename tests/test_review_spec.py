@@ -428,7 +428,7 @@ class TestFenceFields:
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
         tag_enum = schema["properties"]["spec_tags"]["items"]["properties"]["spec_tag"]["enum"]
         assert tuple(tag_enum) == fence_state.SPEC_TAGS
-        assert schema["properties"]["fence_schema_version"]["enum"] == [1, 2, 3, 4]
+        assert schema["properties"]["fence_schema_version"]["enum"] == [1, 2, 3, 4, 5]
         fence["spec_tags"][0]["spec_tag"] = "elsewhere"
         assert validate_against_schema(fence, schema_path)
 

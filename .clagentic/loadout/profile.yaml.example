@@ -33,6 +33,16 @@ visibility: public              # public | private
 merge_control: unrestricted     # code_owner_review_required | review_required | unrestricted
 confirmed_at: 2026-10-24
 
+# Which changed files may count as documentation, for the lighter docs-only review. Read
+# only by gates, from the merge base. Absent means nothing is docs-only. A file is docs
+# only if it matches `paths`, matches no `depended_on` glob (list your agent and
+# instruction files there), and is not config, CI, a hook, a script or the loadout
+# config directory. A change that edits this profile is always code.
+review:
+  docs_only:
+    paths: ["docs/**/*.md", "README.md"]
+    depended_on: ["docs/README.md", "AGENTS.md"]
+
 # The commands `clagentic-loadout test run` uses. Each is an argv list run without a shell
 # from the repository root, and must write a JUnit XML report to the {junit} path. Every
 # key is optional. {base} (impacted only) is replaced by the commit SHA of --base, or of

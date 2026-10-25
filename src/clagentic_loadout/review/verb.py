@@ -163,6 +163,7 @@ from clagentic_loadout.merge.errors import VerdictMalformedError
 from clagentic_loadout.merge.fence_state import (
     COVERAGE_UNMET,
     EVIDENCE_KEYS,
+    KEY_DOCS_ONLY,
     KEY_DROPPED,
     KEY_FENCE_SCHEMA_VERSION,
     KEY_SPEC_COVERAGE,
@@ -644,7 +645,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "'resolved', 'range' and 'engines' are accepted the same way; they are shown in "
         "the body (a finding's own optional 'failure_sequence' under its "
         "bullet, a 'Dropped candidates' section, 'Resolved' and 'Resolved "
-        "by caller' sections, 'range:' and 'engine:' lines) and copied into the fence without raising its version.",
+        "by caller' sections, 'range:' and 'engine:' lines) and copied into the fence without raising its version. "
+        "The 'docs_only' object (a lighter docs-only review and its waiver) is accepted "
+        "the same way, is shown as one line, and raises the fence to fence_schema_version 5.",
     )
     parser.add_argument(
         "--verdict-head-sha",
@@ -1373,6 +1376,7 @@ def _run(
             repo=f"{owner}/{repo}",
             spec_hash=spec_hash,
             evidence_ref=f"comment:{verified.id}",
+            docs_only=parsed.get(KEY_DOCS_ONLY),
         )
         if record is not None:
             result["verdict_record_id"] = record.id

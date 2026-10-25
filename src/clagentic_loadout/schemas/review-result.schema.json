@@ -34,8 +34,31 @@
     },
     "fence_schema_version": {
       "type": "integer",
-      "enum": [1, 2, 3, 4],
-      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated."
+      "enum": [1, 2, 3, 4, 5],
+      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. Version 5 marks a fence that carries the docs_only object; it is a superset of version 4 and adds nothing to the computed verdict. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated. Readers accept every version from 1 to 5."
+    },
+    "docs_only": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["classification", "allowlist_source", "justification", "spec_hash", "accepted", "rejection_reason"],
+      "description": "OPTIONAL evidence, version 5. A review that took the lighter docs-only path, or that rejected the justification for taking it. Informational: it holds no finding open and clears none; the merge verb prints an accepted one as a waiver line.",
+      "properties": {
+        "classification": {"type": "string", "enum": ["docs-only", "code"], "description": "What the changeset classified as, by the base revision's docs allowlist."},
+        "allowlist_source": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["base_sha", "path"],
+          "description": "Where the docs allowlist was read from.",
+          "properties": {
+            "base_sha": {"type": "string", "minLength": 1, "description": "The base revision the allowlist was read at."},
+            "path": {"type": "string", "minLength": 1, "description": "The repo profile path the allowlist was read from."}
+          }
+        },
+        "justification": {"type": "string", "minLength": 1, "description": "The requesting agent's docs-only justification, verbatim from the sealed spec."},
+        "spec_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The sealed spec the justification came from."},
+        "accepted": {"type": "boolean", "description": "Whether the reviewer accepted the justification."},
+        "rejection_reason": {"type": ["string", "null"], "minLength": 1, "description": "Why the reviewer rejected the justification; null when it was accepted."}
+      }
     },
     "verdict_outcome": {
       "type": "string",

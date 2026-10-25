@@ -65,6 +65,10 @@ Landed today (see [docs/verbs.md](docs/verbs.md) for the full description of eac
   `released-tool` or `internal` class) and drafts one from the file tree for a repository
   that has none; `review` applies the class rules to a diff. See
   [docs/repo-profile.md](docs/repo-profile.md).
+- **`changeset`** — classifies a change as docs-only or code from its paths and the docs
+  allowlist in the profile at the base revision; review takes a lighter, audited path for a
+  docs-only change whose spec states why. See
+  [docs/verbs.md](docs/verbs.md#docs-only-review).
 - **`doctor`** — the deployment-conformance check suite: a read-only, safe-to-repeat verb
   (including in CI) that verifies credentials, attestation-source, builder-identity, and
   repo-schema configuration are actually wired up correctly. This is the integrator's

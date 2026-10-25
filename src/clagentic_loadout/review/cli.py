@@ -47,6 +47,7 @@ from clagentic_loadout.platform_detect import (
 )
 from clagentic_loadout.merge.fence_state import (
     EVIDENCE_KEYS,
+    KEY_DOCS_ONLY,
     KEY_DROPPED,
     KEY_EVALUATED_FINDINGS,
     KEY_FAILURE_SEQUENCES,
@@ -64,9 +65,20 @@ from clagentic_loadout.merge.fence_state import (
     failure_sequences_of,
     normalize_findings_state,
 )
-from clagentic_loadout.review import spec_review
+from clagentic_loadout.review import changeset_paths, spec_review
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.delta import resolve_delta
+from clagentic_loadout.review.docs_only_review import (
+    ADVISORY_NOTE,
+    ChangesetInput,
+    DocsOnlyDecision,
+    DocsOnlyError,
+    check_reason,
+    classify_with_policy,
+    decide,
+    earlier_verdicts_reader,
+    split_findings,
+)
 from clagentic_loadout.review.dropped_overlap import drop_overlapping
 from clagentic_loadout.review.evaluate import OUTCOME_CLEAN, Verdict
 from clagentic_loadout.review.evaluate_render import finding_notes
@@ -83,6 +95,7 @@ from clagentic_loadout.review.evaluation import (
     fence_evaluation_fields,
     findings_open_from_verdict,
     is_unsafe_status,
+    read_context_policy,
 )
 from clagentic_loadout.review.findings_contract import (
     KEY_FAILURE_SEQUENCE,
@@ -299,8 +312,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "alone to review a delta with no open findings to answer for.",
     )
     run.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
+    run.add_argument(
+        "--spec-hash",
+        default=None,
+        help="The sealed spec (its sha256, as printed by `loadout-spec seal`) the review is "
+        "against. When the change is documentation only by the base revision's docs allowlist, "
+        "the lighter review is open to it, and the spec carries a docs-only justification, that "
+        "justification is quoted verbatim into every chunk prompt for the reviewer to judge. "
+        "Nothing else changes: without this flag, or for any other change, the prompts carry "
+        "no justification.",
+    )
 
-    post = subparsers.add_parser(
+    post =subparsers.add_parser(
         "post",
         help="Post findings with the tool-constructed verdict fence and verify.",
         description="Stage and post findings; the comment body is built from "
@@ -374,6 +397,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="JSON array marking each acceptance criterion of the --spec-hash spec as met or "
         'unmet: [{"criterion": "<id>", "status": "met"|"unmet"}, ...]. It must name every '
         "criterion of the spec exactly once. Requires --spec-hash.",
+    )
+    post.add_argument(
+        "--reject-justification",
+        default=None,
+        metavar="REASON",
+        help="Reject the docs-only justification in the --spec-hash spec, stating why in one "
+        "line. The post is then a full-review verdict for this head, the rejection is recorded "
+        "in the fence and the verdict record, and every later review of this pull request is a "
+        "full review whatever the spec says. Without this flag, a change that is documentation "
+        "only (by the base revision's docs allowlist) whose spec carries a docs-only "
+        "justification is posted on the lighter path: its findings are advisory, except any "
+        "that is or may be a secret, and the scanners the deployment requires are still "
+        "required. Requires a --spec-hash spec that carries a justification.",
     )
 
     add_evaluate_parser(subparsers)
@@ -526,6 +562,27 @@ def _emit_stage(name: str, status: str, **fields: Any) -> None:
     )
 
 
+def _run_justification(args: argparse.Namespace, config_root) -> str | None:
+    """The docs-only justification of the sealed spec `run` was given, or None
+    when it was given no spec or the spec states none. The spec must be in the
+    specs store and verify against its hash; checked before any host call."""
+    if args.spec_hash is None:
+        return None
+    if not is_spec_hash(args.spec_hash):
+        _fail(
+            f"--spec-hash must be 64 lowercase hex characters, got {args.spec_hash!r}", EXIT_USAGE
+        )
+    try:
+        facts = spec_review.load_spec_facts(
+            args.spec_hash,
+            config_root=config_root,
+            untrusted_roots=(Path(args.repo_path),) if args.repo_path else (),
+        )
+    except spec_review.SpecReviewError as exc:
+        _fail(str(exc), EXIT_SPEC_UNAVAILABLE)
+    return facts.docs_only_justification
+
+
 def _run_command(
     args: argparse.Namespace,
     caller: str,
@@ -550,6 +607,7 @@ def _run_command(
 
     since_head, prior_findings = _load_prior_review(args, owner=owner, repo=repo)
     resolutions = _load_resolutions(args.resolved_findings)
+    justification = _run_justification(args, config_root)
     # Read before any model is called, so a bad evaluator setting costs nothing.
     try:
         evaluation = context_from_config(config_root)
@@ -581,6 +639,16 @@ def _run_command(
         visibility=acquired.repo_visibility,
         policy_reader=_policy_reader(args, backend, owner=owner, repo=repo),
         ruling_scope=_ruling_scope(args, owner=owner, repo=repo),
+    )
+
+    # Taken before a delta narrows `acquired`: the classification is of the whole
+    # pull request, never of the slice since the last reviewed head.
+    changeset = ChangesetInput(
+        changed=tuple(changeset_paths.from_acquired(acquired)),
+        earlier_rejection=earlier_verdicts_reader(
+            backend, owner=owner, repo=repo, pr_number=args.pr
+        ),
+        justification=justification,
     )
 
     delta = None
@@ -626,6 +694,7 @@ def _run_command(
         acquired, profile, run_dir, emit=_emit_stage, delta=delta, delta_stage=delta_stage,
         unknown_resolutions=unknown_resolutions if args.resolved_findings is not None else None,
         evaluation=evaluation,
+        changeset=changeset,
         **kwargs,
     )
     return _report_outcome(outcome)
@@ -861,13 +930,16 @@ def _unsafe_status_message(status: str, verdict: Verdict, reasons: list[str]) ->
     )
 
 
-def _spec_inputs(args: argparse.Namespace, config_root) -> dict[str, Any] | None:
-    """The spec hash and coverage a `post` carries, or None when it was given
-    neither. They are given together; the spec must be in the specs store and
-    verify against its hash, and the coverage must mark each of its acceptance
-    criteria exactly once. Checked before any host call."""
+def _spec_inputs(
+    args: argparse.Namespace, config_root
+) -> tuple[dict[str, Any], spec_review.SpecFacts] | tuple[None, None]:
+    """The spec hash and coverage a `post` carries, with the facts of the spec
+    they name; ``(None, None)`` when it was given neither. They are given
+    together; the spec must be in the specs store and verify against its hash,
+    and the coverage must mark each of its acceptance criteria exactly once.
+    Checked before any host call."""
     if args.spec_hash is None and args.spec_coverage is None:
-        return None
+        return None, None
     if args.spec_hash is None or args.spec_coverage is None:
         _fail("--spec-hash and --spec-coverage must be given together", EXIT_USAGE)
     if not is_spec_hash(args.spec_hash):
@@ -875,7 +947,7 @@ def _spec_inputs(args: argparse.Namespace, config_root) -> dict[str, Any] | None
             f"--spec-hash must be 64 lowercase hex characters, got {args.spec_hash!r}", EXIT_USAGE
         )
     try:
-        criterion_ids = spec_review.load_spec_criterion_ids(
+        facts = spec_review.load_spec_facts(
             args.spec_hash,
             config_root=config_root,
             untrusted_roots=(Path(args.repo_path),) if args.repo_path else (),
@@ -883,10 +955,78 @@ def _spec_inputs(args: argparse.Namespace, config_root) -> dict[str, Any] | None
     except spec_review.SpecReviewError as exc:
         _fail(str(exc), EXIT_SPEC_UNAVAILABLE)
     try:
-        coverage = spec_review.load_coverage(args.spec_coverage, criterion_ids)
+        coverage = spec_review.load_coverage(args.spec_coverage, facts.criterion_ids)
     except spec_review.SpecReviewError as exc:
         _fail(str(exc), EXIT_FINDINGS_INVALID)
-    return {KEY_SPEC_HASH: args.spec_hash, KEY_SPEC_COVERAGE: coverage}
+    return {KEY_SPEC_HASH: args.spec_hash, KEY_SPEC_COVERAGE: coverage}, facts
+
+
+def _reject_reason(args: argparse.Namespace, facts: spec_review.SpecFacts | None) -> str | None:
+    """The checked reason the reviewer rejects the docs-only justification, or
+    None when it does not. A rejection needs a justification to reject."""
+    if args.reject_justification is None:
+        return None
+    try:
+        reason = check_reason(args.reject_justification)
+    except DocsOnlyError as exc:
+        _fail(f"--reject-justification: {exc}", EXIT_USAGE)
+    if facts is None or facts.docs_only_justification is None:
+        _fail(
+            "--reject-justification needs a --spec-hash spec that carries a docs-only "
+            "justification; this review has none to reject",
+            EXIT_USAGE,
+        )
+    return reason
+
+
+def _docs_only_decision(
+    args: argparse.Namespace,
+    *,
+    owner: str,
+    repo: str,
+    caller: str,
+    platform: str,
+    token_provider,
+    opener,
+    live_pr: AcquiredPr,
+    policy,
+    policy_base_sha: str | None,
+    spec_fields: dict[str, Any] | None,
+    facts: spec_review.SpecFacts | None,
+    reject_reason: str | None,
+) -> DocsOnlyDecision:
+    """Whether this post takes the lighter docs-only path, from the one
+    classification every review shares and the spec's justification."""
+    classification = classify_with_policy(
+        changeset_paths.from_acquired(live_pr), policy, policy_base_sha
+    )
+    justification = facts.docs_only_justification if facts is not None else None
+    spec_hash = spec_fields[KEY_SPEC_HASH] if spec_fields is not None else None
+    earlier = unreadable = None
+    # Earlier verdicts matter only when the lighter path is otherwise open.
+    if classification.is_docs_only and justification and reject_reason is None:
+        reader = earlier_verdicts_reader(
+            _build_acquire_backend(
+                args, owner=owner, repo=repo, caller=caller, platform=platform,
+                token_provider=token_provider, opener=opener,
+            ),
+            owner=owner, repo=repo, pr_number=args.pr,
+        )
+        try:
+            earlier = reader()
+        except DocsOnlyError as exc:
+            unreadable = str(exc)
+    try:
+        return decide(
+            classification,
+            spec_hash=spec_hash,
+            justification=justification,
+            reject_reason=reject_reason,
+            earlier_rejection=earlier,
+            earlier_unreadable=unreadable,
+        )
+    except DocsOnlyError as exc:
+        _fail(str(exc), EXIT_FINDINGS_INVALID)
 
 
 def _spec_fence_fields(
@@ -912,7 +1052,8 @@ def _post_command(
     identity_provider,
     config_root,
 ) -> int:
-    spec_fields = _spec_inputs(args, config_root)
+    spec_fields, spec_facts = _spec_inputs(args, config_root)
+    reject_reason = _reject_reason(args, spec_facts)
     loaded_meta: dict[str, Any] = {}
     head_sha, findings, evidence = _load_findings(
         args.findings, owner=owner, repo=repo, pr_number=args.pr,
@@ -1029,12 +1170,28 @@ def _post_command(
         ruling_scope=_ruling_scope(args, owner=owner, repo=repo),
     )
     scanners_run = state.get(KEY_SCANNERS_RUN)
+    # Read once and shared: the docs allowlist and the evaluator's stakes come
+    # from the same read of the base revision.
+    policy = read_context_policy(evaluation)
+    docs_decision = _docs_only_decision(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener, live_pr=live_pr, policy=policy,
+        policy_base_sha=evaluation.policy_base_sha, spec_fields=spec_fields, facts=spec_facts,
+        reject_reason=reject_reason,
+    )
+    # On the lighter path only a finding that is or may be a secret is judged;
+    # the rest are advisory and never reach the evaluator, so they can neither
+    # block nor be held open. Every other post judges every finding.
+    judged, advisory = (
+        split_findings(findings) if docs_decision.lighter else (findings, [])
+    )
     verdict = evaluate_findings(
-        findings,
+        judged,
         head_sha,
         evaluation,
         expected_head=live_pr.head_sha,
         scanners_run=scanners_run if isinstance(scanners_run, list) else None,
+        policy=policy,
     )
     fence_fields = fence_evaluation_fields(verdict, evaluation)
     if args.status is not None and is_unsafe_status(args.status, verdict):
@@ -1045,8 +1202,11 @@ def _post_command(
     # A CLEAN outcome has no blocking finding, so nothing is held open and the
     # only thing that can still make the status blocking is the caller asking.
     status = "clean" if verdict.outcome == OUTCOME_CLEAN and args.status != "blocking" else "blocking"
-    annotated = annotate_findings(findings, verdict)
+    annotated = annotate_findings(judged, verdict)
     open_findings = findings_open_from_verdict(verdict, head_sha)
+
+    def spec_note(item: dict[str, Any]) -> list[str]:
+        return [f"spec tag: {item[KEY_SPEC_TAG]}"] if spec_fields is not None else []
 
     body = {
         "review_status": status,
@@ -1054,18 +1214,26 @@ def _post_command(
             {
                 **{k: item[k] for k in (*_FINDING_KEYS, *_OPTIONAL_FINDING_KEYS) if k in item},
                 "blocking": evaluated.blocking,
-                "notes": [
-                    *finding_notes(evaluated),
-                    *([f"spec tag: {item[KEY_SPEC_TAG]}"] if spec_fields is not None else []),
-                ],
+                "notes": [*finding_notes(evaluated), *spec_note(item)],
             }
             for item, evaluated in zip(annotated, verdict.findings)
+        ]
+        + [
+            {
+                **{k: item[k] for k in (*_FINDING_KEYS, *_OPTIONAL_FINDING_KEYS) if k in item},
+                "blocking": False,
+                "notes": [ADVISORY_NOTE, *spec_note(item)],
+            }
+            for item in advisory
         ],
         **state,
         **({KEY_FINDINGS_OPEN: open_findings} if open_findings else {}),
         **evidence,
         **fence_fields,
-        **_spec_fence_fields(spec_fields, annotated),
+        **_spec_fence_fields(spec_fields, [*annotated, *advisory]),
+        **({KEY_DOCS_ONLY: docs_decision.evidence} if docs_decision.evidence is not None else {}),
+        # Every finding, as a full review lists them: on the lighter path the
+        # advisory ones are carried too, and the gate applies the same split.
         KEY_EVALUATED_FINDINGS: evaluated_findings_for_fence(
             findings, with_fingerprint=evaluation.ruling_provider is not None
         ),
@@ -1151,7 +1319,7 @@ def _post_command(
         KEY_VERDICT_OUTCOME: verdict.outcome,
         "head_sha": head_sha,
         "pr_number": args.pr,
-        "finding_count": len(annotated),
+        "finding_count": len(annotated) + len(advisory),
         "blocking_count": len(verdict.blocking),
         "open_finding_ids": [entry["id"] for entry in open_findings],
         "verified_id": posted.get("verified_id"),
@@ -1164,6 +1332,10 @@ def _post_command(
             result[key] = posted[key]
     if KEY_DROPPED in evidence:
         result["dropped_count"] = len(evidence[KEY_DROPPED])
+    if docs_decision.evidence is not None or (
+        spec_facts is not None and spec_facts.docs_only_justification is not None
+    ):
+        result[KEY_DOCS_ONLY] = docs_decision.to_dict()
     if spec_fields is not None:
         result[KEY_SPEC_HASH] = spec_fields[KEY_SPEC_HASH]
         result["spec_unmet_count"] = sum(

@@ -1866,11 +1866,11 @@ merge reads that absence as a refusal. Absence is never a pass.
 
 **The record.** The published contract is
 [`verdict-record.schema.json`](../src/clagentic_loadout/schemas/verdict-record.schema.json)
-(`schema_version` 1). Fields:
+(`schema_version` 2; readers accept 1 and 2). Fields:
 
 | field | meaning |
 | --- | --- |
-| `schema_version` | version of this shape (`1`) |
+| `schema_version` | version of this shape: `2` for a record that carries `docs_only`, `1` for every other record |
 | `id` | `YYYYMMDDTHHMMSSZ-<8 hex>`; the handle `loadout-record show` reads by |
 | `gate` | which gate measured: `reviewer:<role>`, `pre_check:<label>`, `push.verify:<entry name>`, or the bare `ci` |
 | `head_sha` | the exact commit measured (40 or 64 hex digits). For a push, the head read back from the remote after the push |
@@ -1882,6 +1882,7 @@ merge reads that absence as a refusal. Absence is never a pass.
 | `started`, `finished` | UTC timestamps, to the second |
 | `evidence_ref` | where the evidence lives (`comment:<id>` for a posted verdict), or null |
 | `waiver` | reserved for the merge record: a stated reason a gate was waived. Null; nothing writes it yet |
+| `docs_only` | version 2 only, on a review record: the docs-only object (classification, allowlist source, justification, spec hash, accepted, rejection reason) of a review that took the lighter docs-only path or rejected its justification. See [Docs-only review](#docs-only-review). Absent otherwise |
 
 Gate names come from configuration the caller already holds: reviewer roles from
 `merge.required_reviewer_roles` and `--required-reviewer`, pre-check labels from
@@ -3185,8 +3186,8 @@ The two go together (otherwise exit 1). With them:
   `spec_coverage` and `spec_hash` (all or none). They are evidence like `dropped`:
   they hold no finding open, clear none, and the merge gate does not read them. A
   fence that carries them is `fence_schema_version` **4**, a superset of version 3 (the
-  schema's version enum is now 1 to 4, the three new properties are optional, and a
-  reader that predates version 4 refuses such a fence, which is why the version moved).
+  three new properties are optional, and a reader that predates version 4 refuses such a
+  fence, which is why the version moved).
 - **Verdict records.** After the post is read back, the verb writes the usual
   `reviewer:<role>` record, now carrying `spec_hash`, and one more with the gate name
   `spec-coverage`: `spec_hash` set, `evidence_ref` `comment:<id>` of the posted
@@ -3196,6 +3197,149 @@ The two go together (otherwise exit 1). With them:
 
 The output of a post that ran against a spec adds `spec_hash`, `spec_unmet_count` and,
 when the record was written, `spec_coverage_record_id`.
+
+## Docs-only review
+
+A change that is documentation only can take a lighter review, with the reason stated,
+recorded and open to rejection. Nothing here adds a guard or a deny: the required gates
+are the ones every review has, and the only place the waiver is shown is the merge
+output and attestation.
+
+### Classification: `loadout-changeset classify`
+
+```
+loadout-changeset classify --base REV [--head REV] [--repo-path DIR]
+```
+
+Classification is deterministic and is one function of two inputs: the changed paths and
+the docs allowlist in the repo profile **at the base commit** (never the working tree,
+never the head). `loadout-review run`, `loadout-review post` and this verb all call that
+one function. The allowlist is declared in the profile
+([repo-profile.md](repo-profile.md#the-docs-allowlist-reviewdocs_only)):
+
+```yaml
+review:
+  docs_only:
+    paths: ["docs/**/*.md", "README.md"]   # globs whose files may be documentation
+    depended_on: ["docs/README.md"]        # globs that are code although they look like docs
+```
+
+A path is documentation only when it matches `paths`, matches no `depended_on` glob and
+falls in none of the built-in code classes: configuration and data files (`yaml`, `yml`,
+`json`, `toml`, `ini`, `cfg`), CI and host workflow directories, hook files, scripts and
+other source files, dotfiles, executable, symlink and submodule entries, and the loadout
+configuration directory. Agent and instruction files are not named by the tool: a
+repository lists the ones it has in `depended_on`. The change is `docs-only` only when it
+touches at least one path and every path is documentation; everything else is `code`:
+a path off the allowlist, a base with no profile, an invalid profile or no
+`review.docs_only` (so nothing is docs-only by default), a rename (both the old and the new
+name are classified), a diff header that cannot be read, and any change to the profile
+itself, which both sits in the loadout configuration directory and is judged by the base's
+list, so a change cannot widen the list it is classified by.
+
+`classify` reads the base commit (`--base`, resolved to one commit) and the change since
+its merge base with `--head` (default `HEAD`). It prints one JSON object: `result` and
+`classification` (`docs-only` or `code`), `base` and `head` (full commits), `allowlist_source`
+(`base_sha`, `path`, and `state`: `ok`, `absent` when the profile declares no allowlist,
+`missing`, `invalid` or `unread`) and `files`, every path with its `class` and `reason`.
+Both answers exit 0. Exit codes: `0` classified, `1` usage, `62` the repository, a
+revision or the changed paths could not be read. It is local, read-only and binds no caller.
+
+`loadout-review run` records the same classification of the **whole pull request** in its
+result (not in the findings file), under `changeset`: `classification`,
+`allowlist_source`, `path_count`, up to twenty `code_paths` with the reason each is code,
+`lighter_review_available` and a `note`. A delta run classifies the whole pull request, not
+the slice since the last reviewed head. The earlier verdicts on the pull request are read
+only when the change is docs-only.
+
+Given `--spec-hash` (a sealed spec in the specs store, else exit 33), `run` also puts the
+spec's `docs_only_justification` in front of the reviewer. When the classification is
+`docs-only`, the lighter path is open (`lighter_review_available` is true) and the spec states
+a justification, every chunk prompt of the run carries a `Docs-only justification` section: the
+classification, the justification quoted verbatim, and an instruction to judge whether it
+holds for the chunk's changes. A change classified as code, a pull request whose earlier
+verdicts rejected a justification or could not be read, a spec with no justification and a run
+given no spec carry no such section.
+
+### The lighter path
+
+The lighter path is opt-in and fails toward more review. It applies only when **all** of
+these hold; otherwise the change gets the full review, however plainly it is documentation:
+
+1. the classification is `docs-only` at the base;
+2. the post names a sealed spec (`--spec-hash`, with `--spec-coverage`) whose
+   `docs_only_justification` is non-empty. That text is the requesting agent's own statement
+   of why less review is enough; it is audited, not trusted;
+3. the reviewer does not reject the justification and no verdict on this pull request has.
+
+On the lighter path the post is still a real reviewer verdict, and `loadout-merge` still
+requires one for every required reviewer role. The findings it states are posted as
+**advisory** (`blocking: false`) and never enter `findings_open`. `evaluated_findings` lists
+every finding, advisory ones included, as it does for a full review; the poster and the
+gate's re-evaluation both apply the same rule to that list when the fence's `docs_only`
+object is an accepted, well-formed one, so the computed verdict cannot block on an advisory
+finding. **A secret is the exception.** A finding is advisory only when its
+stated `category` is something other than `secrets_exposure`; a finding with that category,
+with none, or with one outside the vocabulary is judged exactly as in a full review, so a
+possible secret still blocks. The scanner outcomes the deployment requires
+(`review.evaluator.required_scanners`) are still required, so the secrets scan always runs,
+and a missing or failed one still makes the verdict `DEGRADED`.
+
+The fence and the verdict record carry a `docs_only` object:
+
+| key | meaning |
+| --- | --- |
+| `classification` | `docs-only` or `code` |
+| `allowlist_source` | `base_sha` and `path`: the base commit and the profile path the allowlist was read from |
+| `justification` | the spec's text, verbatim |
+| `spec_hash` | the sealed spec it came from |
+| `accepted` | whether the reviewer accepted it |
+| `rejection_reason` | why not (null when accepted) |
+
+The object is present on a lighter-path post (`accepted: true`) and on a post that rejects
+(`accepted: false`); a full review for any other reason records none. The post prints
+`docs_only` (`lighter_review`, `note`) whenever the spec carries a justification.
+
+**Rejecting.** `--reject-justification REASON` (one line, no fence syntax; needs a
+`--spec-hash` spec that has a justification, else exit 1) makes the post a full-review
+verdict for that head and records the rejection in the fence and the record. Every later
+`run` and `post` on the same pull request reads the pull request's earlier verdict fences
+(any author, any head): one rejection anywhere means full review for every later round,
+whatever the spec says, and `run` reports the pull request as `code`. An earlier verdict
+that cannot be read counts against the lighter path the same way.
+
+**The waiver line.** `loadout-merge` prints one line per reviewer fence that accepted a
+justification, on stderr as `merge: WAIVER -- <reviewer>: docs-only review waiver accepted:
+...` (also under `--report-only`), adds the lines to the merge-completion attestation as a
+`Docs-only waivers` row, and puts each in its `verdict_evaluations` entry as
+`docs_only_waiver`. The line names the reviewer, the classification, the allowlist source,
+the spec and the justification (one line, cut to 300 characters; the fence has it whole).
+It changes no gate. A rejected justification shows no waiver.
+
+### Contract versions
+
+This feature moves two published contracts. Both changes are additive, and readers accept
+every earlier version.
+
+| contract | before | now | what changed |
+| --- | --- | --- | --- |
+| verdict record (`verdict-record.schema.json`) | `schema_version` 1 | `schema_version` 2 | adds the optional `docs_only` object. A record that carries it is version 2; every other record is still written as version 1. The object is not allowed on a version 1 record |
+| review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 4 | 1 to 5 | adds the optional `docs_only` object at version 5, a superset of version 4 that adds nothing to the computed verdict. A fence without it keeps the version it had |
+
+A reader that predates a version refuses a fence or record that carries it, which is why
+the versions moved; an upgrade needs every reader of a deployment to be at this release
+before a reviewer posts a docs-only verdict.
+
+**Rolling back.** An installed release that predates this one refuses a fence at version 5 or
+a record at version 2. Rolling back past this release therefore requires that no opt-in
+docs-only post has been made, or that those pull requests get a fresh full-review post after
+the rollback. A post without `--spec-hash` and a sealed justification still writes the
+versions it always did.
+
+A `docs_only` object that is not well formed in every field the waiver line reads (for
+example a missing `allowlist_source`) is not an accepted waiver: that fence is treated as a
+full review, with no waiver line and no lighter treatment of its findings, and does not stop
+merge processing.
 
 ## Not yet landed
 
