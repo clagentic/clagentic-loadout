@@ -3,6 +3,7 @@ including one it dropped to just before exiting."""
 
 from __future__ import annotations
 
+import errno
 import os
 import sys
 from pathlib import Path
@@ -62,6 +63,62 @@ def test_without_waitid_the_exit_code_is_still_passed_through(
 
     assert outcome.exit_code == 5
     assert outcome.problem is None
+
+
+@pytest.mark.parametrize("err", [errno.ENOSYS, errno.EINVAL])
+def test_a_waitid_oserror_falls_back_to_a_plain_wait_and_stops_the_watcher(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, err: int
+) -> None:
+    def broken(*_args: object) -> None:
+        raise OSError(err, os.strerror(err))
+
+    stops: list[object] = []
+    real_stop = runner.UidWatcher.stop
+
+    def counting_stop(self: runner.UidWatcher, *args: object, **kwargs: object) -> frozenset[int]:
+        stops.append(self)
+        return real_stop(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(os, "waitid", broken)
+    monkeypatch.setattr(runner.UidWatcher, "stop", counting_stop)
+
+    outcome = _run(tmp_path, [sys.executable, "-c", "raise SystemExit(9)"])
+
+    assert outcome.exit_code == 9
+    assert outcome.problem is None
+    assert len(stops) == 1
+
+
+def test_a_waitid_oserror_does_not_extend_a_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def broken(*_args: object) -> None:
+        raise OSError(errno.ENOSYS, "unsupported")
+
+    monkeypatch.setattr(os, "waitid", broken)
+
+    outcome = _run(tmp_path, [sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.5)
+
+    assert outcome.exit_code is None
+    assert "timed out" in (outcome.problem or "")
+
+
+def test_the_watcher_is_stopped_once_when_waiting_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    stops: list[object] = []
+    real_stop = runner.UidWatcher.stop
+
+    def counting_stop(self: runner.UidWatcher, *args: object, **kwargs: object) -> frozenset[int]:
+        stops.append(self)
+        return real_stop(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    def boom(*_args: object) -> None:
+        raise RuntimeError("wait failed")
+
+    monkeypatch.setattr(runner.UidWatcher, "stop", counting_stop)
+    monkeypatch.setattr(runner, "_await_exit", boom)
+
+    with pytest.raises(RuntimeError):
+        _run(tmp_path, [sys.executable, "-c", "pass"])
+
+    assert len(stops) == 1
 
 
 def test_without_waitid_a_timeout_still_ends_the_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

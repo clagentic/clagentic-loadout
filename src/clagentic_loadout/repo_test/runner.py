@@ -55,7 +55,9 @@ def _await_exit(proc: subprocess.Popen[bytes], timeout_seconds: float | None) ->
         try:
             if os.waitid(os.P_PID, proc.pid, flags) is not None:
                 return True, True, None
-        except ChildProcessError:
+        except OSError:
+            # ECHILD (child not waitable) or ENOSYS/EINVAL (WNOWAIT unsupported):
+            # either way the plain wait gets only the time not already spent.
             remaining = None if deadline is None else max(deadline - time.monotonic(), 0)
             return _plain_wait(proc, remaining)
         if deadline is not None and time.monotonic() >= deadline:
@@ -78,15 +80,22 @@ def run_command(
             )
             watcher = UidWatcher(proc.pid)
             watcher.start()
-            exited, held, code = _await_exit(proc, timeout_seconds)
-            if not exited:
-                os.killpg(proc.pid, signal.SIGKILL)
-                proc.wait()
-                return CommandOutcome(None, f"timed out after {timeout_seconds} seconds", watcher.stop())
-            # The leader is still a zombie here, so this last sample reads only
-            # its own pid before it can be reused.
-            uids = watcher.stop(sample_leader_last=held)
-            code = proc.wait()
+            stopped = False
+            try:
+                exited, held, code = _await_exit(proc, timeout_seconds)
+                if not exited:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait()
+                    stopped = True
+                    return CommandOutcome(None, f"timed out after {timeout_seconds} seconds", watcher.stop())
+                # The leader is still a zombie here, so this last sample reads only
+                # its own pid before it can be reused.
+                stopped = True
+                uids = watcher.stop(sample_leader_last=held)
+                code = proc.wait()
+            finally:
+                if not stopped:
+                    watcher.stop()
     except FileNotFoundError:
         return CommandOutcome(None, f"command not found: {argv[0]!r} (working directory {str(cwd)!r})")
     except OSError as exc:
