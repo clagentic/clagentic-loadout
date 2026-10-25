@@ -48,6 +48,7 @@ from clagentic_loadout.acquire.contract import (
     ChangedFile,
     IssueComment,
     RangeDiff,
+    RangeFile,
     pr_text,
     repository_visibility,
     tree_file_paths,
@@ -199,6 +200,31 @@ def fetch_file_bytes(
         ) from exc
 
 
+#: The compare endpoint lists at most this many files; a list that long may be
+#: cut short, so it is not trusted as complete.
+_COMPARE_FILES_CAP = 300
+
+
+def _range_files(body: dict) -> tuple[RangeFile, ...] | None:
+    """The compare response's structured per-file list, or None when it is
+    absent, malformed, or long enough to have been cut at the endpoint's cap."""
+    listed = body.get("files")
+    if not isinstance(listed, list) or len(listed) >= _COMPARE_FILES_CAP:
+        return None
+    files = []
+    for item in listed:
+        if not isinstance(item, dict):
+            return None
+        name, added, removed = item.get("filename"), item.get("additions"), item.get("deletions")
+        counts = (added, removed)
+        if not isinstance(name, str) or not name or any(
+            isinstance(n, bool) or not isinstance(n, int) or n < 0 for n in counts
+        ):
+            return None
+        files.append(RangeFile(name, added, removed))
+    return tuple(files)
+
+
 def fetch_range_diff(
     owner: str, repo: str, base_sha: str, head_sha: str, token: str, *, opener=None
 ) -> RangeDiff:
@@ -226,6 +252,7 @@ def fetch_range_diff(
         head_sha=head_sha,
         fast_forward=True,
         diff_text=text if isinstance(text, str) else "",
+        files=_range_files(body),
     )
 
 

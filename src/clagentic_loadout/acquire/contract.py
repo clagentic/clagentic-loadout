@@ -290,6 +290,16 @@ class CommentBackend(Protocol):
 
 
 @dataclass(frozen=True)
+class RangeFile:
+    """One file of a range as the host reports it in structured fields: its
+    path after the change and its added and removed line counts."""
+
+    path: str
+    added: int
+    removed: int
+
+
+@dataclass(frozen=True)
 class RangeDiff:
     """The change between two commits of one repository, from the host API.
 
@@ -297,12 +307,16 @@ class RangeDiff:
     `base_sha`: the one shape in which "what changed since base" is a
     meaningful, linear delta. Any other relation (identical, behind,
     diverged after a force-push or rebase) is False and `diff_text` is empty.
+
+    `files` is the host's structured per-file list when the host gives a
+    complete one, else None: a caller then has only `diff_text` to read.
     """
 
     base_sha: str
     head_sha: str
     fast_forward: bool
     diff_text: str = ""
+    files: tuple[RangeFile, ...] | None = None
 
 
 @runtime_checkable
@@ -337,6 +351,7 @@ __all__ = [
     "PolicyFileBackend",
     "RangeDiff",
     "RangeDiffBackend",
+    "RangeFile",
     "pr_text",
     "repository_visibility",
     "tree_file_paths",
