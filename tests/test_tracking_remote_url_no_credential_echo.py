@@ -11,6 +11,7 @@ Each remote value points at a closed local port, so every git call fails offline
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -171,7 +172,8 @@ def test_git_push_platform_mismatch_hint_names_no_remote(tree_and_remote, tmp_pa
     tree, remote = tree_and_remote
     fake_bin = tmp_path / "fakebin"
     fake_bin.mkdir()
-    real_git = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
+    real_git = shutil.which("git")
+    assert real_git, "git is required on PATH"
     (fake_bin / "git").write_text(
         "#!/bin/sh\n"
         'for arg in "$@"; do\n'
@@ -276,6 +278,73 @@ def test_branch_commit_check_bypass_and_soft_fail_print_no_remote(tree_and_remot
         _run_branch_commit_check(tree, base_branch="main", remote=remote, merge_method="merge", skip=skip)
         out, err = capsys.readouterr()
         assert err and SECRET not in out and SECRET not in err
+
+
+#: Where the credential sits in a remote that is a local path (so the push
+#: reaches the hook stage offline): a directory name, or a `?token=` suffix.
+CREDENTIAL_PATH_FORMS = {
+    "path": lambda base: base / SECRET / "o" / "r.git",
+    "query": lambda base: base / "o" / f"r.git?token={SECRET}",
+}
+
+
+@pytest.fixture(params=sorted(CREDENTIAL_PATH_FORMS))
+def tree_with_credential_path_remote(request, tmp_path) -> tuple[Path, Path]:
+    """A repo with one unpushed commit and a bare remote whose path carries the
+    credential."""
+    tree = tmp_path / "tree"
+    seed_base_commit(tree)
+    remote = CREDENTIAL_PATH_FORMS[request.param](tmp_path)
+    remote.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "-q", "--bare", str(tree), str(remote))
+    git(tree, "commit", "-q", "--allow-empty", "-m", "an unpushed commit")
+    return tree, remote
+
+
+def _install_hook(path: Path, body: str) -> None:
+    path.write_text(f"#!/bin/sh\n{body}\nexit 1\n")
+    path.chmod(0o755)
+
+
+def test_pre_push_hook_echoing_the_remote_location_stays_out_of_the_message(
+    tree_with_credential_path_remote, capsys
+):
+    tree, remote = tree_with_credential_path_remote
+    _install_hook(tree / ".git" / "hooks" / "pre-push", 'echo "pushing to $2"')
+
+    with pytest.raises(GitPushError) as excinfo:
+        git_push_with_token(str(remote), "main", "tok", tree)
+
+    assert excinfo.value.local_hook_lines
+    assert "1 local pre-push hook line(s) withheld" in str(excinfo.value)
+    _assert_clean(excinfo, capsys)
+
+
+def test_pre_receive_hook_echoing_the_remote_path_stays_out_of_the_message(
+    tree_with_credential_path_remote, capsys
+):
+    tree, remote = tree_with_credential_path_remote
+    _install_hook(remote / "hooks" / "pre-receive", 'echo "received in $(pwd)" 1>&2')
+
+    with pytest.raises(GitPushError) as excinfo:
+        git_push_with_token(str(remote), "main", "tok", tree)
+
+    assert excinfo.value.remote_lines
+    assert "1 remote line(s)" in str(excinfo.value)
+    _assert_clean(excinfo, capsys)
+
+
+def test_withheld_hook_lines_print_under_verbose_only(tree_with_credential_path_remote, capsys):
+    tree, remote = tree_with_credential_path_remote
+    _install_hook(tree / ".git" / "hooks" / "pre-push", 'echo "pushing to $2"')
+
+    with pytest.raises(GitPushError):
+        git_push_with_token(str(remote), "main", "tok", tree)
+    assert "pushing to" not in capsys.readouterr().err
+
+    with pytest.raises(GitPushError):
+        git_push_with_token(str(remote), "main", "tok", tree, verbose=True)
+    assert "pushing to" in capsys.readouterr().err
 
 
 def test_stray_merge_commit_error_names_no_remote(tmp_path, capsys):

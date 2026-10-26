@@ -9,7 +9,9 @@ text may interpolate
 
   - a name bound from `tracking_remote()`, or a variable named `remote`,
     `remote_name` or `shown_remote`; or
-  - the `.stderr` of a completed git fetch, push or ls-remote process.
+  - the `.stderr` of a completed git fetch, push or ls-remote process; or
+  - free text lifted out of a git push's output (a server's "remote: " lines, a
+    local hook's lines, `raw_stderr`), which can echo the remote location.
 
 The check is AST-based, in the style of the anonymization guard, so a new
 violation anywhere in `src/` is caught without a hand-kept file list."""
@@ -25,20 +27,16 @@ REMOTE_VALUE_NAMES = frozenset({"remote", "remote_name", "shown_remote"})
 REMOTE_BINDING_CALLS = frozenset({"tracking_remote"})
 TRANSPORT_VERBS = frozenset({"fetch", "push", "ls-remote"})
 TRANSPORT_CALL_MARKERS = ("ls_remote", "fetch_with_token", "push_with_token")
+LINE_EXTRACTORS = frozenset({"_extract_remote_lines", "_extract_local_hook_lines"})
+GIT_TEXT_ATTRIBUTES = frozenset({"remote_lines", "local_hook_lines", "raw_stderr"})
 
 #: (path under src/clagentic_loadout, function, snippet of the offending
 #: expression) -> why it is not a leak. Keep this empty unless the output is an
 #: explicit, opt-in raw-transcript feature.
-ALLOWLIST: dict[tuple[str, str, str], str] = {
-    (
-        "push/git_push.py",
-        "git_push_with_token",
-        "[dry-run exit=",
-    ): (
-        "`--dry-run`/`--verbose` exist to print git's raw push transcript; the "
-        "output is explicit opt-in and redacted by the push redaction choke point"
-    ),
-}
+#: The opt-in --dry-run/--verbose transcript is formatted in
+#: `git_push._redacted_transcript` from a function parameter, which this guard
+#: does not track, so it needs no entry.
+ALLOWLIST: dict[tuple[str, str, str], str] = {}
 
 
 def _is_text(node: ast.AST) -> bool:
@@ -121,18 +119,49 @@ def _remote_value_names(function: ast.AST) -> set[str]:
     return names
 
 
+def _git_text_names(function: ast.AST) -> set[str]:
+    """Names holding free text lifted out of a git push's output: bound from a
+    line extractor, or from an expression built on such a name. A server's
+    "remote: " lines and a hook's lines can quote the remote location, so none
+    of them may reach a message; `len(...)` of them is a count, not the text."""
+    names = set(GIT_TEXT_ATTRIBUTES)
+    grew = True
+    while grew:
+        grew = False
+        for node in ast.walk(function):
+            if not isinstance(node, ast.Assign):
+                continue
+            tainted = any(
+                (isinstance(inner, ast.Call) and _call_name(inner) in LINE_EXTRACTORS)
+                or (isinstance(inner, ast.Name) and inner.id in names)
+                for inner in _walk_outside_len(node.value)
+            )
+            if tainted:
+                targets = {t.id for t in node.targets if isinstance(t, ast.Name)}
+                if not targets <= names:
+                    names |= targets
+                    grew = True
+    return names
+
+
 def find_violations(source: str, relpath: str) -> list[str]:
-    """Every interpolation in *source* of a remote value or a transport stderr."""
+    """Every interpolation in *source* of a remote value, a transport stderr, or
+    free text lifted out of a git push's output."""
     found: set[tuple[int, str]] = set()
     tree = ast.parse(source)
     for function in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
         remote_names = _remote_value_names(function)
         transport_results = _transport_results(function)
+        git_text_names = _git_text_names(function)
         for node in ast.walk(function):
             for part in _formatted_parts(node):
                 for inner in _walk_outside_len(part):
                     leaked = None
-                    if isinstance(inner, ast.Name) and inner.id in remote_names:
+                    if isinstance(inner, ast.Name) and inner.id in git_text_names:
+                        leaked = f"git push output text {inner.id!r}"
+                    elif isinstance(inner, ast.Attribute) and inner.attr in GIT_TEXT_ATTRIBUTES:
+                        leaked = f"git push output text .{inner.attr}"
+                    elif isinstance(inner, ast.Name) and inner.id in remote_names:
                         leaked = f"remote value {inner.id!r}"
                     elif (
                         isinstance(inner, ast.Attribute)
@@ -182,7 +211,24 @@ def test_the_guard_flags_each_shape_it_exists_to_catch():
         "    raise E(f'{result.stderr}')\n"
     )
 
-    for source in (bad_name, bad_param, bad_format, bad_stderr, bad_pushed, bad_readback):
+    bad_hook_lines = (
+        "def f(result):\n"
+        "    hook_lines = tuple(_extract_local_hook_lines(result.stderr, result.stdout))\n"
+        "    hook_text = '\\n'.join(hook_lines)[:800]\n"
+        "    block = f' HOOK MESSAGE: {hook_text}'\n"
+        "    raise E('push failed.' + block)\n"
+    )
+    bad_remote_lines = (
+        "def f(result):\n"
+        "    remote_lines = _extract_remote_lines(result.stderr)\n"
+        "    raise E('push failed: {}'.format(remote_lines))\n"
+    )
+    bad_field = "def f(exc):\n    raise E(f'{exc.local_hook_lines}')\n"
+
+    for source in (
+        bad_name, bad_param, bad_format, bad_stderr, bad_pushed, bad_readback,
+        bad_hook_lines, bad_remote_lines, bad_field,
+    ):
         assert find_violations(source, "x.py"), source
 
 
@@ -232,5 +278,11 @@ def test_the_guard_passes_text_that_names_no_remote_and_ignores_unrelated_stderr
         "    note = f'bytes={len(fetched.stderr)}'\n"
         "    raise E(f'fetch of {sha} exited {fetched.returncode}; log said {log.stderr}')\n"
     )
+    counted = (
+        "def f(result):\n"
+        "    hook_lines = tuple(_extract_local_hook_lines(result.stderr))\n"
+        "    raise E(f'{len(hook_lines)} line(s) withheld')\n"
+    )
+    assert find_violations(counted, "x.py") == []
 
     assert find_violations(clean, "x.py") == []
