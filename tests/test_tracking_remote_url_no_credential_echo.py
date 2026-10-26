@@ -1,11 +1,18 @@
-"""A branch's tracking remote (`branch.<name>.remote`) can itself be a URL carrying
-a credential. No message built from it may echo it: the merge verbs name a
-non-alias remote with a fixed placeholder, and the push verb refuses it outright.
+"""No loadout-authored message may interpolate a remote value, in any form.
 
-Each case points the tracking remote at a closed local port, so a fetch fails
-offline."""
+A branch's tracking remote (`branch.<name>.remote`) is whatever git config holds:
+a URL carrying a credential in its userinfo, query or path, or a remote NAME that
+was itself written as `<secret>@host/path`. Printing it is the defect, so the
+messages name no remote at all and these cases assert the secret is absent from
+the raised message, stdout and stderr of every site that used to print one.
+
+Each remote value points at a closed local port, so every git call fails offline."""
 
 from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -16,82 +23,229 @@ from clagentic_loadout.merge.tree_sync import (
     fetch_merged_sha_object,
 )
 from clagentic_loadout.push import git_coords
-from clagentic_loadout.push.errors import RemoteResolutionError
-from clagentic_loadout.push.verb import PushVerbError
+from clagentic_loadout.push.branch_commit_check import (
+    CommitCheckUnavailableError,
+    check_branch_for_stray_merge_commits,
+    fetch_branch_commit_subjects,
+)
+from clagentic_loadout.push.errors import GitPushError, RemoteResolutionError
+from clagentic_loadout.push.git_push import (
+    GitFetchError,
+    RepoLocalConfigHazardError,
+    git_fetch_with_token,
+    git_ls_remote_with_token,
+    git_push_with_token,
+)
+from clagentic_loadout.push.remote_readback import RemoteReadbackError, read_remote_head
+from clagentic_loadout.push.verb import _run_branch_commit_check
 from tests._gate_repo import git, seed_base_commit
 
-TOKEN = "FAKETOKEN0123456789"
-TRACKING_URLS = {
+SECRET = "FAKETOKEN"
+TOKEN = f"{SECRET}0123456789"
+ALIAS_NAME = f"{TOKEN}@example.invalid/o/r"
+UNREACHABLE = "http://127.0.0.1:1/o/r.git"
+REMOTE_VALUES = {
     "userinfo": f"http://user:{TOKEN}@127.0.0.1:1/o/r.git",
-    "query": f"http://127.0.0.1:1/o/r.git?token={TOKEN}",
+    "query": f"{UNREACHABLE}?token={TOKEN}",
     "path": f"http://127.0.0.1:1/{TOKEN}/o/r.git",
+    "alias-name": ALIAS_NAME,
 }
 MISSING_SHA = "f" * 40
 
 
-@pytest.fixture(params=sorted(TRACKING_URLS))
-def tree(request, tmp_path):
+@pytest.fixture(params=sorted(REMOTE_VALUES))
+def tree_and_remote(request, tmp_path) -> tuple[Path, str]:
+    """A repo on `main` whose tracking remote is one of the credential-bearing
+    values. The alias form registers a real remote with that name."""
     path = tmp_path / "tree"
     seed_base_commit(path)
-    git(path, "config", "branch.main.remote", TRACKING_URLS[request.param])
-    return path
+    value = REMOTE_VALUES[request.param]
+    if request.param == "alias-name":
+        git(path, "remote", "add", value, UNREACHABLE)
+    git(path, "config", "branch.main.remote", value)
+    return path, value
 
 
-def _assert_no_token(excinfo, capsys):
+@pytest.fixture
+def tree(tree_and_remote) -> Path:
+    return tree_and_remote[0]
+
+
+def _assert_clean(excinfo, capsys):
     out, err = capsys.readouterr()
-    assert TOKEN not in str(excinfo.value)
-    assert TOKEN not in out and TOKEN not in err
+    for text in (str(excinfo.value), repr(excinfo.value), out, err):
+        assert SECRET not in text
+
+
+def test_git_refuses_a_colon_in_a_remote_name(tmp_path):
+    """Recorded answer: a remote NAME cannot carry the `user:secret@` userinfo
+    form (git rejects the colon), so a colon-bearing value reaching
+    `branch.<name>.remote` is a URL, covered by the URL-form cases above."""
+    path = tmp_path / "tree"
+    seed_base_commit(path)
+    result = subprocess.run(
+        ["git", "remote", "add", f"user:{TOKEN}@example.invalid/o/r", UNREACHABLE],
+        cwd=str(path), capture_output=True, text=True,
+    )
+
+    assert result.returncode != 0
+    assert "is not a valid remote name" in result.stderr
 
 
 @pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
-def test_advance_repo_to_merged_sha_url_tracking_remote(tree, capsys, known_sha):
+def test_advance_repo_to_merged_sha_names_no_remote(tree, capsys, known_sha):
     with pytest.raises(TreeSyncError) as excinfo:
         advance_repo_to_merged_sha(tree, base_branch="main", known_merged_sha=known_sha)
 
     assert "exit" in str(excinfo.value)
-    _assert_no_token(excinfo, capsys)
+    _assert_clean(excinfo, capsys)
 
 
 @pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
-def test_fetch_merged_sha_object_url_tracking_remote(tree, capsys, known_sha):
+def test_fetch_merged_sha_object_names_no_remote(tree, capsys, known_sha):
     with pytest.raises(TreeSyncError) as excinfo:
         fetch_merged_sha_object(tree, base_branch="main", known_merged_sha=known_sha)
 
     assert "exit" in str(excinfo.value)
-    _assert_no_token(excinfo, capsys)
+    _assert_clean(excinfo, capsys)
 
 
-def test_ensure_commit_present_url_tracking_remote(tree, capsys):
+def test_ensure_commit_present_names_no_remote(tree, capsys):
     with pytest.raises(CommitFileReadError) as excinfo:
         ensure_commit_present(tree, MISSING_SHA, base_branch="main")
 
     assert MISSING_SHA in str(excinfo.value) and "exit" in str(excinfo.value)
-    _assert_no_token(excinfo, capsys)
+    _assert_clean(excinfo, capsys)
 
 
-def test_remote_url_failure_url_tracking_remote(tree, capsys):
-    remote = git_coords.tracking_remote("main", tree)
-
-    with pytest.raises(RemoteResolutionError) as excinfo:
-        git_coords.remote_url(remote, tree)
-
-    _assert_no_token(excinfo, capsys)
-
-
-def test_push_refuses_a_url_tracking_remote_without_echoing_it(tree, capsys):
-    from clagentic_loadout.push.verb import _push_remote_alias
-
-    with pytest.raises(PushVerbError) as excinfo:
-        _push_remote_alias("main", tree)
-
-    _assert_no_token(excinfo, capsys)
+def test_remote_url_failure_names_no_remote(tree_and_remote, capsys):
+    tree, remote = tree_and_remote
+    try:
+        git_coords.remote_url(git_coords.tracking_remote("main", tree), tree)
+    except RemoteResolutionError as exc:
+        assert SECRET not in str(exc)
+    capsys.readouterr()
 
 
-def test_display_remote_passes_a_configured_alias_and_masks_anything_else(tmp_path):
-    path = tmp_path / "tree"
-    seed_base_commit(path)
-    git(path, "remote", "add", "mirror", "http://127.0.0.1:1/o/r.git")
+def test_git_fetch_with_token_names_no_remote(tree_and_remote, capsys):
+    tree, remote = tree_and_remote
 
-    assert git_coords.display_remote("mirror", path) == "mirror"
-    assert git_coords.display_remote("origin", path) == "origin"
-    assert git_coords.display_remote(TRACKING_URLS["query"], path) == git_coords.NON_ALIAS_REMOTE_PLACEHOLDER
+    with pytest.raises(GitFetchError) as excinfo:
+        git_fetch_with_token(remote, "main", "tok", tree)
+
+    assert "exited" in str(excinfo.value)
+    _assert_clean(excinfo, capsys)
+
+
+def test_git_ls_remote_readback_names_no_remote(tree_and_remote, capsys):
+    tree, remote = tree_and_remote
+
+    for token in ("tok", None):
+        with pytest.raises(RemoteReadbackError) as excinfo:
+            read_remote_head(remote, "main", tree, token=token)
+
+        assert "exited" in str(excinfo.value)
+        _assert_clean(excinfo, capsys)
+
+
+def test_git_ls_remote_with_token_result_is_not_a_message(tree_and_remote):
+    """The completed process is returned unexamined; it is the caller that
+    builds a message from it, so the failing exit is all this asserts."""
+    tree, remote = tree_and_remote
+
+    assert git_ls_remote_with_token(remote, "main", "tok", tree).returncode != 0
+
+
+def test_git_push_failure_names_no_remote(tree_and_remote, capsys):
+    tree, remote = tree_and_remote
+
+    with pytest.raises(GitPushError) as excinfo:
+        git_push_with_token(remote, "main", "tok", tree)
+
+    assert "exit=" in str(excinfo.value)
+    _assert_clean(excinfo, capsys)
+
+
+def test_git_push_platform_mismatch_hint_names_no_remote(tree_and_remote, tmp_path, monkeypatch, capsys):
+    tree, remote = tree_and_remote
+    fake_bin = tmp_path / "fakebin"
+    fake_bin.mkdir()
+    real_git = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
+    (fake_bin / "git").write_text(
+        "#!/bin/sh\n"
+        'for arg in "$@"; do\n'
+        '  if [ "$arg" = "push" ]; then\n'
+        '    echo "remote: Invalid username or token." 1>&2\n'
+        "    exit 1\n"
+        "  fi\n"
+        "done\n"
+        f'exec "{real_git}" "$@"\n'
+    )
+    (fake_bin / "git").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+
+    with pytest.raises(GitPushError) as excinfo:
+        git_push_with_token(
+            remote, "main", "tok", tree, platform="github", other_platform_label="forgejo",
+        )
+
+    assert "PLATFORM MISMATCH" in str(excinfo.value)
+    _assert_clean(excinfo, capsys)
+
+
+def test_hermeticity_refusal_names_no_remote(tree_and_remote, capsys):
+    tree, remote = tree_and_remote
+    git(tree, "config", "credential.helper", "none")
+
+    calls = {
+        "fetch": lambda: git_fetch_with_token(remote, "main", "tok", tree),
+        "ls-remote": lambda: git_ls_remote_with_token(remote, "main", "tok", tree),
+        "push": lambda: git_push_with_token(remote, "main", "tok", tree),
+    }
+    for name, call in calls.items():
+        with pytest.raises(RepoLocalConfigHazardError) as excinfo:
+            call()
+        assert "refusing to" in str(excinfo.value), name
+        _assert_clean(excinfo, capsys)
+
+    with pytest.raises(RemoteReadbackError) as readback:
+        read_remote_head(remote, "main", tree, token="tok")
+    _assert_clean(readback, capsys)
+
+
+def test_branch_commit_check_fetch_failure_names_no_remote(tree_and_remote, capsys):
+    tree, remote = tree_and_remote
+
+    with pytest.raises(CommitCheckUnavailableError) as excinfo:
+        fetch_branch_commit_subjects(tree, "main", remote=remote)
+
+    assert "exit" in str(excinfo.value)
+    _assert_clean(excinfo, capsys)
+
+
+def test_branch_commit_check_bypass_and_soft_fail_print_no_remote(tree_and_remote, capsys):
+    tree, remote = tree_and_remote
+
+    for skip in (True, False):
+        _run_branch_commit_check(tree, base_branch="main", remote=remote, merge_method="merge", skip=skip)
+        out, err = capsys.readouterr()
+        assert err and SECRET not in out and SECRET not in err
+
+
+def test_stray_merge_commit_error_names_no_remote(tmp_path, capsys):
+    """A remote that is a local path carrying the secret in a directory name
+    fetches fine, so the offender message itself is what is inspected."""
+    tree = tmp_path / "tree"
+    seed_base_commit(tree)
+    remote = tmp_path / SECRET / "o" / "r.git"
+    remote.parent.mkdir(parents=True)
+    git(tmp_path, "clone", "-q", "--bare", str(tree), str(remote))
+    git(tree, "commit", "-q", "--allow-empty", "-m", "a subject that is not conventional")
+
+    from clagentic_loadout.push.branch_commit_check import StrayMergeCommitError
+
+    with pytest.raises(StrayMergeCommitError) as excinfo:
+        check_branch_for_stray_merge_commits(tree, "main", merge_method="merge", remote=str(remote))
+
+    assert "a subject that is not conventional" in str(excinfo.value)
+    _assert_clean(excinfo, capsys)
