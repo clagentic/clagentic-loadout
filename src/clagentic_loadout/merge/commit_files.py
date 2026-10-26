@@ -75,9 +75,13 @@ def ensure_commit_present(git_tree: str | Path, sha: str, *, base_branch: str = 
     remote = tracking_remote(base_branch, git_tree) if base_branch else "origin"
     fetched = _git(["fetch", remote, sha], cwd=git_tree)
     if fetched.returncode != 0:
+        # git's fetch diagnostics quote the remote URL, query string included, so a
+        # credential carried in the URL would reach the caller's output. Name the
+        # remote and the exit code only.
         raise CommitFileReadError(
             f"commit {sha} is not present in {git_tree} and `git fetch {remote} {sha}` "
-            f"failed (exit {fetched.returncode}): {fetched.stderr.strip()[:400]}"
+            f"failed (exit {fetched.returncode}; git's output is withheld because it can "
+            f"quote the remote URL)"
         )
     recheck = _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=git_tree)
     if recheck.returncode != 0:

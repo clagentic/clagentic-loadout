@@ -145,6 +145,18 @@ def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
+def _fetch_failure_message(
+    remote_name: str, fetch_target: str, repo_path: Path, result: subprocess.CompletedProcess
+) -> str:
+    # git's fetch diagnostics quote the remote URL, query string included, so a
+    # credential carried in the URL would reach the caller's output. Name the
+    # remote and the exit code only.
+    return (
+        f"git fetch {remote_name} {fetch_target!r} failed (exit {result.returncode}) in "
+        f"{repo_path}; git's output is withheld because it can quote the remote URL"
+    )
+
+
 def resolve_base_branch(pr_info: dict) -> str:
     """Extract the PR's base branch name (the ref the merge landed on) from
     a get_pr_info() response. Both backends' PR payloads use the same
@@ -226,11 +238,7 @@ def advance_repo_to_merged_sha(
     fetch_target = known_merged_sha if known_merged_sha else base_branch
     fetch_result = _run_git(["fetch", remote_name, fetch_target], cwd=repo_path)
     if fetch_result.returncode != 0:
-        raise TreeSyncError(
-            f"git fetch {remote_name} {fetch_target!r} failed (exit "
-            f"{fetch_result.returncode}) in {repo_path}: "
-            f"{fetch_result.stderr.strip()[:400]}"
-        )
+        raise TreeSyncError(_fetch_failure_message(remote_name, fetch_target, repo_path, fetch_result))
 
     checkout_target = known_merged_sha if known_merged_sha else "FETCH_HEAD"
     checkout_result = _run_git(
@@ -335,11 +343,7 @@ def fetch_merged_sha_object(
     fetch_target = known_merged_sha if known_merged_sha else base_branch
     fetch_result = _run_git(["fetch", remote_name, fetch_target], cwd=repo_path)
     if fetch_result.returncode != 0:
-        raise TreeSyncError(
-            f"git fetch {remote_name} {fetch_target!r} failed (exit "
-            f"{fetch_result.returncode}) in {repo_path}: "
-            f"{fetch_result.stderr.strip()[:400]}"
-        )
+        raise TreeSyncError(_fetch_failure_message(remote_name, fetch_target, repo_path, fetch_result))
 
     if known_merged_sha:
         fetched_sha = known_merged_sha
