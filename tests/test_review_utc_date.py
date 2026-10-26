@@ -8,10 +8,13 @@ import pytest
 import yaml
 
 from clagentic_loadout.review import dispositions as disp
+from clagentic_loadout.review import evaluate as evaluate_module
 from clagentic_loadout.review import evaluation
 from clagentic_loadout.review import profile_posture as pp
 from clagentic_loadout.review import rulings
 from clagentic_loadout.review.utc_date import parse_utc_date, today_utc
+
+from _review_evaluate_support import HEAD, disposition, internal_stakes
 
 PLUS_14 = dt.timezone(dt.timedelta(hours=14))
 MINUS_12 = dt.timezone(dt.timedelta(hours=-12))
@@ -109,6 +112,25 @@ class TestClearingStanza:
         stanza = disp.clearing_stanza("a.py", "R1", "accepted_risk", dt.date(2026, 10, 25))
         assert "at: 2026-10-25" in stanza
         assert "expires: 2026-11-24" in stanza
+
+
+class TestEvaluateDefaultDayIsUtc:
+    # A disposition expiring 2026-10-25 holds through that UTC day. The clock is
+    # an offset-aware moment, so reading its own local date would misjudge it.
+    @pytest.mark.parametrize(
+        ("now", "expired"),
+        [
+            (dt.datetime(2026, 10, 26, 1, 0, tzinfo=PLUS_14), False),  # 11:00 UTC on the 25th
+            (dt.datetime(2026, 10, 26, 15, 0, tzinfo=PLUS_14), True),  # 01:00 UTC on the 26th
+            (dt.datetime(2026, 10, 25, 11, 0, tzinfo=MINUS_12), False),  # 23:00 UTC on the 25th
+            (dt.datetime(2026, 10, 25, 13, 0, tzinfo=MINUS_12), True),  # 01:00 UTC on the 26th
+        ],
+    )
+    def test_expiry_is_judged_against_the_utc_date_when_no_day_is_given(self, monkeypatch, now, expired):
+        monkeypatch.setattr(evaluate_module, "today_utc", lambda: today_utc(now))
+        entry = disposition(expires=dt.date(2026, 10, 25))
+        verdict = evaluate_module.evaluate([], internal_stakes(), [entry], HEAD, HEAD)
+        assert bool(verdict.expired_dispositions) is expired
 
 
 class TestDefaultTodayIsUtc:

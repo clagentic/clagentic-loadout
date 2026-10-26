@@ -45,6 +45,7 @@ from clagentic_loadout.review.rubric import (
 )
 from clagentic_loadout.review.rulings import is_ruling
 from clagentic_loadout.review.stakes import INTERNAL, PathStakes, Stakes
+from clagentic_loadout.review.utc_date import today_utc
 
 #: Identifies the rules a verdict was computed under. Bump it with any change to
 #: the rubric, the blocking rule, the merge rule or the disposition rules, so a
@@ -402,12 +403,12 @@ def evaluate(
     facts and fingerprint) and return the Verdict.
 
     ``block_at`` is the lowest severity that blocks. ``today`` dates the
-    disposition expiry check (default: the current date). ``degraded_reasons``
+    disposition expiry check (default: the current UTC date). ``degraded_reasons``
     carries reasons found while reading policy, so they surface in the verdict.
     """
     if block_at not in SEVERITIES[1:]:
         raise ValueError(f"block_at must be one of {', '.join(SEVERITIES[1:])}, got {block_at!r}")
-    day = today if today is not None else dt.date.today()
+    day = today if today is not None else today_utc()
     threshold = severity_rank(block_at)
 
     merged = _merge_identical(
