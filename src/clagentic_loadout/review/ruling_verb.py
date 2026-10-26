@@ -126,6 +126,7 @@ from clagentic_loadout.review.rulings import (
     compile_reference_pattern,
     same_repo,
 )
+from clagentic_loadout.review.utc_date import today_utc
 from clagentic_loadout.transport.attestation import AttestationError
 from clagentic_loadout.transport.attestation import resolve_bound_identity as _resolve_identity
 from clagentic_loadout.transport.caller_binding import (
@@ -554,7 +555,7 @@ def main(
     except SystemExit as exc:
         return EXIT_OK if exc.code in (0, None) else EXIT_USAGE
 
-    day = today if today is not None else dt.date.today()
+    day = today if today is not None else today_utc()
     try:
         if args.command == "record":
             return _record(

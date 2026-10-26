@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.review.path_glob import path_matches
+from clagentic_loadout.review.utc_date import parse_utc_date
 
 BY_DESIGN = "by_design"
 FALSE_POSITIVE = "false_positive"
@@ -98,15 +99,9 @@ class Disposition:
 
 
 def _date(value: Any, where: str) -> dt.date:
-    if isinstance(value, dt.datetime):
-        return value.date()
-    if isinstance(value, dt.date):
-        return value
-    if isinstance(value, str):
-        try:
-            return dt.date.fromisoformat(value.strip())
-        except ValueError:
-            pass
+    parsed = parse_utc_date(value)
+    if parsed is not None:
+        return parsed
     raise DispositionsFormatError(f"{where} must be a date like 2026-09-01, got {value!r}")
 
 

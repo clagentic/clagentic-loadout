@@ -509,6 +509,17 @@ class TestList:
 
         assert json.loads(capsys.readouterr().out)["rulings"][0]["expired"] is True
 
+    def test_with_no_date_given_it_judges_expiry_on_the_utc_date(
+        self, registry, repo_path, capsys, monkeypatch
+    ):
+        _record(repo_path=repo_path)
+        capsys.readouterr()
+        monkeypatch.setattr(verb, "today_utc", lambda: TODAY + dt.timedelta(days=90))
+
+        _run(["list"], role=None, today=None)
+
+        assert json.loads(capsys.readouterr().out)["rulings"][0]["expired"] is True
+
     def test_with_no_registry_it_lists_nothing(self, tmp_path, monkeypatch, capsys):
         monkeypatch.delenv(rp.RULINGS_FILE_ENV_VAR, raising=False)
 
