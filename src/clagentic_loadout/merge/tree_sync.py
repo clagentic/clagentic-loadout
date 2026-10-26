@@ -126,7 +126,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from clagentic_loadout.push.git_coords import tracking_remote
+from clagentic_loadout.push.git_coords import display_remote, tracking_remote
 
 
 class TreeSyncError(Exception):
@@ -150,9 +150,10 @@ def _fetch_failure_message(
 ) -> str:
     # git's fetch diagnostics quote the remote URL, query string included, so a
     # credential carried in the URL would reach the caller's output. Name the
-    # remote and the exit code only.
+    # remote and the exit code only. The tracking remote itself may be a URL, so
+    # it is shown only when it is a configured alias.
     return (
-        f"git fetch {remote_name} {fetch_target!r} failed (exit {result.returncode}) in "
+        f"git fetch {display_remote(remote_name, repo_path)} {fetch_target!r} failed (exit {result.returncode}) in "
         f"{repo_path}; git's output is withheld because it can quote the remote URL"
     )
 
