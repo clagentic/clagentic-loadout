@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.review import stakes as stk
+from clagentic_loadout.review.utc_date import parse_utc_date, today_utc
 
 KEY_EXPOSURE = "exposure"
 KEY_DATA = "data"
@@ -115,36 +116,7 @@ def parse_confirmed_at(value: object) -> dt.date | None:
     not. An offset-aware moment is converted to UTC before the date is taken,
     so the same instant is the same date whatever offset it was written in; a
     bare date, or a moment with no offset, is already a UTC calendar date."""
-    try:
-        if isinstance(value, dt.datetime):
-            return _utc_date(value)
-        if isinstance(value, dt.date):
-            return value
-        if not isinstance(value, str):
-            return None
-        text = value.strip()
-        return _utc_date(dt.datetime.fromisoformat(text.replace("Z", "+00:00")))
-    except OverflowError:
-        # An offset that carries the moment past the first or last representable day.
-        return None
-    except ValueError:
-        pass
-    try:
-        return dt.date.fromisoformat(text)
-    except ValueError:
-        return None
-
-
-def _utc_date(moment: dt.datetime) -> dt.date:
-    """The UTC calendar date of *moment*; a moment with no offset is read as UTC."""
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=dt.timezone.utc)
-    return moment.astimezone(dt.timezone.utc).date()
-
-
-def today_utc(now: dt.datetime | None = None) -> dt.date:
-    """The UTC calendar date of *now* (default: the current time)."""
-    return _utc_date(now if now is not None else dt.datetime.now(dt.timezone.utc))
+    return parse_utc_date(value)
 
 
 def _confirmation_item(
