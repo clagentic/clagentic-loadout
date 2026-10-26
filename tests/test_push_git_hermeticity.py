@@ -213,7 +213,7 @@ class TestCheckRepoLocalConfigHazards:
         repo, _remote = _make_repo_with_bare_remote(tmp_path)
         _git(["config", "--local", "credential.helper", "!echo should-not-run"], repo)
         hazards = check_repo_local_config_hazards(repo)
-        assert any(h.startswith("credential.") for h in hazards)
+        assert hazards == ("credential.*",)
 
     def test_detects_http_extraheader(self, tmp_path):
         repo, _remote = _make_repo_with_bare_remote(tmp_path)
@@ -223,7 +223,7 @@ class TestCheckRepoLocalConfigHazards:
             repo,
         )
         hazards = check_repo_local_config_hazards(repo)
-        assert any(h.endswith(".extraheader") for h in hazards)
+        assert hazards == ("http.*.extraheader",)
 
     def test_detects_includeif(self, tmp_path):
         repo, _remote = _make_repo_with_bare_remote(tmp_path)
@@ -235,7 +235,7 @@ class TestCheckRepoLocalConfigHazards:
             repo,
         )
         hazards = check_repo_local_config_hazards(repo)
-        assert any(h.startswith("includeif.") for h in hazards)
+        assert hazards == ("includeIf.*",)
 
     def test_detects_url_insteadof(self, tmp_path):
         """BOBBIE finding (bobbie.sast.repo-local-hazard-coverage-gap): a
@@ -250,7 +250,7 @@ class TestCheckRepoLocalConfigHazards:
             repo,
         )
         hazards = check_repo_local_config_hazards(repo)
-        assert any(h.endswith(".insteadof") for h in hazards)
+        assert hazards == ("url.*.insteadOf",)
 
     def test_detects_url_pushinsteadof(self, tmp_path):
         """pushInsteadOf is the MORE directly relevant variant here: it
@@ -263,7 +263,7 @@ class TestCheckRepoLocalConfigHazards:
             repo,
         )
         hazards = check_repo_local_config_hazards(repo)
-        assert any(h.endswith(".pushinsteadof") for h in hazards)
+        assert hazards == ("url.*.pushInsteadOf",)
 
     def test_bare_repo_with_no_local_config_hazards_is_empty(self, tmp_path):
         bare = tmp_path / "bare.git"
@@ -473,16 +473,10 @@ class TestSyntheticHostileEnvironment:
         with pytest.raises(RepoLocalConfigHazardError) as exc_info:
             git_push_with_token("origin", "widget", "unused-token-value", repo)
 
-        assert "pushinsteadof" in str(exc_info.value)
-        # For url.*.pushInsteadOf the attacker-controlled host is itself
-        # part of the config KEY (the base URL is the section name), so it
-        # legitimately appears in the message per
-        # check_repo_local_config_hazards's own "key only, never the value"
-        # contract -- this asserts the KEY (naming the hazardous entry) is
-        # what surfaced, and the config VALUE (the rewrite target this
-        # rule maps onto, i.e. what the caller believed it was pushing to)
-        # is what does NOT appear, since a value is never reproduced.
-        assert sentinel_host in str(exc_info.value)
+        assert "url.*.pushInsteadOf" in str(exc_info.value)
+        # Neither the key's base-URL segment (the attacker host) nor the
+        # config value is reproduced: only the hazard category is named.
+        assert sentinel_host not in str(exc_info.value)
         assert redirect_target not in str(exc_info.value)
 
     def test_ambient_netrc_sentinel_never_sent(self, tmp_path, monkeypatch):

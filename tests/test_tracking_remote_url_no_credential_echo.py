@@ -23,6 +23,7 @@ from clagentic_loadout.merge.tree_sync import (
     fetch_merged_sha_object,
 )
 from clagentic_loadout.push import git_coords
+from clagentic_loadout.push.git_hermeticity import check_repo_local_config_hazards
 from clagentic_loadout.push.branch_commit_check import (
     CommitCheckUnavailableError,
     check_branch_for_stray_merge_commits,
@@ -74,7 +75,7 @@ def tree(tree_and_remote) -> Path:
 def _assert_clean(excinfo, capsys):
     out, err = capsys.readouterr()
     for text in (str(excinfo.value), repr(excinfo.value), out, err):
-        assert SECRET not in text
+        assert SECRET.lower() not in text.lower()
 
 
 def test_git_refuses_a_colon_in_a_remote_name(tmp_path):
@@ -211,6 +212,51 @@ def test_hermeticity_refusal_names_no_remote(tree_and_remote, capsys):
     with pytest.raises(RemoteReadbackError) as readback:
         read_remote_head(remote, "main", tree, token="tok")
     _assert_clean(readback, capsys)
+
+
+#: Repo-local config whose KEY embeds a URL segment carrying a credential, with
+#: the category the refusal must still name.
+HAZARD_KEYS = {
+    "insteadof": (f"url.https://user:{TOKEN}@example.invalid/.insteadOf", "url.*.insteadOf"),
+    "pushinsteadof": (f"url.https://user:{TOKEN}@example.invalid/.pushInsteadOf", "url.*.pushInsteadOf"),
+    "extraheader": (f"http.https://example.invalid/?token={TOKEN}.extraheader", "http.*.extraheader"),
+    "credential": (f"credential.https://{TOKEN}@example.invalid.helper", "credential.*"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(HAZARD_KEYS))
+def test_hermeticity_refusal_names_the_category_not_the_config_key(name, tmp_path, capsys):
+    key, category = HAZARD_KEYS[name]
+    tree = tmp_path / "tree"
+    seed_base_commit(tree)
+    git(tree, "config", key, "https://example.invalid/")
+
+    assert check_repo_local_config_hazards(tree) == (category,)
+    calls = {
+        "fetch": lambda: git_fetch_with_token("origin", "main", "tok", tree),
+        "ls-remote": lambda: git_ls_remote_with_token("origin", "main", "tok", tree),
+        "push": lambda: git_push_with_token("origin", "main", "tok", tree),
+    }
+    for call_name, call in calls.items():
+        with pytest.raises(RepoLocalConfigHazardError) as excinfo:
+            call()
+        assert category in str(excinfo.value), call_name
+        _assert_clean(excinfo, capsys)
+
+    with pytest.raises(RemoteReadbackError) as readback:
+        read_remote_head("origin", "main", tree, token="tok")
+    _assert_clean(readback, capsys)
+
+
+def test_hermeticity_refusal_names_no_includeif_condition(tmp_path, capsys):
+    tree = tmp_path / "tree"
+    seed_base_commit(tree)
+    git(tree, "config", f"includeIf.gitdir:/{TOKEN}/.path", "/dev/null")
+
+    assert check_repo_local_config_hazards(tree) == ("includeIf.*",)
+    with pytest.raises(RepoLocalConfigHazardError) as excinfo:
+        git_fetch_with_token("origin", "main", "tok", tree)
+    _assert_clean(excinfo, capsys)
 
 
 def test_branch_commit_check_fetch_failure_names_no_remote(tree_and_remote, capsys):

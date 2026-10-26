@@ -186,6 +186,43 @@ def test_the_guard_flags_each_shape_it_exists_to_catch():
         assert find_violations(source, "x.py"), source
 
 
+def _hazard_appends_from_config_text(source: str) -> list[str]:
+    """Appends to `hazards` in check_repo_local_config_hazards whose argument
+    is derived from the config listing (a key can embed a credential in its
+    URL segment). A caller-side rule would flag every message printing the
+    result, which is safe once the labels are constants, so the check sits at
+    the one place the labels are produced."""
+    config_derived = {"result", "line", "key"}
+    found = []
+    for function in ast.walk(ast.parse(source)):
+        if not (isinstance(function, ast.FunctionDef) and function.name == "check_repo_local_config_hazards"):
+            continue
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and any(isinstance(n, ast.Name) and n.id in config_derived for n in ast.walk(node))
+            ):
+                found.append(ast.unparse(node))
+    return found
+
+
+def test_hazard_labels_are_never_derived_from_the_config_listing():
+    source = (SRC_ROOT / "push" / "git_hermeticity.py").read_text(encoding="utf-8")
+
+    assert "def check_repo_local_config_hazards" in source
+    assert _hazard_appends_from_config_text(source) == []
+    leaky = (
+        "def check_repo_local_config_hazards(cwd):\n"
+        "    hazards = []\n"
+        "    for line in result.stdout.splitlines():\n"
+        "        key = line.split('=')[0]\n"
+        "        hazards.append(key)\n"
+    )
+    assert _hazard_appends_from_config_text(leaky) == ["hazards.append(key)"]
+
+
 def test_the_guard_passes_text_that_names_no_remote_and_ignores_unrelated_stderr():
     clean = (
         "def f(branch, sha):\n"

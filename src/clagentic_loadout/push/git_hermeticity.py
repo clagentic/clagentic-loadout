@@ -157,11 +157,6 @@ _AMBIENT_ASKPASS_AND_SSH_ENV_VARS = (
 #: definition something OTHER than this package injected.
 _GIT_CONFIG_INJECTION_RE = re.compile(r"^GIT_CONFIG_(COUNT|KEY_\d+|VALUE_\d+)$")
 
-#: Repo-local config key prefixes that constitute a hermeticity hazard (see
-#: module docstring, REPO-LOCAL CONFIG CANNOT BE SUPPRESSED). Matched against
-#: the KEY half of each `git config --local --list` line (before the `=`).
-_HAZARD_KEY_PREFIXES = ("credential.", "includeif.")
-
 #: `http.<url>.extraheader` is a hazard shape whose key is not a fixed
 #: prefix -- the URL segment varies per remote. Matched as "starts with
 #: http., ends with .extraheader", case-insensitively (git config keys are
@@ -307,10 +302,15 @@ def check_repo_local_config_hazards(git_cwd: Path | None = None) -> tuple[str, .
     can silently retarget a push to an attacker-chosen host, which then
     receives the minted token this package's GIT_ASKPASS presents to it).
 
-    Returns a tuple of hazard descriptions (KEY only, never the VALUE --
-    a credential.helper's configured command, or an extraheader's carried
-    token, is not this function's to reproduce in a message any caller
-    might print) -- empty when no hazard is found. `git config --local
+    (Listed with `-z` so a key containing `=` is read whole.)
+
+    Returns a tuple of hazard CATEGORY labels (`credential.*`,
+    `http.*.extraheader`, `includeIf.*`, `url.*.insteadOf`,
+    `url.*.pushInsteadOf`) -- never the key and never the VALUE. A key embeds
+    a URL or condition segment that can carry a credential, and a value (a
+    credential.helper's command, an extraheader's token) is not this
+    function's to reproduce in a message any caller might print. Empty when
+    no hazard is found. `git config --local
     --list` exiting non-zero (e.g. no `.git/config` at all, a bare
     repository) is NOT a hazard -- it means there is nothing repo-local to
     find, and this function returns an empty tuple rather than treating an
@@ -323,7 +323,7 @@ def check_repo_local_config_hazards(git_cwd: Path | None = None) -> tuple[str, .
     descriptions folded in.
     """
     result = subprocess.run(
-        ["git", "config", "--local", "--list"],
+        ["git", "config", "--local", "--list", "-z"],
         capture_output=True,
         text=True,
         cwd=str(git_cwd) if git_cwd is not None else None,
@@ -331,17 +331,29 @@ def check_repo_local_config_hazards(git_cwd: Path | None = None) -> tuple[str, .
     if result.returncode != 0:
         return ()
     hazards: list[str] = []
-    for line in result.stdout.splitlines():
-        if "=" not in line:
-            continue
-        key = line.split("=", 1)[0].strip().lower()
-        if (
-            key.startswith(_HAZARD_KEY_PREFIXES)
-            or _HTTP_EXTRAHEADER_RE.match(key)
-            or _URL_INSTEADOF_RE.match(key)
-        ):
-            hazards.append(key)
+    # -z: NUL-terminated `key\nvalue` entries. The plain listing joins key and
+    # value with `=`, which a key may itself contain (a URL query string), so
+    # splitting on it would cut such a key short and miss the hazard.
+    for entry in result.stdout.split("\0"):
+        category = _hazard_category(entry.split("\n", 1)[0].strip().lower())
+        if category is not None:
+            hazards.append(category)
     return tuple(hazards)
+
+
+def _hazard_category(key: str) -> str | None:
+    """The fixed category label for a lower-cased config *key*, or None when
+    the key is not a hazard. The label is a constant: the key's URL or
+    condition segment can carry a credential and is never returned."""
+    if key.startswith("credential."):
+        return "credential.*"
+    if key.startswith("includeif."):
+        return "includeIf.*"
+    if _HTTP_EXTRAHEADER_RE.match(key):
+        return "http.*.extraheader"
+    if _URL_INSTEADOF_RE.match(key):
+        return "url.*.pushInsteadOf" if key.endswith(".pushinsteadof") else "url.*.insteadOf"
+    return None
 
 
 __all__ = [
