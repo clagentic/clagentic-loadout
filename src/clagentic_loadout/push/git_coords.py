@@ -44,26 +44,6 @@ def tracking_remote(branch: str, git_cwd: Path | None = None) -> str:
     return name if name else "origin"
 
 
-#: Rendered in place of a remote value that is not a configured remote alias.
-NON_ALIAS_REMOTE_PLACEHOLDER = "<remote not configured as a named remote>"
-
-
-def display_remote(remote: str, git_cwd: Path | None = None) -> str:
-    """Return *remote* in a form safe to print, or a fixed placeholder.
-
-    `branch.<name>.remote` may hold a URL, and a URL can carry a credential in
-    its userinfo, query or path. Only a configured remote alias (or the literal
-    default 'origin') passes through; anything else, including a value that
-    cannot be checked, renders as the placeholder and carries no part of it.
-    """
-    if remote == "origin":
-        return remote
-    r = _run(["git", "remote"], cwd=git_cwd)
-    if r.returncode == 0 and remote in r.stdout.split():
-        return remote
-    return NON_ALIAS_REMOTE_PLACEHOLDER
-
-
 def remote_url(remote: str, git_cwd: Path | None = None) -> str:
     """Return the raw remote URL for *remote*.
 
@@ -71,7 +51,9 @@ def remote_url(remote: str, git_cwd: Path | None = None) -> str:
     """
     r = _run(["git", "remote", "get-url", remote], cwd=git_cwd)
     if r.returncode != 0 or not r.stdout.strip():
-        raise RemoteResolutionError(f"cannot get URL for remote {display_remote(remote, git_cwd)!r}")
+        # *remote* is whatever `branch.<name>.remote` holds: a URL, or a name
+        # written as `<secret>@host/path`. It is never printed.
+        raise RemoteResolutionError("cannot get the URL of the branch's tracking remote")
     return r.stdout.strip()
 
 
@@ -150,9 +132,7 @@ def parse_owner_repo(owner_repo: str) -> tuple[str, str]:
 
 __all__ = [
     "PROTECTED_BRANCHES",
-    "NON_ALIAS_REMOTE_PLACEHOLDER",
     "current_branch",
-    "display_remote",
     "parse_forgejo_coords",
     "parse_owner_repo",
     "read_remote_url_best_effort",

@@ -2176,23 +2176,6 @@ def _run(
     )
 
 
-def _push_remote_alias(branch: str, project_root: Path) -> str:
-    """The tracking remote for *branch*, refused when it is not a configured
-    remote alias. `branch.<name>.remote` may hold a URL that carries a
-    credential, and the remote name is interpolated into messages all along the
-    push path, so a non-alias value is rejected here with a fixed message."""
-    remote_name = git_coords.tracking_remote(branch, project_root)
-    if git_coords.display_remote(remote_name, project_root) != remote_name:
-        _fail(
-            f"the tracking remote of branch {branch!r} is not a configured remote "
-            f"name ({git_coords.NON_ALIAS_REMOTE_PLACEHOLDER}); its value is withheld "
-            f"because it can carry a credential. Set branch.{branch}.remote to a "
-            f"named remote.",
-            code=EXIT_REMOTE_ERROR,
-        )
-    return remote_name
-
-
 def _resolve_owner_repo_for_update(args: argparse.Namespace, project_root: Path) -> tuple[str, str, str]:
     """Returns (owner, repo, api_base) — api_base is "" on the GitHub path
     (github_backend hardcodes its own public API base)."""
@@ -2539,15 +2522,15 @@ def _run_create_pr(
             )
         owner, repo = git_coords.parse_owner_repo(args.repo)
         api_base = ""
-        remote_name = _push_remote_alias(branch, project_root)
+        remote_name = git_coords.tracking_remote(branch, project_root)
     else:
         if args.repo:
             owner, repo = git_coords.parse_owner_repo(args.repo)
-            remote_name = _push_remote_alias(branch, project_root)
+            remote_name = git_coords.tracking_remote(branch, project_root)
             raw_url = git_coords.remote_url(remote_name, project_root)
             api_base, _o, _r = git_coords.parse_forgejo_coords(raw_url)
         else:
-            remote_name = _push_remote_alias(branch, project_root)
+            remote_name = git_coords.tracking_remote(branch, project_root)
             raw_url = git_coords.remote_url(remote_name, project_root)
             api_base, owner, repo = git_coords.parse_forgejo_coords(raw_url)
 

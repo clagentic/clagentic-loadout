@@ -18,7 +18,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from clagentic_loadout.push.git_coords import display_remote, tracking_remote
+from clagentic_loadout.push.git_coords import tracking_remote
 
 
 class CommitFileReadError(Exception):
@@ -73,21 +73,21 @@ def ensure_commit_present(git_tree: str | Path, sha: str, *, base_branch: str = 
     if probe.returncode == 0:
         return
     remote = tracking_remote(base_branch, git_tree) if base_branch else "origin"
-    shown_remote = display_remote(remote, git_tree)
     fetched = _git(["fetch", remote, sha], cwd=git_tree)
     if fetched.returncode != 0:
-        # git's fetch diagnostics quote the remote URL, query string included, so a
-        # credential carried in the URL would reach the caller's output. Name the
-        # remote and the exit code only; the tracking remote can itself be a URL.
+        # git's fetch diagnostics quote the remote URL, query string included, and
+        # the tracking remote is whatever config holds (a URL, or a name written as
+        # `<secret>@host/path`), so neither is printed: only the exit code is.
         raise CommitFileReadError(
-            f"commit {sha} is not present in {git_tree} and `git fetch {shown_remote} {sha}` "
-            f"failed (exit {fetched.returncode}; git's output is withheld because it can "
-            f"quote the remote URL)"
+            f"commit {sha} is not present in {git_tree} and fetching it from the "
+            f"branch's tracking remote failed (exit {fetched.returncode}; git's output "
+            f"is withheld because it can quote the remote URL)"
         )
     recheck = _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=git_tree)
     if recheck.returncode != 0:
         raise CommitFileReadError(
-            f"commit {sha} is still not a commit in {git_tree} after fetching it from {shown_remote}"
+            f"commit {sha} is still not a commit in {git_tree} after fetching it from "
+            f"the branch's tracking remote"
         )
 
 

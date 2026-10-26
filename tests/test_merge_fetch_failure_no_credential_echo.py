@@ -46,7 +46,7 @@ def test_advance_repo_to_merged_sha_fetch_failure_withholds_the_url(tree, capsys
     with pytest.raises(TreeSyncError) as excinfo:
         advance_repo_to_merged_sha(tree, base_branch="main", known_merged_sha=known_sha)
 
-    assert "git fetch origin" in str(excinfo.value) and "exit" in str(excinfo.value)
+    assert "git fetch of" in str(excinfo.value) and "exit" in str(excinfo.value)
     _assert_no_token(excinfo, capsys)
 
 
@@ -55,7 +55,7 @@ def test_fetch_merged_sha_object_fetch_failure_withholds_the_url(tree, capsys, k
     with pytest.raises(TreeSyncError) as excinfo:
         fetch_merged_sha_object(tree, base_branch="main", known_merged_sha=known_sha)
 
-    assert "git fetch origin" in str(excinfo.value) and "exit" in str(excinfo.value)
+    assert "git fetch of" in str(excinfo.value) and "exit" in str(excinfo.value)
     _assert_no_token(excinfo, capsys)
 
 

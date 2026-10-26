@@ -126,7 +126,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from clagentic_loadout.push.git_coords import display_remote, tracking_remote
+from clagentic_loadout.push.git_coords import tracking_remote
 
 
 class TreeSyncError(Exception):
@@ -145,16 +145,16 @@ def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _fetch_failure_message(
-    remote_name: str, fetch_target: str, repo_path: Path, result: subprocess.CompletedProcess
-) -> str:
-    # git's fetch diagnostics quote the remote URL, query string included, so a
-    # credential carried in the URL would reach the caller's output. Name the
-    # remote and the exit code only. The tracking remote itself may be a URL, so
-    # it is shown only when it is a configured alias.
+def _fetch_failure_message(fetch_target: str, repo_path: Path, result: subprocess.CompletedProcess) -> str:
+    # git's fetch diagnostics quote the remote URL, query string included, and the
+    # tracking remote is whatever `branch.<name>.remote` holds (a URL, or a name
+    # that is itself written as `<secret>@host/path`), so neither git's text nor
+    # the remote value may be printed. Only the target, the path and the exit
+    # code are.
     return (
-        f"git fetch {display_remote(remote_name, repo_path)} {fetch_target!r} failed (exit {result.returncode}) in "
-        f"{repo_path}; git's output is withheld because it can quote the remote URL"
+        f"git fetch of {fetch_target!r} from the branch's tracking remote failed "
+        f"(exit {result.returncode}) in {repo_path}; git's output is withheld "
+        f"because it can quote the remote URL"
     )
 
 
@@ -239,7 +239,7 @@ def advance_repo_to_merged_sha(
     fetch_target = known_merged_sha if known_merged_sha else base_branch
     fetch_result = _run_git(["fetch", remote_name, fetch_target], cwd=repo_path)
     if fetch_result.returncode != 0:
-        raise TreeSyncError(_fetch_failure_message(remote_name, fetch_target, repo_path, fetch_result))
+        raise TreeSyncError(_fetch_failure_message(fetch_target, repo_path, fetch_result))
 
     checkout_target = known_merged_sha if known_merged_sha else "FETCH_HEAD"
     checkout_result = _run_git(
@@ -344,7 +344,7 @@ def fetch_merged_sha_object(
     fetch_target = known_merged_sha if known_merged_sha else base_branch
     fetch_result = _run_git(["fetch", remote_name, fetch_target], cwd=repo_path)
     if fetch_result.returncode != 0:
-        raise TreeSyncError(_fetch_failure_message(remote_name, fetch_target, repo_path, fetch_result))
+        raise TreeSyncError(_fetch_failure_message(fetch_target, repo_path, fetch_result))
 
     if known_merged_sha:
         fetched_sha = known_merged_sha
