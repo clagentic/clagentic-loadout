@@ -51,6 +51,7 @@ from clagentic_loadout.review.ruling_provider import (
 )
 from clagentic_loadout.review.rubric import DEFAULT_BLOCK_AT, SEVERITIES
 from clagentic_loadout.review.stakes import VISIBILITIES
+from clagentic_loadout.review.utc_date import today_utc
 from clagentic_loadout.sha import FULL_SHA_RE
 from clagentic_loadout.transport.provider_config import load_user_config_section
 
@@ -274,6 +275,7 @@ def run_verdict(args: argparse.Namespace, *, config_root: str | Path | None = No
         file_head if file_head is not None else head,
         expected,
         block_at=block_at,
+        today=today_utc(),
         scanners_run=scanners,
         required_scanners=required_scanners,
         degraded_reasons=[*policy.degraded, *ruled.degraded],

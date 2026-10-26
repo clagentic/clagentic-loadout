@@ -55,6 +55,7 @@ from clagentic_loadout.review.ruling_provider import (
 )
 from clagentic_loadout.review.rubric import DEFAULT_BLOCK_AT
 from clagentic_loadout.review.stakes import VISIBILITIES, VISIBILITY_PUBLIC, Stakes
+from clagentic_loadout.review.utc_date import today_utc
 
 #: Recorded in a findings document only; the fence has no use for it.
 KEY_REPOSITORY_VISIBILITY = "repository_visibility"
@@ -179,7 +180,7 @@ def evaluate_findings(
         head_sha,
         expected_head if expected_head is not None else head_sha,
         block_at=context.block_at,
-        today=today,
+        today=today if today is not None else today_utc(),
         scanners_run=scanners_run,
         required_scanners=context.required_scanners,
         degraded_reasons=degraded,
