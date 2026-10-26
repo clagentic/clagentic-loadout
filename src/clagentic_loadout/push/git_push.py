@@ -125,7 +125,7 @@ REPORTING RESOLVED FACTS, NOT GUESSES (CLAUDE.md hard rule 4; lr-f57f13
 REJECTED an alternative that would have violated it): even when
 classification lands on "unknown," this module reports what it OBSERVED --
 exit code, stderr byte count, whether a "To <url>" line was present (the
-real did-we-reach-transport signal), the resolved remote/refspec, and the
+real did-we-reach-transport signal), the resolved refspec, and the
 lease flag with its derivation -- never a narrative claim like "the push
 either never reached the server-side hook or was refused before it," which
 would be flatly false for a locally-detected non-fast-forward/lease failure
@@ -221,12 +221,6 @@ from clagentic_loadout.push.push_redaction import redact_push_secrets
 #: git-transport auth failure substrings that plausibly indicate a
 #: platform/credential mismatch rather than a dead credential.
 _AUTH_MISMATCH_MARKERS = ("invalid username or token", "authentication failed", "403")
-
-#: Max characters of the raw git stderr to include in the failure message.
-#: Kept generous -- the full transcript is always carried on the exception
-#: object regardless (see push.errors.GitPushError.raw_stderr); this limit
-#: only bounds what is folded into the formatted display string.
-_PUSH_ERROR_STDERR_LIMIT = 800
 
 #: Max characters of the extracted remote-side message to include. Remote
 #: lines carry the actual rejection reason (pre-receive hook output, policy
@@ -763,7 +757,9 @@ def _hermeticity_preflight(action: str, git_cwd: Path | None) -> None:
     """Fail-closed pre-flight shared by push, fetch and ls-remote: the
     resolved git version must meet the enforced minimum and the target
     repo's LOCAL config must carry no unsuppressable hazard. *action* is the
-    verb phrase folded into the refusal message ("push 'b' to 'origin'").
+    verb phrase folded into the refusal message ("push 'b' to the tracking
+    remote"). It must never name the remote: that value can be a URL carrying
+    a credential, or a name written as `<secret>@host/path`.
     """
     check_git_version(git_cwd=git_cwd)
     hazards = check_repo_local_config_hazards(git_cwd)
@@ -823,7 +819,7 @@ def git_fetch_with_token(
     operator constraint this fix is built against (ambient credentials may
     always exist and must never be allowed to silently win).
     """
-    _hermeticity_preflight(f"fetch {remote!r} {branch!r}", git_cwd)
+    _hermeticity_preflight(f"fetch {branch!r} from the tracking remote", git_cwd)
     with _credentialed_git_env(token) as env:
         result = subprocess.run(
             ["git", *_HERMETIC_ARGV_PREFIX, "fetch", remote, branch],
@@ -833,10 +829,13 @@ def git_fetch_with_token(
             cwd=str(git_cwd) if git_cwd is not None else None,
         )
         if result.returncode != 0:
-            stderr_safe = redact_push_secrets(result.stderr, known_secrets=(token,))
+            # git's fetch diagnostics quote the remote URL, which regex redaction
+            # cannot be trusted to mask in every form (a path or query credential);
+            # the remote and git's text are withheld rather than filtered.
             raise GitFetchError(
-                f"git fetch {remote!r} {branch!r} exited {result.returncode}: "
-                f"{stderr_safe.strip()[:400]}"
+                f"git fetch of {branch!r} from the tracking remote exited "
+                f"{result.returncode}; git's output is withheld because it can "
+                f"quote the remote URL"
             )
 
 
@@ -855,7 +854,7 @@ def git_ls_remote_with_token(
     read, which made a push that had landed look unconfirmed. Same
     hermeticity pre-flight as push and fetch, same fail-closed errors.
     """
-    _hermeticity_preflight(f"read back {ref!r} from {remote!r}", git_cwd)
+    _hermeticity_preflight(f"read back {ref!r} from the tracking remote", git_cwd)
     with _credentialed_git_env(token) as env:
         result = subprocess.run(
             ["git", *_HERMETIC_ARGV_PREFIX, "ls-remote", "--exit-code", remote, f"refs/heads/{ref}"],
@@ -952,7 +951,7 @@ def git_push_with_token(
     success where a real push would refuse, a misleading affordance worse
     than none (module docstring).
     """
-    _hermeticity_preflight(f"push {branch!r} to {remote!r}", git_cwd)
+    _hermeticity_preflight(f"push {branch!r} to the tracking remote", git_cwd)
     with _credentialed_git_env(token, force_trace=verbose) as env:
         refspec = f"{branch}:{branch}"
         push_cmd = ["git", *_HERMETIC_ARGV_PREFIX, "push", remote, refspec, "--set-upstream"]
@@ -994,13 +993,13 @@ def git_push_with_token(
                 and any(marker in result.stderr.lower() for marker in _AUTH_MISMATCH_MARKERS)
             ):
                 mismatch_hint = (
-                    f" POSSIBLE PLATFORM MISMATCH: pushing to remote {remote!r} "
+                    f" POSSIBLE PLATFORM MISMATCH: pushing to the tracking remote "
                     f"using {platform!r} credentials, but the auth rejection looks "
                     f"like the remote actually expects {other_platform_label!r} "
                     f"credentials (or vice versa). This is NOT necessarily a dead/"
-                    f"expired credential. Verify with 'git remote get-url {remote}' "
-                    f"and re-run with the matching platform if the host doesn't "
-                    f"match."
+                    f"expired credential. Verify the tracking remote's host with "
+                    f"'git remote get-url <remote>' and re-run with the matching "
+                    f"platform if the host doesn't match."
                 )
 
             # Classification runs against the RAW stderr (and, for local-hook
@@ -1033,7 +1032,9 @@ def git_push_with_token(
             # CLAUDE.md hard rule 4): every field here is something this
             # call OBSERVED -- exit code, byte count, the parsed reason (or
             # its absence), whether transport was reached, the resolved
-            # remote/refspec, and the lease flag with its origin. Never a
+            # refspec, and the lease flag with its origin. The remote is
+            # deliberately not among them: it can be a URL carrying a
+            # credential. Never a
             # narrative claim about why a signal is absent. stderr_bytes is
             # measured on the RAW stderr length -- a byte count is not
             # secret-shaped and redaction can only shrink or replace
@@ -1042,14 +1043,19 @@ def git_push_with_token(
             reason_note = f" reject-reason={reject_reason!r}" if reject_reason else " reject-reason=none"
             facts_note = (
                 f" [exit={result.returncode} stderr_bytes={len(result.stderr)}"
-                f" reached_transport={reached_transport} remote={remote!r}"
+                f" reached_transport={reached_transport}"
                 f" refspec={refspec!r} force_with_lease={force_with_lease}"
                 f" lease_origin={lease_origin!r}{reason_note}]"
             )
 
+            # git's own push diagnostics ("To <url>", "fatal: unable to access
+            # '<url>'", "failed to push some refs to '<url>'") quote the remote URL,
+            # so they are withheld from the message rather than regex-filtered. The
+            # remote's own "remote: " lines and a local hook's lines, which carry
+            # no client-side URL, are what explains a rejection.
             message = (
-                f"git push failed (exit {result.returncode}, {sub_cause}): "
-                f"{result.stderr.strip()[:_PUSH_ERROR_STDERR_LIMIT]}"
+                f"git push failed (exit {result.returncode}, {sub_cause}); git's own "
+                f"output is withheld because it can quote the remote URL."
                 f"{remote_block}{local_hook_block}{mismatch_hint}{facts_note}"
             )
 

@@ -193,19 +193,22 @@ def read_remote_head(
             ["ls-remote", "--exit-code", remote, f"refs/heads/{ref}"], cwd=project_root
         )
     if result.returncode != 0:
+        # git's ls-remote diagnostics quote the remote URL, and *remote* is
+        # whatever config holds (a URL, or a name written as `<secret>@host/path`),
+        # so neither is printed: only the ref and the exit code are.
         raise RemoteReadbackError(
-            f"post-push remote readback FAILED -- `git ls-remote {remote} "
-            f"refs/heads/{ref}` exited {result.returncode}: "
-            f"{result.stderr.strip()[:400]}. This is NOT a local read "
-            f"fallback -- the caller cannot report a remote fact this "
-            f"process did not itself confirm."
+            f"post-push remote readback FAILED -- `git ls-remote` of "
+            f"refs/heads/{ref} exited {result.returncode}; git's output is "
+            f"withheld because it can quote the remote URL. This is NOT a "
+            f"local read fallback -- the caller cannot report a remote fact "
+            f"this process did not itself confirm."
         )
 
     line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
     if not line:
         raise RemoteReadbackError(
-            f"post-push remote readback FAILED -- `git ls-remote {remote} "
-            f"refs/heads/{ref}` returned no matching ref line. The branch "
+            f"post-push remote readback FAILED -- `git ls-remote` of "
+            f"refs/heads/{ref} returned no matching ref line. The branch "
             f"does not appear to exist on the remote from this read."
         )
 
@@ -215,7 +218,7 @@ def read_remote_head(
     except InvalidShaError as exc:
         raise RemoteReadbackError(
             f"post-push remote readback produced a malformed SHA from "
-            f"`git ls-remote {remote} refs/heads/{ref}` output {line!r} -- {exc}"
+            f"`git ls-remote` of refs/heads/{ref} output {line!r} -- {exc}"
         ) from exc
 
     return RemoteReadback(remote_head_sha=sha, remote=remote, ref=ref)

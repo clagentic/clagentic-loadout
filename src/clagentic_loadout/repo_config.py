@@ -391,13 +391,13 @@ def _refusal(
 ) -> ConfigRootRefusedError:
     try:
         target = read_origin_target(tree)
-        remote = f"remote origin {target.slug!r} on host {target.host!r}"
+        origin_note = f"remote origin {target.slug!r} on host {target.host!r}"
     except OriginBindingError:
-        remote = "remote origin is not a readable, parseable remote URL"
+        origin_note = "remote origin is not a readable, parseable remote URL"
     return ConfigRootRefusedError(
         f"the config file {config_file} above the git tree is refused: {why}. "
         f"Resolved git tree {str(tree)!r}, config root {str(directory)!r}, "
-        f"{remote}. A config in the directory holding the git "
+        f"{origin_note}. A config in the directory holding the git "
         f"tree must declare {section}.{declaration_key} naming that tree; any other "
         f"config above the tree that holds merge settings is not used."
     )

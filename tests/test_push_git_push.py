@@ -539,16 +539,18 @@ class TestGitPushWithToken:
         assert all(sentinel not in line for line in exc.local_hook_lines)
         assert exc.reject_reason is None or sentinel not in exc.reject_reason
 
-    def test_str_of_git_push_error_contains_raw_stderr(self, tmp_path):
-        """lr-f57f13 invariant test (seq 4, TYPED ERROR OBJECT section):
-        str(exc) must contain exc.raw_stderr -- proving the fields are not
-        merely decorative parallel data a future author could let drift out
-        of sync with the displayed message."""
+    def test_str_of_git_push_error_withholds_raw_stderr(self, tmp_path):
+        """git's own push diagnostics quote the remote URL (a credential can
+        ride in its userinfo, query or path), so the displayed message
+        carries the observed facts and withholds git's text; the typed
+        `raw_stderr` field still holds it for a programmatic consumer."""
         repo, _remote = _make_repo_with_bare_remote(tmp_path)
         with pytest.raises(GitPushError) as exc_info:
             git_push_with_token("nonexistent-remote", "feature", "tok", repo)
         exc = exc_info.value
-        assert exc.raw_stderr.strip()[:200] in str(exc)
+        assert exc.raw_stderr.strip()
+        assert exc.raw_stderr.strip()[:200] not in str(exc)
+        assert "withheld" in str(exc)
 
     def test_typed_fields_populated_on_every_failure(self, tmp_path):
         """GitPushError's typed fields (lr-f57f13) must be populated, not

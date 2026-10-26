@@ -122,11 +122,9 @@ class StrayMergeCommitError(Exception):
     grammar, WHY this matters, and the exact remediation command -- CLI
     hygiene rule 4, never a collapsed guess."""
 
-    def __init__(self, offenders: list[tuple[str, str]], *, base_branch: str, remote: str) -> None:
+    def __init__(self, offenders: list[tuple[str, str]], *, base_branch: str) -> None:
         self.offenders = offenders
-        super().__init__(
-            _format_stray_merge_commit_error(offenders, base_branch=base_branch, remote=remote)
-        )
+        super().__init__(_format_stray_merge_commit_error(offenders, base_branch=base_branch))
 
 
 def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -166,9 +164,13 @@ def fetch_branch_commit_subjects(
     """
     fetch = _run_git(["fetch", remote, base_branch], cwd=Path(repo_root))
     if fetch.returncode != 0:
+        # git's fetch diagnostics quote the remote URL, and *remote* is whatever
+        # config holds (a URL, or a name written as `<secret>@host/path`), so
+        # neither is printed: only the base branch and the exit code are.
         raise CommitCheckUnavailableError(
-            f"git fetch {remote} {base_branch} failed (exit {fetch.returncode}): "
-            f"{fetch.stderr.strip()[:400]}"
+            f"git fetch of {base_branch} from the branch's tracking remote failed "
+            f"(exit {fetch.returncode}); git's output is withheld because it can "
+            f"quote the remote URL"
         )
 
     log = _run_git(
@@ -221,16 +223,17 @@ def find_non_conformant_branch_commits(
     return [(sha, subject) for sha, subject in subjects if not is_conventional_title(subject)]
 
 
-def _format_stray_merge_commit_error(
-    offenders: list[tuple[str, str]], *, base_branch: str, remote: str
-) -> str:
+def _format_stray_merge_commit_error(offenders: list[tuple[str, str]], *, base_branch: str) -> str:
     """Build the StrayMergeCommitError message. Names every offending SHA
     and subject verbatim, states WHY this matters, and gives the exact
-    remediation command (CLI hygiene rule 4 -- never a collapsed guess)."""
+    remediation command (CLI hygiene rule 4 -- never a collapsed guess).
+
+    The remote is written as the literal placeholder `<remote>`: the value the
+    caller used can be a URL carrying a credential, so it is never printed."""
     listed = "\n".join(f"  {sha} {subject!r}" for sha, subject in offenders)
     return (
         f"Push-time branch commit-subject check FAILED -- this branch "
-        f"carries {len(offenders)} commit(s) in {remote}/{base_branch}..HEAD "
+        f"carries {len(offenders)} commit(s) in <remote>/{base_branch}..HEAD "
         f"with a non-conformant subject:\n{listed}\n"
         f"Expected Conventional Commits grammar:\n"
         f"  <type>(<scope>)!?: <description>\n"
@@ -241,11 +244,12 @@ def _format_stray_merge_commit_error(
         f"review, and security audit have already run against this SHA. The "
         f"most common cause is a branch cut from a working tree that already "
         f"contained another PR's merge commit before that PR landed on "
-        f"{remote}/{base_branch} -- platform-generated merge-commit subjects "
+        f"<remote>/{base_branch} -- platform-generated merge-commit subjects "
         f"(e.g. 'Merge pull request #N from ...') never conform to this "
         f"grammar.\n"
-        f"RESOLUTION: git fetch {remote} {base_branch} && "
-        f"git rebase {remote}/{base_branch} -- this drops an already-merged "
+        f"RESOLUTION: git fetch <remote> {base_branch} && "
+        f"git rebase <remote>/{base_branch} (<remote> is this branch's tracking "
+        f"remote) -- this drops an already-merged "
         f"commit via patch-id once its originating PR is in "
         f"{base_branch}'s ancestry. VERIFY the rebase changed nothing you "
         f"intended to keep (e.g. `git diff <old-tip> HEAD` is empty) before "
@@ -295,7 +299,7 @@ def check_branch_for_stray_merge_commits(
 
     offenders = find_non_conformant_branch_commits(repo_root, base_branch, remote=remote)
     if offenders:
-        raise StrayMergeCommitError(offenders, base_branch=base_branch, remote=remote)
+        raise StrayMergeCommitError(offenders, base_branch=base_branch)
 
 
 __all__ = [

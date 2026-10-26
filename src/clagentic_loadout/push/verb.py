@@ -1251,7 +1251,7 @@ def _run_branch_commit_check(
         print(
             f"push: branch commit-subject check BYPASSED via "
             f"--skip-branch-commit-check for {project_root} "
-            f"(base={base_branch!r}, remote={remote!r})",
+            f"(base={base_branch!r})",
             file=sys.stderr,
         )
         return

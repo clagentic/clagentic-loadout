@@ -4047,8 +4047,8 @@ class TestBranchCommitCheck:
         assert code == verb.EXIT_STRAY_MERGE_COMMIT
         stderr = capsys.readouterr().err
         assert "Merge pull request #378 from clagentic/fix/lr-f969fc-y" in stderr
-        assert "git fetch origin main" in stderr
-        assert "git rebase origin/main" in stderr
+        assert "git fetch <remote> main" in stderr
+        assert "git rebase <remote>/main" in stderr
         assert "--skip-branch-commit-check" in stderr
 
     def test_clean_branch_is_unaffected(self, tmp_path, monkeypatch):
