@@ -1823,7 +1823,10 @@ class TestCreatePrForgejo:
         pre_push_hook.chmod(0o755)
 
         code = _run_main(
-            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            [
+                "--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t",
+                "--body-stdin", "--verbose",
+            ],
             token_provider=_RecordingTokenProvider(),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
@@ -1831,7 +1834,7 @@ class TestCreatePrForgejo:
         assert code == verb.EXIT_PUSH_FAILED
         captured = capsys.readouterr()
 
-        # Channel 1: human-readable stderr text.
+        # Channel 1: human-readable stderr text (hook text is opt-in: --verbose).
         assert distinctive_marker in captured.err
         assert "local-hook-rejected" in captured.err
 
@@ -1844,6 +1847,31 @@ class TestCreatePrForgejo:
         assert envelope["sub_cause"] == "local-hook-rejected"
         assert envelope["reached_transport"] is False
         assert any(distinctive_marker in line for line in envelope["local_hook_lines"])
+
+    def test_local_hook_text_is_withheld_from_default_output(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """Without --verbose the hook's text reaches neither the message nor the
+        failure envelope, which carries only the line count."""
+        repo, _remote = repo_with_remote
+        marker = "DEFAULT-OUTPUT-HOOK-MARKER"
+        pre_push_hook = repo / ".git" / "hooks" / "pre-push"
+        pre_push_hook.write_text(f'#!/bin/sh\necho "{marker}" 1>&2\nexit 1\n')
+        pre_push_hook.chmod(0o755)
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+
+        assert code == verb.EXIT_PUSH_FAILED
+        captured = capsys.readouterr()
+        assert marker not in captured.out + captured.err
+        envelope = json.loads([line for line in captured.err.splitlines() if line.strip()][-1])
+        assert envelope["local_hook_line_count"] == 1
+        assert "local_hook_lines" not in envelope
 
 
 class TestCleanlinessCheck:

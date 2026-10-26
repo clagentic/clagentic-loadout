@@ -222,17 +222,6 @@ from clagentic_loadout.push.push_redaction import redact_push_secrets
 #: platform/credential mismatch rather than a dead credential.
 _AUTH_MISMATCH_MARKERS = ("invalid username or token", "authentication failed", "403")
 
-#: Max characters of the extracted remote-side message to include. Remote
-#: lines carry the actual rejection reason (pre-receive hook output, policy
-#: gate text) and are never secret — the server emits its own text.
-_PUSH_ERROR_REMOTE_LIMIT = 800
-
-#: Max characters of the extracted local pre-push hook message to include.
-#: Hook output is the LOCAL repo's own script text (e.g. a docs-staleness
-#: gate message) — never secret, same non-secrecy rationale as
-#: _PUSH_ERROR_REMOTE_LIMIT above.
-_PUSH_ERROR_LOCAL_HOOK_LIMIT = 800
-
 #: Env var name for the opt-in GIT_TRACE passthrough. When set to a truthy
 #: value, git's own trace output (packet negotiation, hook invocation,
 #: transport phase) is captured into the push subprocess's stderr so the
@@ -871,6 +860,16 @@ def git_ls_remote_with_token(
     )
 
 
+def _redacted_transcript(result: subprocess.CompletedProcess, token: str) -> str:
+    """The raw push transcript, redacted: the one place git's push output is
+    formatted into text, reached only from the opt-in --dry-run/--verbose paths."""
+    return redact_push_secrets(
+        f"[dry-run exit={result.returncode}] stdout: {result.stdout}"
+        f" stderr: {result.stderr}",
+        known_secrets=(token,),
+    )
+
+
 def git_push_with_token(
     remote: str,
     branch: str,
@@ -978,11 +977,7 @@ def git_push_with_token(
             # itself would have accepted the push. Redacted through the
             # SAME choke point every other field in this module uses
             # (push.push_redaction), never a second implementation.
-            dry_run_transcript = redact_push_secrets(
-                f"[dry-run exit={result.returncode}] stdout: {result.stdout}"
-                f" stderr: {result.stderr}",
-                known_secrets=(token,),
-            )
+            dry_run_transcript = _redacted_transcript(result, token)
             print(f"push: --dry-run transcript -- {dry_run_transcript}", file=sys.stderr)
 
         if result.returncode != 0:
@@ -1016,16 +1011,25 @@ def git_push_with_token(
             local_hook_lines = tuple(_extract_local_hook_lines(result.stderr, result.stdout))
             reached_transport = _has_to_line(result.stderr)
 
-            remote_block = ""
-            if remote_lines:
-                remote_text = "\n".join(remote_lines)[:_PUSH_ERROR_REMOTE_LIMIT]
-                remote_block = f" REMOTE MESSAGE ({sub_cause}): {remote_text}"
+            # A server's "remote: " lines and a local hook's lines are free text
+            # that can echo a remote location a credential rides in (a hook is
+            # handed the remote URL as an argument; a server can repeat the path
+            # it received), and regex redaction cannot mask a path or query
+            # credential in every form. The default message therefore carries
+            # only their counts; the lines stay on the exception and print
+            # through the opt-in --verbose/--dry-run transcript.
+            withheld_note = ""
+            if remote_lines or local_hook_lines:
+                withheld_note = (
+                    f" {len(remote_lines)} remote line(s) and {len(local_hook_lines)} "
+                    f"local pre-push hook line(s) withheld because they can quote the "
+                    f"remote URL; re-run with --verbose to show them."
+                )
 
-            local_hook_block = ""
-            if local_hook_lines:
-                local_hook_text = "\n".join(local_hook_lines)[:_PUSH_ERROR_LOCAL_HOOK_LIMIT]
-                local_hook_block = (
-                    f" LOCAL PRE-PUSH HOOK MESSAGE ({sub_cause}): {local_hook_text}"
+            if verbose and not dry_run:
+                print(
+                    f"push: --verbose transcript -- {_redacted_transcript(result, token)}",
+                    file=sys.stderr,
                 )
 
             # REPORTING RESOLVED FACTS, NOT GUESSES (module docstring;
@@ -1050,13 +1054,11 @@ def git_push_with_token(
 
             # git's own push diagnostics ("To <url>", "fatal: unable to access
             # '<url>'", "failed to push some refs to '<url>'") quote the remote URL,
-            # so they are withheld from the message rather than regex-filtered. The
-            # remote's own "remote: " lines and a local hook's lines, which carry
-            # no client-side URL, are what explains a rejection.
+            # so they are withheld from the message rather than regex-filtered.
             message = (
                 f"git push failed (exit {result.returncode}, {sub_cause}); git's own "
                 f"output is withheld because it can quote the remote URL."
-                f"{remote_block}{local_hook_block}{mismatch_hint}{facts_note}"
+                f"{withheld_note}{mismatch_hint}{facts_note}"
             )
 
             raise GitPushError(

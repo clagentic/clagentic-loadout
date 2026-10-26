@@ -2774,18 +2774,21 @@ def _run_create_pr(
         # structurally at construction (see push.errors.GitPushError) --
         # so this envelope carries no unredacted text a plain-text stderr
         # reader wasn't already going to see.
-        _fail(
-            str(exc),
-            code=EXIT_PUSH_FAILED,
-            envelope={
-                "sub_cause": exc.sub_cause,
-                "exit_code": exc.exit_code,
-                "reached_transport": exc.reached_transport,
-                "reject_reason": exc.reject_reason,
-                "remote_lines": list(exc.remote_lines),
-                "local_hook_lines": list(exc.local_hook_lines),
-            },
-        )
+        # The lines are free text that can quote the remote URL, so, like the
+        # message, the envelope carries their counts unless the caller opted in
+        # to the raw transcript with --verbose or --dry-run.
+        envelope = {
+            "sub_cause": exc.sub_cause,
+            "exit_code": exc.exit_code,
+            "reached_transport": exc.reached_transport,
+            "reject_reason": exc.reject_reason,
+            "remote_line_count": len(exc.remote_lines),
+            "local_hook_line_count": len(exc.local_hook_lines),
+        }
+        if args.verbose or args.dry_run:
+            envelope["remote_lines"] = list(exc.remote_lines)
+            envelope["local_hook_lines"] = list(exc.local_hook_lines)
+        _fail(str(exc), code=EXIT_PUSH_FAILED, envelope=envelope)
 
     if args.dry_run:
         # --DRY-RUN STOPS HERE (lr-68039e): nothing was pushed to the

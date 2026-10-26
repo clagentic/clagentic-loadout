@@ -10,9 +10,10 @@ mean, and the redaction guarantee.
 ## The always-carried-transcript guarantee
 
 Every `GitPushError` this package raises carries the **full raw `git push` stderr**
-(`GitPushError.raw_stderr`), independent of whether classification succeeded. A caller
-that only reads `str(exc)` still gets the transcript folded into the message (bounded to a
-generous character limit for display; the full text is always on `raw_stderr` itself).
+(`GitPushError.raw_stderr`), independent of whether classification succeeded. The default
+`str(exc)` withholds git's text (it can quote the remote URL, which may carry a credential)
+and reports the observed facts instead; the full redacted text is always on `raw_stderr`
+itself and prints under `--verbose`/`--dry-run`.
 
 **Classification is ADDITIVE METADATA, never a replacement for the transcript.**
 `GitPushError.sub_cause` states which coarse bucket the classifier placed a failure in —
@@ -130,10 +131,12 @@ package and catches the exception directly. A caller that instead shells out to 
 `loadout-push` CLI (`clagentic_loadout.push.verb`) receives the identical evidence over two
 stderr channels on `EXIT_PUSH_FAILED`, never only the coarse `sub_cause` label:
 
-1. The human-readable line `push: git push failed (exit N, <sub_cause>): ...` — this already
-   folds in the extracted `REMOTE MESSAGE`/`LOCAL PRE-PUSH HOOK MESSAGE` blocks verbatim (see
-   the label table above), so a caller reading plain stderr text sees the hook's or remote's
-   own message, not merely the classification.
+1. The human-readable line `push: git push failed (exit N, <sub_cause>): ...` — this carries
+   the exit code, the sub-cause, the parsed `reject_reason`, and the COUNT of withheld remote
+   and local-hook lines. The lines themselves are withheld by default because they can quote
+   the remote URL (a hook is handed it as an argument; a server can repeat the path it
+   received), and a path or query credential cannot be reliably redacted. Re-run with
+   `--verbose` (or `--dry-run`) to print them in the redacted transcript.
 2. Immediately following it, one JSON line on stderr (never stdout — stdout carries JSON only
    on a successful push) with these keys:
 
@@ -143,8 +146,10 @@ stderr channels on `EXIT_PUSH_FAILED`, never only the coarse `sub_cause` label:
    | `exit_code` | Same value as `GitPushError.exit_code`. |
    | `reached_transport` | Same value as `GitPushError.reached_transport`. |
    | `reject_reason` | Same value as `GitPushError.reject_reason` (may be `null`). |
-   | `remote_lines` | Same content as `GitPushError.remote_lines`, as a JSON array. |
-   | `local_hook_lines` | Same content as `GitPushError.local_hook_lines`, as a JSON array. |
+   | `remote_line_count` | Number of `GitPushError.remote_lines` entries. |
+   | `local_hook_line_count` | Number of `GitPushError.local_hook_lines` entries. |
+   | `remote_lines` | Only with `--verbose` or `--dry-run`: same content as `GitPushError.remote_lines`, as a JSON array. |
+   | `local_hook_lines` | Only with `--verbose` or `--dry-run`: same content as `GitPushError.local_hook_lines`, as a JSON array. |
 
    Every value here is already redacted through the same choke point described above
    (`GitPushError.__init__` redacts before this envelope is ever built) — a caller consuming
@@ -160,7 +165,7 @@ sibling defect class this belongs to).
 
 ## Integrator guidance
 
-- Read `raw_stderr` (or the formatted `str(exc)`, which always contains it) when a caller
+- Read `raw_stderr` (or re-run with `--verbose`, since `str(exc)` withholds git's text) when a caller
   needs to actually understand a failure — `sub_cause` is a search key, not the answer.
 - Do not build automation that treats `sub_cause == "unknown"` as "no information was
   available" — the transcript is always there; `unknown` states only that the classifier

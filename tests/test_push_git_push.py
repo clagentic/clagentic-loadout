@@ -303,8 +303,10 @@ class TestGitPushWithToken:
 
         message = str(exc_info.value)
         assert "pre-receive-rejected" in message
-        assert "policy: direct pushes to protected branches are rejected" in message
-        assert "REMOTE MESSAGE" in message
+        assert "policy: direct pushes to protected branches are rejected" not in message
+        assert "policy: direct pushes to protected branches are rejected" in exc_info.value.remote_lines
+        assert "1 remote line(s) and 0 local pre-push hook line(s) withheld" in message
+        assert "--verbose" in message
 
     def test_forgejo_401_auth_failure_classifies_as_auth_failed_not_pre_receive(self):
         """lr-91bac6 acceptance criterion: a Forgejo 401 credential-failure
@@ -402,9 +404,9 @@ class TestGitPushWithToken:
         message = str(exc_info.value)
         assert "local-hook-rejected" in message
         assert "unknown" not in message
-        assert "docs-staleness gate: CHANGELOG.md was not updated" in message
-        assert "LOCAL PRE-PUSH HOOK MESSAGE" in message
-        assert "REMOTE MESSAGE" not in message
+        assert "docs-staleness gate: CHANGELOG.md was not updated" not in message
+        assert "docs-staleness gate: CHANGELOG.md was not updated" in exc_info.value.local_hook_lines
+        assert "0 remote line(s) and 1 local pre-push hook line(s) withheld" in message
 
     def test_local_pre_push_hook_stdout_only_message_is_not_dropped(self, tmp_path):
         """lr-91bac6 comment #2, case (d): a local pre-push hook that writes
@@ -436,10 +438,9 @@ class TestGitPushWithToken:
         assert exc.sub_cause != SUB_CAUSE_UNKNOWN
         assert exc.reached_transport is False
         assert "VERSION was not bumped for newly shipped files" in exc.local_hook_lines
-        assert "VERSION was not bumped for newly shipped files" in message
-        assert "LOCAL PRE-PUSH HOOK MESSAGE" in message
+        assert "VERSION was not bumped for newly shipped files" not in message
+        assert "0 remote line(s) and 1 local pre-push hook line(s) withheld" in message
         assert "unknown" not in message
-        assert "REMOTE MESSAGE" not in message
 
     def test_local_pre_push_hook_mixed_stdout_and_stderr_both_surface(self, tmp_path):
         """A local pre-push hook writing SOME lines to stdout and SOME to
@@ -489,15 +490,14 @@ class TestGitPushWithToken:
     def test_transport_failure_fabricates_no_remote_or_hook_block(self, tmp_path):
         """A transport-only failure (no such remote configured) never
         reaches the server and has no local pre-push hook installed --
-        asserts neither a REMOTE MESSAGE nor a LOCAL PRE-PUSH HOOK MESSAGE
-        block is fabricated for a failure class that has neither."""
+        asserts no withheld-lines note is fabricated for a failure class that
+        has neither."""
         repo, _remote = _make_repo_with_bare_remote(tmp_path)
         with pytest.raises(GitPushError) as exc_info:
             git_push_with_token("nonexistent-remote", "feature", "some-token-value", repo)
 
         message = str(exc_info.value)
-        assert "REMOTE MESSAGE" not in message
-        assert "LOCAL PRE-PUSH HOOK MESSAGE" not in message
+        assert "line(s) withheld" not in message
 
     def test_git_trace_env_var_does_not_leak_token(self, tmp_path, monkeypatch):
         """The opt-in GIT_TRACE diagnostic passthrough folds git's own
