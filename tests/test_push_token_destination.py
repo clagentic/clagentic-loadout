@@ -26,7 +26,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from clagentic_loadout.push import verb
-from clagentic_loadout.push.errors import RemoteResolutionError
 from clagentic_loadout.push.remote_readback import RemoteReadbackError
 from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root is an autouse fixture)
     RecordingTokenProvider,
@@ -157,16 +156,17 @@ def test_v2_github_alias_whose_url_is_off_host(repo_with_remote, listener, monke
 
 def test_v3_forgejo_url_valued_tracking_remote_fails_closed(repo_with_remote, listener, monkeypatch, capsys):
     """Forgejo resolves its coordinates with `git remote get-url`, which a URL
-    cannot satisfy: the create path stops with RemoteResolutionError before any
-    mint. A regression guard; the stop is not new."""
+    cannot satisfy: the create path stops before any mint with a category-only
+    message and EXIT_REMOTE_ERROR, as the update path does -- not a traceback."""
     repo, _remote = repo_with_remote
     git(["config", "branch.feature.remote", listener.url], repo)
     provider = RecordingTokenProvider(token=TOKEN)
 
-    with pytest.raises(RemoteResolutionError):
-        _run(_forgejo_args(repo), monkeypatch, provider=provider)
+    code = _run(_forgejo_args(repo), monkeypatch, provider=provider)
 
     out, err = capsys.readouterr()
+    assert code == verb.EXIT_REMOTE_ERROR
+    assert "Traceback" not in err
     assert provider.resolved_for == []
     assert listener.requests == []
     assert not listener.received_token()
