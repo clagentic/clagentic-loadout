@@ -228,6 +228,7 @@ from clagentic_loadout.merge.commit_subjects import REAL_MERGE_METHOD
 from clagentic_loadout.merge.errors import TitleInvalidError
 from clagentic_loadout.merge.title_gate import check_pr_title
 from clagentic_loadout.platform_detect import (
+    DEFAULT_GITHUB_HOSTNAME,
     PLATFORM_FORGEJO,
     PLATFORM_GITHUB,
     PlatformResolutionError,
@@ -252,6 +253,11 @@ from clagentic_loadout.push.contention_check import (
     own_branch_refs,
 )
 from clagentic_loadout.push.contention_config import load_contention_config
+from clagentic_loadout.push.destination_guard import (
+    DestinationDeniedError,
+    check_push_destination,
+    fetch_destination_is_anchored,
+)
 from clagentic_loadout.push.errors import (
     AuthorMismatchError,
     BodyEmptyError,
@@ -1699,6 +1705,29 @@ def _resolve_effective_bot_identity(
     return bot_name, bot_email, "none"
 
 
+def _readback_unavailable(reason: str) -> dict:
+    """The degraded readback result: warn on stderr and report the remote fact
+    as unconfirmed (never substituted with a local value)."""
+    print(
+        f"push: WARNING -- post-push remote readback could not confirm "
+        f"the pushed branch on the remote: {reason}. The push and PR-open "
+        f"calls already succeeded; this is a diagnostic re-read only. "
+        f"remote_head_sha is omitted (never substituted with a local "
+        f"value) so a caller cannot mistake this for a confirmed remote "
+        f"fact.",
+        file=sys.stderr,
+    )
+    return {
+        "remote_head_sha": None,
+        "remote_head_sha_source": None,
+        READBACK_ENVELOPE_KEY: Readback(
+            verified=False,
+            source=READBACK_SOURCE_READ_UNAVAILABLE,
+            detail={"reason": reason},
+        ).to_dict(),
+    }
+
+
 def _perform_remote_readback(
     *,
     remote: str,
@@ -1706,6 +1735,7 @@ def _perform_remote_readback(
     project_root: Path,
     expected_bot_email: str | None,
     token: str | None = None,
+    fetch_anchored: bool = True,
 ) -> dict:
     """Post-push authoritative remote state (lr-4e8a43): read the branch's
     HEAD back FROM THE REMOTE via `git ls-remote` (push.remote_readback,
@@ -1728,7 +1758,9 @@ def _perform_remote_readback(
     *token* is the minted push credential: the read runs through the same
     credentialed, hermetic envelope as the push, so it can see a remote the
     process's ambient identity cannot (without it, the read failed on exactly
-    those remotes and a landed push looked unconfirmed).
+    those remotes and a landed push looked unconfirmed). *fetch_anchored* is
+    False when the remote's fetch URL may not receive that token
+    (push.destination_guard); the read is then skipped, not run.
 
     Returns a dict merged directly into the JSON success envelope:
       remote_head_sha: the SHA `git ls-remote` reported, or None on failure.
@@ -1763,27 +1795,18 @@ def _perform_remote_readback(
     this task is not asked to relitigate. See this task's PR body for the
     full rationale.
     """
+    if not fetch_anchored:
+        # The read would present the minted token to the remote's fetch URL,
+        # which is not the platform host (push.destination_guard): skip it
+        # rather than send the token there. Same degraded shape as a failed read.
+        return _readback_unavailable(
+            "the tracking remote's fetch destination is not the platform host, "
+            "so the credentialed read was skipped"
+        )
     try:
         readback = read_remote_head(remote, branch, project_root, token=token)
     except RemoteReadbackError as exc:
-        print(
-            f"push: WARNING -- post-push remote readback could not confirm "
-            f"the pushed branch on the remote: {exc}. The push and PR-open "
-            f"calls already succeeded; this is a diagnostic re-read only. "
-            f"remote_head_sha is omitted (never substituted with a local "
-            f"value) so a caller cannot mistake this for a confirmed remote "
-            f"fact.",
-            file=sys.stderr,
-        )
-        return {
-            "remote_head_sha": None,
-            "remote_head_sha_source": None,
-            READBACK_ENVELOPE_KEY: Readback(
-                verified=False,
-                source=READBACK_SOURCE_READ_UNAVAILABLE,
-                detail={"reason": str(exc)},
-            ).to_dict(),
-        }
+        return _readback_unavailable(str(exc))
 
     envelope = {
         "remote_head_sha": readback.remote_head_sha,
@@ -2552,6 +2575,19 @@ def _run_create_pr(
         except HostDeniedError as exc:
             _fail(str(exc), code=EXIT_HOST_DENIED)
 
+    # Token destination anchoring: the minted token is presented to whatever the
+    # push (and the lease pre-fetch and readback) reaches, so the tracking
+    # remote must be a configured remote whose push destinations are the
+    # platform host or cannot reach a peer. Runs before the mint.
+    anchor_url = f"https://{DEFAULT_GITHUB_HOSTNAME}" if args.platform == PLATFORM_GITHUB else api_base
+    try:
+        check_push_destination(remote_name, anchor_url=anchor_url, git_cwd=project_root)
+    except DestinationDeniedError as exc:
+        _fail(str(exc), code=EXIT_REMOTE_ERROR)
+    fetch_anchored = fetch_destination_is_anchored(
+        remote_name, anchor_url=anchor_url, git_cwd=project_root
+    )
+
     _check_title_gate(args, owner, repo, project_root=project_root)
 
     # Builder-identity resolution happens BEFORE token resolution -- UNCHANGED
@@ -2734,6 +2770,7 @@ def _run_create_pr(
             branch=branch,
             project_root=project_root,
             token=token,
+            fetch_allowed=fetch_anchored,
         )
     except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
         _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
@@ -2811,6 +2848,7 @@ def _run_create_pr(
     remote_readback_envelope = _perform_remote_readback(
         remote=remote_name, branch=branch, project_root=project_root,
         expected_bot_email=effective_bot_email, token=token,
+        fetch_anchored=fetch_anchored,
     )
 
     # Verification records name the head the REMOTE now holds, read back above,

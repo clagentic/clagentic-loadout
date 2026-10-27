@@ -536,6 +536,29 @@ exists to protect right along with it. See
 (mirrors `tests/test_transport_read_host_guard.py::
 TestSharedUserConfigRoot` for the sibling guard).
 
+### Token destination (push)
+
+The minted token is handed to git through `GIT_ASKPASS`, so it reaches whatever
+host the push reaches. Before any token is minted, `push` therefore requires
+the branch's tracking remote (`branch.<name>.remote`, or `origin` when unset) to
+be a configured remote (`git remote` lists it) and checks every push
+destination (`git remote get-url --push --all`):
+
+- an `http(s)` URL must have the same host and port as the platform host: the
+  forge host on Forgejo, `github.com` on GitHub;
+- a local path and a `file://` URL are allowed (they never consult
+  `GIT_ASKPASS`, so they cannot receive the token);
+- `ssh://`, scp-style `host:path`, `git://`, any other scheme and any
+  `<name>::` remote helper are refused.
+
+A refusal exits `7` and names only the category, never the remote value.
+
+The pre-lease fetch and the post-push readback also present the token, to the
+remote's fetch URL. A fetch URL that fails the same test does not fail the push:
+the fetch (a warning) and the readback (`readback.verified` false) are skipped.
+Destinations are resolved without global or system git config, as the
+credentialed git call itself runs.
+
 ### Host restriction (git-host-api read verb)
 
 `git-host-api` (`transport.git_host_api`), unlike `push`, treats an EXPLICIT
