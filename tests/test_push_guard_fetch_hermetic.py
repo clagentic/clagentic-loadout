@@ -12,11 +12,16 @@ holds a credential helper, and a local HTTP listener that answers 401 Basic and
 records every Authorization header.
 
   G1  a user-level insteadOf rewrites the anchored fetch url to the listener
-  G2  an off-host fetch url is refused before the guards run
+  G2  an off-host fetch url is refused before the guards run (both platforms)
   G3  a repo-local insteadOf onto the listener is refused before the guards run
+      (both platforms)
   G4  positive control: a local fetch url, the guards run and the push proceeds
   G5  an anchored http(s) fetch url: the guard fetch presents the minted token,
       never the ambient credential, and the guards run without a soft-fail warning
+      (the askpass script is called directly; no server asks for authentication)
+  G6  an anchored private host that really requires the minted token: a local
+      server serves the bare remote through `git http-backend` and answers 401
+      unless the Basic password equals the minted token
 """
 
 from __future__ import annotations
@@ -24,9 +29,11 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +52,11 @@ from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root 
 TOKEN = "FAKETOKEN-guard-fetch"
 AMBIENT = "AMBIENT-guard-fetch"
 GITHUB_URL = "https://github.com/some-owner/some-repo.git"
+ANCHORED_HOST = "git-host.example.com"
+ANCHORED_URL = f"http://{ANCHORED_HOST}/some-owner/some-repo.git"
+REWRITTEN_PREFIX = "http://rewritten.example.com/"
+REWRITTEN_URL = f"{REWRITTEN_PREFIX}some-owner/some-repo.git"
+_PLATFORMS = ["github", "forgejo"]
 
 
 class _Listener:
@@ -150,11 +162,16 @@ def _task_id_guard_config(repo) -> None:
     (config_dir / "config.yaml").write_text("push:\n  task_id_guard_pattern: 'ZZZ-never-9'\n")
 
 
-def _run(repo, monkeypatch, *extra):
+def _run(repo, monkeypatch, *extra, platform="github", allowed_host=ANCHORED_HOST):
+    """The real verb entrypoint. A Forgejo run derives its anchor from the
+    tracking remote's fetch url, so it names the anchored host explicitly."""
     provider = RecordingTokenProvider(token=TOKEN)
+    platform_args = ["--platform", platform, "--repo", "some-owner/some-repo"]
+    if platform == "forgejo":
+        platform_args += ["--allowed-host", allowed_host]
     code = run_main(
         [
-            "--repo-path", str(repo), "--platform", "github", "--repo", "some-owner/some-repo",
+            "--repo-path", str(repo), *platform_args,
             "--title", "feat: t", "--body-stdin", *extra,
         ],
         token_provider=provider,
@@ -200,37 +217,75 @@ def test_g1_user_level_insteadof_does_not_carry_an_ambient_credential_to_a_guard
     assert listener.url not in out + err
 
 
+@pytest.mark.parametrize("platform", _PLATFORMS)
 @pytest.mark.parametrize("guards", _GUARD_MODES)
 def test_g2_off_host_fetch_url_is_refused_before_any_guard_fetch(
-    guards, repo_with_remote, listener, ambient_home, guard_fetches, monkeypatch, capsys
+    platform, guards, repo_with_remote, listener, ambient_home, guard_fetches, monkeypatch, capsys
 ):
     repo, _remote = repo_with_remote
-    git(["remote", "set-url", "origin", listener.url], repo)
+    if platform == "github":
+        git(["remote", "set-url", "origin", listener.url], repo)
+    else:
+        # The Forgejo anchor is the first fetch url's host, so the off-host
+        # fetch url is a further one on the same remote.
+        git(["remote", "set-url", "origin", ANCHORED_URL], repo)
+        git(["remote", "set-url", "--add", "origin", listener.url], repo)
     _task_id_guard_config(repo)
 
-    code, provider = _run(repo, monkeypatch, *guards)
+    code, provider = _run(repo, monkeypatch, *guards, platform=platform)
 
     assert code == verb.EXIT_REMOTE_ERROR
     assert provider.resolved_for == []
     assert guard_fetches == []
     assert listener.requests == []
+    assert not listener.received_a_credential()
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+@pytest.mark.parametrize("guards", _GUARD_MODES)
+def test_g3_repo_local_insteadof_onto_the_listener_is_refused_before_any_guard_fetch(
+    platform, guards, repo_with_remote, listener, ambient_home, guard_fetches, monkeypatch, capsys
+):
+    repo, _remote = repo_with_remote
+    if platform == "github":
+        git(["remote", "set-url", "origin", GITHUB_URL], repo)
+        git(["config", f"url.{listener.base}.insteadOf", "https://github.com/"], repo)
+    else:
+        # The rewrite applies to a further fetch url: the Forgejo anchor is read
+        # from the first one, which stays on the anchored host.
+        git(["remote", "set-url", "origin", ANCHORED_URL], repo)
+        git(["remote", "set-url", "--add", "origin", REWRITTEN_URL], repo)
+        git(["config", f"url.{listener.base}.insteadOf", REWRITTEN_PREFIX], repo)
+    _task_id_guard_config(repo)
+
+    code, provider = _run(repo, monkeypatch, *guards, platform=platform)
+
+    assert code == verb.EXIT_REMOTE_ERROR
+    assert provider.resolved_for == []
+    assert guard_fetches == []
+    assert listener.requests == []
+    assert not listener.received_a_credential()
 
 
 @pytest.mark.parametrize("guards", _GUARD_MODES)
-def test_g3_repo_local_insteadof_onto_the_listener_is_refused_before_any_guard_fetch(
+def test_g3_forgejo_rewrite_of_the_anchor_itself_is_refused_by_the_host_ceiling(
     guards, repo_with_remote, listener, ambient_home, guard_fetches, monkeypatch, capsys
 ):
+    """A repo-local rewrite of the only fetch url moves the derived Forgejo
+    anchor onto the listener, so the configured host ceiling refuses it before
+    the destination check, the mint and the guards."""
     repo, _remote = repo_with_remote
-    git(["remote", "set-url", "origin", GITHUB_URL], repo)
-    git(["config", f"url.{listener.base}.insteadOf", "https://github.com/"], repo)
+    git(["remote", "set-url", "origin", ANCHORED_URL], repo)
+    git(["config", f"url.{listener.base}.insteadOf", f"http://{ANCHORED_HOST}/"], repo)
     _task_id_guard_config(repo)
 
-    code, provider = _run(repo, monkeypatch, *guards)
+    code, provider = _run(repo, monkeypatch, *guards, platform="forgejo")
 
-    assert code == verb.EXIT_REMOTE_ERROR
+    assert code == verb.EXIT_HOST_DENIED
     assert provider.resolved_for == []
     assert guard_fetches == []
     assert listener.requests == []
+    assert not listener.received_a_credential()
 
 
 @pytest.mark.parametrize("lease", [(), ("--force-with-lease",)], ids=["no-lease", "lease"])
@@ -284,6 +339,142 @@ def test_g5_an_anchored_guard_fetch_presents_the_minted_token_and_the_guards_run
     assert AMBIENT not in err
     assert "could not run" not in err
     assert listener.requests == []
+
+
+def _http_backend_available() -> bool:
+    exec_path = subprocess.run(
+        ["git", "--exec-path"], capture_output=True, text=True, check=True
+    ).stdout.strip()
+    return (Path(exec_path) / "git-http-backend").exists()
+
+
+class _AuthenticatedGitServer:
+    """A private git host: `git http-backend` behind a 401 Basic challenge that
+    only the expected password passes. Records every Authorization header it
+    receives, including the ones it refuses."""
+
+    def __init__(self, served_root: Path, password: str) -> None:
+        self.authorizations: list[str] = []
+        self.requests: list[str] = []
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def _serve(self) -> None:
+                server.requests.append(self.path)
+                body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+                header = self.headers.get("Authorization", "")
+                if header:
+                    server.authorizations.append(header)
+                scheme, _, payload = header.partition(" ")
+                presented = ""
+                if scheme.lower() == "basic" and payload:
+                    presented = base64.b64decode(payload).decode(errors="replace").partition(":")[2]
+                if presented != password:
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="private"')
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                self._run_backend(body)
+
+            def _run_backend(self, body: bytes) -> None:
+                path, _, query = self.path.partition("?")
+                env = {
+                    "PATH": os.environ["PATH"],
+                    "GIT_PROJECT_ROOT": str(served_root),
+                    "GIT_HTTP_EXPORT_ALL": "1",
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                    "REQUEST_METHOD": self.command,
+                    "PATH_INFO": path,
+                    "QUERY_STRING": query,
+                    "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                    "CONTENT_LENGTH": str(len(body)),
+                    "REMOTE_USER": "token-user",
+                    "REMOTE_ADDR": "127.0.0.1",
+                }
+                for source, target in (
+                    ("Content-Encoding", "HTTP_CONTENT_ENCODING"),
+                    ("Git-Protocol", "GIT_PROTOCOL"),
+                ):
+                    if self.headers.get(source):
+                        env[target] = self.headers[source]
+                result = subprocess.run(
+                    ["git", "http-backend"], input=body, env=env, capture_output=True
+                )
+                head, _, payload = result.stdout.partition(b"\r\n\r\n")
+                status, headers = 200, []
+                for line in head.decode(errors="replace").split("\r\n"):
+                    name, _, value = line.partition(":")
+                    if name.lower() == "status":
+                        status = int(value.strip().split()[0])
+                    elif name:
+                        headers.append((name, value.strip()))
+                self.send_response(status)
+                for name, value in headers:
+                    self.send_header(name, value)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = _serve
+
+            def log_message(self, *args) -> None:
+                return
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.authority = f"127.0.0.1:{self._server.server_address[1]}"
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    def __enter__(self) -> "_AuthenticatedGitServer":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+    def passwords_presented(self) -> list[str]:
+        return [
+            base64.b64decode(header.partition(" ")[2]).decode(errors="replace").partition(":")[2]
+            for header in self.authorizations
+            if header.lower().startswith("basic ")
+        ]
+
+
+@pytest.mark.skipif(
+    not _http_backend_available(), reason="git http-backend is not installed on this host"
+)
+@pytest.mark.parametrize("guards", _GUARD_MODES)
+def test_g6_a_private_anchored_host_is_fetched_with_the_minted_token_never_the_ambient_one(
+    guards, repo_with_remote, ambient_home, guard_fetches, tmp_path, monkeypatch, capsys
+):
+    repo, remote = repo_with_remote
+    served = tmp_path / "served"
+    shutil.copytree(remote, served / "some-owner" / "some-repo.git")
+    _task_id_guard_config(repo)
+
+    with _AuthenticatedGitServer(served, TOKEN) as server:
+        git(["remote", "set-url", "origin", f"http://{server.authority}/some-owner/some-repo.git"], repo)
+
+        # The destination check passes only because the anchor is the server.
+        verb.check_push_destination("origin", anchor_url=f"http://{server.authority}", git_cwd=repo)
+
+        code, provider = _run(repo, monkeypatch, *guards, platform="forgejo", allowed_host=server.authority)
+
+    _out, err = capsys.readouterr()
+    assert code == verb.EXIT_OK, err
+    assert len(provider.resolved_for) == 1
+    assert len(guard_fetches) == (1 if "--skip-branch-commit-check" in guards else 2)
+    # The guards' own soft-fail wording; the stubbed post-push readback prints
+    # an unrelated warning, so the match is on the guard messages.
+    assert "commit-subject check could not run" not in err
+    assert server.requests
+    passwords = server.passwords_presented()
+    assert TOKEN in passwords
+    assert set(passwords) == {TOKEN}
+    assert AMBIENT not in passwords
+    assert AMBIENT not in err
 
 
 def test_the_guard_fetch_environment_is_neutralized(repo_with_remote, monkeypatch):
