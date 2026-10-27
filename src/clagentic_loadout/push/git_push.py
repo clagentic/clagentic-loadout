@@ -862,7 +862,7 @@ def git_ls_remote_with_token(
 
 def _redacted_transcript(result: subprocess.CompletedProcess, token: str) -> str:
     """The raw push transcript, redacted: the one place git's push output is
-    formatted into text, reached only from the opt-in --dry-run/--verbose paths."""
+    formatted into text, reached only from the opt-in --dry-run path."""
     return redact_push_secrets(
         f"[dry-run exit={result.returncode}] stdout: {result.stdout}"
         f" stderr: {result.stderr}",
@@ -1015,21 +1015,15 @@ def git_push_with_token(
             # that can echo a remote location a credential rides in (a hook is
             # handed the remote URL as an argument; a server can repeat the path
             # it received), and regex redaction cannot mask a path or query
-            # credential in every form. The default message therefore carries
-            # only their counts; the lines stay on the exception and print
-            # through the opt-in --verbose/--dry-run transcript.
+            # credential in every form. No failure path prints them: the message
+            # carries only their counts, and the lines stay on the exception's
+            # structured fields for a programmatic caller.
             withheld_note = ""
             if remote_lines or local_hook_lines:
                 withheld_note = (
                     f" {len(remote_lines)} remote line(s) and {len(local_hook_lines)} "
                     f"local pre-push hook line(s) withheld because they can quote the "
-                    f"remote URL; re-run with --verbose to show them."
-                )
-
-            if verbose and not dry_run:
-                print(
-                    f"push: --verbose transcript -- {_redacted_transcript(result, token)}",
-                    file=sys.stderr,
+                    f"remote URL."
                 )
 
             # REPORTING RESOLVED FACTS, NOT GUESSES (module docstring;

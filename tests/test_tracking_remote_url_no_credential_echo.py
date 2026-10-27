@@ -334,17 +334,17 @@ def test_pre_receive_hook_echoing_the_remote_path_stays_out_of_the_message(
     _assert_clean(excinfo, capsys)
 
 
-def test_withheld_hook_lines_print_under_verbose_only(tree_with_credential_path_remote, capsys):
+def test_withheld_hook_lines_print_on_no_failing_path(tree_with_credential_path_remote, capsys):
     tree, remote = tree_with_credential_path_remote
     _install_hook(tree / ".git" / "hooks" / "pre-push", 'echo "pushing to $2"')
 
-    with pytest.raises(GitPushError):
-        git_push_with_token(str(remote), "main", "tok", tree)
-    assert "pushing to" not in capsys.readouterr().err
-
-    with pytest.raises(GitPushError):
-        git_push_with_token(str(remote), "main", "tok", tree, verbose=True)
-    assert "pushing to" in capsys.readouterr().err
+    for kwargs in ({}, {"verbose": True}):
+        with pytest.raises(GitPushError) as excinfo:
+            git_push_with_token(str(remote), "main", "tok", tree, **kwargs)
+        assert excinfo.value.local_hook_lines
+        captured = capsys.readouterr()
+        assert "pushing to" not in captured.out + captured.err
+        assert "pushing to" not in str(excinfo.value)
 
 
 def test_stray_merge_commit_error_names_no_remote(tmp_path, capsys):

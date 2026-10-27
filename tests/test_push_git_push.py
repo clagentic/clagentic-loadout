@@ -306,7 +306,7 @@ class TestGitPushWithToken:
         assert "policy: direct pushes to protected branches are rejected" not in message
         assert "policy: direct pushes to protected branches are rejected" in exc_info.value.remote_lines
         assert "1 remote line(s) and 0 local pre-push hook line(s) withheld" in message
-        assert "--verbose" in message
+        assert "--verbose" not in message
 
     def test_forgejo_401_auth_failure_classifies_as_auth_failed_not_pre_receive(self):
         """lr-91bac6 acceptance criterion: a Forgejo 401 credential-failure

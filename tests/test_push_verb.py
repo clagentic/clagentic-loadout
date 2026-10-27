@@ -1834,8 +1834,9 @@ class TestCreatePrForgejo:
         assert code == verb.EXIT_PUSH_FAILED
         captured = capsys.readouterr()
 
-        # Channel 1: human-readable stderr text (hook text is opt-in: --verbose).
-        assert distinctive_marker in captured.err
+        # Channel 1: human-readable stderr text carries the classification
+        # but never the hook's text, even under --verbose.
+        assert distinctive_marker not in captured.err
         assert "local-hook-rejected" in captured.err
 
         # Channel 2: the structured JSON failure envelope -- the LAST
@@ -1846,12 +1847,14 @@ class TestCreatePrForgejo:
         envelope = json.loads(stderr_lines[-1])
         assert envelope["sub_cause"] == "local-hook-rejected"
         assert envelope["reached_transport"] is False
-        assert any(distinctive_marker in line for line in envelope["local_hook_lines"])
+        assert envelope["local_hook_line_count"] == 1
+        assert "local_hook_lines" not in envelope
+        assert distinctive_marker not in captured.out + captured.err
 
     def test_local_hook_text_is_withheld_from_default_output(
         self, repo_with_remote, monkeypatch, capsys
     ):
-        """Without --verbose the hook's text reaches neither the message nor the
+        """By default the hook's text reaches neither the message nor the
         failure envelope, which carries only the line count."""
         repo, _remote = repo_with_remote
         marker = "DEFAULT-OUTPUT-HOOK-MARKER"

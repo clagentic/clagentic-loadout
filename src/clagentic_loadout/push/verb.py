@@ -2775,8 +2775,7 @@ def _run_create_pr(
         # so this envelope carries no unredacted text a plain-text stderr
         # reader wasn't already going to see.
         # The lines are free text that can quote the remote URL, so, like the
-        # message, the envelope carries their counts unless the caller opted in
-        # to the raw transcript with --verbose or --dry-run.
+        # message, the envelope carries only their counts on every path.
         envelope = {
             "sub_cause": exc.sub_cause,
             "exit_code": exc.exit_code,
@@ -2785,9 +2784,6 @@ def _run_create_pr(
             "remote_line_count": len(exc.remote_lines),
             "local_hook_line_count": len(exc.local_hook_lines),
         }
-        if args.verbose or args.dry_run:
-            envelope["remote_lines"] = list(exc.remote_lines)
-            envelope["local_hook_lines"] = list(exc.local_hook_lines)
         _fail(str(exc), code=EXIT_PUSH_FAILED, envelope=envelope)
 
     if args.dry_run:
