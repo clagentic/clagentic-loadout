@@ -15,6 +15,8 @@ records every Authorization header.
   G2  an off-host fetch url is refused before the guards run
   G3  a repo-local insteadOf onto the listener is refused before the guards run
   G4  positive control: a local fetch url, the guards run and the push proceeds
+  G5  an anchored http(s) fetch url: the guard fetch presents the minted token,
+      never the ambient credential, and the guards run without a soft-fail warning
 """
 
 from __future__ import annotations
@@ -123,11 +125,11 @@ def guard_fetches(monkeypatch):
     real_run = subprocess.run
 
     def spy(cmd, **kwargs):
-        if cmd[:2] == ["git", "fetch"] and cmd[-1] == "main":
+        if cmd[0] == "git" and "fetch" in cmd and cmd[-1] == "main":
             calls.append(list(cmd))
         return real_run(cmd, **kwargs)
 
-    monkeypatch.setattr("clagentic_loadout.push.branch_commit_check.subprocess.run", spy)
+    monkeypatch.setattr("clagentic_loadout.push.git_push.subprocess.run", spy)
     return calls
 
 
@@ -250,6 +252,40 @@ def test_g4_a_local_fetch_url_still_runs_the_guards_and_pushes(
     assert "feature" in git(["branch"], remote).stdout
 
 
+@pytest.mark.parametrize("guards", _GUARD_MODES)
+def test_g5_an_anchored_guard_fetch_presents_the_minted_token_and_the_guards_run(
+    guards, repo_with_remote, listener, ambient_home, monkeypatch, capsys
+):
+    repo, remote = repo_with_remote
+    git(["remote", "set-url", "origin", GITHUB_URL], repo)
+    git(["config", "http.https://github.com/.proxy", "http://127.0.0.1:1"], repo)
+    _task_id_guard_config(repo)
+    presented: list[str] = []
+    real_run = subprocess.run
+
+    def spy(cmd, **kwargs):
+        if cmd[0] == "git" and "fetch" in cmd and cmd[-1] == "main":
+            askpass = kwargs["env"]["GIT_ASKPASS"]
+            answer = real_run([askpass, "Password"], capture_output=True, text=True)
+            presented.append(answer.stdout.strip())
+            assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == "/dev/null"
+            # The anchored host is not reachable offline: the same fetch is
+            # redirected to the local bare repo, keeping the envelope as built.
+            cmd = [*cmd[:-2], str(remote), "main"]
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr("clagentic_loadout.push.git_push.subprocess.run", spy)
+
+    _run(repo, monkeypatch, *guards)
+
+    _out, err = capsys.readouterr()
+    assert presented
+    assert set(presented) == {TOKEN}
+    assert AMBIENT not in err
+    assert "could not run" not in err
+    assert listener.requests == []
+
+
 def test_the_guard_fetch_environment_is_neutralized(repo_with_remote, monkeypatch):
     """The environment handed to the fetch has no global or system config, no
     ambient askpass and an empty HOME."""
@@ -264,7 +300,7 @@ def test_the_guard_fetch_environment_is_neutralized(repo_with_remote, monkeypatc
             seen["home_entries"] = os.listdir(kwargs["env"]["HOME"])
         return real_run(cmd, **kwargs)
 
-    monkeypatch.setattr("clagentic_loadout.push.branch_commit_check.subprocess.run", _spy)
+    monkeypatch.setattr("clagentic_loadout.push.git_push.subprocess.run", _spy)
     monkeypatch.setenv("GIT_ASKPASS", "/ambient/askpass.sh")
     monkeypatch.setenv("HOME", "/ambient/home")
 
