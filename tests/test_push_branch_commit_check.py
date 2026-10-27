@@ -164,8 +164,8 @@ class TestCheckBranchForStrayMergeCommits:
             )
         message = str(exc_info.value)
         assert "Merge pull request #378 from clagentic/fix/lr-f969fc-y" in message
-        assert "git fetch origin main" in message
-        assert "git rebase origin/main" in message
+        assert "git fetch <remote> main" in message
+        assert "git rebase <remote>/main" in message
         assert exc_info.value.offenders[0][1] == (
             "Merge pull request #378 from clagentic/fix/lr-f969fc-y"
         )

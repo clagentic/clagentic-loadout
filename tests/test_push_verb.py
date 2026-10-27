@@ -1823,7 +1823,10 @@ class TestCreatePrForgejo:
         pre_push_hook.chmod(0o755)
 
         code = _run_main(
-            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            [
+                "--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t",
+                "--body-stdin", "--verbose",
+            ],
             token_provider=_RecordingTokenProvider(),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
@@ -1831,8 +1834,9 @@ class TestCreatePrForgejo:
         assert code == verb.EXIT_PUSH_FAILED
         captured = capsys.readouterr()
 
-        # Channel 1: human-readable stderr text.
-        assert distinctive_marker in captured.err
+        # Channel 1: human-readable stderr text carries the classification
+        # but never the hook's text, even under --verbose.
+        assert distinctive_marker not in captured.err
         assert "local-hook-rejected" in captured.err
 
         # Channel 2: the structured JSON failure envelope -- the LAST
@@ -1843,7 +1847,35 @@ class TestCreatePrForgejo:
         envelope = json.loads(stderr_lines[-1])
         assert envelope["sub_cause"] == "local-hook-rejected"
         assert envelope["reached_transport"] is False
-        assert any(distinctive_marker in line for line in envelope["local_hook_lines"])
+        # --verbose adds git trace lines, so the count is a lower bound here.
+        assert envelope["local_hook_line_count"] >= 1
+        assert "local_hook_lines" not in envelope
+        assert distinctive_marker not in captured.out + captured.err
+
+    def test_local_hook_text_is_withheld_from_default_output(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """By default the hook's text reaches neither the message nor the
+        failure envelope, which carries only the line count."""
+        repo, _remote = repo_with_remote
+        marker = "DEFAULT-OUTPUT-HOOK-MARKER"
+        pre_push_hook = repo / ".git" / "hooks" / "pre-push"
+        pre_push_hook.write_text(f'#!/bin/sh\necho "{marker}" 1>&2\nexit 1\n')
+        pre_push_hook.chmod(0o755)
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+
+        assert code == verb.EXIT_PUSH_FAILED
+        captured = capsys.readouterr()
+        assert marker not in captured.out + captured.err
+        envelope = json.loads([line for line in captured.err.splitlines() if line.strip()][-1])
+        assert envelope["local_hook_line_count"] == 1
+        assert "local_hook_lines" not in envelope
 
 
 class TestCleanlinessCheck:
@@ -4047,8 +4079,8 @@ class TestBranchCommitCheck:
         assert code == verb.EXIT_STRAY_MERGE_COMMIT
         stderr = capsys.readouterr().err
         assert "Merge pull request #378 from clagentic/fix/lr-f969fc-y" in stderr
-        assert "git fetch origin main" in stderr
-        assert "git rebase origin/main" in stderr
+        assert "git fetch <remote> main" in stderr
+        assert "git rebase <remote>/main" in stderr
         assert "--skip-branch-commit-check" in stderr
 
     def test_clean_branch_is_unaffected(self, tmp_path, monkeypatch):

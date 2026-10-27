@@ -51,7 +51,9 @@ def remote_url(remote: str, git_cwd: Path | None = None) -> str:
     """
     r = _run(["git", "remote", "get-url", remote], cwd=git_cwd)
     if r.returncode != 0 or not r.stdout.strip():
-        raise RemoteResolutionError(f"cannot get URL for remote {remote!r}")
+        # *remote* is whatever `branch.<name>.remote` holds: a URL, or a name
+        # written as `<secret>@host/path`. It is never printed.
+        raise RemoteResolutionError("cannot get the URL of the branch's tracking remote")
     return r.stdout.strip()
 
 

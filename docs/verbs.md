@@ -1690,11 +1690,12 @@ opt-in `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` passthrough).
 
 **On a `git push` failure (`EXIT_PUSH_FAILED`), a caller gets the same evidence on TWO
 channels, both on stderr — never only the coarse classification:** the
-human-readable `push: git push failed (exit N, <sub_cause>): ...` line (which already folds
-in the extracted `remote: `-prefixed / local-hook lines verbatim), immediately followed by a
-single JSON line — the SAME structured fields documented in
+human-readable `push: git push failed (exit N, <sub_cause>): ...` line (which carries the
+counts of the extracted `remote: `-prefixed / local-hook lines; the lines themselves are
+printed by no default or `--verbose` path, because they can quote the remote URL),
+immediately followed by a single JSON line — the structured fields documented in
 [push-failure-reporting.md](push-failure-reporting.md) (`sub_cause`, `exit_code`,
-`reached_transport`, `reject_reason`, `remote_lines`, `local_hook_lines`) — for a caller that
+`reached_transport`, `reject_reason`, `remote_line_count`, `local_hook_line_count`) — for a caller that
 parses JSON instead of scraping text. Both channels are redacted through the identical
 choke point (see [push-failure-reporting.md](push-failure-reporting.md#the-redaction-guarantee)).
 This JSON line is stderr-only, never stdout — stdout carries JSON only on a successful push
