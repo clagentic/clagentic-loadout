@@ -95,6 +95,10 @@ def ensure_commit_present(
     probe = _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=git_tree)
     if probe.returncode == 0:
         return
+    # Outside a git tree no remote exists to judge or fetch from: that is an
+    # unreadable commit (a caller may degrade it), not a refused destination.
+    if _git(["rev-parse", "--git-dir"], cwd=git_tree).returncode != 0:
+        raise CommitFileReadError(f"commit {sha} is not present: {git_tree} is not a git tree")
     try:
         fetch_from_tracking_remote(git_tree, base_branch, sha, fetch_auth)
     except MergeFetchDeniedError as exc:
