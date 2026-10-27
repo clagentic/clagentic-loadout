@@ -1847,7 +1847,8 @@ class TestCreatePrForgejo:
         envelope = json.loads(stderr_lines[-1])
         assert envelope["sub_cause"] == "local-hook-rejected"
         assert envelope["reached_transport"] is False
-        assert envelope["local_hook_line_count"] == 1
+        # --verbose adds git trace lines, so the count is a lower bound here.
+        assert envelope["local_hook_line_count"] >= 1
         assert "local_hook_lines" not in envelope
         assert distinctive_marker not in captured.out + captured.err
 
