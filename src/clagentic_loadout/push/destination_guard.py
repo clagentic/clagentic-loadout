@@ -19,12 +19,21 @@ THE RULE (all checks run before any credential is minted):
     post-push readback present the token to it) must be either
     an http(s) URL whose host and port equal the anchored platform authority,
     or a destination that cannot reach a network peer: a plain local path or a
-    `file://` URL. Those two transports never consult GIT_ASKPASS, so they
-    cannot receive the token; refusing them would add no protection and would
-    break local-clone workflows;
+    `file://` URL. Those transports need no credential and the git call that
+    reaches them is made without one; refusing them would break local-clone
+    workflows. A set that mixes the two kinds is refused;
   - ssh, scp-style, `git://` and every other scheme, and any `<name>::` remote
     helper (`ext::` runs a command), are refused: each can reach a peer or run
     a transport helper.
+
+A LOCAL DESTINATION IS NOT CREDENTIAL-FREE BY ITSELF: a local or `file://`
+push runs the destination repository's hooks (pre-receive, update,
+post-receive) with the pushing process's environment, and a credentialed
+environment carries GIT_ASKPASS and the token file it reads. So a git call
+whose destinations are all local runs WITHOUT the token (see
+`destinations_are_local`, used by the credentialed call sites), and a
+destination set that mixes http(s) with local is refused outright: a
+credentialed environment must never reach a local receive-pack.
 
 Destinations are resolved the way the credentialed subprocess resolves them:
 under the same neutralized git environment (no global or system config, so no
@@ -64,6 +73,7 @@ CATEGORY_NOT_CONFIGURED = "not-a-configured-remote"
 CATEGORY_OFF_HOST = "off-host"
 CATEGORY_UNSUPPORTED_TRANSPORT = "unsupported-transport"
 CATEGORY_UNRESOLVED = "unresolved"
+CATEGORY_MIXED_TRANSPORT = "mixed-transport"
 
 _MESSAGES = {
     CATEGORY_NOT_CONFIGURED: (
@@ -84,6 +94,11 @@ _MESSAGES = {
     CATEGORY_UNRESOLVED: (
         "the destination of the branch's tracking remote could not be "
         "resolved; refusing before any credential is minted"
+    ),
+    CATEGORY_MIXED_TRANSPORT: (
+        "the destinations of the branch's tracking remote mix a network "
+        "destination with a local one; a credentialed environment must never "
+        "reach a local receive-pack, so refusing before any credential is minted"
     ),
 }
 
@@ -137,31 +152,36 @@ def _authority(url: str) -> tuple[str, int] | None:
     return host.lower(), port if port is not None else default_port
 
 
-def _violation(url: str, anchor: tuple[str, int]) -> str | None:
-    """The refusal category for one destination *url*, or None when the token
-    may be sent to it."""
-    if _CONTROL_CHARS.search(url):
-        return CATEGORY_UNRESOLVED
-    if _REMOTE_HELPER_RE.match(url):
-        return CATEGORY_UNSUPPORTED_TRANSPORT
+def _is_local(url: str) -> bool:
+    """True for a destination that needs no credential: a plain local path or a
+    `file://` URL. Anything unparseable or helper-shaped is not local."""
+    if _CONTROL_CHARS.search(url) or _REMOTE_HELPER_RE.match(url):
+        return False
     scheme_match = _URL_SCHEME_RE.match(url)
     if scheme_match:
-        scheme = scheme_match.group(1).lower()
-        if scheme in _NETWORKLESS_SCHEMES:
-            return None
-        if scheme not in _HTTP_SCHEMES:
-            return CATEGORY_UNSUPPORTED_TRANSPORT
+        return scheme_match.group(1).lower() in _NETWORKLESS_SCHEMES
+    # git reads `host:path` as ssh unless a slash comes first.
+    colon = url.find(":")
+    if colon == -1:
+        return True
+    slash = url.find("/")
+    return slash != -1 and slash < colon
+
+
+def _violation(url: str, anchor: tuple[str, int]) -> str | None:
+    """The refusal category for one destination *url*, or None when a git call
+    may reach it (credentialed for http(s), credential-free for a local one)."""
+    if _CONTROL_CHARS.search(url):
+        return CATEGORY_UNRESOLVED
+    if _is_local(url):
+        return None
+    scheme_match = _URL_SCHEME_RE.match(url)
+    if scheme_match and scheme_match.group(1).lower() in _HTTP_SCHEMES:
         destination = _authority(url)
         if destination is None:
             return CATEGORY_UNRESOLVED
         return None if destination == anchor else CATEGORY_OFF_HOST
-    # git reads `host:path` as ssh unless a slash comes first.
-    colon = url.find(":")
-    if colon != -1:
-        slash = url.find("/")
-        if slash == -1 or colon < slash:
-            return CATEGORY_UNSUPPORTED_TRANSPORT
-    return None
+    return CATEGORY_UNSUPPORTED_TRANSPORT
 
 
 def _anchor_authority(anchor_url: str) -> tuple[str, int]:
@@ -183,13 +203,37 @@ def _destination_urls(
         raise DestinationDeniedError(CATEGORY_UNRESOLVED)
     if tracking_remote_name not in configured:
         raise DestinationDeniedError(CATEGORY_NOT_CONFIGURED)
+    return _resolved_urls(tracking_remote_name, push=push, git_cwd=git_cwd)
+
+
+def _resolved_urls(name: str, *, push: bool, git_cwd: Path | None) -> list[str]:
     args = ["remote", "get-url", "--all"]
     if push:
         args.append("--push")
-    urls = _git_lines([*args, "--", tracking_remote_name], git_cwd)
+    urls = _git_lines([*args, "--", name], git_cwd)
     if not urls:
         raise DestinationDeniedError(CATEGORY_UNRESOLVED)
     return urls
+
+
+def _refuse_mixed(urls: list[str]) -> None:
+    if len({_is_local(url) for url in urls}) > 1:
+        raise DestinationDeniedError(CATEGORY_MIXED_TRANSPORT)
+
+
+def destinations_are_local(remote: str, *, push: bool, git_cwd: Path | None = None) -> bool:
+    """True when every destination a git call to *remote* reaches is local, so
+    the call must run without a credential; False when none is. A *remote* that
+    is not a configured name is itself the destination (git accepts a URL or a
+    path there). A set mixing the two kinds raises DestinationDeniedError: no
+    single environment is right for both."""
+    configured = _git_lines(["remote"], git_cwd)
+    if configured is not None and remote in configured:
+        urls = _resolved_urls(remote, push=push, git_cwd=git_cwd)
+    else:
+        urls = [remote]
+    _refuse_mixed(urls)
+    return _is_local(urls[0])
 
 
 def check_push_destination(
@@ -202,7 +246,9 @@ def check_push_destination(
     host and port an http(s) destination must equal."""
     anchor = _anchor_authority(anchor_url)
     for push in (True, False):
-        for url in _destination_urls(tracking_remote_name, push=push, git_cwd=git_cwd):
+        urls = _destination_urls(tracking_remote_name, push=push, git_cwd=git_cwd)
+        _refuse_mixed(urls)
+        for url in urls:
             category = _violation(url, anchor)
             if category is not None:
                 raise DestinationDeniedError(category)
@@ -213,6 +259,8 @@ __all__ = [
     "CATEGORY_OFF_HOST",
     "CATEGORY_UNRESOLVED",
     "CATEGORY_UNSUPPORTED_TRANSPORT",
+    "CATEGORY_MIXED_TRANSPORT",
     "DestinationDeniedError",
     "check_push_destination",
+    "destinations_are_local",
 ]

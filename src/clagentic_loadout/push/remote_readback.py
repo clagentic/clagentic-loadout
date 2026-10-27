@@ -78,6 +78,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.push.destination_guard import DestinationDeniedError
 from clagentic_loadout.push.git_push import (
     GitVersionTooOldError,
     RepoLocalConfigHazardError,
@@ -183,7 +184,7 @@ def read_remote_head(
     if token:
         try:
             result = git_ls_remote_with_token(remote, ref, token, project_root)
-        except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
+        except (GitVersionTooOldError, RepoLocalConfigHazardError, DestinationDeniedError) as exc:
             raise RemoteReadbackError(
                 f"post-push remote readback FAILED -- hermeticity pre-flight "
                 f"refused the read: {exc}"

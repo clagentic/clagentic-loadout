@@ -548,8 +548,13 @@ readback present the token to it):
 
 - an `http(s)` URL must have the same host and port as the platform host: the
   forge host on Forgejo, `github.com` on GitHub;
-- a local path and a `file://` URL are allowed (they never consult
-  `GIT_ASKPASS`, so they cannot receive the token);
+- a local path and a `file://` URL are allowed, and the git call that reaches
+  one runs WITHOUT the token: no `GIT_ASKPASS`, no token file, no credential in
+  the environment (a local receive-pack runs the destination repository's hooks
+  with the pushing process's environment, so a credentialed environment must
+  never reach one). The rest of the hermetic environment is unchanged;
+- a destination set that mixes an `http(s)` URL with a local one (several
+  `pushurl` values) is refused;
 - `ssh://`, scp-style `host:path`, `git://`, any other scheme and any
   `<name>::` remote helper are refused.
 
