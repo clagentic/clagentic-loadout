@@ -146,7 +146,10 @@ below).
   Text is redacted first (URL userinfo, `Authorization` values, bearer and `token=` literals,
   terminal escapes and control characters) and then cut: at most 1000 characters of message,
   4000 of excerpt per case and 40000 of text in total. A cut value ends with
-  `...[truncated: N characters dropped]`. When the total cap is reached the list ends with one
+  `...[truncated: N characters dropped]`. A text over 16000 characters is not redacted whole;
+  it is cut back first to a point its redaction cannot depend on (before a URL, a short
+  bearer or `token=` value, or an unterminated escape sequence at the edge), so a secret
+  split by that cut is dropped rather than shown in part. When the total cap is reached the list ends with one
   record that has no `id`, only `omitted_cases` and `note`. A run with no failed case prints
   `[]`. An `unrunnable` run, or one whose recorded report cannot be read, is refused (exit `78`).
 - **`--diff BASE_RUN_ID`**: JSON with `head_only`, `base_only` and `shared_count` of failing

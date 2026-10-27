@@ -9,7 +9,7 @@ import pytest
 from _repo_test_support import make_repo, write_run
 
 from clagentic_loadout.repo_test import exits, failures, store
-from clagentic_loadout.repo_test.junit import ID_SCHEME
+from clagentic_loadout.repo_test.junit import ID_SCHEME, FailedCase
 from clagentic_loadout.repo_test.run_cmd import execute_run
 from clagentic_loadout.repo_test.verb import main
 
@@ -148,6 +148,59 @@ def test_a_token_shaped_value_in_a_failure_is_redacted(
     assert secret not in out
     (record,) = json.loads(out)
     assert "[REDACTED]" in record["message"] and "[REDACTED]" in record["excerpt"]
+
+
+def _excerpt_of(text: str) -> str:
+    (record,) = failures.bound_failures([FailedCase("m.T::t", "failure", "m", text)])
+    return record["excerpt"]
+
+
+def _everything_kept(text: str) -> str:
+    """What survives redaction and the pre-cut, before any output cap: the
+    emitted text is a prefix of this."""
+    return failures._bounded(text, 10 * failures._REDACTION_INPUT_CHARS)[0]
+
+
+def test_a_userinfo_password_split_by_the_redaction_window_after_a_shrink_is_not_emitted() -> None:
+    window = failures._REDACTION_INPUT_CHARS
+    head = "Authorization: Bearer " + "A" * 15_000 + "\n"
+    password = "p" * (window - len(head) - len("https://user:"))
+    text = head + "https://user:" + password + "@host.example.test/x\n" + "tail " * 100
+
+    excerpt = _excerpt_of(text)
+
+    assert "user:" not in excerpt and "ppp" not in excerpt
+    assert excerpt.startswith("Authorization: [REDACTED]")
+
+
+def test_a_userinfo_password_split_by_the_redaction_window_without_a_shrink_is_not_emitted() -> None:
+    window = failures._REDACTION_INPUT_CHARS
+    password = "q" * 50
+    lead = "a " * ((window - len("https://user:") - len(password)) // 2)
+    text = lead + "https://user:" + password + "@host.example.test/x " + "z " * 100
+
+    assert "user:" not in _everything_kept(text) and "qqq" not in _everything_kept(text)
+
+
+def test_a_short_bearer_value_split_by_the_window_is_not_emitted() -> None:
+    window = failures._REDACTION_INPUT_CHARS
+    lead = "a " * ((window - len("Bearer abc")) // 2)
+    text = lead + "Bearer abcdefghijklmnop " + "z " * 100
+
+    assert "abc" not in _everything_kept(text)
+
+
+def test_an_unterminated_escape_sequence_at_the_window_edge_is_not_emitted() -> None:
+    window = failures._REDACTION_INPUT_CHARS
+    text = "ok " + "a " * ((window - 20) // 2) + "\x1b]0;payload-without-end " + "z" * 100
+
+    assert "payload" not in _everything_kept(text)
+
+
+def test_an_oversized_text_with_no_secret_near_the_window_keeps_its_leading_text() -> None:
+    text = "line one\n" + "x" * 100_000
+
+    assert _excerpt_of(text).startswith("line one\nxxx")
 
 
 def test_an_unrunnable_run_is_refused_naming_the_run(reports: Path, capsys: pytest.CaptureFixture[str]) -> None:
