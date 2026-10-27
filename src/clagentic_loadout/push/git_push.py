@@ -653,7 +653,7 @@ _HERMETIC_ARGV_PREFIX = ["-c", "credential.helper="]
 
 @contextlib.contextmanager
 def _destination_git_env(
-    remote: str, token: str, *, push: bool, git_cwd: Path | None, force_trace: bool = False
+    remote: str, token: str | None, *, push: bool, git_cwd: Path | None, force_trace: bool = False
 ):
     """The git environment for a call to *remote*: token-carrying only when the
     destination is not local. A local or file:// push runs the destination
@@ -802,10 +802,11 @@ class GitFetchError(Exception):
 def git_fetch_with_token(
     remote: str,
     branch: str,
-    token: str,
+    token: str | None,
     git_cwd: Path | None = None,
 ) -> None:
-    """Fetch *branch* from *remote* using *token* for authentication, via
+    """Fetch *branch* from *remote* using *token* for authentication (None:
+    the same hermetic fetch with no credential at all), via
     the SAME credentialed environment `git_push_with_token` uses (see
     `_credentialed_git_env`) — never an ambient credential.
 

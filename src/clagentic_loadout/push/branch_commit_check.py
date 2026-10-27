@@ -87,6 +87,7 @@ from pathlib import Path
 
 from clagentic_loadout.merge.commit_subjects import REAL_MERGE_METHOD
 from clagentic_loadout.merge.title_gate import is_conventional_title
+from clagentic_loadout.push.git_push import GitFetchError, git_fetch_with_token
 
 #: Separator between a commit's subject (%s) and its full hex SHA (%H) in
 #: the `git log` format string below. Chosen to be exceedingly unlikely to
@@ -136,6 +137,7 @@ def fetch_branch_commit_subjects(
     base_branch: str,
     *,
     remote: str = "origin",
+    token: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return [(sha, subject), ...] for EVERY commit in `<fetched
     remote/base_branch>..HEAD`, unfiltered (first line only) -- the raw
@@ -158,20 +160,27 @@ def fetch_branch_commit_subjects(
     merge.commit_subjects.check_branch_commit_subjects' own "first offender
     in *commit_subjects* order" contract.
 
+    The fetch runs through push.git_push.git_fetch_with_token, the same
+    destination-aware hermetic primitive the pre-lease fetch uses: no system or
+    global git config (so a user-level url rewrite cannot redirect it), no
+    ambient credential helper, netrc or askpass, and *token* presented only to
+    an http(s) destination. A private repository therefore keeps being checked
+    rather than silently soft-failing on an unauthenticated fetch. With *token*
+    None the fetch carries no credential at all.
+
     Raises:
         CommitCheckUnavailableError: the fetch or log command itself fails
             (unreachable remote, no such base branch, not a git repo).
+        GitVersionTooOldError, RepoLocalConfigHazardError: the hermeticity
+            pre-flight refused; a fail-closed refusal, not a check-execution
+            failure, so it is not folded into CommitCheckUnavailableError.
     """
-    fetch = _run_git(["fetch", remote, base_branch], cwd=Path(repo_root))
-    if fetch.returncode != 0:
-        # git's fetch diagnostics quote the remote URL, and *remote* is whatever
-        # config holds (a URL, or a name written as `<secret>@host/path`), so
-        # neither is printed: only the base branch and the exit code are.
-        raise CommitCheckUnavailableError(
-            f"git fetch of {base_branch} from the branch's tracking remote failed "
-            f"(exit {fetch.returncode}); git's output is withheld because it can "
-            f"quote the remote URL"
-        )
+    try:
+        git_fetch_with_token(remote, base_branch, token, Path(repo_root))
+    except GitFetchError as exc:
+        # The message is already category-only: git's output and the remote are
+        # withheld because both can quote a credential-bearing URL.
+        raise CommitCheckUnavailableError(str(exc)) from exc
 
     log = _run_git(
         [
@@ -205,6 +214,7 @@ def find_non_conformant_branch_commits(
     base_branch: str,
     *,
     remote: str = "origin",
+    token: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return [(sha, subject), ...] for every commit in
     `<fetched remote/base_branch>..HEAD` whose subject (first line only)
@@ -219,7 +229,7 @@ def find_non_conformant_branch_commits(
         CommitCheckUnavailableError: the fetch or log command itself fails
             (unreachable remote, no such base branch, not a git repo).
     """
-    subjects = fetch_branch_commit_subjects(repo_root, base_branch, remote=remote)
+    subjects = fetch_branch_commit_subjects(repo_root, base_branch, remote=remote, token=token)
     return [(sha, subject) for sha, subject in subjects if not is_conventional_title(subject)]
 
 
@@ -265,6 +275,7 @@ def check_branch_for_stray_merge_commits(
     merge_method: str,
     remote: str = "origin",
     skip: bool = False,
+    token: str | None = None,
 ) -> None:
     """Push-time backstop: refuse a push whose branch carries a commit in
     `<fetched remote/base_branch>..HEAD` with a non-Conventional-Commits
@@ -297,7 +308,9 @@ def check_branch_for_stray_merge_commits(
     if merge_method != REAL_MERGE_METHOD:
         return
 
-    offenders = find_non_conformant_branch_commits(repo_root, base_branch, remote=remote)
+    offenders = find_non_conformant_branch_commits(
+        repo_root, base_branch, remote=remote, token=token
+    )
     if offenders:
         raise StrayMergeCommitError(offenders, base_branch=base_branch)
 

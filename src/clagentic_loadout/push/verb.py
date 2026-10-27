@@ -1230,7 +1230,13 @@ def _run_cleanliness_check(project_root: Path, *, strict: bool) -> None:
 
 
 def _run_branch_commit_check(
-    project_root: Path, *, base_branch: str, remote: str, merge_method: str, skip: bool
+    project_root: Path,
+    *,
+    base_branch: str,
+    remote: str,
+    merge_method: str,
+    skip: bool,
+    token: str | None = None,
 ) -> None:
     """Push-time branch commit-subject check (lr-dd1742,
     push.branch_commit_check) -- catches a branch carrying a stray,
@@ -1263,6 +1269,7 @@ def _run_branch_commit_check(
     try:
         check_branch_for_stray_merge_commits(
             project_root, base_branch, merge_method=merge_method, remote=remote, skip=False,
+            token=token,
         )
     except CommitCheckUnavailableError as exc:
         print(
@@ -1272,7 +1279,7 @@ def _run_branch_commit_check(
 
 
 def _run_task_id_guard_commit_check(
-    project_root: Path, *, base_branch: str, remote: str
+    project_root: Path, *, base_branch: str, remote: str, token: str | None = None
 ) -> None:
     """Task-id guard, branch-commit-subject surface (lr-4005f5,
     task_id_guard) -- refuses (mode="block") or warns (mode="warn") when any
@@ -1302,6 +1309,9 @@ def _run_task_id_guard_commit_check(
     inability to run must never refuse a push that would otherwise be
     clean).
 
+    *token* is the minted token, presented only to an anchored http(s)
+    destination by the shared hermetic fetch primitive.
+
     Raises task_id_guard.TaskIdGuardViolation on the first matching commit
     subject (mode="block"); caught at the CLI boundary in main() and mapped
     to EXIT_TASK_ID_GUARD_VIOLATION.
@@ -1311,7 +1321,9 @@ def _run_task_id_guard_commit_check(
         return
 
     try:
-        subjects = fetch_branch_commit_subjects(project_root, base_branch, remote=remote)
+        subjects = fetch_branch_commit_subjects(
+            project_root, base_branch, remote=remote, token=token
+        )
     except CommitCheckUnavailableError as exc:
         print(
             f"push: task-id guard commit-subject check could not run -- {exc}",
@@ -2695,17 +2707,25 @@ def _run_create_pr(
 
     _run_cleanliness_check(project_root, strict=args.strict_cleanliness)
 
-    _run_branch_commit_check(
-        project_root,
-        base_branch=args.base,
-        remote=remote_name,
-        merge_method=args.merge_method,
-        skip=args.skip_branch_commit_check,
-    )
+    # The guard fetches share the push's credentialed hermetic primitive and the
+    # minted token: the destination was anchored above, so the token goes only
+    # to the platform host, and a private repo is still checked. A hermeticity
+    # refusal is fail-closed, the same as at the lease fetch and the push.
+    try:
+        _run_branch_commit_check(
+            project_root,
+            base_branch=args.base,
+            remote=remote_name,
+            merge_method=args.merge_method,
+            skip=args.skip_branch_commit_check,
+            token=token,
+        )
 
-    _run_task_id_guard_commit_check(
-        project_root, base_branch=args.base, remote=remote_name,
-    )
+        _run_task_id_guard_commit_check(
+            project_root, base_branch=args.base, remote=remote_name, token=token,
+        )
+    except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
+        _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
 
     # Repo-declared verification, at the head that is about to be pushed
     # (bot-identity re-authoring above has already settled it), before any
