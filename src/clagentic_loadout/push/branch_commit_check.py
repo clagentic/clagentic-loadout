@@ -82,11 +82,14 @@ gate firing and is always a hard refusal — see check_branch_for_stray_merge_co
 
 from __future__ import annotations
 
+import os
 import subprocess
+import tempfile
 from pathlib import Path
 
 from clagentic_loadout.merge.commit_subjects import REAL_MERGE_METHOD
 from clagentic_loadout.merge.title_gate import is_conventional_title
+from clagentic_loadout.push.git_hermeticity import neutralize_ambient_git_env
 
 #: Separator between a commit's subject (%s) and its full hex SHA (%H) in
 #: the `git log` format string below. Chosen to be exceedingly unlikely to
@@ -131,6 +134,26 @@ def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
 
 
+def _run_guard_fetch(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+    """Run a `git fetch` for a push-time guard with NO credential of any kind.
+
+    The destination check that precedes the guards resolves the tracking
+    remote's urls under the neutralized git environment (no global or system
+    config), so a user-level `url.<base>.insteadOf` rewrite is invisible to it.
+    A fetch run under the ambient environment would apply that rewrite and
+    answer an http(s) challenge from the ambient credential helper, netrc or
+    askpass, handing the credential to a host the check never saw. The fetch
+    therefore reads the same configuration the check read, and has no ambient
+    credential source to answer with."""
+    with tempfile.TemporaryDirectory(prefix="loadout_guard_fetch_") as empty_home:
+        env = neutralize_ambient_git_env(os.environ.copy())
+        env["HOME"] = empty_home
+        env["XDG_CONFIG_HOME"] = empty_home
+        return subprocess.run(
+            ["git", *args], cwd=str(cwd), capture_output=True, text=True, env=env
+        )
+
+
 def fetch_branch_commit_subjects(
     repo_root: str | Path,
     base_branch: str,
@@ -162,7 +185,7 @@ def fetch_branch_commit_subjects(
         CommitCheckUnavailableError: the fetch or log command itself fails
             (unreachable remote, no such base branch, not a git repo).
     """
-    fetch = _run_git(["fetch", remote, base_branch], cwd=Path(repo_root))
+    fetch = _run_guard_fetch(["fetch", remote, base_branch], cwd=Path(repo_root))
     if fetch.returncode != 0:
         # git's fetch diagnostics quote the remote URL, and *remote* is whatever
         # config holds (a URL, or a name written as `<secret>@host/path`), so
