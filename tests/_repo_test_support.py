@@ -5,21 +5,28 @@ a direct writer for finished run directories."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
+from xml.etree import ElementTree
 
 from clagentic_loadout.repo_test import store
 
 FAKE_RUNNER = '''\
 """Stand-in test runner: writes a JUnit report to argv[1]. Every further argument
-is a test file; a file whose name contains "bad" fails. With no files, the
-`fail.txt` marker in the working directory makes one test fail."""
+is a test file; a file whose name contains "bad" fails. A `--base=<value>` argument
+is an option, never a file: its value is recorded as a passing `suite.base` test so
+a test can read what the command received. With no files, the `fail.txt` marker in
+the working directory makes one test fail."""
 import sys
 
-junit, files = sys.argv[1], sys.argv[2:]
+junit, args = sys.argv[1], sys.argv[2:]
+bases = [a[len("--base="):] for a in args if a.startswith("--base=")]
+files = [a for a in args if not a.startswith("--base=")]
 cases = [("suite.alpha", "test_one", "pass"), ("suite.alpha", "test_two", "pass")]
 cases.append(("suite.alpha", "test_skipped", "skip"))
+cases.extend(("suite.base", value, "pass") for value in bases)
 for name in files:
     cases.append(("suite.files", name, "fail" if "bad" in name else "pass"))
 import os
@@ -34,6 +41,9 @@ with open(junit, "w") as handle:
 sys.exit(1 if any(c[2] == "fail" for c in cases) else 0)
 '''
 
+# Fixed so the seed commit, and the base SHA derived from it, is the same on every run.
+_SEED_DATE = "2026-01-01T00:00:00+00:00"
+
 _GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
 
 
@@ -46,7 +56,7 @@ def profile_text(**test_keys: list[str] | str) -> str:
     runner = [sys.executable, "runner.py", "{junit}"]
     declared: dict[str, object] = {
         "full": runner,
-        "impacted": [*runner, "{base}"],
+        "impacted": [*runner, "--base={base}"],
         "files": runner,
     }
     declared.update(test_keys)
@@ -66,7 +76,13 @@ def make_repo(root: Path, *, profile: str | None = None, git_init: bool = True) 
     if git_init:
         git(root, "init", "-q", "-b", "main")
         git(root, "add", "runner.py", "test_good.py", "test_bad.py", ".clagentic/loadout/profile.yaml")
-        git(root, "commit", "-q", "-m", "chore: seed")
+        subprocess.run(
+            [*_GIT, "-C", str(root), "commit", "-q", "-m", "chore: seed"],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "GIT_AUTHOR_DATE": _SEED_DATE, "GIT_COMMITTER_DATE": _SEED_DATE},
+        )
     return root
 
 
@@ -122,6 +138,12 @@ def write_run(
             result["tier"] = tier
         (run_dir / store.RESULT_FILE).write_text(json.dumps(result))
     return run_dir
+
+
+def recorded_bases(run_dir: Path) -> list[str]:
+    """The base values the stand-in runner received, read from a run's junit report."""
+    root = ElementTree.parse(run_dir / store.JUNIT_FILE).getroot()
+    return [case.get("name", "") for case in root.iter("testcase") if case.get("classname") == "suite.base"]
 
 
 def tree_snapshot(root: Path) -> dict[str, tuple[int, int, bytes]]:
