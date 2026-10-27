@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import base64
 import json
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from clagentic_loadout.push import verb
+from clagentic_loadout.push.git_push import GitFetchError, git_fetch_with_token
 from clagentic_loadout.push.remote_readback import RemoteReadbackError
 from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root is an autouse fixture)
     RecordingTokenProvider,
@@ -36,6 +38,7 @@ from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root 
     json_resp,
     repo_with_remote,
     run_main,
+    use_local_fetch_url,
 )
 
 TOKEN = "FAKETOKEN-684312"
@@ -284,6 +287,120 @@ def test_forgejo_aliased_origin_on_the_anchored_host_still_pushes(
     assert no_network_readback == ["feature"]
     assert listener.requests == []
     assert "feature" in git(["branch"], remote).stdout
+
+
+def _install_env_recording_hook(remote, record):
+    """A pre-receive hook in the destination repo that records everything a
+    hostile destination could read: its environment, and the file GIT_ASKPASS
+    names (the generated script) plus the token file that script reads."""
+    hook = remote / "hooks" / "pre-receive"
+    hook.write_text(
+        "#!/bin/sh\n"
+        f'env >> "{record}"\n'
+        f'echo "ASKPASS=${{GIT_ASKPASS-unset}}" >> "{record}"\n'
+        'if [ -n "$GIT_ASKPASS" ] && [ -r "$GIT_ASKPASS" ]; then\n'
+        f'  cat "$GIT_ASKPASS" >> "{record}"\n'
+        f'  cat "$(dirname "$GIT_ASKPASS")/tok" >> "{record}"\n'
+        "fi\n"
+        "exit 0\n"
+    )
+    hook.chmod(0o755)
+
+
+@pytest.mark.parametrize("extra", [(), ("--force-with-lease",)])
+def test_a_local_destination_hook_sees_no_credential(
+    extra, repo_with_remote, monkeypatch, capsys, tmp_path
+):
+    """A local receive-pack runs the destination's hooks with the pushing
+    process's environment, so that git call carries no GIT_ASKPASS, no token
+    file and no token anywhere in the environment."""
+    repo, remote = repo_with_remote
+    use_local_fetch_url(repo, remote)
+    record = tmp_path / "hook-record.txt"
+    _install_env_recording_hook(remote, record)
+    provider = RecordingTokenProvider(token=TOKEN)
+
+    code = _run(
+        _github_args(repo, "--skip-branch-commit-check", *extra), monkeypatch,
+        provider=provider, opener=_github_opener,
+    )
+
+    out, err = capsys.readouterr()
+    assert code == verb.EXIT_OK, err
+    assert "feature" in git(["branch"], remote).stdout
+    seen = record.read_text()
+    assert "ASKPASS=unset" in seen
+    assert "GIT_ASKPASS=" not in seen
+    assert TOKEN not in seen
+    assert "askpass.sh" not in seen
+
+
+def test_a_network_destination_still_receives_the_askpass_environment(tmp_path, monkeypatch):
+    """The other half of the rule: for an http(s) destination the token is
+    still presented, so the change removes exposure to local transports only."""
+    seen: dict = {}
+    real_run = subprocess.run
+
+    def _spy(cmd, **kwargs):
+        if "fetch" in cmd:
+            seen["env"] = kwargs["env"]
+        return real_run(cmd, **kwargs)
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(["init", "-b", "main"], repo)
+    git(["remote", "add", "origin", "http://127.0.0.1:1/o/r.git"], repo)
+    monkeypatch.setattr("clagentic_loadout.push.git_push.subprocess.run", _spy)
+
+    with pytest.raises(GitFetchError):
+        git_fetch_with_token("origin", "main", TOKEN, repo)
+
+    assert seen["env"]["GIT_ASKPASS"]
+
+
+def test_a_local_fetch_destination_carries_no_askpass(repo_with_remote, monkeypatch):
+    repo, remote = repo_with_remote
+    use_local_fetch_url(repo, remote)
+    seen: dict = {}
+    real_run = subprocess.run
+
+    def _spy(cmd, **kwargs):
+        if "fetch" in cmd:
+            seen["env"] = kwargs["env"]
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr("clagentic_loadout.push.git_push.subprocess.run", _spy)
+    monkeypatch.setenv("GIT_ASKPASS", "/ambient/askpass.sh")
+
+    git_fetch_with_token("origin", "main", TOKEN, repo)
+
+    assert "GIT_ASKPASS" not in seen["env"]
+    assert TOKEN not in " ".join(seen["env"].values())
+
+
+@pytest.mark.parametrize("platform", ["github", "forgejo"])
+def test_a_mixed_http_and_local_push_set_is_refused_before_the_mint(
+    platform, repo_with_remote, monkeypatch, capsys
+):
+    repo, remote = repo_with_remote
+    if platform == "github":
+        use_local_fetch_url(repo, remote)
+        anchored_push = GITHUB_URL
+        args = _github_args(repo, "--skip-branch-commit-check")
+    else:
+        anchored_push = f"http://{ANCHORED_HOST}/some-owner/some-repo.git"
+        args = _forgejo_args(repo, "--skip-branch-commit-check")
+    git(["config", "--add", "remote.origin.pushurl", anchored_push], repo)
+    provider = RecordingTokenProvider(token=TOKEN)
+
+    code = _run(args, monkeypatch, provider=provider, opener=_github_opener)
+
+    out, err = capsys.readouterr()
+    assert code == verb.EXIT_REMOTE_ERROR
+    assert provider.resolved_for == []
+    assert "mix a network destination with a local one" in err
+    assert str(remote) not in out + err
+    assert "feature" not in git(["branch"], remote).stdout
 
 
 @pytest.mark.parametrize(

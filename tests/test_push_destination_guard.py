@@ -6,12 +6,14 @@ import pytest
 
 from clagentic_loadout.push import destination_guard
 from clagentic_loadout.push.destination_guard import (
+    CATEGORY_MIXED_TRANSPORT,
     CATEGORY_NOT_CONFIGURED,
     CATEGORY_OFF_HOST,
     CATEGORY_UNRESOLVED,
     CATEGORY_UNSUPPORTED_TRANSPORT,
     DestinationDeniedError,
     check_push_destination,
+    destinations_are_local,
 )
 from tests._gate_repo import git, seed_base_commit
 
@@ -171,8 +173,49 @@ def test_refusal_messages_name_a_category_never_a_value(tree):
         assert "example.com" not in str(excinfo.value)
 
 
+@pytest.mark.parametrize(
+    ("local_url", "network_url"),
+    [
+        ("/srv/git/r.git", "https://git-host.example.com:3000/o/r.git"),
+        ("file:///srv/git/r.git", "https://git-host.example.com:3000/o/r.git"),
+    ],
+)
+@pytest.mark.parametrize("local_first", [True, False])
+def test_a_push_set_mixing_local_and_network_destinations_is_refused(
+    tree, local_url, network_url, local_first
+):
+    """A credentialed environment must never reach a local receive-pack, and a
+    credential-free one cannot serve the network member: no environment fits."""
+    first, second = (local_url, network_url) if local_first else (network_url, local_url)
+    _remote(tree, first, push_urls=[first, second])
+
+    with pytest.raises(DestinationDeniedError) as excinfo:
+        check_push_destination("origin", anchor_url=ANCHOR, git_cwd=tree)
+
+    assert excinfo.value.category == CATEGORY_MIXED_TRANSPORT
+    with pytest.raises(DestinationDeniedError):
+        destinations_are_local("origin", push=True, git_cwd=tree)
+
+
+def test_destinations_are_local_follows_the_destination_set_asked_for(tree):
+    _remote(tree, "/srv/git/r.git", push_urls=["https://git-host.example.com:3000/o/r.git"])
+
+    assert destinations_are_local("origin", push=False, git_cwd=tree) is True
+    assert destinations_are_local("origin", push=True, git_cwd=tree) is False
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [("/srv/git/r.git", True), ("file:///srv/git/r.git", True), ("not-configured", True),
+     ("https://git-host.example.com:3000/o/r.git", False)],
+)
+def test_an_unconfigured_remote_value_is_itself_the_destination(tree, remote, expected):
+    assert destinations_are_local(remote, push=True, git_cwd=tree) is expected
+
+
 def test_every_category_has_a_message():
     for category in (
+        CATEGORY_MIXED_TRANSPORT,
         CATEGORY_NOT_CONFIGURED,
         CATEGORY_OFF_HOST,
         CATEGORY_UNRESOLVED,
