@@ -110,6 +110,7 @@ from typing import Iterable
 from clagentic_loadout.git_origin import ConfigTreeBinding, OriginBindingError
 from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
 from clagentic_loadout.merge.config_root import MergeConfigRootRefusedError, resolve_merge_config_path
+from clagentic_loadout.merge.fetch_transport import MergeFetchAuth, MergeFetchDeniedError
 from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_CI_STRICT,
     CONFIG_KEY_EVALUATOR,
@@ -402,6 +403,7 @@ def load_gate_at_commit(
     base_branch: str = "",
     deployment_repo_path: str | Path | None = None,
     config_binding: ConfigTreeBinding | None = None,
+    fetch_auth: MergeFetchAuth | None = None,
 ) -> RepoGate:
     """Read the tracked gate file at *sha* in *git_tree* and apply
     `gate_from_tracked_text`. A commit or file that cannot be read is the same
@@ -419,10 +421,19 @@ def load_gate_at_commit(
     the "nothing readable" gate (the merge refuses). The tracked file read above
     is content-addressed at *sha*, so it needs no binding. None keeps the
     fallback unbound for a library caller; the merge verbs always pass one.
+
+    *fetch_auth* is what a fetch of a missing base commit may present (see
+    `merge.fetch_transport`). A refused fetch destination is NOT an unreadable
+    commit: it propagates as MergeFetchDeniedError, because degrading it to the
+    "nothing readable" gate would let a steered remote loosen the reviewer floor.
     """
     source = f"{Path(git_tree).resolve()}@{sha[:12]}:{TRACKED_GATE_RELATIVE_PATH}"
     try:
-        text = read_file_at_commit(git_tree, sha, TRACKED_GATE_RELATIVE_PATH, base_branch=base_branch)
+        text = read_file_at_commit(
+            git_tree, sha, TRACKED_GATE_RELATIVE_PATH, base_branch=base_branch, fetch_auth=fetch_auth
+        )
+    except MergeFetchDeniedError:
+        raise
     except CommitFileReadError as exc:
         return _nothing_readable(_ignored_or_none(deployment_repo_path), f"{source}: {exc}")
     if text is None and deployment_repo_path is not None:
@@ -442,6 +453,7 @@ def load_repo_gate_at_base(
     base_sha: str,
     base_branch: str = "",
     config_binding: ConfigTreeBinding | None = None,
+    fetch_auth: MergeFetchAuth | None = None,
 ) -> RepoGate:
     """Load the repo's declared gate from the PR base commit.
 
@@ -485,6 +497,7 @@ def load_repo_gate_at_base(
             base_branch=base_branch,
             deployment_repo_path=repo_path,
             config_binding=config_binding,
+            fetch_auth=fetch_auth,
         )
         # Keep only the IGNORED notices the source itself raised: none when the
         # deployment file is the gate, because then nothing in it is ignored.
@@ -503,6 +516,7 @@ def load_repo_gate_at_base(
         base_branch=base_branch,
         deployment_repo_path=repo_path,
         config_binding=config_binding,
+        fetch_auth=fetch_auth,
     )
 
 

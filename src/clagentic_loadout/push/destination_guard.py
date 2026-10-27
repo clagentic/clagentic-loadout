@@ -168,9 +168,10 @@ def _is_local(url: str) -> bool:
     return slash != -1 and slash < colon
 
 
-def _violation(url: str, anchor: tuple[str, int]) -> str | None:
+def _violation(url: str, anchor: tuple[str, int] | None) -> str | None:
     """The refusal category for one destination *url*, or None when a git call
-    may reach it (credentialed for http(s), credential-free for a local one)."""
+    may reach it (credentialed for http(s), credential-free for a local one).
+    With no *anchor* every http(s) destination is off-host."""
     if _CONTROL_CHARS.search(url):
         return CATEGORY_UNRESOLVED
     if _is_local(url):
@@ -254,6 +255,25 @@ def check_push_destination(
                 raise DestinationDeniedError(category)
 
 
+def check_fetch_destination(
+    tracking_remote_name: str, *, anchor_url: str | None, git_cwd: Path | None = None
+) -> None:
+    """Refuse (DestinationDeniedError) unless every FETCH destination of
+    *tracking_remote_name* may be reached by a git call: an http(s) URL on the
+    host and port of *anchor_url*, or a local path / `file://` URL. A caller
+    that never pushes has no use for the push urls, so only the fetch set is
+    judged (a differing `pushurl` is the ordinary ssh-push shape and never
+    reaches a fetch). *anchor_url* None means no platform host is known, so any
+    http(s) destination is refused and only local ones pass."""
+    anchor = _anchor_authority(anchor_url) if anchor_url is not None else None
+    urls = _destination_urls(tracking_remote_name, push=False, git_cwd=git_cwd)
+    _refuse_mixed(urls)
+    for url in urls:
+        category = _violation(url, anchor)
+        if category is not None:
+            raise DestinationDeniedError(category)
+
+
 __all__ = [
     "CATEGORY_NOT_CONFIGURED",
     "CATEGORY_OFF_HOST",
@@ -261,6 +281,7 @@ __all__ = [
     "CATEGORY_UNSUPPORTED_TRANSPORT",
     "CATEGORY_MIXED_TRANSPORT",
     "DestinationDeniedError",
+    "check_fetch_destination",
     "check_push_destination",
     "destinations_are_local",
 ]

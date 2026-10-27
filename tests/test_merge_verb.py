@@ -23,7 +23,7 @@ import yaml
 
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.verdict import build_verdict_block
-from tests._gate_repo import seed_base_commit
+from tests._gate_repo import git, seed_base_commit
 from tests._support.merge_verb import (
     FULL_SHA as _FULL_SHA,
     MERGED_COMMIT_SHA as _MERGED_COMMIT_SHA,
@@ -1136,14 +1136,17 @@ class TestPostMergeReadback:
         TreeSyncError/EXIT_POST_MERGE_FAILED, which would be a DIFFERENT exit
         code than the one this test asserts -- proving the refusal really
         happens at the readback point, not coincidentally later."""
+        pr_info = _pr_info_with_base(tmp_path)
+        # A configured remote that cannot be fetched from: a tree with no
+        # remote at all is refused before the merge (merge.fetch_transport),
+        # which would hide the ordering this test pins.
+        git(tmp_path, "remote", "add", "origin", str(tmp_path.parent / "no-such-remote.git"))
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=_make_opener(
-                pr_info=_pr_info_with_base(tmp_path), post_merge_readback_confirms=False
-            ),
+            opener=_make_opener(pr_info=pr_info, post_merge_readback_confirms=False),
         )
         assert code == verb.EXIT_MERGE_READBACK_FAILED
 

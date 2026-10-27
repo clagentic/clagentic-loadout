@@ -2145,6 +2145,16 @@ on both platforms:
    platform's `merge_pr` (Forgejo or GitHub, both through the
    redirect-hardened shared transport).
 
+**Merge-path fetch destination.** Before the merge path runs a git fetch of the
+base branch, the base branch's tracking remote must be a configured remote whose
+fetch destination is an http(s) URL on the platform host and port, or a local path
+or `file://` URL. ssh, scp-style, `git://` and remote-helper destinations are
+refused. A refusal exits `1` before any git network call, with a message that
+names only the category of the refusal. An anchored (http(s)) fetch authenticates
+with the minted merger credential and never with an ambient credential: the fetch
+reads no global or system git config, so a user-level `url.insteadOf` or
+`safe.directory` does not apply to it. A local fetch carries no credential.
+
 Any gate failure refuses and exits non-zero; the merge is never attempted
 on a partial pass. Both the Forgejo backend (`merge.forgejo_backend`) and
 the GitHub backend (`merge.github_backend`) are landed and CLI-reachable
@@ -2958,6 +2968,15 @@ re-run gets the exact same bounded-timeout/verified-liveness behavior a
 merge-embedded run would have, via the SAME
 `merge.post_merge_config.resolve_post_merge_step_timeout_seconds` call
 `loadout-merge`'s own post-merge tail makes.
+
+The advance of `--repo-path` to the merged SHA fetches under the same
+destination rule as `loadout-merge` (see "Merge-path fetch destination"
+above): the base branch's tracking remote must be a configured remote whose fetch
+destination is an http(s) URL on the platform host and port, or a local path or
+`file://` URL; ssh, scp-style, `git://` and remote-helper destinations exit `1`
+before any git network call, with a category-only message. An anchored fetch
+uses the minted merger credential and no ambient credential or global/system git
+config; a local fetch carries no credential.
 
 **`--repo-path` is the git tree.** A `--repo-path` in no git work tree (a non-git wrapper
 included) is refused with exit `1` before any credential mint or network call; when that

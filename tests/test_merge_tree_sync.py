@@ -459,14 +459,10 @@ class TestFetchMergedShaObject:
         nonexistent_sha = "f" * 40
         import clagentic_loadout.merge.tree_sync as tree_sync_module
 
-        real_run_git = tree_sync_module._run_git
-
-        def _fake_run_git(args, *, cwd):
-            if args[:1] == ["fetch"]:
-                return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
-            return real_run_git(args, cwd=cwd)
-
-        monkeypatch.setattr(tree_sync_module, "_run_git", _fake_run_git)
+        # The fetch goes through merge.fetch_transport, not _run_git.
+        monkeypatch.setattr(
+            tree_sync_module, "fetch_from_tracking_remote", lambda *args, **kwargs: None
+        )
 
         with pytest.raises(TreeSyncError, match="git cat-file -e"):
             fetch_merged_sha_object(

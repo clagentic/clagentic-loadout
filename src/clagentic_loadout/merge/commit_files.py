@@ -18,11 +18,23 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from clagentic_loadout.push.git_coords import tracking_remote
+from clagentic_loadout.merge.fetch_transport import (
+    MergeFetchAuth,
+    MergeFetchDeniedError,
+    MergeFetchFailedError,
+    fetch_from_tracking_remote,
+)
 
 
 class CommitFileReadError(Exception):
     """A commit or a file at that commit could not be read."""
+
+
+class CommitFetchDeniedError(MergeFetchDeniedError, CommitFileReadError):
+    """The commit is absent and the fetch that would supply it was refused
+    before any network call. Both kinds, so a caller reading "could not read the
+    commit" still catches it while one that must not degrade a steered remote can
+    tell it apart."""
 
 
 def _git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -57,14 +69,25 @@ def resolve_commit(git_tree: str | Path, ref: str) -> str | None:
     return resolved.stdout.strip() or None if resolved.returncode == 0 else None
 
 
-def ensure_commit_present(git_tree: str | Path, sha: str, *, base_branch: str = "") -> None:
+def ensure_commit_present(
+    git_tree: str | Path,
+    sha: str,
+    *,
+    base_branch: str = "",
+    fetch_auth: MergeFetchAuth | None = None,
+) -> None:
     """Guarantee *sha* names a commit in *git_tree*'s object database.
 
-    Fetches it from the base branch's tracking remote when it is missing.
+    Fetches it from the base branch's tracking remote when it is missing, through
+    `merge.fetch_transport` with *fetch_auth* (None allows local remotes only).
 
     Raises:
         CommitFileReadError: *git_tree* is not a git tree, or the commit is
             absent locally and cannot be fetched.
+        CommitFetchDeniedError: the tracking remote's destination was refused
+            before any network call. Also a MergeFetchDeniedError, which a caller
+            that degrades an unreadable commit must re-raise instead (see
+            `merge.repo_gate_runtime.load_gate_at_commit`).
     """
     git_tree = Path(git_tree)
     if not sha or sha.startswith("-"):
@@ -72,17 +95,23 @@ def ensure_commit_present(git_tree: str | Path, sha: str, *, base_branch: str = 
     probe = _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=git_tree)
     if probe.returncode == 0:
         return
-    remote = tracking_remote(base_branch, git_tree) if base_branch else "origin"
-    fetched = _git(["fetch", remote, sha], cwd=git_tree)
-    if fetched.returncode != 0:
+    # Outside a git tree no remote exists to judge or fetch from: that is an
+    # unreadable commit (a caller may degrade it), not a refused destination.
+    if _git(["rev-parse", "--git-dir"], cwd=git_tree).returncode != 0:
+        raise CommitFileReadError(f"commit {sha} is not present: {git_tree} is not a git tree")
+    try:
+        fetch_from_tracking_remote(git_tree, base_branch, sha, fetch_auth)
+    except MergeFetchDeniedError as exc:
+        raise CommitFetchDeniedError(f"commit {sha} is not present in {git_tree}: {exc}") from exc
+    except MergeFetchFailedError as exc:
         # git's fetch diagnostics quote the remote URL, query string included, and
         # the tracking remote is whatever config holds (a URL, or a name written as
-        # `<secret>@host/path`), so neither is printed: only the exit code is.
+        # `<secret>@host/path`), so neither is printed: the transport's message
+        # carries only the exit code.
         raise CommitFileReadError(
             f"commit {sha} is not present in {git_tree} and fetching it from the "
-            f"branch's tracking remote failed (exit {fetched.returncode}; git's output "
-            f"is withheld because it can quote the remote URL)"
-        )
+            f"branch's tracking remote failed ({exc})"
+        ) from exc
     recheck = _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd=git_tree)
     if recheck.returncode != 0:
         raise CommitFileReadError(
@@ -92,7 +121,12 @@ def ensure_commit_present(git_tree: str | Path, sha: str, *, base_branch: str = 
 
 
 def read_file_at_commit(
-    git_tree: str | Path, sha: str, relative_path: str, *, base_branch: str = ""
+    git_tree: str | Path,
+    sha: str,
+    relative_path: str,
+    *,
+    base_branch: str = "",
+    fetch_auth: MergeFetchAuth | None = None,
 ) -> str | None:
     """Return *relative_path*'s text at commit *sha*, or None when the commit's
     tree does not contain it.
@@ -104,7 +138,7 @@ def read_file_at_commit(
             or show the path; or the content is not valid UTF-8.
     """
     git_tree = Path(git_tree)
-    ensure_commit_present(git_tree, sha, base_branch=base_branch)
+    ensure_commit_present(git_tree, sha, base_branch=base_branch, fetch_auth=fetch_auth)
     listed = _git(["ls-tree", "--full-tree", "--name-only", sha, "--", relative_path], cwd=git_tree)
     if listed.returncode != 0:
         raise CommitFileReadError(
@@ -127,4 +161,10 @@ def read_file_at_commit(
         ) from exc
 
 
-__all__ = ["CommitFileReadError", "ensure_commit_present", "read_file_at_commit", "resolve_commit"]
+__all__ = [
+    "CommitFetchDeniedError",
+    "CommitFileReadError",
+    "ensure_commit_present",
+    "read_file_at_commit",
+    "resolve_commit",
+]

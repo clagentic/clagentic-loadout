@@ -507,6 +507,9 @@ class TestMalformedGateAtBase:
 
     def test_a_base_sha_that_cannot_be_read_refuses_pre_checks(self, tmp_path, capsys):
         repo = _repo_with(tmp_path, [_FAIL_CHECK])
+        # A configured remote the missing commit cannot be fetched from: a tree
+        # with no remote at all is refused outright (merge.fetch_transport).
+        git(repo.path, "remote", "add", "origin", str(tmp_path.parent / "no-such-remote.git"))
         pr_info = {**repo.pr_info(), "base": {"ref": "main", "sha": "f" * 40}}
         merge_calls: list[str] = []
         assert _merge(repo, pr_info=pr_info, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED

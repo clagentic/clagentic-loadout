@@ -126,7 +126,12 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from clagentic_loadout.push.git_coords import tracking_remote
+from clagentic_loadout.merge.fetch_transport import (
+    MergeFetchAuth,
+    MergeFetchDeniedError,
+    MergeFetchFailedError,
+    fetch_from_tracking_remote,
+)
 
 
 class TreeSyncError(Exception):
@@ -137,6 +142,8 @@ class TreeSyncError(Exception):
 
 
 def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
+    """A local-only git call (checkout, rev-parse, cat-file). Network fetches go
+    through `merge.fetch_transport`, never through here."""
     return subprocess.run(
         ["git", *args],
         capture_output=True,
@@ -145,17 +152,17 @@ def _run_git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _fetch_failure_message(fetch_target: str, repo_path: Path, result: subprocess.CompletedProcess) -> str:
+def _fetch(
+    repo_path: Path, base_branch: str, fetch_target: str, fetch_auth: MergeFetchAuth | None
+) -> None:
     # git's fetch diagnostics quote the remote URL, query string included, and the
     # tracking remote is whatever `branch.<name>.remote` holds (a URL, or a name
-    # that is itself written as `<secret>@host/path`), so neither git's text nor
-    # the remote value may be printed. Only the target, the path and the exit
-    # code are.
-    return (
-        f"git fetch of {fetch_target!r} from the branch's tracking remote failed "
-        f"(exit {result.returncode}) in {repo_path}; git's output is withheld "
-        f"because it can quote the remote URL"
-    )
+    # that is itself written as `<secret>@host/path`), so the transport's messages
+    # carry a category or an exit code only, and this adds the target and path.
+    try:
+        fetch_from_tracking_remote(repo_path, base_branch, fetch_target, fetch_auth)
+    except (MergeFetchDeniedError, MergeFetchFailedError) as exc:
+        raise TreeSyncError(f"{exc} (fetching {fetch_target!r} in {repo_path})") from exc
 
 
 def resolve_base_branch(pr_info: dict) -> str:
@@ -187,6 +194,7 @@ def advance_repo_to_merged_sha(
     *,
     base_branch: str,
     known_merged_sha: str | None = None,
+    fetch_auth: MergeFetchAuth | None = None,
 ) -> str:
     """Advance the working tree at *repo_path* to the merged main commit and
     return the resulting HEAD SHA.
@@ -222,7 +230,12 @@ def advance_repo_to_merged_sha(
     `git fetch origin` fail here, which silently skipped every
     post_merge_steps entry after an otherwise-successful merge.
 
-    Raises TreeSyncError on: a missing/unresolvable *base_branch*, any
+    *fetch_auth* is the platform anchor and minted token the fetch may present
+    (see `merge.fetch_transport`); None allows local remotes only. A refused
+    destination raises before any network call.
+
+    Raises TreeSyncError on: a missing/unresolvable *base_branch*, a refused
+    fetch destination, any
     non-zero `git fetch`/`git checkout`/`git rev-parse` exit, or a
     post-checkout HEAD that does not match *known_merged_sha* when one was
     supplied.
@@ -235,11 +248,8 @@ def advance_repo_to_merged_sha(
             f"guess which ref the merge landed on."
         )
 
-    remote_name = tracking_remote(base_branch, repo_path)
     fetch_target = known_merged_sha if known_merged_sha else base_branch
-    fetch_result = _run_git(["fetch", remote_name, fetch_target], cwd=repo_path)
-    if fetch_result.returncode != 0:
-        raise TreeSyncError(_fetch_failure_message(fetch_target, repo_path, fetch_result))
+    _fetch(repo_path, base_branch, fetch_target, fetch_auth)
 
     checkout_target = known_merged_sha if known_merged_sha else "FETCH_HEAD"
     checkout_result = _run_git(
@@ -281,6 +291,7 @@ def fetch_merged_sha_object(
     *,
     base_branch: str,
     known_merged_sha: str | None = None,
+    fetch_auth: MergeFetchAuth | None = None,
 ) -> str:
     """Fetch the merged commit into *repo_path*'s local object database and
     return its SHA, WITHOUT checking anything out -- no `git checkout`, no
@@ -340,11 +351,8 @@ def fetch_merged_sha_object(
             f"guess which ref the merge landed on."
         )
 
-    remote_name = tracking_remote(base_branch, repo_path)
     fetch_target = known_merged_sha if known_merged_sha else base_branch
-    fetch_result = _run_git(["fetch", remote_name, fetch_target], cwd=repo_path)
-    if fetch_result.returncode != 0:
-        raise TreeSyncError(_fetch_failure_message(fetch_target, repo_path, fetch_result))
+    _fetch(repo_path, base_branch, fetch_target, fetch_auth)
 
     if known_merged_sha:
         fetched_sha = known_merged_sha

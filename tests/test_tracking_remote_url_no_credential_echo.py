@@ -17,7 +17,12 @@ from pathlib import Path
 
 import pytest
 
-from clagentic_loadout.merge.commit_files import CommitFileReadError, ensure_commit_present
+from clagentic_loadout.merge.commit_files import (
+    CommitFetchDeniedError,
+    CommitFileReadError,
+    ensure_commit_present,
+)
+from clagentic_loadout.merge.fetch_transport import MergeFetchAuth
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
     advance_repo_to_merged_sha,
@@ -68,9 +73,30 @@ def tree_and_remote(request, tmp_path) -> tuple[Path, str]:
     return path, value
 
 
-@pytest.fixture
-def tree(tree_and_remote) -> Path:
-    return tree_and_remote[0]
+@pytest.fixture(params=sorted(REMOTE_VALUES))
+def tree(request, tmp_path) -> Path:
+    """A repo whose tracking remote PASSES the destination guard under `AUTH` (the
+    closed port is the anchored host) but whose fetch FAILS offline: the alias form
+    is a configured remote named by the branch, the URL forms are the `origin`
+    remote that a branch with no `remote` setting falls back to."""
+    path = tmp_path / "tree"
+    seed_base_commit(path)
+    if request.param == "alias-name":
+        git(path, "remote", "add", ALIAS_NAME, UNREACHABLE)
+        git(path, "config", "branch.main.remote", ALIAS_NAME)
+    else:
+        git(path, "remote", "add", "origin", REMOTE_VALUES[request.param])
+    return path
+
+
+@pytest.fixture(params=sorted(set(REMOTE_VALUES) - {"alias-name"}))
+def refused_tree(request, tmp_path) -> Path:
+    """A repo whose tracking remote is itself a credential-bearing URL: not a
+    configured remote, so the guard refuses it before any git network call."""
+    path = tmp_path / "tree"
+    seed_base_commit(path)
+    git(path, "config", "branch.main.remote", REMOTE_VALUES[request.param])
+    return path
 
 
 def _assert_clean(excinfo, capsys):
@@ -94,29 +120,58 @@ def test_git_refuses_a_colon_in_a_remote_name(tmp_path):
     assert "is not a valid remote name" in result.stderr
 
 
+#: The closed port is the anchored platform host, so a remote that passes the
+#: destination guard fails its fetch offline.
+AUTH = MergeFetchAuth(anchor_url="http://127.0.0.1:1", token="tok")
+_REFUSAL = "refusing before any git network call"
+
+
 @pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
 def test_advance_repo_to_merged_sha_names_no_remote(tree, capsys, known_sha):
     with pytest.raises(TreeSyncError) as excinfo:
-        advance_repo_to_merged_sha(tree, base_branch="main", known_merged_sha=known_sha)
+        advance_repo_to_merged_sha(
+            tree, base_branch="main", known_merged_sha=known_sha, fetch_auth=AUTH
+        )
 
-    assert "exit" in str(excinfo.value)
+    assert "exit" in str(excinfo.value) and _REFUSAL not in str(excinfo.value)
     _assert_clean(excinfo, capsys)
 
 
 @pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
 def test_fetch_merged_sha_object_names_no_remote(tree, capsys, known_sha):
     with pytest.raises(TreeSyncError) as excinfo:
-        fetch_merged_sha_object(tree, base_branch="main", known_merged_sha=known_sha)
+        fetch_merged_sha_object(
+            tree, base_branch="main", known_merged_sha=known_sha, fetch_auth=AUTH
+        )
 
-    assert "exit" in str(excinfo.value)
+    assert "exit" in str(excinfo.value) and _REFUSAL not in str(excinfo.value)
     _assert_clean(excinfo, capsys)
 
 
 def test_ensure_commit_present_names_no_remote(tree, capsys):
     with pytest.raises(CommitFileReadError) as excinfo:
-        ensure_commit_present(tree, MISSING_SHA, base_branch="main")
+        ensure_commit_present(tree, MISSING_SHA, base_branch="main", fetch_auth=AUTH)
 
     assert MISSING_SHA in str(excinfo.value) and "exit" in str(excinfo.value)
+    assert _REFUSAL not in str(excinfo.value)
+    _assert_clean(excinfo, capsys)
+
+
+@pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
+def test_a_refused_destination_names_no_remote_in_tree_sync(refused_tree, capsys, known_sha):
+    for sync in (advance_repo_to_merged_sha, fetch_merged_sha_object):
+        with pytest.raises(TreeSyncError) as excinfo:
+            sync(refused_tree, base_branch="main", known_merged_sha=known_sha, fetch_auth=AUTH)
+
+        assert _REFUSAL in str(excinfo.value)
+        _assert_clean(excinfo, capsys)
+
+
+def test_a_refused_destination_names_no_remote_in_ensure_commit_present(refused_tree, capsys):
+    with pytest.raises(CommitFetchDeniedError) as excinfo:
+        ensure_commit_present(refused_tree, MISSING_SHA, base_branch="main", fetch_auth=AUTH)
+
+    assert MISSING_SHA in str(excinfo.value) and _REFUSAL in str(excinfo.value)
     _assert_clean(excinfo, capsys)
 
 

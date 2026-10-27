@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from clagentic_loadout.merge.commit_files import CommitFileReadError, ensure_commit_present
+from clagentic_loadout.merge.fetch_transport import MergeFetchAuth
 from clagentic_loadout.merge.merge_result_clone import MergeResultCloneError, merge_result_clone
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
@@ -25,6 +26,9 @@ ORIGINS = {
     "path": f"http://127.0.0.1:1/{TOKEN}/o/r.git",
 }
 MISSING_SHA = "f" * 40
+#: The closed port is the anchored platform host here, so the fetch is permitted
+#: and fails offline instead of being refused as off-host.
+AUTH = MergeFetchAuth(anchor_url="http://127.0.0.1:1", token="tok")
 
 
 @pytest.fixture(params=sorted(ORIGINS))
@@ -44,7 +48,9 @@ def _assert_no_token(excinfo, capsys):
 @pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
 def test_advance_repo_to_merged_sha_fetch_failure_withholds_the_url(tree, capsys, known_sha):
     with pytest.raises(TreeSyncError) as excinfo:
-        advance_repo_to_merged_sha(tree, base_branch="main", known_merged_sha=known_sha)
+        advance_repo_to_merged_sha(
+            tree, base_branch="main", known_merged_sha=known_sha, fetch_auth=AUTH
+        )
 
     assert "git fetch of" in str(excinfo.value) and "exit" in str(excinfo.value)
     _assert_no_token(excinfo, capsys)
@@ -53,7 +59,9 @@ def test_advance_repo_to_merged_sha_fetch_failure_withholds_the_url(tree, capsys
 @pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
 def test_fetch_merged_sha_object_fetch_failure_withholds_the_url(tree, capsys, known_sha):
     with pytest.raises(TreeSyncError) as excinfo:
-        fetch_merged_sha_object(tree, base_branch="main", known_merged_sha=known_sha)
+        fetch_merged_sha_object(
+            tree, base_branch="main", known_merged_sha=known_sha, fetch_auth=AUTH
+        )
 
     assert "git fetch of" in str(excinfo.value) and "exit" in str(excinfo.value)
     _assert_no_token(excinfo, capsys)
@@ -61,7 +69,7 @@ def test_fetch_merged_sha_object_fetch_failure_withholds_the_url(tree, capsys, k
 
 def test_ensure_commit_present_fetch_failure_withholds_the_url(tree, capsys):
     with pytest.raises(CommitFileReadError) as excinfo:
-        ensure_commit_present(tree, MISSING_SHA)
+        ensure_commit_present(tree, MISSING_SHA, fetch_auth=AUTH)
 
     assert MISSING_SHA in str(excinfo.value) and "exit" in str(excinfo.value)
     _assert_no_token(excinfo, capsys)
@@ -69,7 +77,9 @@ def test_ensure_commit_present_fetch_failure_withholds_the_url(tree, capsys):
 
 def test_merge_result_clone_fetch_failure_withholds_the_url(tree, capsys):
     with pytest.raises(MergeResultCloneError) as excinfo:
-        with merge_result_clone(tree, MISSING_SHA, MISSING_SHA, base_branch="main"):
+        with merge_result_clone(
+            tree, MISSING_SHA, MISSING_SHA, base_branch="main", fetch_auth=AUTH
+        ):
             pytest.fail("the clone must not be built when the commit cannot be fetched")
 
     _assert_no_token(excinfo, capsys)
