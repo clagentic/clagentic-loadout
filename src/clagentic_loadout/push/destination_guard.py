@@ -14,7 +14,9 @@ present the token.
 THE RULE (all checks run before any credential is minted):
   - the tracking remote must be a CONFIGURED remote (`git remote` lists it);
     a URL, or any value that is not a remote name, is refused;
-  - every push destination (`git remote get-url --push --all`) must be either
+  - every push destination (`git remote get-url --push --all`) and every fetch
+    destination (`git remote get-url --all`; the pre-lease fetch and the
+    post-push readback present the token to it) must be either
     an http(s) URL whose host and port equal the anchored platform authority,
     or a destination that cannot reach a network peer: a plain local path or a
     `file://` URL. Those two transports never consult GIT_ASKPASS, so they
@@ -193,29 +195,17 @@ def _destination_urls(
 def check_push_destination(
     tracking_remote_name: str, *, anchor_url: str, git_cwd: Path | None = None
 ) -> None:
-    """Refuse (DestinationDeniedError) unless every push destination of
-    *tracking_remote_name* may receive the token. *anchor_url* is the platform
-    URL whose host and port an http(s) destination must equal."""
+    """Refuse (DestinationDeniedError) unless every push destination AND every
+    fetch destination of *tracking_remote_name* may receive the token. The
+    fetch urls are checked too because the pre-lease fetch and the post-push
+    readback present the token to them. *anchor_url* is the platform URL whose
+    host and port an http(s) destination must equal."""
     anchor = _anchor_authority(anchor_url)
-    for url in _destination_urls(tracking_remote_name, push=True, git_cwd=git_cwd):
-        category = _violation(url, anchor)
-        if category is not None:
-            raise DestinationDeniedError(category)
-
-
-def fetch_destination_is_anchored(
-    tracking_remote_name: str, *, anchor_url: str, git_cwd: Path | None = None
-) -> bool:
-    """True when every fetch URL of *tracking_remote_name* may receive the
-    token. Never raises: the pre-lease fetch and the post-push readback are
-    diagnostic steps, so a destination that fails the check makes the caller
-    skip the token-bearing call rather than fail the push."""
-    try:
-        anchor = _anchor_authority(anchor_url)
-        urls = _destination_urls(tracking_remote_name, push=False, git_cwd=git_cwd)
-    except DestinationDeniedError:
-        return False
-    return all(_violation(url, anchor) is None for url in urls)
+    for push in (True, False):
+        for url in _destination_urls(tracking_remote_name, push=push, git_cwd=git_cwd):
+            category = _violation(url, anchor)
+            if category is not None:
+                raise DestinationDeniedError(category)
 
 
 __all__ = [
@@ -225,5 +215,4 @@ __all__ = [
     "CATEGORY_UNSUPPORTED_TRANSPORT",
     "DestinationDeniedError",
     "check_push_destination",
-    "fetch_destination_is_anchored",
 ]

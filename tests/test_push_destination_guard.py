@@ -12,7 +12,6 @@ from clagentic_loadout.push.destination_guard import (
     CATEGORY_UNSUPPORTED_TRANSPORT,
     DestinationDeniedError,
     check_push_destination,
-    fetch_destination_is_anchored,
 )
 from tests._gate_repo import git, seed_base_commit
 
@@ -52,8 +51,6 @@ def test_destinations_that_may_receive_the_token(tree, url, anchor):
 
     check_push_destination("origin", anchor_url=anchor, git_cwd=tree)
 
-    assert fetch_destination_is_anchored("origin", anchor_url=anchor, git_cwd=tree)
-
 
 @pytest.mark.parametrize(
     ("url", "category"),
@@ -80,7 +77,6 @@ def test_destinations_that_are_refused(tree, url, category):
         check_push_destination("origin", anchor_url=ANCHOR, git_cwd=tree)
 
     assert excinfo.value.category == category
-    assert not fetch_destination_is_anchored("origin", anchor_url=ANCHOR, git_cwd=tree)
 
 
 def test_a_name_that_is_not_a_configured_remote_is_refused(tree):
@@ -90,7 +86,6 @@ def test_a_name_that_is_not_a_configured_remote_is_refused(tree):
         with pytest.raises(DestinationDeniedError) as excinfo:
             check_push_destination(value, anchor_url=ANCHOR, git_cwd=tree)
         assert excinfo.value.category == CATEGORY_NOT_CONFIGURED
-        assert not fetch_destination_is_anchored(value, anchor_url=ANCHOR, git_cwd=tree)
 
 
 def test_every_pushurl_is_checked_not_just_the_first(tree):
@@ -104,20 +99,36 @@ def test_every_pushurl_is_checked_not_just_the_first(tree):
         check_push_destination("origin", anchor_url=ANCHOR, git_cwd=tree)
 
     assert excinfo.value.category == CATEGORY_OFF_HOST
-    assert fetch_destination_is_anchored("origin", anchor_url=ANCHOR, git_cwd=tree)
 
 
-def test_push_and_fetch_destinations_are_judged_separately(tree):
-    """An off-host fetch url with an anchored push url fails the fetch check
-    only; the reverse fails the push check only."""
+@pytest.mark.parametrize(
+    ("fetch_url", "push_urls", "category"),
+    [
+        ("https://other.example.com/o/r.git", ["https://git-host.example.com:3000/o/r.git"], CATEGORY_OFF_HOST),
+        ("https://other.example.com/o/r.git", [], CATEGORY_OFF_HOST),
+        ("ssh://git@other.example.com/o/r.git", ["file:///srv/git/r.git"], CATEGORY_UNSUPPORTED_TRANSPORT),
+        ("git@other.example.com:o/r.git", ["/srv/git/r.git"], CATEGORY_UNSUPPORTED_TRANSPORT),
+    ],
+)
+def test_the_fetch_destination_is_checked_even_when_the_push_destination_is_fine(
+    tree, fetch_url, push_urls, category
+):
+    """The pre-lease fetch and the readback present the token to the fetch url,
+    so an off-host fetch url refuses the push before the mint."""
+    _remote(tree, fetch_url, push_urls=push_urls)
+
+    with pytest.raises(DestinationDeniedError) as excinfo:
+        check_push_destination("origin", anchor_url=ANCHOR, git_cwd=tree)
+
+    assert excinfo.value.category == category
+
+
+def test_a_local_fetch_url_with_an_anchored_push_url_is_allowed(tree):
     _remote(
-        tree,
-        "https://other.example.com/o/r.git",
-        push_urls=["https://git-host.example.com:3000/o/r.git"],
+        tree, "/srv/git/r.git", push_urls=["https://git-host.example.com:3000/o/r.git"]
     )
 
     check_push_destination("origin", anchor_url=ANCHOR, git_cwd=tree)
-    assert not fetch_destination_is_anchored("origin", anchor_url=ANCHOR, git_cwd=tree)
 
 
 def test_a_global_insteadof_rule_is_not_applied_when_resolving(tree, tmp_path, monkeypatch):

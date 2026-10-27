@@ -171,12 +171,17 @@ class TestSharedGitPushEntrypointLock:
         (repo / "feature2.txt").write_text("more work\n")
         _git(["add", "feature2.txt"], repo)
         _git(["commit", "-m", "feature 2 work"], repo)
+        # A GitHub run never parses the fetch url, and the token-destination
+        # guard refuses one on a host other than github.com. The local url is
+        # reachable, so the branch-commit check can now read the fixture's
+        # non-conventional commit subjects; this test is not about that check.
+        _git(["remote", "set-url", "origin", str(_remote)], repo)
 
         code = _run_main(
             [
                 "--repo-path", str(repo), "--platform", "github",
                 "--repo", "some-owner/some-repo",
-                "--title", "feat: t2", "--body-stdin",
+                "--title", "feat: t2", "--body-stdin", "--skip-branch-commit-check",
             ],
             token_provider=_RecordingTokenProvider(),
             opener=lambda req, timeout=30: _json_resp(201, {"number": 43})

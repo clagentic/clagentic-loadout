@@ -90,7 +90,6 @@ def resolve_lease(
     branch: str,
     project_root: Path,
     token: str,
-    fetch_allowed: bool = True,
 ) -> LeaseResolution:
     """Resolve the force-with-lease decision for this push (module
     docstring, D5 DECIDED, all three required parts).
@@ -111,10 +110,6 @@ def resolve_lease(
     envelope (`push.git_push.git_fetch_with_token` /
     `_credentialed_git_env`) rather than an ambient credential helper (see
     module docstring, "CREDENTIALED FETCH, NOT AN AMBIENT ONE").
-
-    *fetch_allowed*: False when the remote's fetch URL may not receive the
-    token (push.destination_guard); the pre-lease fetch is then skipped and
-    reported as a warning.
 
     When the resolved decision is to force, this function fetches *branch*
     from *remote* FIRST, credentialed with *token* — a lease evaluated
@@ -144,22 +139,6 @@ def resolve_lease(
 
     if not force:
         return LeaseResolution(force_with_lease=False, origin=origin, fetch_attempted=False)
-
-    if not fetch_allowed:
-        # The remote's fetch URL is not the platform host (push.destination_guard),
-        # so the credentialed fetch would send the token off-host: skip it, like
-        # any other fetch that could not run.
-        return LeaseResolution(
-            force_with_lease=force,
-            origin=origin,
-            fetch_attempted=False,
-            fetch_warning=(
-                "pre-lease fetch skipped -- the tracking remote's fetch destination "
-                "is not the platform host the credential is scoped to; the lease "
-                "evaluates against the existing remote-tracking ref, which may be "
-                "stale and can surface as a '(stale info)' rejection."
-            ),
-        )
 
     try:
         git_fetch_with_token(remote, branch, token, project_root)

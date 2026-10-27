@@ -541,8 +541,10 @@ TestSharedUserConfigRoot` for the sibling guard).
 The minted token is handed to git through `GIT_ASKPASS`, so it reaches whatever
 host the push reaches. Before any token is minted, `push` therefore requires
 the branch's tracking remote (`branch.<name>.remote`, or `origin` when unset) to
-be a configured remote (`git remote` lists it) and checks every push
-destination (`git remote get-url --push --all`):
+be a configured remote (`git remote` lists it) and checks every
+push destination (`git remote get-url --push --all`) and every fetch
+destination (`git remote get-url --all`; the pre-lease fetch and the post-push
+readback present the token to it):
 
 - an `http(s)` URL must have the same host and port as the platform host: the
   forge host on Forgejo, `github.com` on GitHub;
@@ -553,9 +555,6 @@ destination (`git remote get-url --push --all`):
 
 A refusal exits `7` and names only the category, never the remote value.
 
-The pre-lease fetch and the post-push readback also present the token, to the
-remote's fetch URL. A fetch URL that fails the same test does not fail the push:
-the fetch (a warning) and the readback (`readback.verified` false) are skipped.
 Destinations are resolved without global or system git config, as the
 credentialed git call itself runs.
 

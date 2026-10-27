@@ -210,30 +210,21 @@ def test_v5_forced_lease_pre_fetch_cannot_reach_an_off_host_remote(
     assert code == verb.EXIT_REMOTE_ERROR
 
 
-def test_v6_off_host_fetch_url_gets_neither_the_lease_fetch_nor_the_readback(
-    repo_with_remote, listener, monkeypatch, capsys
+@pytest.mark.parametrize("extra", [(), ("--force-with-lease",)])
+def test_v6_off_host_fetch_url_is_refused_before_the_mint(
+    extra, repo_with_remote, listener, monkeypatch, capsys
 ):
-    """The push goes to a local bare repo, so it proceeds; the two other
-    token-bearing calls would go to the fetch url, so both are skipped."""
+    """The push goes to a local bare repo, but the pre-lease fetch and the
+    readback present the token to the fetch url, so it is judged like the push
+    destination: refused before the mint, with the lease safety intact."""
     repo, _remote = repo_with_remote
     git(["remote", "set-url", "origin", listener.url], repo)
     provider = RecordingTokenProvider(token=TOKEN)
 
-    code = _run(
-        _github_args(repo, "--force-with-lease", "--skip-branch-commit-check"),
-        monkeypatch, provider=provider, opener=_github_opener,
-    )
+    code = _run(_github_args(repo, *extra), monkeypatch, provider=provider, opener=_github_opener)
 
-    out, err = capsys.readouterr()
-    assert code == verb.EXIT_OK, err
-    assert provider.resolved_for
-    assert listener.requests == []
-    assert not listener.received_token()
-    assert "pre-lease fetch attempted=False" in err
-    assert "pre-lease fetch skipped" in err
-    payload = json.loads(out.strip().splitlines()[-1])
-    assert payload["remote_head_sha"] is None
-    assert payload["readback"]["verified"] is False
+    _assert_refused_before_mint(code, provider, listener, capsys)
+    assert code == verb.EXIT_REMOTE_ERROR
 
 
 @pytest.fixture
