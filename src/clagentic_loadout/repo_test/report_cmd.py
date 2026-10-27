@@ -1,8 +1,8 @@
 """repo_test.report_cmd — ``clagentic-loadout test report``.
 
 Read-only: picks one recorded run by id, by ``latest``, or by exact commit, and
-answers with its summary, its failing test ids, or a comparison with another
-run. It never writes, creates or deletes anything under the reports root.
+answers with its summary, its failing test ids, the failure messages of its failed
+cases, or a comparison with another run. It never writes, creates or deletes anything under the reports root.
 
 Selecting a run:
 
@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.repo_test import exits, store
-from clagentic_loadout.repo_test.junit import ID_SCHEME
+from clagentic_loadout.repo_test.failures import bound_failures
+from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, parse_failed_cases
 from clagentic_loadout.repo_test.spec import MODE_TIER
 from clagentic_loadout.repo_test.store import RunRecord, StoreError
 
@@ -131,6 +132,7 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
         "command": result.get("command"),
         "command_exit_code": result.get("command_exit_code"),
         "counts": result.get("counts"),
+        "id_scheme": result.get("id_scheme") if isinstance(result.get("id_scheme"), int) else None,
         "report_verification": result.get("report_verification"),
         "failing_id_count": len(_failing_ids(run)),
         "started_at": result.get("started_at"),
@@ -187,6 +189,25 @@ def failing_ids_of(run: RunRecord) -> list[str]:
     to read ids from, so it is refused rather than reported as an empty set."""
     _require_complete(run, "its failing ids")
     return sorted(_failing_ids(run))
+
+
+def failures_of(root: Path, run: RunRecord) -> list[dict[str, Any]]:
+    """Bounded, redacted records of the failed cases of a complete run, read from
+    the junit report recorded with it. Refused when the run has no results or its
+    report cannot be read."""
+    _require_complete(run, "its failures")
+    junit_path = root / run.run_id / store.JUNIT_FILE
+    if junit_path.is_symlink():
+        raise ReportRefused(
+            f"run {run.run_id}: {str(junit_path)!r} is a symlink, refusing it", exits.EXIT_DIFF_REFUSED
+        )
+    try:
+        cases = parse_failed_cases(junit_path)
+    except JunitError as exc:
+        raise ReportRefused(
+            f"run {run.run_id}: its recorded JUnit report cannot be read: {exc}", exits.EXIT_DIFF_REFUSED
+        ) from exc
+    return bound_failures(cases)
 
 
 def _require_complete(run: RunRecord, what: str) -> None:
@@ -302,6 +323,7 @@ __all__ = [
     "ReportRefused",
     "diff_of",
     "failing_ids_of",
+    "failures_of",
     "load_base_run",
     "select_run",
     "summary_of",

@@ -42,7 +42,19 @@ def _test_id(case: ET.Element) -> str:
     return f"{classname}::{name}" if classname else name
 
 
-def parse_junit(path: Path) -> JunitSummary:
+@dataclass(frozen=True)
+class FailedCase:
+    """One failed case, as the report holds it: the id, whether its first
+    ``failure``/``error`` child was a failure or an error, that child's
+    ``message`` attribute, and its text. Nothing here is redacted or bounded."""
+
+    test_id: str
+    kind: str
+    message: str
+    text: str
+
+
+def _load_root(path: Path) -> ET.Element:
     try:
         size = path.stat().st_size
     except OSError as exc:
@@ -55,6 +67,11 @@ def parse_junit(path: Path) -> JunitSummary:
         raise JunitError(f"the JUnit report is not readable XML: {exc}") from exc
     if root.tag not in ("testsuites", "testsuite"):
         raise JunitError(f"the JUnit report root is <{root.tag}>, not <testsuites> or <testsuite>")
+    return root
+
+
+def parse_junit(path: Path) -> JunitSummary:
+    root = _load_root(path)
     failing: list[str] = []
     passed = skipped = 0
     for case in root.iter("testcase"):
@@ -74,10 +91,30 @@ def parse_junit(path: Path) -> JunitSummary:
     )
 
 
+def parse_failed_cases(path: Path) -> list[FailedCase]:
+    """One entry per failed case, in report order, so cases sharing an id each
+    keep their own entry (the same multiset rule as ``JunitSummary.failing_ids``)."""
+    cases: list[FailedCase] = []
+    for case in _load_root(path).iter("testcase"):
+        detail = next((child for child in case if child.tag in ("failure", "error")), None)
+        if detail is not None:
+            cases.append(
+                FailedCase(
+                    test_id=_test_id(case),
+                    kind=detail.tag,
+                    message=detail.get("message") or "",
+                    text="".join(detail.itertext()),
+                )
+            )
+    return cases
+
+
 __all__ = [
     "ID_SCHEME",
     "MAX_JUNIT_BYTES",
+    "FailedCase",
     "JunitError",
     "JunitSummary",
+    "parse_failed_cases",
     "parse_junit",
 ]

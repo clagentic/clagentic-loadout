@@ -5,7 +5,7 @@ and read the results by run id.
   clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout S]
   clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout S]
   clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S]
-                                [--summary | --failing-ids | --diff BASE_RUN_ID]
+                                [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
 
 The exit codes are in ``repo_test.exits``; a test command's own exit code is
 recorded in the run and never returned. Both ``run`` and ``report`` print JSON
@@ -46,7 +46,7 @@ Usage: {_PROG} run full|impacted [--repo-root DIR] [--base REV] [--timeout SECON
        {_PROG} run files PATH... [--repo-root DIR] [--timeout SECONDS]
        {_PROG} run tier NAME [--repo-root DIR] [--timeout SECONDS]
        {_PROG} report [RUN_ID|latest] [--repo R] [--sha S]
-                                    [--summary | --failing-ids | --diff BASE_RUN_ID]
+                                    [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
        {_PROG} --help | --version
 
 Commands:
@@ -104,7 +104,7 @@ def _run_parser() -> argparse.ArgumentParser:
 def _report_parser() -> argparse.ArgumentParser:
     report = _new_parser(
         "report",
-        "Print a summary, the failing test ids, or a comparison of a recorded run. A run is "
+        "Print a summary, the failing test ids, the failure messages, or a comparison of a recorded run. A run is "
         "chosen by run id, or `latest` (the default), optionally narrowed with --repo and "
         "--sha. --sha never falls back to the latest run. Read-only.",
     )
@@ -121,6 +121,15 @@ def _report_parser() -> argparse.ArgumentParser:
     shape.add_argument("--summary", action="store_true", help="Print the run summary (default).")
     shape.add_argument(
         "--failing-ids", action="store_true", help="Print the failing test ids, one per line."
+    )
+    shape.add_argument(
+        "--failures",
+        action="store_true",
+        help="Print a JSON list with one record per failed test case, in report order: id, kind "
+        "(failure or error), message and a text excerpt, each redacted and size-capped (a cut "
+        "value ends with a marker stating the characters dropped). A run with no failed case "
+        "prints an empty list. If the total cap is reached, a last record without an id gives "
+        "omitted_cases.",
     )
     shape.add_argument(
         "--diff",
@@ -167,6 +176,8 @@ def _report(args: argparse.Namespace) -> int:
         run = report_cmd.select_run(root, args.run_id, repo=args.repo, sha=args.sha)
         if args.diff is not None:
             _print_json(report_cmd.diff_of(run, report_cmd.load_base_run(root, args.diff)))
+        elif args.failures:
+            _print_json(report_cmd.failures_of(root, run))
         elif args.failing_ids:
             for test_id in report_cmd.failing_ids_of(run):
                 print(test_id)
