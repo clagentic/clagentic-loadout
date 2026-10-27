@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-from _repo_test_support import git, make_repo, profile_text
+from _repo_test_support import FAKE_RUNNER, git, make_repo, profile_text, recorded_bases
 
 from clagentic_loadout.repo_test import exits, store
 from clagentic_loadout.repo_test.verb import main
@@ -116,9 +117,10 @@ def test_impacted_substitutes_the_resolved_base_sha_and_records_it(
 
     code, summary, _ = _run(capsys, "impacted", "--base", "main", "--repo-root", str(repo))
 
-    assert code == exits.EXIT_OK
+    assert code == exits.EXIT_OK, summary
     run = store.load_run(reports, summary["run_id"])
     assert run.provenance["base_sha"] == base
+    assert recorded_bases(reports / summary["run_id"]) == [base]
 
 
 def test_impacted_uses_the_profiles_default_base(
@@ -128,8 +130,32 @@ def test_impacted_uses_the_profiles_default_base(
 
     code, summary, _ = _run(capsys, "impacted", "--repo-root", str(repo))
 
-    assert code == exits.EXIT_OK
-    assert store.load_run(reports, summary["run_id"]).provenance["base_sha"] == git(repo, "rev-parse", "main")
+    assert code == exits.EXIT_OK, summary
+    main_sha = git(repo, "rev-parse", "main")
+    assert store.load_run(reports, summary["run_id"]).provenance["base_sha"] == main_sha
+    assert recorded_bases(reports / summary["run_id"]) == [main_sha]
+
+
+def test_the_seed_commit_dates_are_pinned(tmp_path: Path) -> None:
+    repo = make_repo(tmp_path / "repo")
+
+    assert git(repo, "log", "-1", "--format=%aI %cI") == "2026-01-01T00:00:00+00:00 2026-01-01T00:00:00+00:00"
+
+
+def test_the_stand_in_runner_never_mistakes_a_base_value_for_a_failing_file(tmp_path: Path) -> None:
+    # A SHA-shaped base that happens to contain "bad" must not fail the run.
+    runner = tmp_path / "runner.py"
+    runner.write_text(FAKE_RUNNER)
+    junit = tmp_path / "junit.xml"
+    forced_base = "0123bad" + "0" * 33
+
+    done = subprocess.run(
+        [sys.executable, str(runner), str(junit), f"--base={forced_base}"], capture_output=True, text=True
+    )
+
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert "<failure" not in junit.read_text()
+    assert forced_base in junit.read_text()
 
 
 def test_impacted_without_any_base_names_both_places_to_set_it(
