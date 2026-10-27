@@ -15,7 +15,7 @@ clagentic-loadout test run full|impacted [--repo-root DIR] [--base REV] [--timeo
 clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout SECONDS]
 clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout SECONDS]
 clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S]
-                              [--summary | --failing-ids | --diff BASE_RUN_ID]
+                              [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
 ```
 
 ## Declaring the commands
@@ -136,9 +136,22 @@ below).
   recorded no commit ("commit unknown"), is never selected. `--repo` and `--sha` cannot be
   combined with an explicit run id.
 - **`--summary`** (default): JSON with the run id, `state` (`complete` or `unrunnable`), mode,
-  `tier` (the tier name for a tier run, else null), counts, the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
+  `tier` (the tier name for a tier run, else null), counts, `id_scheme` (the failing-id scheme the run
+  was recorded with; null for a run recorded before it existed), the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
 - **`--failing-ids`**: the failing test ids, sorted, one per line. One line per failed test
   case, so an id that failed twice appears twice and the line count equals `counts.failed`.
+- **`--failures`**: a JSON list with one record per failed test case, in report order (two
+  failed cases that share an id each get a record). A record has `id`, `kind` (`failure` or
+  `error`), `message` (the report's `message` attribute) and `excerpt` (the element text).
+  Text is redacted first (URL userinfo, `Authorization` values, bearer and `token=` literals,
+  terminal escapes and control characters) and then cut: at most 1000 characters of message,
+  4000 of excerpt per case and 40000 of text in total. A cut value ends with
+  `...[truncated: N characters dropped]`. A text over 16000 characters is not redacted whole;
+  it is cut back first to a point its redaction cannot depend on (before a URL, a short
+  bearer or `token=` value, or an unterminated escape sequence at the edge), so a secret
+  split by that cut is dropped rather than shown in part. When the total cap is reached the list ends with one
+  record that has no `id`, only `omitted_cases` and `note`. A run with no failed case prints
+  `[]`. An `unrunnable` run, or one whose recorded report cannot be read, is refused (exit `78`).
 - **`--diff BASE_RUN_ID`**: JSON with `head_only`, `base_only` and `shared_count` of failing
   ids, and `repo_check`. Ids are compared as a multiset: an id that failed more often at head
   than at base is in `head_only` once per extra failure. A run recorded before per-case ids
@@ -151,7 +164,7 @@ below).
 - `--diff` compares like with like: it refuses (exit `78`) when exactly one of the two runs is
   a tier run, or when both are tier runs of different tiers. Two runs of the same tier, and two
   non-tier runs, compare as before.
-- An `unrunnable` run has no results, so `--failing-ids` and `--diff` refuse it (exit `78`)
+- An `unrunnable` run has no results, so `--failing-ids`, `--failures` and `--diff` refuse it (exit `78`)
   rather than report an empty set.
 
 | Code | Meaning |
