@@ -633,7 +633,8 @@ from clagentic_loadout.merge.tree_sync import (
     resolve_base_branch,
     resolve_base_sha,
 )
-from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
+from clagentic_loadout.merge.fetch_transport import MergeFetchAuth, require_fetch_destination
+from clagentic_loadout.platform_detect import DEFAULT_GITHUB_HOSTNAME, PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.task_id_guard import (
     InvalidTaskIdGuardConfigError,
@@ -811,6 +812,11 @@ class _ForgejoMergeBackend:
         )
         return verified.id
 
+    def fetch_auth(self) -> MergeFetchAuth:
+        """What a git fetch on the merge path may present: this run's minted
+        token, to the configured forge host only."""
+        return MergeFetchAuth(anchor_url=self._git_host_base, token=self._token)
+
     def policy_file_backend(self) -> ForgejoAcquireBackend:
         """The acquisition backend that reads files at a revision, holding this
         run's credential, so the gate reads policy without a local checkout."""
@@ -881,6 +887,11 @@ class _GithubMergeBackend:
         )
         return verified.id
 
+    def fetch_auth(self) -> MergeFetchAuth:
+        """What a git fetch on the merge path may present: this run's minted
+        token, to the fixed GitHub git host only."""
+        return MergeFetchAuth(anchor_url=f"https://{DEFAULT_GITHUB_HOSTNAME}", token=self._token)
+
     def policy_file_backend(self) -> GithubAcquireBackend:
         """The acquisition backend that reads files at a revision, holding this
         run's credential, so the gate reads policy without a local checkout."""
@@ -913,6 +924,33 @@ class _GithubMergeBackend:
             owner, repo, pr_number, token=self._token, merge_message=merge_message,
             merge_title=merge_title, merge_method=merge_method, opener=self._opener,
         )
+
+
+def _post_merge_sync_enabled(repo_path: str) -> bool:
+    """Whether step 10 will fetch into --repo-path. An unreadable setting counts
+    as enabled: step 10 reports that error itself, and the destination check is
+    the conservative side."""
+    try:
+        return resolve_sync_tree_after_merge(repo_path)
+    except PostMergeConfigError:
+        return True
+
+
+def _require_anchored_fetch_destination(
+    repo_path: str, base_branch: str, fetch_auth: MergeFetchAuth
+) -> None:
+    """Refuse before the first git network call when the base branch's tracking
+    remote, in a tree this run fetches into, does not lead to the platform host
+    (or a local path). Raises MergeFetchDeniedError (a usage error, exit 1), with
+    a category-only message. Both the gate tree and --repo-path itself are judged:
+    they are the same tree except under a malformed `merge.git_working_tree`.
+    """
+    try:
+        gate_tree = str(resolve_gate_git_tree(repo_path))
+    except PostMergeConfigError:
+        gate_tree = repo_path
+    for tree in dict.fromkeys((gate_tree, repo_path)):
+        require_fetch_destination(tree, base_branch, fetch_auth)
 
 
 def _gate_policy_reader(backend, *, owner: str, repo: str, repo_path: str | None) -> PolicyReader:
@@ -1511,11 +1549,19 @@ def _run(
     # which is why it can only be loaded now that the PR payload is in hand. Its
     # declared reviewer roles are a floor beneath --required-reviewer; a role
     # already named by a flag keeps the flag's login binding.
+    #
+    # That read may fetch the base commit from the base branch's tracking remote,
+    # which repo-local git config names. The fetch judges the destination itself
+    # before any network call, and a refusal propagates as a usage error rather
+    # than degrading the gate. Everything before this point talked to the platform
+    # API only; no git command has touched a network.
+    fetch_auth = backend.fetch_auth()
     repo_gate = load_repo_gate_at_base(
         args.repo_path,
         base_sha=resolve_base_sha(pr_info),
         base_branch=resolve_base_branch(pr_info),
         config_binding=config_binding,
+        fetch_auth=fetch_auth,
     )
     # The same resolution loadout-ruling uses to attribute a fence to a required
     # role (merge.required_reviewers).
@@ -2006,6 +2052,7 @@ def _run(
                 current_head_sha,
                 base_branch=resolve_base_branch(pr_info),
                 env=check_env,
+                fetch_auth=fetch_auth,
             ) as check_tree:
                 print(
                     f"merge: pre_checks gate -- running {len(pre_checks)} declared "
@@ -2160,6 +2207,17 @@ def _run(
             f"head={current_head_sha!r}); nothing was merged"
         )
         return EXIT_OK
+
+    # The tree sync after the merge (step 10) fetches from the base branch's
+    # tracking remote, which repo-local git config names. Judge that destination
+    # now, before the merge lands, so a steered remote refuses the merge instead
+    # of failing a sync that follows an irreversible server-side merge. Nothing is
+    # fetched when the repo turns the sync off; any fetch that does happen judges
+    # the destination again itself.
+    if args.repo_path and _post_merge_sync_enabled(args.repo_path):
+        _require_anchored_fetch_destination(
+            args.repo_path, resolve_base_branch(pr_info), fetch_auth
+        )
 
     # 9. All gates passed -- execute the merge.
     print(
@@ -2478,6 +2536,7 @@ def _run(
                             git_tree_path,
                             base_branch=base_branch,
                             known_merged_sha=merged_sha,
+                            fetch_auth=fetch_auth,
                         )
                     except TreeSyncError as exc:
                         _fail(
@@ -2502,6 +2561,7 @@ def _run(
                             git_tree_path,
                             base_branch=base_branch,
                             known_merged_sha=merged_sha,
+                            fetch_auth=fetch_auth,
                         )
                     except TreeSyncError as exc:
                         _fail(
@@ -2716,6 +2776,7 @@ def _run(
                                 git_tree_path,
                                 base_branch=base_branch,
                                 known_merged_sha=landed_sha,
+                                fetch_auth=fetch_auth,
                             )
                         except TreeSyncError as exc:
                             _fail(

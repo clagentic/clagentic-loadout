@@ -142,7 +142,8 @@ from clagentic_loadout.merge.tree_sync import (
     land_on_base_branch,
     resolve_base_branch,
 )
-from clagentic_loadout.platform_detect import PLATFORM_FORGEJO, PLATFORM_GITHUB
+from clagentic_loadout.merge.fetch_transport import MergeFetchAuth, require_fetch_destination
+from clagentic_loadout.platform_detect import DEFAULT_GITHUB_HOSTNAME, PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.push.errors import NamespaceDeniedError, RemoteResolutionError
 from clagentic_loadout.push.git_coords import parse_owner_repo
 from clagentic_loadout.push.namespace_guard import (
@@ -230,7 +231,8 @@ def _resolve_backend(
     opener,
 ):
     """Resolve platform guard -> mint/resolve token -> return a uniform
-    ``get_pr_info(pr_number) -> dict`` callable. Mirrors merge.verb.
+    ``get_pr_info(pr_number) -> dict`` callable and the `MergeFetchAuth` (platform
+    anchor plus this run's token) the tree-sync fetch presents. Mirrors merge.verb.
     _resolve_backend / merge.close_verb._resolve_backend's shape exactly
     (lr-9c69 precedent): the platform guard ALWAYS runs before token
     resolution, for both platforms.
@@ -264,12 +266,14 @@ def _resolve_backend(
     if platform == PLATFORM_GITHUB:
         def _get_pr_info(pr_number: int) -> dict:
             return github_backend.get_pr_info(owner, repo, pr_number, token=token, opener=opener)
+        anchor_url = f"https://{DEFAULT_GITHUB_HOSTNAME}"
     else:
         def _get_pr_info(pr_number: int) -> dict:
             return forgejo_backend.get_pr_info(
                 git_host_base, owner, repo, pr_number, token=token, opener=opener
             )
-    return _get_pr_info
+        anchor_url = git_host_base
+    return _get_pr_info, MergeFetchAuth(anchor_url=anchor_url, token=token)
 
 
 # ---------------------------------------------------------------------------
@@ -518,7 +522,7 @@ def _run(
     # 3. Platform guard (BOTH directions, fail-closed, BEFORE any credential
     # mint or API call) -> credential resolution -> resolved PR-info reader.
     try:
-        get_pr_info = _resolve_backend(
+        get_pr_info, fetch_auth = _resolve_backend(
             args.platform,
             owner=owner,
             repo=repo,
@@ -578,11 +582,16 @@ def _run(
     git_tree_path = (
         str(declared_working_tree) if declared_working_tree is not None else args.repo_path
     )
+    # The fetch below goes to the base branch's tracking remote, which repo-local git
+    # config names: judge that destination first, so a steered remote refuses here
+    # (a usage error, exit 1) before any git network call.
+    require_fetch_destination(git_tree_path, base_branch, fetch_auth)
     try:
         landed_sha = advance_repo_to_merged_sha(
             git_tree_path,
             base_branch=base_branch,
             known_merged_sha=known_merged_sha,
+            fetch_auth=fetch_auth,
         )
     except TreeSyncError as exc:
         _fail(

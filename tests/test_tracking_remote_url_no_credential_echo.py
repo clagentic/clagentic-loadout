@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 from clagentic_loadout.merge.commit_files import CommitFileReadError, ensure_commit_present
+from clagentic_loadout.merge.fetch_transport import MergeFetchAuth
 from clagentic_loadout.merge.tree_sync import (
     TreeSyncError,
     advance_repo_to_merged_sha,
@@ -94,29 +95,43 @@ def test_git_refuses_a_colon_in_a_remote_name(tmp_path):
     assert "is not a valid remote name" in result.stderr
 
 
+#: The closed port is the anchored platform host, so a remote that is configured
+#: by name fails offline; a URL-valued tracking remote is refused as not a
+#: configured remote. Either way the message names no remote.
+AUTH = MergeFetchAuth(anchor_url="http://127.0.0.1:1", token="tok")
+
+
+def _failed_or_refused(message: str) -> bool:
+    return "exit" in message or "refusing before any git network call" in message
+
+
 @pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
 def test_advance_repo_to_merged_sha_names_no_remote(tree, capsys, known_sha):
     with pytest.raises(TreeSyncError) as excinfo:
-        advance_repo_to_merged_sha(tree, base_branch="main", known_merged_sha=known_sha)
+        advance_repo_to_merged_sha(
+            tree, base_branch="main", known_merged_sha=known_sha, fetch_auth=AUTH
+        )
 
-    assert "exit" in str(excinfo.value)
+    assert _failed_or_refused(str(excinfo.value))
     _assert_clean(excinfo, capsys)
 
 
 @pytest.mark.parametrize("known_sha", [None, MISSING_SHA])
 def test_fetch_merged_sha_object_names_no_remote(tree, capsys, known_sha):
     with pytest.raises(TreeSyncError) as excinfo:
-        fetch_merged_sha_object(tree, base_branch="main", known_merged_sha=known_sha)
+        fetch_merged_sha_object(
+            tree, base_branch="main", known_merged_sha=known_sha, fetch_auth=AUTH
+        )
 
-    assert "exit" in str(excinfo.value)
+    assert _failed_or_refused(str(excinfo.value))
     _assert_clean(excinfo, capsys)
 
 
 def test_ensure_commit_present_names_no_remote(tree, capsys):
     with pytest.raises(CommitFileReadError) as excinfo:
-        ensure_commit_present(tree, MISSING_SHA, base_branch="main")
+        ensure_commit_present(tree, MISSING_SHA, base_branch="main", fetch_auth=AUTH)
 
-    assert MISSING_SHA in str(excinfo.value) and "exit" in str(excinfo.value)
+    assert MISSING_SHA in str(excinfo.value) and _failed_or_refused(str(excinfo.value))
     _assert_clean(excinfo, capsys)
 
 

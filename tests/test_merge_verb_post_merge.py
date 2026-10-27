@@ -801,12 +801,14 @@ class TestSyncTreeAfterMergeDefaultOn:
         assert rev_parse.stdout.strip() == starting_sha
 
     def test_fail_loud_path_preserved_with_sync_enabled_by_default(self, tmp_path):
-        # No origin remote at all (bare tmp_path, no post_merge_steps
-        # configured) -- fetch_merged_sha_object must still fail loud with
-        # EXIT_POST_MERGE_FAILED, never a silent partial sync, even on the
-        # fetch-only (no-checkout) path this shape now takes (lr-173768). The
-        # tree is a git repo with a base commit but no remote to fetch from.
+        # A remote that cannot be fetched from (a local path that does not
+        # exist; no post_merge_steps configured) -- fetch_merged_sha_object must
+        # still fail loud with EXIT_POST_MERGE_FAILED, never a silent partial
+        # sync, even on the fetch-only (no-checkout) path this shape now takes
+        # (lr-173768). A tree with NO configured remote is refused before the
+        # merge instead (merge.fetch_transport), so the remote exists here.
         _record_base_sha(seed_base_commit(tmp_path))
+        _run_git(["remote", "add", "origin", str(tmp_path.parent / "no-such-remote.git")], cwd=tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,

@@ -58,6 +58,7 @@ from pathlib import Path
 from typing import Iterator, Mapping
 
 from clagentic_loadout.merge.commit_files import CommitFileReadError, ensure_commit_present
+from clagentic_loadout.merge.fetch_transport import MergeFetchAuth
 from clagentic_loadout.merge.pre_check_env import without_git_location
 
 _TREE_NAME = "tree"
@@ -306,6 +307,7 @@ def merge_result_clone(
     *,
     base_branch: str = "",
     env: Mapping[str, str] | None = None,
+    fetch_auth: MergeFetchAuth | None = None,
 ) -> Iterator[Path]:
     """Yield the path of a private clone whose `HEAD` is the result of merging
     *head_sha* onto *base_sha*, and remove it on exit however the body ends.
@@ -316,14 +318,19 @@ def merge_result_clone(
     variables removed, and, when *env* is given, runs with that environment
     instead of the inherited one.
 
+    *fetch_auth* is what a fetch of a missing commit may present (see
+    `merge.fetch_transport`); None allows local remotes only.
+
     Raises:
         MergeResultConflictError: the head conflicts with base.
         MergeResultCloneError: a commit is unavailable or git failed.
+        MergeFetchDeniedError: the tracking remote's destination was refused
+            before any network call.
     """
     git_tree = Path(git_tree)
     try:
         for sha in (base_sha, head_sha):
-            ensure_commit_present(git_tree, sha, base_branch=base_branch)
+            ensure_commit_present(git_tree, sha, base_branch=base_branch, fetch_auth=fetch_auth)
     except CommitFileReadError as exc:
         raise MergeResultCloneError(str(exc)) from exc
     scratch = Path(tempfile.mkdtemp(prefix="loadout-precheck-"))
