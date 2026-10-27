@@ -197,6 +197,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from clagentic_loadout.push.destination_guard import destinations_are_local
 from clagentic_loadout.push.errors import GitPushError
 from clagentic_loadout.push.git_hermeticity import (
     GitVersionTooOldError,
@@ -651,9 +652,28 @@ _HERMETIC_ARGV_PREFIX = ["-c", "credential.helper="]
 
 
 @contextlib.contextmanager
-def _credentialed_git_env(token: str, *, force_trace: bool = False):
+def _destination_git_env(
+    remote: str, token: str, *, push: bool, git_cwd: Path | None, force_trace: bool = False
+):
+    """The git environment for a call to *remote*: token-carrying only when the
+    destination is not local. A local or file:// push runs the destination
+    repository's hooks with this process's environment, so a credentialed
+    environment (GIT_ASKPASS and the token file it reads) must never reach one;
+    a local transport needs no credential. *push* selects the push or the fetch
+    destination set. A set mixing local and network destinations raises
+    DestinationDeniedError."""
+    carried = None if destinations_are_local(remote, push=push, git_cwd=git_cwd) else token
+    with _credentialed_git_env(carried, force_trace=force_trace) as env:
+        yield env
+
+
+@contextlib.contextmanager
+def _credentialed_git_env(token: str | None, *, force_trace: bool = False):
     """Construct the isolated, token-injected, HERMETIC environment every
     credentialed git subprocess in this module runs under, and yield it.
+
+    *token* None builds the same hermetic environment with NO credential: no
+    token file, no GIT_ASKPASS (see `_destination_git_env`).
 
     *force_trace* (lr-68039e): set True to enable GIT_TRACE the SAME way the
     CLAGENTIC_LOADOUT_PUSH_GIT_TRACE env var already does below --
@@ -699,18 +719,21 @@ def _credentialed_git_env(token: str, *, force_trace: bool = False):
     """
     tmp_dir = tempfile.mkdtemp(prefix="loadout_push_")
     try:
-        token_file = os.path.join(tmp_dir, "tok")
-        askpass_file = os.path.join(tmp_dir, "askpass.sh")
         isolated_home = os.path.join(tmp_dir, "home")
         os.makedirs(isolated_home, exist_ok=True)
 
-        with open(token_file, "w") as f:
-            f.write(token)
-        os.chmod(token_file, 0o600)
+        askpass_file = None
+        if token is not None:
+            token_file = os.path.join(tmp_dir, "tok")
+            askpass_file = os.path.join(tmp_dir, "askpass.sh")
 
-        with open(askpass_file, "w") as f:
-            f.write(make_askpass_script(token_file))
-        os.chmod(askpass_file, 0o700)
+            with open(token_file, "w") as f:
+                f.write(token)
+            os.chmod(token_file, 0o600)
+
+            with open(askpass_file, "w") as f:
+                f.write(make_askpass_script(token_file))
+            os.chmod(askpass_file, 0o700)
 
         # Neutralize the ambient surface FIRST (global/system config scope,
         # ambient askpass/SSH env vars, config-injection channel) -- this
@@ -718,7 +741,8 @@ def _credentialed_git_env(token: str, *, force_trace: bool = False):
         # applied AFTER, so neither is shadowed or raced by anything the
         # neutralization pass would otherwise have left behind.
         env = neutralize_ambient_git_env(os.environ.copy())
-        env["GIT_ASKPASS"] = askpass_file
+        if askpass_file is not None:
+            env["GIT_ASKPASS"] = askpass_file
         env["GIT_TERMINAL_PROMPT"] = "0"
         # Empty HOME: removes ~/.netrc / ~/.git-credentials / ~/.gitconfig
         # as discoverable credential sources, making GIT_ASKPASS the sole
@@ -809,7 +833,7 @@ def git_fetch_with_token(
     always exist and must never be allowed to silently win).
     """
     _hermeticity_preflight(f"fetch {branch!r} from the tracking remote", git_cwd)
-    with _credentialed_git_env(token) as env:
+    with _destination_git_env(remote, token, push=False, git_cwd=git_cwd) as env:
         result = subprocess.run(
             ["git", *_HERMETIC_ARGV_PREFIX, "fetch", remote, branch],
             capture_output=True,
@@ -844,7 +868,7 @@ def git_ls_remote_with_token(
     hermeticity pre-flight as push and fetch, same fail-closed errors.
     """
     _hermeticity_preflight(f"read back {ref!r} from the tracking remote", git_cwd)
-    with _credentialed_git_env(token) as env:
+    with _destination_git_env(remote, token, push=False, git_cwd=git_cwd) as env:
         result = subprocess.run(
             ["git", *_HERMETIC_ARGV_PREFIX, "ls-remote", "--exit-code", remote, f"refs/heads/{ref}"],
             capture_output=True,
@@ -951,7 +975,9 @@ def git_push_with_token(
     than none (module docstring).
     """
     _hermeticity_preflight(f"push {branch!r} to the tracking remote", git_cwd)
-    with _credentialed_git_env(token, force_trace=verbose) as env:
+    with _destination_git_env(
+        remote, token, push=True, git_cwd=git_cwd, force_trace=verbose
+    ) as env:
         refspec = f"{branch}:{branch}"
         push_cmd = ["git", *_HERMETIC_ARGV_PREFIX, "push", remote, refspec, "--set-upstream"]
         if force_with_lease:

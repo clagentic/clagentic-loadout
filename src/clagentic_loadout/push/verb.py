@@ -228,6 +228,7 @@ from clagentic_loadout.merge.commit_subjects import REAL_MERGE_METHOD
 from clagentic_loadout.merge.errors import TitleInvalidError
 from clagentic_loadout.merge.title_gate import check_pr_title
 from clagentic_loadout.platform_detect import (
+    DEFAULT_GITHUB_HOSTNAME,
     PLATFORM_FORGEJO,
     PLATFORM_GITHUB,
     PlatformResolutionError,
@@ -252,6 +253,10 @@ from clagentic_loadout.push.contention_check import (
     own_branch_refs,
 )
 from clagentic_loadout.push.contention_config import load_contention_config
+from clagentic_loadout.push.destination_guard import (
+    DestinationDeniedError,
+    check_push_destination,
+)
 from clagentic_loadout.push.errors import (
     AuthorMismatchError,
     BodyEmptyError,
@@ -2512,27 +2517,33 @@ def _run_create_pr(
         branch=branch,
     )
 
-    if args.platform == PLATFORM_GITHUB:
-        if not args.repo:
-            _fail(
-                "--repo is required for --platform github (e.g. --repo "
-                "some-owner/some-repo); GitHub coordinate derivation from "
-                "git remote is not supported.",
-                code=EXIT_REMOTE_ERROR,
-            )
-        owner, repo = git_coords.parse_owner_repo(args.repo)
-        api_base = ""
-        remote_name = git_coords.tracking_remote(branch, project_root)
-    else:
-        if args.repo:
+    if args.platform == PLATFORM_GITHUB and not args.repo:
+        _fail(
+            "--repo is required for --platform github (e.g. --repo "
+            "some-owner/some-repo); GitHub coordinate derivation from "
+            "git remote is not supported.",
+            code=EXIT_REMOTE_ERROR,
+        )
+    # A URL-valued tracking remote cannot satisfy `git remote get-url`; the
+    # resolution error carries a category-only message (never the remote value),
+    # so it is reported the way the update path reports it, not as a traceback.
+    try:
+        if args.platform == PLATFORM_GITHUB:
             owner, repo = git_coords.parse_owner_repo(args.repo)
+            api_base = ""
             remote_name = git_coords.tracking_remote(branch, project_root)
-            raw_url = git_coords.remote_url(remote_name, project_root)
-            api_base, _o, _r = git_coords.parse_forgejo_coords(raw_url)
         else:
-            remote_name = git_coords.tracking_remote(branch, project_root)
-            raw_url = git_coords.remote_url(remote_name, project_root)
-            api_base, owner, repo = git_coords.parse_forgejo_coords(raw_url)
+            if args.repo:
+                owner, repo = git_coords.parse_owner_repo(args.repo)
+                remote_name = git_coords.tracking_remote(branch, project_root)
+                raw_url = git_coords.remote_url(remote_name, project_root)
+                api_base, _o, _r = git_coords.parse_forgejo_coords(raw_url)
+            else:
+                remote_name = git_coords.tracking_remote(branch, project_root)
+                raw_url = git_coords.remote_url(remote_name, project_root)
+                api_base, owner, repo = git_coords.parse_forgejo_coords(raw_url)
+    except RemoteResolutionError as exc:
+        _fail(str(exc), code=EXIT_REMOTE_ERROR)
 
     try:
         check_namespace_allowed(owner, repo, allowed_namespaces=allowed_namespaces)
@@ -2551,6 +2562,17 @@ def _run_create_pr(
             )
         except HostDeniedError as exc:
             _fail(str(exc), code=EXIT_HOST_DENIED)
+
+    # Token destination anchoring: the minted token is presented to whatever the
+    # push (and the lease pre-fetch and readback) reaches, so the tracking
+    # remote must be a configured remote whose push destinations are the
+    # platform host or cannot reach a peer, for both its push and its fetch
+    # urls. Runs before the mint.
+    anchor_url = f"https://{DEFAULT_GITHUB_HOSTNAME}" if args.platform == PLATFORM_GITHUB else api_base
+    try:
+        check_push_destination(remote_name, anchor_url=anchor_url, git_cwd=project_root)
+    except DestinationDeniedError as exc:
+        _fail(str(exc), code=EXIT_REMOTE_ERROR)
 
     _check_title_gate(args, owner, repo, project_root=project_root)
 

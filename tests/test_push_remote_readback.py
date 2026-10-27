@@ -147,7 +147,10 @@ class TestCredentialedReadback:
         credentialed = read_remote_head("origin", "feature", repo, token="tok-abc")
         assert credentialed.remote_head_sha == plain.remote_head_sha
 
-    def test_token_read_runs_with_askpass_and_isolated_home(self, repo_with_remote, monkeypatch):
+    def test_token_read_of_a_local_remote_carries_no_askpass(self, repo_with_remote, monkeypatch):
+        """A local remote needs no credential, so the read runs hermetic but
+        without GIT_ASKPASS or any token (the destination's hooks and helpers
+        inherit the environment)."""
         repo, _remote = repo_with_remote
         _git(["push", "origin", "feature"], repo)
         seen: dict = {}
@@ -161,7 +164,33 @@ class TestCredentialedReadback:
 
         monkeypatch.setattr("clagentic_loadout.push.git_push.subprocess.run", _spy)
         monkeypatch.setenv("HOME", "/ambient/home")
+        monkeypatch.setenv("GIT_ASKPASS", "/ambient/askpass.sh")
         read_remote_head("origin", "feature", repo, token="tok-abc")
+
+        assert "GIT_ASKPASS" not in seen["env"]
+        assert "tok-abc" not in " ".join(f"{k}={v}" for k, v in seen["env"].items())
+        assert seen["env"]["HOME"] != "/ambient/home"
+        assert seen["env"]["GIT_TERMINAL_PROMPT"] == "0"
+
+    def test_token_read_runs_with_askpass_and_isolated_home(self, repo_with_remote, monkeypatch):
+        repo, _remote = repo_with_remote
+        _git(["push", "origin", "feature"], repo)
+        # An http(s) fetch url (nothing listens on port 1): the call fails, the
+        # environment it was launched with is what this asserts.
+        _git(["remote", "set-url", "origin", "http://127.0.0.1:1/o/r.git"], repo)
+        seen: dict = {}
+        real_run = subprocess.run
+
+        def _spy(cmd, **kwargs):
+            if "ls-remote" in cmd:
+                seen["cmd"] = cmd
+                seen["env"] = kwargs["env"]
+            return real_run(cmd, **kwargs)
+
+        monkeypatch.setattr("clagentic_loadout.push.git_push.subprocess.run", _spy)
+        monkeypatch.setenv("HOME", "/ambient/home")
+        with pytest.raises(RemoteReadbackError):
+            read_remote_head("origin", "feature", repo, token="tok-abc")
 
         assert seen["env"]["GIT_ASKPASS"]
         assert seen["env"]["HOME"] != "/ambient/home"

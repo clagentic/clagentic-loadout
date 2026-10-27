@@ -93,6 +93,17 @@ def repo_with_remote(tmp_path):
     return repo, remote
 
 
+def use_local_fetch_url(repo, remote) -> None:
+    """Point origin's fetch url at the local bare repo.
+
+    The default fixture keeps a Forgejo-shaped fetch url because the Forgejo
+    path parses its coordinates from it. A GitHub-platform run never parses it,
+    and the token-destination guard (push.destination_guard) refuses a fetch
+    url on a host other than github.com, so those runs use a local path, which
+    the guard allows."""
+    git(["remote", "set-url", "origin", str(remote)], repo)
+
+
 def run_main(
     argv, *, token_provider=None, opener=None, stdin_text=None, monkeypatch=None,
     host_config_root=None,

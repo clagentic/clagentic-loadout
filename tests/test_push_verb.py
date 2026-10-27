@@ -58,6 +58,7 @@ from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root 
     json_resp as _json_resp,
     repo_with_remote,
     run_main as _run_main,
+    use_local_fetch_url as _use_local_fetch_url,
 )
 
 
@@ -743,7 +744,8 @@ class TestHostGuard:
         guard must be a no-op there regardless of what --allowed-host names,
         rather than requiring every GitHub deployment's allowlist to also
         carry a spurious empty-string entry."""
-        repo, _remote = repo_with_remote
+        repo, remote = repo_with_remote
+        _use_local_fetch_url(repo, remote)
         provider = _RecordingTokenProvider()
         opener = _github_create_opener()
         code = _run_main(
@@ -996,7 +998,8 @@ class TestHostConfigCeiling:
         was even resolved, so a malformed config value refused a GitHub push
         too via EXIT_HOST_CONFIG_INVALID (37) -- exactly the same class of
         failure the guard is supposed to be a no-op for on this platform."""
-        repo, _remote = repo_with_remote
+        repo, remote = repo_with_remote
+        _use_local_fetch_url(repo, remote)
         provider = _RecordingTokenProvider()
         opener = _github_create_opener()
         config_root = tmp_path / "host-config-root"
@@ -2031,7 +2034,8 @@ class TestCleanlinessCheck:
 
 class TestCreatePrGithub:
     def test_end_to_end_success(self, repo_with_remote, monkeypatch, capsys):
-        repo, _remote = repo_with_remote
+        repo, remote = repo_with_remote
+        _use_local_fetch_url(repo, remote)
         provider = _RecordingTokenProvider()
         opener = _github_create_opener(pr_number=101)
 
@@ -2521,7 +2525,8 @@ class TestRepoContextReachesProvider:
         assert provider.calls == [(verb.DEFAULT_ROLE, "some-owner/some-repo")]
 
     def test_github_create_pr_passes_explicit_repo_flag(self, repo_with_remote, monkeypatch):
-        repo, _remote = repo_with_remote
+        repo, remote = repo_with_remote
+        _use_local_fetch_url(repo, remote)
         provider = _RepoRecordingTokenProvider()
         opener = _github_create_opener()
 

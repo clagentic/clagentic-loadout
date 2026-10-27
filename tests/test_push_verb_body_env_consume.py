@@ -21,6 +21,7 @@ from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root 
     json_resp as _json_resp,
     repo_with_remote,
     run_main as _run_main,
+    use_local_fetch_url as _use_local_fetch_url,
 )
 
 _CALLER = verb.DEFAULT_ROLE
@@ -97,7 +98,8 @@ class TestPreRemoteRefusalKeepsStagedBody:
     def test_github_without_repo_then_corrected_retry_needs_no_restage(
         self, repo_with_remote, monkeypatch, capsys
     ):
-        repo, _remote = repo_with_remote
+        repo, remote = repo_with_remote
+        _use_local_fetch_url(repo, remote)
         branch = verb.git_coords.current_branch(repo)
         _stage_create(repo)
         argv = ["--repo-path", str(repo), "--platform", "github", "--title", "feat: t", "--body-env"]
