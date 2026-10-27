@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import Iterator, Mapping
 
 from clagentic_loadout.merge.commit_files import CommitFileReadError, ensure_commit_present
-from clagentic_loadout.merge.fetch_transport import MergeFetchAuth
+from clagentic_loadout.merge.fetch_transport import MergeFetchAuth, MergeFetchDeniedError
 from clagentic_loadout.merge.pre_check_env import without_git_location
 
 _TREE_NAME = "tree"
@@ -331,6 +331,10 @@ def merge_result_clone(
     try:
         for sha in (base_sha, head_sha):
             ensure_commit_present(git_tree, sha, base_branch=base_branch, fetch_auth=fetch_auth)
+    except MergeFetchDeniedError:
+        # A refused destination is not an unavailable commit: degrading it to
+        # MergeResultCloneError would change the caller's exit category.
+        raise
     except CommitFileReadError as exc:
         raise MergeResultCloneError(str(exc)) from exc
     scratch = Path(tempfile.mkdtemp(prefix="loadout-precheck-"))

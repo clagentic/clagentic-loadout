@@ -77,11 +77,13 @@ def test_m6_the_merge_result_clone_and_the_tracked_gate_read_refuse_a_steered_re
 
     with pytest.raises(CommitFetchDeniedError):
         ensure_commit_present(tree, MISSING_SHA, base_branch="main", fetch_auth=auth)
-    with pytest.raises(MergeResultCloneError):
+    # A refused destination propagates as such; it is not an unbuildable merge result.
+    with pytest.raises(CommitFetchDeniedError) as denied:
         with merge_result_clone(
             tree, MISSING_SHA, MISSING_SHA, base_branch="main", fetch_auth=auth
         ):
             pytest.fail("no clone may be built from a refused destination")
+    assert not isinstance(denied.value, MergeResultCloneError)
     # The gate reader must not degrade a steered remote into "nothing readable".
     with pytest.raises(MergeFetchDeniedError):
         load_gate_at_commit(tree, MISSING_SHA, base_branch="main", fetch_auth=auth)

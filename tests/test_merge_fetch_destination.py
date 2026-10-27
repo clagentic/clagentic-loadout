@@ -24,7 +24,8 @@ import subprocess
 import pytest
 
 from clagentic_loadout.merge import post_merge_verb, verb
-from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, git, make_origin_confirmable
+from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, git, init_gate_repo, make_origin_confirmable
+from tests._support.gate_merge import run_gate_merge
 from tests.test_merge_post_merge_verb import (
     _base_args as post_merge_args,
     _init_repo_with_origin as init_post_merge_repo,
@@ -121,6 +122,37 @@ def test_m1_m2_m3_a_steered_tracking_remote_refuses_the_merge_before_any_request
     assert len(provider.resolved_for) == 1
     assert listener.url not in out + err and AMBIENT not in out + err
     assert "refusing before any git network call" in err
+
+
+@pytest.mark.parametrize("kind", ["url", "branch-remote"])
+def test_a_steered_remote_on_the_pre_checks_clone_path_exits_as_a_refused_destination(
+    kind, tmp_path, listener, ambient_home, scratch_tmp, capsys
+):
+    """The PR head is not local, so the pre_checks merge-result clone must fetch
+    it: a steered remote there is a refused destination (usage exit), not an
+    unbuildable merge result (pre_checks exit)."""
+    gate = {"required_reviewer_roles": [], "pre_checks": [{"cmd": ["true"], "on_failure": "fail"}]}
+    repo = init_gate_repo(tmp_path / "shared", tracked_gate=gate)
+    git(repo.path, "branch", "-q", "-D", "pr")
+    git(repo.path, "reflog", "expire", "--expire=now", "--all")
+    git(repo.path, "gc", "-q", "--prune=now")
+    if kind == "url":
+        git(repo.path, "remote", "add", "mirror", listener.url)
+        git(repo.path, "config", "branch.main.remote", "mirror")
+    else:
+        git(repo.path, "config", "branch.main.remote", listener.url)
+    merge_calls: list[str] = []
+
+    code = run_gate_merge(repo, merge_calls)
+
+    out, err = capsys.readouterr()
+    assert code == verb.EXIT_USAGE, err
+    assert code != verb.EXIT_PRE_CHECKS_FAILED
+    assert "refusing before any git network call" in err
+    assert "could not build the merge result" not in err
+    assert merge_calls == []
+    assert _no_credential_reached(listener)
+    assert listener.url not in out + err and AMBIENT not in out + err
 
 
 def test_a_differing_pushurl_is_not_a_fetch_destination(tmp_path, listener, ambient_home, capsys):
