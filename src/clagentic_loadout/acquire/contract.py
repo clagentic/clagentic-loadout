@@ -339,12 +339,36 @@ class RangeDiffBackend(Protocol):
         ...
 
 
+@runtime_checkable
+class BaseMergeBackend(Protocol):
+    """Optional capability of a transport: whether the PR's base was merged into
+    the branch between two of its heads. Separate from RangeDiffBackend for the
+    same reason: a transport that cannot answer stays a valid RangeDiffBackend.
+    """
+
+    def fetch_base_merged(
+        self, *, owner: str, repo: str, base_sha: str, since_head: str, head_sha: str
+    ) -> bool:
+        """True when the merge base of *base_sha* and *head_sha* differs from
+        the merge base of *base_sha* and *since_head*, that is, when the range
+        since_head..head_sha carries commits of the base and not only the PR's
+        own. *head_sha* must descend from *since_head*.
+
+        Raises:
+            acquire.errors.AcquireFetchError: the answer could not be read (an
+                unknown commit, a non-2xx response, a network failure, or a
+                response that does not carry the needed fields).
+        """
+        ...
+
+
 __all__ = [
     "VISIBILITY_INTERNAL",
     "VISIBILITY_PRIVATE",
     "VISIBILITY_PUBLIC",
     "AcquireBackend",
     "AcquiredPr",
+    "BaseMergeBackend",
     "ChangedFile",
     "CommentBackend",
     "IssueComment",

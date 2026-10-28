@@ -875,15 +875,19 @@ finding ends the round as exactly one of three outcomes:
 delta `findings.json`. The findings file records `mode` (`delta`|`full`) and
 `since_head`; a delta run has its own run directory (`<head>-since-<prior>`).
 Delta mode works the same for every reviewer role and both platforms, each role
-keyed on its own last verdict. A range that includes merges from the base
-branch includes their changes.
+keyed on its own last verdict. A range that includes a merge from the base
+branch is not reviewed as a delta (`BASE_MERGED`, below): its diff would carry the
+base's changes, which are not the PR's own.
 
 The full diff stays the default, and delta mode falls back to it, with a
 `delta` stage naming the reason and a line on stderr, when the head has not
 moved (`SAME_HEAD`), is not a strict fast-forward of the prior head
-(`NON_FAST_FORWARD`, e.g. after a rebase), the range cannot be read
+(`NON_FAST_FORWARD`, e.g. after a rebase), the base was merged into the branch
+since the last review (`BASE_MERGED`: the merge base with the base differs at
+the two heads), the range cannot be read or the merge base cannot be told
 (`RANGE_UNAVAILABLE`), holds no reviewable change (`DELTA_EMPTY`), or the
-transport cannot read a range (`RANGE_UNSUPPORTED`).
+transport cannot read a range or tell whether the base was merged in
+(`RANGE_UNSUPPORTED`).
 
 **Resume.** A stall (timeout or carrier exit) that survives the in-call retry is
 persisted and `run` exits **10**: run the identical command again and only the

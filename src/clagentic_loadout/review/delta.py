@@ -15,9 +15,10 @@ that role's own last verdict.
 
 A full-diff review stays the default. Delta mode applies only when the current
 head is a strict fast-forward of the last reviewed head, and every other case
-(same head, rebased or force-pushed head, range unreadable, nothing in the
-range, or a transport that cannot answer the question) falls back to the full
-diff, naming the reason, because reviewing less than the whole PR is only
+(same head, rebased or force-pushed head, the base merged into the branch
+since the last review, range unreadable, nothing in the range, or a transport
+that cannot answer the question) falls back to the full diff, naming the
+reason, because reviewing less than the whole PR is only
 sound when the narrower question is well defined.
 
 Every prior open finding ends a delta review as exactly one of:
@@ -48,7 +49,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from clagentic_loadout.acquire.contract import AcquiredPr, RangeDiffBackend
+from clagentic_loadout.acquire.contract import AcquiredPr, BaseMergeBackend, RangeDiffBackend
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.review.chunking import Chunk
 from clagentic_loadout.review.evaluate import is_praise_note
@@ -75,6 +76,7 @@ REASON_NON_FAST_FORWARD = "NON_FAST_FORWARD"
 REASON_RANGE_UNAVAILABLE = "RANGE_UNAVAILABLE"
 REASON_DELTA_EMPTY = "DELTA_EMPTY"
 REASON_RANGE_UNSUPPORTED = "RANGE_UNSUPPORTED"
+REASON_BASE_MERGED = "BASE_MERGED"
 
 MODE_FULL = "full"
 MODE_DELTA = "delta"
@@ -167,6 +169,30 @@ def resolve_delta(
         return full(
             REASON_NON_FAST_FORWARD,
             "the current head does not descend from the last reviewed head",
+        )
+    # Checked on the range's own relation: a base merged into the branch makes
+    # since_head..head carry the base's commits, which are not the PR's change
+    # and lie outside the range a reviewer is judged against.
+    if not isinstance(backend, BaseMergeBackend):
+        return full(
+            REASON_RANGE_UNSUPPORTED, "this transport cannot tell whether the base was merged in"
+        )
+    if not acquired.base_sha:
+        return full(REASON_RANGE_UNAVAILABLE, "the PR reports no base commit")
+    try:
+        base_merged = backend.fetch_base_merged(
+            owner=acquired.owner,
+            repo=acquired.repo,
+            base_sha=acquired.base_sha,
+            since_head=since_head,
+            head_sha=acquired.head_sha,
+        )
+    except AcquireFetchError as exc:
+        return full(REASON_RANGE_UNAVAILABLE, str(exc))
+    if base_merged:
+        return full(
+            REASON_BASE_MERGED,
+            "the base was merged into the branch since the last review",
         )
     if not span.diff_text.strip():
         return full(REASON_DELTA_EMPTY, "the range holds no reviewable change")
