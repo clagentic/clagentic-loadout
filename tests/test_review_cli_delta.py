@@ -184,8 +184,9 @@ def test_a_delta_run_resumes_from_its_finished_chunks(env, tmp_path, capsys):
         ({"status": "behind", "diff": ""}, "NON_FAST_FORWARD"),
         ({"status": "ahead", "diff": " \n"}, "DELTA_EMPTY"),
         ({"http_status": 404}, "RANGE_UNAVAILABLE"),
+        ({**_ahead(), "base_merged": True}, "BASE_MERGED"),
     ],
-    ids=["diverged", "behind", "empty", "unreadable"],
+    ids=["diverged", "behind", "empty", "unreadable", "base-merged"],
 )
 def test_a_delta_that_is_not_well_defined_reviews_the_full_diff_and_names_why(
     env, tmp_path, capsys, compare, reason

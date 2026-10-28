@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from clagentic_loadout.acquire.contract import RangeDiffBackend
+from clagentic_loadout.acquire.contract import BaseMergeBackend, RangeDiffBackend
 from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.acquire.forgejo_backend import ForgejoAcquireBackend
 from clagentic_loadout.acquire.github_backend import GithubAcquireBackend
@@ -145,3 +145,94 @@ class TestForgejo:
 
         with pytest.raises(AcquireFetchError, match="no commit count"):
             _range(_forgejo(opener))
+
+
+_MERGE_BASE = "c" * 40
+_SINCE = "d" * 40
+
+
+def _merged(backend):
+    return backend.fetch_base_merged(
+        owner=_OWNER, repo=_REPO, base_sha=_BASE, since_head=_SINCE, head_sha=_HEAD
+    )
+
+
+def _github_merge_base_opener(*, at_head, at_since, http=200):
+    def opener(req, timeout=30):
+        url = req.full_url
+        if url.endswith(f"/compare/{_BASE}...{_HEAD}"):
+            sha = at_head
+        elif url.endswith(f"/compare/{_BASE}...{_SINCE}"):
+            sha = at_since
+        else:
+            raise AssertionError(f"unexpected request: {url}")
+        body = {} if sha is None else {"merge_base_commit": {"sha": sha}}
+        return _Response(http, json.dumps(body).encode("utf-8"))
+
+    return opener
+
+
+def _forgejo_count_opener(*, at_head, at_since, between):
+    counts = {
+        f"{_BASE}...{_HEAD}": at_head,
+        f"{_BASE}...{_SINCE}": at_since,
+        f"{_SINCE}...{_HEAD}": between,
+    }
+
+    def opener(req, timeout=15):
+        for suffix, total in counts.items():
+            if req.full_url.endswith(f"/api/v1/repos/{_OWNER}/{_REPO}/compare/{suffix}"):
+                return _Response(200, json.dumps({"total_commits": total}).encode("utf-8"))
+        raise AssertionError(f"unexpected request: {req.full_url}")
+
+    return opener
+
+
+def test_both_transports_satisfy_the_base_merge_protocol():
+    assert isinstance(_github(None), BaseMergeBackend)
+    assert isinstance(_forgejo(None), BaseMergeBackend)
+
+
+class TestGithubBaseMerged:
+    def test_the_same_merge_base_at_both_heads_is_no_base_merge(self):
+        opener = _github_merge_base_opener(at_head=_MERGE_BASE, at_since=_MERGE_BASE)
+
+        assert _merged(_github(opener)) is False
+
+    def test_a_different_merge_base_is_a_base_merge(self):
+        opener = _github_merge_base_opener(at_head=_HEAD, at_since=_MERGE_BASE)
+
+        assert _merged(_github(opener)) is True
+
+    def test_a_compare_without_a_merge_base_raises(self):
+        opener = _github_merge_base_opener(at_head=None, at_since=_MERGE_BASE)
+
+        with pytest.raises(AcquireFetchError, match="no merge base"):
+            _merged(_github(opener))
+
+    def test_an_unreadable_compare_raises(self):
+        opener = _github_merge_base_opener(at_head=_MERGE_BASE, at_since=_MERGE_BASE, http=404)
+
+        with pytest.raises(AcquireFetchError, match="HTTP 404"):
+            _merged(_github(opener))
+
+
+class TestForgejoBaseMerged:
+    def test_a_range_of_only_the_prs_own_commits_is_no_base_merge(self):
+        # The head holds the prior head's two commits and the range's three.
+        opener = _forgejo_count_opener(at_head=5, at_since=2, between=3)
+
+        assert _merged(_forgejo(opener)) is False
+
+    def test_a_range_holding_commits_of_the_base_is_a_base_merge(self):
+        # Of the range's four commits two are the base's, already in the base.
+        opener = _forgejo_count_opener(at_head=4, at_since=2, between=4)
+
+        assert _merged(_forgejo(opener)) is True
+
+    def test_an_unreadable_compare_raises(self):
+        def opener(req, timeout=15):
+            return _Response(500, b"{}")
+
+        with pytest.raises(AcquireFetchError, match="HTTP 500"):
+            _merged(_forgejo(opener))

@@ -9,6 +9,7 @@ from clagentic_loadout.review.delta import (
     MAX_LISTED_FINDINGS,
     MODE_DELTA,
     MODE_FULL,
+    REASON_BASE_MERGED,
     REASON_DELTA_EMPTY,
     REASON_NON_FAST_FORWARD,
     REASON_RANGE_UNAVAILABLE,
@@ -37,11 +38,23 @@ def _acquired(head=_HEAD) -> AcquiredPr:
 
 
 class _Backend:
-    def __init__(self, *, fast_forward=True, diff="delta diff text", error=None):
+    def __init__(
+        self, *, fast_forward=True, diff="delta diff text", error=None,
+        base_merged=False, merge_error=None,
+    ):
         self.fast_forward = fast_forward
         self.diff = diff
         self.error = error
+        self.base_merged = base_merged
+        self.merge_error = merge_error
         self.requested: list[tuple[str, str]] = []
+        self.merge_asked: list[tuple[str, str, str]] = []
+
+    def fetch_base_merged(self, *, owner, repo, base_sha, since_head, head_sha):
+        self.merge_asked.append((base_sha, since_head, head_sha))
+        if self.merge_error is not None:
+            raise self.merge_error
+        return self.base_merged
 
     def fetch_range_diff(self, *, owner, repo, base_sha, head_sha):
         self.requested.append((base_sha, head_sha))
@@ -136,6 +149,56 @@ def test_a_range_with_no_reviewable_change_falls_back_to_the_full_diff():
 
     assert resolution.context is None
     assert resolution.reason == REASON_DELTA_EMPTY
+
+
+def test_a_base_merged_into_the_branch_falls_back_to_the_full_diff_of_the_pr_itself():
+    backend = _Backend(base_merged=True)
+
+    resolution = resolve_delta(backend, _acquired(), _SINCE, [_finding()])
+
+    assert resolution.mode == MODE_FULL
+    assert resolution.reason == REASON_BASE_MERGED
+    assert resolution.context is None
+    assert "base was merged" in resolution.detail
+    # The full review reads the PR's own diff (merge base..head), not the range.
+    assert resolution.acquired.diff_text == "full diff text"
+    assert resolution.acquired.base_sha == _BASE
+    assert backend.merge_asked == [(_BASE, _SINCE, _HEAD)]
+    assert resolution.stage_fields() == {"mode": "full", "reason": REASON_BASE_MERGED}
+
+
+def test_a_fast_forward_without_a_base_merge_still_reviews_a_delta():
+    resolution = resolve_delta(_Backend(base_merged=False), _acquired(), _SINCE, [])
+
+    assert resolution.mode == MODE_DELTA
+
+
+def test_an_unreadable_merge_base_falls_back_to_the_full_diff_and_keeps_the_cause():
+    backend = _Backend(merge_error=AcquireFetchError("compare returned no merge base"))
+
+    resolution = resolve_delta(backend, _acquired(), _SINCE, [])
+
+    assert resolution.context is None
+    assert resolution.reason == REASON_RANGE_UNAVAILABLE
+    assert "no merge base" in resolution.detail
+
+
+def test_a_non_fast_forward_is_named_before_a_base_merge_is_looked_for():
+    backend = _Backend(fast_forward=False, base_merged=True)
+
+    assert resolve_delta(backend, _acquired(), _SINCE, []).reason == REASON_NON_FAST_FORWARD
+    assert backend.merge_asked == []
+
+
+def test_a_transport_that_cannot_tell_about_a_base_merge_falls_back_to_the_full_diff():
+    class _RangeOnly:
+        def fetch_range_diff(self, *, owner, repo, base_sha, head_sha):
+            return RangeDiff(base_sha, head_sha, True, "delta diff text")
+
+    resolution = resolve_delta(_RangeOnly(), _acquired(), _SINCE, [])
+
+    assert resolution.context is None
+    assert resolution.reason == REASON_RANGE_UNSUPPORTED
 
 
 def test_a_transport_that_cannot_read_a_range_falls_back_to_the_full_diff():

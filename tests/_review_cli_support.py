@@ -298,7 +298,8 @@ def github_opener(
     """Serves the acquire reads and the review-post comment writes for one PR.
     `state` collects the posted body and every request URL. `compare`, when
     given, serves the commit-range endpoint: {"status": "ahead", "diff": "..."}
-    (or "http_status" for a failing read); without it a compare request is an
+    (or "http_status" for a failing read; "base_merged": True for a branch the
+    base was merged into since the prior head); without it a compare request is an
     unexpected call. `pr_fields` adds fields (title, body) to the PR metadata.
     `repo_record` is the repository record under `base.repo` (None omits it, as
     a host that does not state one). `base_files`, when given, is the file tree
@@ -327,7 +328,15 @@ def github_opener(
                 return _Response(compare["http_status"], b"{}")
             if accept == "application/vnd.github.v3.diff":
                 return _Response(200, compare["diff"].encode("utf-8"), "text/plain")
-            return _json({"status": compare["status"]})
+            # The merge base with the base is the same at both heads unless the
+            # base was merged into the branch in between.
+            merged = compare.get("base_merged", False) and not url.endswith(f"...{head_sha}")
+            return _json(
+                {
+                    "status": compare["status"],
+                    "merge_base_commit": {"sha": ("f" if merged else "e") * 40},
+                }
+            )
         if method == "GET" and base_files is not None and "/git/trees/" in url:
             if tree_http != 200:
                 return _Response(tree_http, b"{}")
