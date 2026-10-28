@@ -41,8 +41,11 @@ class ReviewHost:
         base_files: dict[str, str] | None = None,
         comment_read_failures: int = 0,
         range_diff: str | None = None,
+        base_merged: bool = False,
     ) -> None:
         self.platform = platform
+        #: Whether the base was merged into the branch since PRIOR_HEAD.
+        self.base_merged = base_merged
         #: The net diff of the fast-forward from PRIOR_HEAD to the head, served by
         #: the compare endpoints for a delta review; None serves none.
         self.range_diff = range_diff
@@ -145,7 +148,11 @@ class ReviewHost:
                 response = FakeResponse(200, self.range_diff.encode("utf-8"))
                 response.headers = {"Content-Type": "text/plain"}
                 return response
-            return json_resp(200, {"status": "ahead"})
+            merged = self.base_merged and path.endswith(f"...{PRIOR_HEAD}")
+            return json_resp(
+                200,
+                {"status": "ahead", "merge_base_commit": {"sha": ("f" if merged else "e") * 40}},
+            )
         if method == "GET" and path.endswith(f"/pulls/{n}"):
             if req.get_header("Accept", "") == "application/vnd.github.v3.diff":
                 response = FakeResponse(200, self.diff.encode("utf-8"))
@@ -171,9 +178,13 @@ class ReviewHost:
             if path.endswith(".diff"):
                 return FakeResponse(200, self.range_diff.encode("utf-8"))
             # The API route reports commits only: one commit forward from the prior
-            # head to the head, none the other way.
-            forward = path.endswith(f"/compare/{PRIOR_HEAD}...{self.head_sha}")
-            return json_resp(200, {"total_commits": 1 if forward else 0})
+            # head to the head, none the other way. The head holds one commit beyond
+            # the base; when the base was merged in, the prior-to-head range holds
+            # another one (a commit of the base) that the head's own count excludes.
+            if path.endswith(f"/compare/{PRIOR_HEAD}...{self.head_sha}"):
+                return json_resp(200, {"total_commits": 2 if self.base_merged else 1})
+            at_head = path.endswith(f"...{self.head_sha}") and f"/compare/{self.pull['base']['sha']}..." in path
+            return json_resp(200, {"total_commits": 1 if at_head else 0})
         if method == "GET" and path.endswith(f"/pulls/{n}.diff"):
             return FakeResponse(200, self.diff.encode("utf-8"))
         if method == "GET" and path.endswith(f"/pulls/{n}/files"):

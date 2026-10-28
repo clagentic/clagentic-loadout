@@ -256,6 +256,46 @@ def fetch_range_diff(
     )
 
 
+def _merge_base_sha(
+    owner: str, repo: str, base_sha: str, other: str, token: str, *, opener=None
+) -> str:
+    """The merge base of *base_sha* and *other*, from the compare response's
+    `merge_base_commit`. A response without one is a failure, never a guess."""
+    url = (
+        f"{GITHUB_API_BASE}/repos/{owner}/{repo}/compare/"
+        f"{urllib.parse.quote(base_sha, safe='')}...{urllib.parse.quote(other, safe='')}"
+    )
+    status, body = _github_get(url, token, opener=opener)
+    if status != 200 or not isinstance(body, dict):
+        raise AcquireFetchError(
+            f"cannot compare {base_sha[:12]}...{other[:12]} in {owner}/{repo}: HTTP {status}"
+        )
+    commit = body.get("merge_base_commit")
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not sha:
+        raise AcquireFetchError(
+            f"compare {base_sha[:12]}...{other[:12]} in {owner}/{repo} returned no merge base"
+        )
+    return sha
+
+
+def fetch_base_merged(
+    owner: str,
+    repo: str,
+    base_sha: str,
+    since_head: str,
+    head_sha: str,
+    token: str,
+    *,
+    opener=None,
+) -> bool:
+    """Whether the base was merged into the branch between *since_head* and
+    *head_sha*: the merge base with the base differs at the two heads."""
+    return _merge_base_sha(
+        owner, repo, base_sha, head_sha, token, opener=opener
+    ) != _merge_base_sha(owner, repo, base_sha, since_head, token, opener=opener)
+
+
 def fetch_issue_comments(
     owner: str, repo: str, pr_number: int, token: str, *, opener=None
 ) -> list[dict]:
@@ -377,6 +417,13 @@ class GithubAcquireBackend:
             owner, repo, base_sha, head_sha, self._token, opener=self._opener
         )
 
+    def fetch_base_merged(
+        self, *, owner: str, repo: str, base_sha: str, since_head: str, head_sha: str
+    ) -> bool:
+        return fetch_base_merged(
+            owner, repo, base_sha, since_head, head_sha, self._token, opener=self._opener
+        )
+
     def fetch_tree_paths(self, *, owner: str, repo: str, ref: str) -> list[str]:
         return fetch_tree_paths(owner, repo, ref, self._token, opener=self._opener)
 
@@ -391,6 +438,7 @@ class GithubAcquireBackend:
 
 __all__ = [
     "GithubAcquireBackend",
+    "fetch_base_merged",
     "fetch_issue_comments",
     "fetch_file_bytes",
     "fetch_pr_content",

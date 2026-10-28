@@ -379,6 +379,36 @@ def fetch_range_diff(
     )
 
 
+def fetch_base_merged(
+    git_host_base: str,
+    token: str,
+    owner: str,
+    repo: str,
+    base_sha: str,
+    since_head: str,
+    head_sha: str,
+    *,
+    opener=None,
+) -> bool:
+    """Whether the base was merged into the branch between *since_head* and
+    *head_sha* (which descends from it). The compare route reports no merge
+    base, so it is derived from commit counts: the commits the head holds
+    beyond the base equal those *since_head* holds plus the commits of
+    since_head..head exactly when every commit of that range is the PR's own.
+    A commit of the base in the range is already in the base, so it adds to the
+    range count but not to the head's."""
+    at_head = _compare_commit_count(
+        git_host_base, token, owner, repo, base_sha, head_sha, opener=opener
+    )
+    at_since = _compare_commit_count(
+        git_host_base, token, owner, repo, base_sha, since_head, opener=opener
+    )
+    between = _compare_commit_count(
+        git_host_base, token, owner, repo, since_head, head_sha, opener=opener
+    )
+    return at_head != at_since + between
+
+
 def fetch_issue_comments(
     git_host_base: str, token: str, owner: str, repo: str, pr_number: int, *, opener=None
 ) -> list[dict[str, Any]]:
@@ -492,6 +522,20 @@ class ForgejoAcquireBackend:
             opener=self._opener,
         )
 
+    def fetch_base_merged(
+        self, *, owner: str, repo: str, base_sha: str, since_head: str, head_sha: str
+    ) -> bool:
+        return fetch_base_merged(
+            self._git_host_base,
+            self._token,
+            owner,
+            repo,
+            base_sha,
+            since_head,
+            head_sha,
+            opener=self._opener,
+        )
+
     def fetch_tree_paths(self, *, owner: str, repo: str, ref: str) -> list[str]:
         return fetch_tree_paths(
             self._git_host_base, self._token, owner, repo, ref, opener=self._opener
@@ -512,6 +556,7 @@ class ForgejoAcquireBackend:
 
 __all__ = [
     "ForgejoAcquireBackend",
+    "fetch_base_merged",
     "fetch_issue_comments",
     "fetch_file_bytes",
     "fetch_pr_content",
