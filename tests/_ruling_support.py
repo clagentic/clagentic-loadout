@@ -25,6 +25,20 @@ FP = "fp2:0123456789abcdef"
 OTHER_FP = "fp2:fedcba9876543210"
 TODAY = dt.date(2026, 10, 1)
 
+#: The day the merge gate reads as "today" in tests that pin it, ten days after
+#: a default ruling's date: inside the 30-day accepted_risk window.
+GATE_DAY = TODAY + dt.timedelta(days=10)
+
+
+def pin_gate_clock(monkeypatch, day: dt.date = GATE_DAY) -> None:
+    """Make every site the merge gate reads the UTC date from return *day*, so
+    ruling expiry does not depend on the wall clock."""
+    from clagentic_loadout.review import evaluate, evaluation
+
+    for module in (evaluation, evaluate):
+        monkeypatch.setattr(module, "today_utc", lambda: day)
+
+
 #: Blocks on the worst-case stakes every unstated path resolves to, and is not a
 #: security-floor category: a ruling may clear it.
 NON_FLOOR = facts(confidentiality="full", integrity="full", availability="full")
