@@ -8,7 +8,11 @@ Selecting a run:
 
   * ``<run-id>`` is untrusted input and must match the run id grammar.
   * ``latest`` is the newest finished run; ``--repo`` narrows it to one
-    repository (a path, the repository's name, or its remote URL).
+    repository (a path, the repository's name, or its remote URL). Without
+    ``--repo`` it is scoped to the git repository holding the current directory,
+    or refused when the current directory is in none and the runs on record span
+    more than one repository.
+  * ``<run-id> --repo R`` asserts the run belongs to R and refuses when it does not.
   * ``--sha`` selects the newest clean run recorded for exactly that commit (the
     full SHA, or an unambiguous prefix of 7 or more hex characters). It never
     falls back to ``latest``: with no match it refuses and names what exists. A
@@ -17,19 +21,19 @@ Selecting a run:
 
 from __future__ import annotations
 
-import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.repo_test import exits, store
 from clagentic_loadout.repo_test.junit import ID_SCHEME
+from clagentic_loadout.repo_test.provenance import toplevel
+from clagentic_loadout.repo_test.repo_match import SHA_ARG_RE, repo_label, repo_matches
 from clagentic_loadout.repo_test.spec import MODE_TIER
 from clagentic_loadout.repo_test.store import RunRecord, StoreError
 
 LATEST = "latest"
-_SHA_ARG_RE = re.compile(r"\A[0-9a-fA-F]{7,40}\Z")
 _LISTED_RUNS = 10
 
 REPO_SAME = "same"
@@ -46,20 +50,6 @@ class ReportRefused(Exception):
         self.code = code
 
 
-def _repo_matches(run: RunRecord, wanted: str) -> bool:
-    repo = run.repo
-    identities = {repo.get("path"), repo.get("name"), repo.get("remote_url")}
-    remote = repo.get("remote_url")
-    if isinstance(remote, str):
-        identities.add(remote.rstrip("/").removesuffix(".git").rsplit("/", 1)[-1])
-    if wanted in identities:
-        return True
-    try:
-        return str(Path(wanted).resolve()) == repo.get("path")
-    except OSError:
-        return False
-
-
 def _describe_runs(runs: Sequence[RunRecord]) -> str:
     shown = runs[-_LISTED_RUNS:]
     parts = []
@@ -69,35 +59,87 @@ def _describe_runs(runs: Sequence[RunRecord]) -> str:
     return ", ".join(parts) if parts else "no runs"
 
 
-def _load_runs(root: Path, repo: str | None) -> list[RunRecord]:
+def _repo_key(run: RunRecord) -> str:
+    return repo_label(run.repo) if run.repo else "unknown repository"
+
+
+def _scoped_runs(
+    runs: list[RunRecord], cwd: Path | None, note: Callable[[str], None] | None
+) -> tuple[list[RunRecord], str | None]:
+    """Narrow *runs* when no ``--repo`` was given: to the repository holding *cwd*
+    when it is inside a git work tree; otherwise refuse if the runs span more than
+    one repository. Returns the runs and the repository they were narrowed to."""
+    top = toplevel(cwd) if cwd is not None else None
+    if top is not None:
+        scoped = [run for run in runs if run.repo.get("path") == top]
+        if note is not None:
+            note(f"`latest` is scoped to the repository at {top!r}; pass --repo to name another")
+        if not scoped:
+            raise ReportRefused(
+                f"no finished test run for the repository at {top!r} under the reports root; "
+                "pass --repo to name another repository",
+                exits.EXIT_NO_RUNS,
+            )
+        return scoped, top
+    found = sorted({_repo_key(run) for run in runs})
+    if len(found) > 1:
+        raise ReportRefused(
+            f"the current directory is not in a git work tree and runs are recorded for {len(found)} "
+            f"repositories ({'; '.join(found)}); pass --repo to name one",
+            exits.EXIT_REPO_MISMATCH,
+        )
+    return runs, None
+
+
+def _load_runs(
+    root: Path, repo: str | None, cwd: Path | None, note: Callable[[str], None] | None
+) -> list[RunRecord]:
     try:
         runs = store.list_runs(root)
     except StoreError as exc:
         raise ReportRefused(str(exc), exits.EXIT_NO_RUNS) from exc
     if repo is not None:
-        runs = [run for run in runs if _repo_matches(run, repo)]
+        runs = [run for run in runs if repo_matches(run.repo, repo)]
+    elif runs:
+        runs, _ = _scoped_runs(runs, cwd, note)
     if not runs:
         scope = f" for repository {repo!r}" if repo is not None else ""
         raise ReportRefused(f"no finished test run{scope} under reports root {str(root)!r}", exits.EXIT_NO_RUNS)
     return runs
 
 
-def select_run(root: Path, target: str, *, repo: str | None, sha: str | None) -> RunRecord:
-    """The run *target* names, subject to *repo* and *sha*."""
+def select_run(
+    root: Path,
+    target: str,
+    *,
+    repo: str | None,
+    sha: str | None,
+    cwd: Path | None = None,
+    note: Callable[[str], None] | None = None,
+) -> RunRecord:
+    """The run *target* names, subject to *repo* and *sha*. With an explicit run id,
+    *repo* is an assertion about that run. For ``latest`` without *repo*, *cwd*
+    scopes the choice (see ``_scoped_runs``) and *note* receives what it did."""
     if target != LATEST:
-        if sha is not None or repo is not None:
+        if sha is not None:
             raise ReportRefused(
-                "--repo and --sha select among runs; they cannot be combined with an explicit run id",
+                "--sha selects among runs; it cannot be combined with an explicit run id",
                 exits.EXIT_USAGE,
             )
         try:
-            return store.load_run(root, target)
+            run = store.load_run(root, target)
         except StoreError as exc:
             raise ReportRefused(str(exc), exits.EXIT_BAD_RUN_ID) from exc
-    runs = _load_runs(root, repo)
+        if repo is not None and not repo_matches(run.repo, repo):
+            raise ReportRefused(
+                f"run {run.run_id} was recorded for {_repo_key(run)}, not the expected repository {repo!r}",
+                exits.EXIT_REPO_MISMATCH,
+            )
+        return run
+    runs = _load_runs(root, repo, cwd, note)
     if sha is None:
         return runs[-1]
-    if _SHA_ARG_RE.match(sha) is None:
+    if SHA_ARG_RE.match(sha) is None:
         raise ReportRefused(
             f"--sha must be 7 to 40 hex characters (a full SHA or an unambiguous prefix), got {sha!r}",
             exits.EXIT_USAGE,

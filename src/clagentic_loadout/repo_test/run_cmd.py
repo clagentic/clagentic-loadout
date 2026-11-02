@@ -8,7 +8,7 @@ JSON summary to print. Nothing here prints or exits; verb.py does.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,7 @@ from typing import Any
 
 from clagentic_loadout.repo_test import exits, provenance, store
 from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, JunitSummary, parse_junit
+from clagentic_loadout.repo_test.repo_match import SHA_ARG_RE, repo_label, repo_matches
 from clagentic_loadout.repo_test.report_scratch import (
     REFUSED,
     ReportUntrusted,
@@ -48,7 +49,8 @@ _FAILURE_LOG_LINES = 40
 
 
 class RunRefused(Exception):
-    """The run cannot start. Carries the verb's exit code."""
+    """The run was refused, before it started or, when its result cannot be recorded,
+    after it finished. Carries the verb's exit code."""
 
     def __init__(self, message: str, code: int) -> None:
         super().__init__(message)
@@ -112,6 +114,38 @@ def _result_counts(summary: JunitSummary | None) -> dict[str, int]:
     }
 
 
+def check_expectation(recorded: Mapping[str, Any], expect_repo: str | None, expect_head: str | None) -> None:
+    """Refuse when the provenance *recorded* for the tree about to be tested is not
+    the repository or commit the caller expected. Runs before anything is created."""
+    if expect_head is not None and SHA_ARG_RE.match(expect_head) is None:
+        raise RunRefused(
+            f"--expect-head must be 7 to 40 hex characters (a full SHA or an unambiguous prefix), got {expect_head!r}",
+            exits.EXIT_USAGE,
+        )
+    repo = recorded.get("repo")
+    repo = repo if isinstance(repo, dict) else {}
+    if expect_repo is not None and not repo_matches(repo, expect_repo):
+        raise RunRefused(
+            f"expected repository {expect_repo!r} but this run would test {repo_label(repo)}; "
+            "nothing was run or recorded",
+            exits.EXIT_REPO_MISMATCH,
+        )
+    if expect_head is not None:
+        head = recorded.get("head_sha")
+        if not isinstance(head, str):
+            raise RunRefused(
+                f"expected head {expect_head!r} but the head of {repo_label(repo)} is unknown "
+                "(not a git work tree, or git could not read it); nothing was run or recorded",
+                exits.EXIT_REPO_MISMATCH,
+            )
+        if not head.startswith(expect_head.lower()):
+            raise RunRefused(
+                f"expected head {expect_head!r} but {repo_label(repo)} is at {head}; "
+                "nothing was run or recorded",
+                exits.EXIT_REPO_MISMATCH,
+            )
+
+
 def execute_run(
     *,
     mode: str,
@@ -121,10 +155,17 @@ def execute_run(
     timeout_seconds: float | None,
     env: Mapping[str, str] | None = None,
     tier: str | None = None,
+    expect_repo: str | None = None,
+    expect_head: str | None = None,
+    on_start: Callable[[str, Mapping[str, Any]], None] | None = None,
 ) -> RunOutcome:
     """Run the declared tests for *mode* and record the run. Mode ``tier`` runs
-    the tier named by *tier*. Raises RunRefused for anything that stops the run
-    before it starts."""
+    the tier named by *tier*. *expect_repo* and *expect_head* refuse the run when the
+    tree is not that repository or commit. *on_start* is called with the run id and
+    its provenance once the run is recorded, just before the command starts. Raises
+    RunRefused before the run starts (usage, profile, expectation mismatch, store setup)
+    and also after it has started when its result cannot be recorded; the caller still
+    reports the run as finished in that case."""
     root = Path(repo_root).resolve()
     if not root.is_dir():
         raise RunRefused(f"repo root {str(repo_root)!r} (resolved {str(root)!r}) is not a directory", exits.EXIT_USAGE)
@@ -171,13 +212,16 @@ def execute_run(
             )
     files = _resolve_files(root, paths) if mode == MODE_FILES else []
 
+    recorded = provenance.collect(root, base_sha)
+    check_expectation(recorded, expect_repo, expect_head)
+
     reports = store.reports_root(env)
     run_id = store.new_run_id()
     run_dir = reports / run_id
     try:
         ensure_private_dir(reports)
         run_dir.mkdir(mode=0o700)
-        write_json_atomic(run_dir / store.PROVENANCE_FILE, provenance.collect(root, base_sha))
+        write_json_atomic(run_dir / store.PROVENANCE_FILE, recorded)
     except OSError as exc:
         raise RunRefused(f"cannot record run {run_id} under {str(reports)!r}: {exc}", exits.EXIT_STORE_WRITE) from exc
 
@@ -192,6 +236,8 @@ def execute_run(
         for part in template
     ] + files
     started = datetime.now(timezone.utc)
+    if on_start is not None:
+        on_start(run_id, recorded)
     junit: JunitSummary | None = None
     report_verification: dict[str, Any] | None = None
     cleanup_problem: str | None = None
@@ -247,6 +293,7 @@ def execute_run(
         raise RunRefused(f"cannot record the result of run {run_id}: {exc}", exits.EXIT_STORE_WRITE) from exc
 
     printed = {key: value for key, value in record.items() if key != "failing_ids"}
+    printed.update(repo=recorded.get("repo"), head_sha=recorded.get("head_sha"), dirty=recorded.get("dirty"))
     printed["failing_id_count"] = len(record["failing_ids"])
     tail = log_tail(log_path, _FAILURE_LOG_LINES) if state == store.STATE_UNRUNNABLE else ""
     return RunOutcome(exit_code=code, summary=printed, failure_log_tail=tail)

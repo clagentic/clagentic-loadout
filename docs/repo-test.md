@@ -102,7 +102,18 @@ skipped.
 ## `test run`
 
 Prints the run summary as JSON (`run_id`, `state`, `mode`, `tier`, `counts`, `failing_id_count`,
-`command_exit_code`, `problem`, timestamps) and exits:
+`command_exit_code`, `problem`, `repo` (name, path, remote URL), `head_sha`, `dirty`, timestamps)
+and exits. It also prints one line to stderr before the command starts and one after it ends,
+each naming the run id, repository name and path, head SHA (`unknown` outside a git work
+tree) and `dirty`. Once the first line has printed, the second always prints, including when
+the run is then refused (for example the result cannot be recorded): it reads
+`finished (refused, exit <code>)` and the exit code is unchanged.
+
+- `--expect-repo VALUE` refuses (exit `78`) unless the tree to test is that repository, matched
+  like `test report --repo` (path, name, remote URL). `--expect-head SHA` refuses (exit `78`)
+  unless HEAD is that commit (full SHA or a prefix of 7 or more hex characters), and also when
+  the head is unknown. A refusal names the expected and the actual value and happens before the
+  command runs and before any run is recorded.
 
 | Code | Meaning |
 |---|---|
@@ -113,6 +124,7 @@ Prints the run summary as JSON (`run_id`, `state`, `mode`, `tier`, `counts`, `fa
 | `72` | The profile does not declare what this run needs; the message names the key. |
 | `73` | The command could not run (not found, timed out) or left no readable JUnit report. |
 | `74` | The run could not be recorded under the reports root. |
+| `78` | Refused: the tree is not the repository or commit given by `--expect-repo` / `--expect-head`. |
 
 The command's own exit code is recorded in the run and is never this verb's exit code.
 
@@ -129,12 +141,18 @@ below).
 - **Choosing the run.** `RUN_ID` (default `latest`) is untrusted input and must match the run
   id grammar before it touches a path; it is resolved directly under the reports root, and a
   run directory that is a symlink is refused. `latest` is the newest finished run.
-  `--repo` narrows `latest` to one repository, by path, name or remote URL.
+  `--repo` narrows `latest` to one repository, by path, name or remote URL. Without `--repo`,
+  `latest` is scoped to the git repository holding the current directory (stated on stderr);
+  when the current directory is in no git work tree and runs are on record for more than one
+  repository, it exits `78` naming them and asking for `--repo`. With one repository on record
+  it returns that repository's newest run. `--sha` is scoped the same way.
+- **`RUN_ID --repo R`** asserts the run belongs to repository `R` (same matching as above) and
+  exits `78`, naming both, when it does not.
 - **`--sha S`** selects the newest clean run recorded for exactly that commit: the full SHA or
   an unambiguous prefix of 7 or more hex characters. It never falls back to `latest`. With no
   match it exits `77` and lists the runs that exist; a run on a dirty tree, or one that
-  recorded no commit ("commit unknown"), is never selected. `--repo` and `--sha` cannot be
-  combined with an explicit run id.
+  recorded no commit ("commit unknown"), is never selected. `--sha` cannot be combined with
+  an explicit run id.
 - **`--summary`** (default): JSON with the run id, `state` (`complete` or `unrunnable`), mode,
   `tier` (the tier name for a tier run, else null), counts, the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
 - **`--failing-ids`**: the failing test ids, sorted, one per line. One line per failed test
@@ -161,7 +179,7 @@ below).
 | `75` | The reports root does not exist, or holds no matching finished run. |
 | `76` | The run id is malformed or no such run exists; the message names the id. |
 | `77` | No clean run matches `--sha` (or the prefix is ambiguous). |
-| `78` | Refused: `--diff` across repositories or unlike tiers, or a run without results. |
+| `78` | Refused: `--diff` across repositories or unlike tiers, a run without results, `RUN_ID --repo` naming another repository, or `latest` outside git with several repositories on record. |
 
 ## The optional permission rule
 

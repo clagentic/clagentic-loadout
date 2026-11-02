@@ -21,6 +21,10 @@ def reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "reports"
     root.mkdir()
     monkeypatch.setenv(store.REPORTS_DIR_ENV_VAR, str(root))
+    # Not inside any git work tree, so `latest` is not scoped by the caller's repository.
+    outside = tmp_path / "outside-git"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
     return root
 
 
@@ -298,3 +302,37 @@ def test_report_changes_nothing_under_the_reports_root_or_beside_it(
         _report(capsys, *argv)
 
     assert tree_snapshot(tmp_path) == before
+
+
+@pytest.fixture
+def removed_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+
+
+def test_an_explicit_run_id_reports_from_a_removed_working_directory(
+    reports: Path, removed_cwd: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, "20260101T000000Z-10", repo_path="/repos/alpha")
+    write_run(reports, "20260102T000000Z-11", repo_path="/repos/beta")
+
+    code, out, _ = _report(capsys, "20260101T000000Z-10")
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == "20260101T000000Z-10"
+
+    code, out, _ = _report(capsys, "latest", "--repo", "beta")
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == "20260102T000000Z-11"
+
+
+def test_latest_from_a_removed_working_directory_follows_the_outside_git_rule(
+    reports: Path, removed_cwd: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, "20260101T000000Z-10", repo_path="/repos/alpha")
+    code, out, _ = _report(capsys)
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == "20260101T000000Z-10"
+
+    write_run(reports, "20260102T000000Z-11", repo_path="/repos/beta")
+    code, _, err = _report(capsys)
+    assert code == exits.EXIT_REPO_MISMATCH
+    assert "alpha" in err and "beta" in err

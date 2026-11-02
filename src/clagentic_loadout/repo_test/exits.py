@@ -13,8 +13,13 @@ in the run and never returned, so none of these can be mistaken for it.
   75  report: the reports root is missing, or holds no matching run
   76  report: the run id is malformed, or no such run exists
   77  report: no run matches --sha (names what exists), or the prefix is ambiguous
-  78  report: refused (--diff across repositories or across unlike tiers, or an
-      unrunnable run, which has no results to list or compare)
+  78  refused: a repository mismatch (run --expect-repo/--expect-head, report
+      --repo on an explicit run id, `latest` with no repository to scope to
+      and several on record, --diff across repositories), --diff across unlike
+      tiers, or an unrunnable run, which has no results to list or compare.
+      Reused rather than extended: every one of these is a refusal to act
+      on a run or tree that is not the one the caller named, and the range 70-79
+      has no free code while 80 and up belong to other verbs.
   79  installer helper (repo_test.permission): the settings file could not be read
       or written; not a `clagentic-loadout test` exit
 """
@@ -30,4 +35,5 @@ EXIT_NO_RUNS = 75
 EXIT_BAD_RUN_ID = 76
 EXIT_SHA_NO_MATCH = 77
 EXIT_DIFF_REFUSED = 78
+EXIT_REPO_MISMATCH = EXIT_DIFF_REFUSED
 EXIT_SETTINGS = 79
