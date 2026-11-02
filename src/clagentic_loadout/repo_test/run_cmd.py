@@ -49,7 +49,8 @@ _FAILURE_LOG_LINES = 40
 
 
 class RunRefused(Exception):
-    """The run cannot start. Carries the verb's exit code."""
+    """The run was refused, before it started or, when its result cannot be recorded,
+    after it finished. Carries the verb's exit code."""
 
     def __init__(self, message: str, code: int) -> None:
         super().__init__(message)
@@ -161,9 +162,10 @@ def execute_run(
     """Run the declared tests for *mode* and record the run. Mode ``tier`` runs
     the tier named by *tier*. *expect_repo* and *expect_head* refuse the run when the
     tree is not that repository or commit. *on_start* is called with the run id and
-    its provenance once the run is recorded, just before the command starts. Raises RunRefused for
-    anything that stops the run
-    before it starts."""
+    its provenance once the run is recorded, just before the command starts. Raises
+    RunRefused before the run starts (usage, profile, expectation mismatch, store setup)
+    and also after it has started when its result cannot be recorded; the caller still
+    reports the run as finished in that case."""
     root = Path(repo_root).resolve()
     if not root.is_dir():
         raise RunRefused(f"repo root {str(repo_root)!r} (resolved {str(root)!r}) is not a directory", exits.EXIT_USAGE)
