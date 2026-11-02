@@ -105,7 +105,9 @@ Prints the run summary as JSON (`run_id`, `state`, `mode`, `tier`, `counts`, `fa
 `command_exit_code`, `problem`, `repo` (name, path, remote URL), `head_sha`, `dirty`, timestamps)
 and exits. It also prints one line to stderr before the command starts and one after it ends,
 each naming the run id, repository name and path, head SHA (`unknown` outside a git work
-tree) and `dirty`.
+tree) and `dirty`. Once the first line has printed, the second always prints, including when
+the run is then refused (for example the result cannot be recorded): it reads
+`finished (refused, exit <code>)` and the exit code is unchanged.
 
 - `--expect-repo VALUE` refuses (exit `78`) unless the tree to test is that repository, matched
   like `test report --repo` (path, name, remote URL). `--expect-head SHA` refuses (exit `78`)

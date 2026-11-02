@@ -57,6 +57,32 @@ def test_run_prints_where_it_ran_on_stderr_first_and_last_and_in_the_summary(
     assert "started" in lines[0] and "finished" in lines[-1]
 
 
+def test_a_store_write_refusal_after_start_still_prints_the_finished_line(
+    tmp_path: Path, reports: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from clagentic_loadout.repo_test import run_cmd
+
+    real = run_cmd.write_json_atomic
+
+    def refuse_result(path: Path, payload: object) -> None:
+        if Path(path).name == store.RESULT_FILE:
+            raise OSError("disk full")
+        real(path, payload)
+
+    monkeypatch.setattr(run_cmd, "write_json_atomic", refuse_result)
+    repo = make_repo(tmp_path / "alpha")
+
+    code, out, err = _main(capsys, "run", "full", "--repo-root", str(repo))
+
+    assert code == exits.EXIT_STORE_WRITE
+    assert out == ""
+    lines = [line for line in err.splitlines() if " started: " in line or " finished (" in line]
+    assert len(lines) == 2
+    assert "started" in lines[0]
+    assert f"finished (refused, exit {exits.EXIT_STORE_WRITE})" in lines[1]
+    assert "cannot record the result" in err
+
+
 def test_run_outside_a_git_work_tree_states_an_unknown_head(
     tmp_path: Path, reports: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

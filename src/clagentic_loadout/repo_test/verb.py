@@ -171,6 +171,12 @@ def _run(args: argparse.Namespace) -> int:
             print(f"{_PROG}: `tier` takes exactly one tier name, got {len(paths)}", file=sys.stderr)
             return exits.EXIT_USAGE
         tier, paths = paths[0], []
+    started: list[tuple[str, Mapping[str, Any]]] = []
+
+    def announce(run_id: str, recorded: Mapping[str, Any]) -> None:
+        started.append((run_id, recorded))
+        print(_describe_start(run_id, recorded, "started"), file=sys.stderr, flush=True)
+
     try:
         outcome = execute_run(
             mode=args.mode,
@@ -181,12 +187,19 @@ def _run(args: argparse.Namespace) -> int:
             tier=tier,
             expect_repo=args.expect_repo,
             expect_head=args.expect_head,
-            on_start=lambda run_id, recorded: print(
-                _describe_start(run_id, recorded, "started"), file=sys.stderr, flush=True
-            ),
+            on_start=announce,
         )
     except RunRefused as exc:
         print(f"{_PROG}: {exc}", file=sys.stderr)
+        if started:
+            # A refusal after the start line (the result could not be recorded) still
+            # closes the pair so a reader never sees a run that began and never ended.
+            run_id, recorded = started[0]
+            print(
+                _describe_start(run_id, recorded, f"finished (refused, exit {exc.code})"),
+                file=sys.stderr,
+                flush=True,
+            )
         return exc.code
     _print_json(outcome.summary)
     if outcome.failure_log_tail:
