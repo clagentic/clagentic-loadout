@@ -23,6 +23,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.repo_test import exits, report_cmd, store
@@ -36,13 +39,14 @@ _EXIT_CODES_TEXT = (
     "Exit codes: 0 ok, 1 usage, 70 tests failed, 71 no valid profile, 72 profile does not "
     "declare the command (or base), 73 command could not run or left no JUnit report, "
     "74 run could not be recorded, 75 no reports root or no matching run, 76 bad or unknown "
-    "run id, 77 no run for --sha, 78 report refused (different repositories, unlike tiers, or a run "
-    "without results)."
+    "run id, 77 no run for --sha, 78 refused (not the expected repository or commit, a repository "
+    "to scope `latest` to is ambiguous, different repositories, unlike tiers, or a run without results)."
 )
 
 _TOP_HELP = f"""{_PROG} -- run the tests a repository declares, and read the results by run id.
 
 Usage: {_PROG} run full|impacted [--repo-root DIR] [--base REV] [--timeout SECONDS]
+                                    [--expect-repo R] [--expect-head SHA]
        {_PROG} run files PATH... [--repo-root DIR] [--timeout SECONDS]
        {_PROG} run tier NAME [--repo-root DIR] [--timeout SECONDS]
        {_PROG} report [RUN_ID|latest] [--repo R] [--sha S]
@@ -98,6 +102,18 @@ def _run_parser() -> argparse.ArgumentParser:
         default=None,
         help="Seconds after which the command and its child processes are killed.",
     )
+    run.add_argument(
+        "--expect-repo",
+        default=None,
+        help="Refuse (exit 78) unless the tree to test is this repository: path, name or remote "
+        "URL. Nothing is run or recorded on a mismatch.",
+    )
+    run.add_argument(
+        "--expect-head",
+        default=None,
+        help="Refuse (exit 78) unless HEAD is this commit: full SHA or a prefix of 7 or more hex "
+        "characters. Also refused when the head is unknown.",
+    )
     return run
 
 
@@ -106,11 +122,13 @@ def _report_parser() -> argparse.ArgumentParser:
         "report",
         "Print a summary, the failing test ids, or a comparison of a recorded run. A run is "
         "chosen by run id, or `latest` (the default), optionally narrowed with --repo and "
-        "--sha. --sha never falls back to the latest run. Read-only.",
+        "--sha. Without --repo, `latest` is scoped to the git repository of the current directory, "
+        "or refused when that is none and several repositories are on record. With a run id, "
+        "--repo asserts the run's repository. --sha never falls back to the latest run. Read-only.",
     )
     report.add_argument("run_id", nargs="?", default=None, help="A run id, or `latest` (default).")
     report.add_argument(
-        "--repo", default=None, help="Narrow `latest` to a repository: path, name or remote URL."
+        "--repo", default=None, help="Narrow `latest` to a repository, or assert the repository of a run id: path, name or remote URL."
     )
     report.add_argument(
         "--sha",
@@ -136,6 +154,16 @@ def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _describe_start(run_id: str, recorded: Mapping[str, Any], phase: str) -> str:
+    repo = recorded.get("repo") if isinstance(recorded.get("repo"), dict) else {}
+    dirty = recorded.get("dirty")
+    return (
+        f"{_PROG}: run {run_id} {phase}: repo={repo.get('name') or 'unknown'} "
+        f"path={repo.get('path') or 'unknown'} head={recorded.get('head_sha') or 'unknown'} "
+        f"dirty={'unknown' if dirty is None else str(dirty).lower()}"
+    )
+
+
 def _run(args: argparse.Namespace) -> int:
     paths, tier = list(args.paths), None
     if args.mode == MODE_TIER:
@@ -151,6 +179,11 @@ def _run(args: argparse.Namespace) -> int:
             base=args.base,
             timeout_seconds=args.timeout,
             tier=tier,
+            expect_repo=args.expect_repo,
+            expect_head=args.expect_head,
+            on_start=lambda run_id, recorded: print(
+                _describe_start(run_id, recorded, "started"), file=sys.stderr, flush=True
+            ),
         )
     except RunRefused as exc:
         print(f"{_PROG}: {exc}", file=sys.stderr)
@@ -158,13 +191,24 @@ def _run(args: argparse.Namespace) -> int:
     _print_json(outcome.summary)
     if outcome.failure_log_tail:
         print(f"{_PROG}: end of the command's output:\n{outcome.failure_log_tail}", file=sys.stderr)
+    print(
+        _describe_start(outcome.summary["run_id"], outcome.summary, f"finished ({outcome.summary['state']})"),
+        file=sys.stderr,
+    )
     return outcome.exit_code
 
 
 def _report(args: argparse.Namespace) -> int:
     root = store.reports_root()
     try:
-        run = report_cmd.select_run(root, args.run_id, repo=args.repo, sha=args.sha)
+        run = report_cmd.select_run(
+            root,
+            args.run_id,
+            repo=args.repo,
+            sha=args.sha,
+            cwd=Path.cwd(),
+            note=lambda text: print(f"{_PROG}: {text}", file=sys.stderr),
+        )
         if args.diff is not None:
             _print_json(report_cmd.diff_of(run, report_cmd.load_base_run(root, args.diff)))
         elif args.failing_ids:

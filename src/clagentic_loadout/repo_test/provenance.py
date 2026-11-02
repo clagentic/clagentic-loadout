@@ -59,6 +59,13 @@ def resolve_commit(root: Path, revision: str) -> str | None:
     return sha if sha and FULL_SHA_RE.match(sha) else None
 
 
+def toplevel(root: Path) -> str | None:
+    """The resolved top-level path of the git work tree holding *root*, or None
+    when *root* is not inside one."""
+    top = _git(root, "rev-parse", "--show-toplevel")
+    return str(Path(top).resolve()) if top else None
+
+
 def collect(root: Path, base_sha: str | None = None) -> dict[str, Any]:
     """The provenance record for a run in the directory *root*."""
     top = _git(root, "rev-parse", "--show-toplevel")
@@ -79,4 +86,4 @@ def collect(root: Path, base_sha: str | None = None) -> dict[str, Any]:
     }
 
 
-__all__ = ["collect", "resolve_commit", "strip_userinfo"]
+__all__ = ["collect", "resolve_commit", "strip_userinfo", "toplevel"]

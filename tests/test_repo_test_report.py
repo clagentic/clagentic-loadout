@@ -21,6 +21,10 @@ def reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "reports"
     root.mkdir()
     monkeypatch.setenv(store.REPORTS_DIR_ENV_VAR, str(root))
+    # Not inside any git work tree, so `latest` is not scoped by the caller's repository.
+    outside = tmp_path / "outside-git"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
     return root
 
 
