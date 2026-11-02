@@ -198,6 +198,18 @@ def _run(args: argparse.Namespace) -> int:
     return outcome.exit_code
 
 
+def _scoping_cwd(args: argparse.Namespace) -> Path | None:
+    """The working directory, read only where `latest` scoping uses it (no run id,
+    no --repo). A directory that no longer exists or cannot be read counts as
+    not inside a git work tree rather than aborting the report."""
+    if args.run_id != LATEST or args.repo is not None:
+        return None
+    try:
+        return Path.cwd()
+    except OSError:
+        return None
+
+
 def _report(args: argparse.Namespace) -> int:
     root = store.reports_root()
     try:
@@ -206,7 +218,7 @@ def _report(args: argparse.Namespace) -> int:
             args.run_id,
             repo=args.repo,
             sha=args.sha,
-            cwd=Path.cwd(),
+            cwd=_scoping_cwd(args),
             note=lambda text: print(f"{_PROG}: {text}", file=sys.stderr),
         )
         if args.diff is not None:
