@@ -11,6 +11,7 @@ directory, which proves the step ran against the merged content and where.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 
@@ -19,8 +20,7 @@ import yaml
 
 from clagentic_loadout.merge import post_merge_verb, tool_merge_tree, verb
 from clagentic_loadout.transport import provider_config
-from tests import test_merge_post_merge_verb as pmv
-from tests import test_merge_verb_post_merge as mvp
+from tests import _merge_support as ms
 from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, make_origin_confirmable
 
 _PY = sys.executable
@@ -39,9 +39,9 @@ def _git(args, cwd) -> str:
 def _isolation(tmp_path, monkeypatch):
     monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "user-config-root")
     monkeypatch.setenv(tool_merge_tree.TREES_DIR_ENV_VAR, str(tmp_path / "trees"))
-    mvp._SEEDED_BASE["sha"] = ""
+    ms.SEEDED_BASE["sha"] = ""
     yield
-    mvp._SEEDED_BASE["sha"] = ""
+    ms.SEEDED_BASE["sha"] = ""
 
 
 def _push_merged_commit(work, tmp_path) -> str:
@@ -91,13 +91,13 @@ def _scenario(tmp_path, *, shape: str, steps=True, platform="forgejo"):
     branch + uncommitted edit), 'clean-base'."""
     work = tmp_path / "work"
     work.mkdir()
-    mvp._init_repo_with_origin(work)
+    ms.init_repo_with_origin(work)
     if platform == "github":
         make_origin_confirmable(work, url=CONFIRMABLE_GITHUB_ORIGIN)
     merged = _push_merged_commit(work, tmp_path)
     marker = tmp_path / "marker.txt"
     if steps:
-        mvp._write_merge_config(work, [_step(marker)])
+        ms.write_merge_config(work, [_step(marker)])
     if shape == "feature":
         _git(["checkout", "-b", "feature/x"], work)
     if shape in ("feature", "dirty-base"):
@@ -107,14 +107,14 @@ def _scenario(tmp_path, *, shape: str, steps=True, platform="forgejo"):
 
 def _merge(work, merged, platform="forgejo", **extra):
     if platform == "github":
-        opener = mvp._make_github_opener(merged_sha=merged)
+        opener = ms.make_merge_github_opener(merged_sha=merged)
     else:
-        opener = mvp._make_opener()
-    argv = mvp._base_args(**{"--repo-path": str(work), "--platform": platform, **extra})
+        opener = ms.make_merge_opener()
+    argv = ms.merge_base_args(**{"--repo-path": str(work), "--platform": platform, **extra})
     return verb.main(
         argv,
-        token_provider=mvp._RecordingTokenProvider(),
-        authority_provider=mvp._AllowingAuthorityProvider(),
+        token_provider=ms.RecordingTokenProvider(),
+        authority_provider=ms.AllowingAuthorityProvider(),
         opener=opener,
     )
 
@@ -122,15 +122,15 @@ def _merge(work, merged, platform="forgejo", **extra):
 def _post_merge(work, merged, platform="forgejo"):
     sha = merged if platform == "github" else None
     opener = (
-        pmv._make_github_opener(merge_commit_sha=sha)
+        ms.make_post_merge_github_opener(merge_commit_sha=sha)
         if platform == "github"
-        else pmv._make_opener(merge_commit_sha=sha)
+        else ms.make_post_merge_opener(merge_commit_sha=sha)
     )
-    argv = pmv._base_args(str(work), **{"--platform": platform})
+    argv = ms.post_merge_base_args(str(work), **{"--platform": platform})
     return post_merge_verb.main(
         argv,
-        token_provider=pmv._RecordingTokenProvider(),
-        authority_provider=pmv._AllowingAuthorityProvider(),
+        token_provider=ms.RecordingTokenProvider(),
+        authority_provider=ms.AllowingAuthorityProvider(),
         opener=opener,
     )
 
@@ -187,7 +187,7 @@ class TestMergeVerbFeatureBranchWithUncommittedEdit:
 
     def test_failing_step_still_removes_the_tree_and_leaves_the_checkout(self, tmp_path):
         work, merged, marker = _scenario(tmp_path, shape="feature", steps=False)
-        mvp._write_merge_config(
+        ms.write_merge_config(
             work, [{"cmd": [_PY, "-c", "import sys; sys.exit(3)"], "on_failure": "fail"}]
         )
         before = _snapshot(work)
@@ -242,10 +242,10 @@ class TestWrapperLayout:
         wrapper.mkdir()
         work = wrapper / "repo"
         work.mkdir()
-        mvp._init_repo_with_origin(work)
+        ms.init_repo_with_origin(work)
         merged = _push_merged_commit(work, tmp_path)
         marker = tmp_path / "marker.txt"
-        mvp._write_merge_config(wrapper, [_step(marker)], git_working_tree="repo")
+        ms.write_merge_config(wrapper, [_step(marker)], git_working_tree="repo")
         _git(["checkout", "-b", "feature/x"], work)
         (work / "README.md").write_text("seed\nuncommitted edit\n", encoding="utf-8")
         before = _snapshot(work)
@@ -312,6 +312,8 @@ class TestPostMergeVerb:
         result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
         assert result["steps_run"] == 1
         assert str(tmp_path / "trees") in result["post_merge_tree"]
+        assert result["post_merge_tree_removed"] is True
+        assert not (tmp_path / "trees").exists() or not list((tmp_path / "trees").rglob(merged))
 
     def test_clean_base_branch_keeps_advancing_and_landing(self, tmp_path, capsys):
         work, merged, marker = _scenario(tmp_path, shape="clean-base")
@@ -319,7 +321,8 @@ class TestPostMergeVerb:
         assert marker.read_text().split("|")[1] == str(work.resolve())
         assert _git(["symbolic-ref", "--short", "HEAD"], work).strip() == _BASE
         assert _git(["rev-parse", "HEAD"], work).strip() == merged
-        assert "post_merge_tree" not in json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        result = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+        assert "post_merge_tree" not in result and "post_merge_tree_removed" not in result
 
 
 class TestStepsDirInTree:
@@ -339,3 +342,295 @@ class TestStepsDirInTree:
         tree.mkdir()
         with pytest.raises(tool_merge_tree.MergeTreeUnavailableError):
             tool_merge_tree.steps_dir_in_tree(tree, work, sub)
+
+
+def _commit_to_origin(work, tmp_path, name, write) -> str:
+    """Clone the work repo's origin to *name*, let *write(clone)* add files and
+    stage them, commit and push; return the new tip."""
+    origin = str(work.parent / f"{work.name}-origin.git")
+    clone = tmp_path / name
+    _git(["clone", "-b", _BASE, origin, str(clone)], tmp_path)
+    _git(["config", "user.email", "t@example.com"], clone)
+    _git(["config", "user.name", "t"], clone)
+    write(clone)
+    _git(["commit", "-m", f"{name} change"], clone)
+    _git(["push", "origin", f"{_BASE}:{_BASE}"], clone)
+    return _git(["rev-parse", "HEAD"], clone).strip()
+
+
+def _cmd_step(cmd) -> dict:
+    return {"cmd": cmd, "on_failure": "fail"}
+
+
+def _record_env_step(marker) -> dict:
+    code = (
+        "import os, pathlib;"
+        f"pathlib.Path(r'{marker}').write_text("
+        f"os.environ.get('{tool_merge_tree.ENV_MERGE_TREE}', 'unset') + '|' + os.getcwd())"
+    )
+    return _cmd_step([_PY, "-c", code])
+
+
+class TestRepoPathNamedByAStepIsRefused:
+    """In the tool-tree case a step that names --repo-path's git top-level as an
+    absolute path would act on the builder's checkout; it is refused before any step
+    runs."""
+
+    def _setup(self, tmp_path, naming_step):
+        work, merged, marker = _scenario(tmp_path, shape="feature", steps=False)
+        first = _step(marker)
+        ms.write_merge_config(work, [first, naming_step(work)])
+        return work, merged, marker
+
+    @pytest.mark.parametrize(
+        "naming_step",
+        [
+            pytest.param(lambda w: _cmd_step(f"{_PY} -c pass {w}/scripts/install.sh"), id="string"),
+            pytest.param(lambda w: _cmd_step([_PY, "-c", "pass", f"--prefix={w}"]), id="list"),
+            pytest.param(
+                lambda w: _cmd_step(["bash", "-c", f"cd {w} && ./install.sh"]), id="bash-c"
+            ),
+            pytest.param(
+                lambda w: {**_cmd_step([_PY, "-c", "pass"]), "verify": ["test", "-d", str(w)]},
+                id="verify",
+            ),
+        ],
+    )
+    @pytest.mark.parametrize("verb_name", ["merge", "post-merge"])
+    def test_refused_before_any_step_runs(
+        self, tmp_path, capsys, naming_step, verb_name
+    ):
+        work, merged, marker = self._setup(tmp_path, naming_step)
+        before = _snapshot(work)
+        if verb_name == "merge":
+            code = _merge(work, merged)
+            expected = verb.EXIT_POST_MERGE_FAILED
+        else:
+            code = _post_merge(work, merged)
+            expected = post_merge_verb.EXIT_POST_MERGE_FAILED
+        assert code == expected
+        err = capsys.readouterr().err
+        assert tool_merge_tree.OUTCOME_STEP_NAMES_REPO_PATH in err
+        assert "step 2" in err and str(work) in err
+        assert "CLAGENTIC_LOADOUT_MERGE_TREE" in err and "clean base checkout" in err
+        assert not marker.exists()
+        assert _snapshot(work) == before
+        _assert_tool_tree_gone(work, tmp_path, merged)
+
+    def test_the_realpath_form_is_refused(self, tmp_path, capsys):
+        work, merged, marker = self._setup(
+            tmp_path, lambda w: _cmd_step([_PY, "-c", "pass", f"{w.resolve()}/x"])
+        )
+        link = tmp_path / "link"
+        link.symlink_to(work)
+        before = _snapshot(work)
+        assert _merge(link, merged) == verb.EXIT_POST_MERGE_FAILED
+        assert tool_merge_tree.OUTCOME_STEP_NAMES_REPO_PATH in capsys.readouterr().err
+        assert not marker.exists()
+        assert _snapshot(work) == before
+
+    def test_the_symlink_spelling_is_refused_too(self, tmp_path, capsys):
+        work, merged, marker = self._setup(
+            tmp_path, lambda w: _cmd_step([_PY, "-c", "pass", f"{tmp_path}/link/x"])
+        )
+        (tmp_path / "link").symlink_to(work)
+        assert _merge(tmp_path / "link", merged) == verb.EXIT_POST_MERGE_FAILED
+        assert tool_merge_tree.OUTCOME_STEP_NAMES_REPO_PATH in capsys.readouterr().err
+        assert not marker.exists()
+
+    def test_a_sibling_path_that_shares_the_prefix_is_not_refused(self, tmp_path):
+        work, merged, marker = self._setup(
+            tmp_path, lambda w: _cmd_step([_PY, "-c", "pass", f"{w}-other/x", f"/y{w}"])
+        )
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert marker.exists()
+
+    def test_a_clean_base_checkout_is_unchanged_even_when_a_step_names_its_path(self, tmp_path):
+        work, merged, marker = _scenario(tmp_path, shape="clean-base", steps=False)
+        ms.write_merge_config(work, [_step(marker), _cmd_step([_PY, "-c", "pass", str(work)])])
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert marker.exists()
+
+
+class TestRefuseStepsUnit:
+    def _repo(self, tmp_path):
+        repo = tmp_path / "x" / "repo"
+        repo.mkdir(parents=True)
+        _git(["init", "-b", _BASE, str(repo)], tmp_path)
+        return repo.resolve()
+
+    @pytest.mark.parametrize(
+        ("text", "refused"),
+        [
+            ("{r}", True),
+            ("{r}/sub/file", True),
+            ("cd {r}; make", True),
+            ("--prefix={r}", True),
+            ("{r}-other", False),
+            ("{r}.git", False),
+            ("/y{r}", False),
+            ("{r}x/file", False),
+            ("relative/path", False),
+        ],
+    )
+    def test_path_boundary(self, tmp_path, text, refused):
+        repo = self._repo(tmp_path)
+        steps = [_cmd_step(["bash", "-c", text.format(r=repo)])]
+        if refused:
+            with pytest.raises(tool_merge_tree.StepNamesRepoPathError):
+                tool_merge_tree.refuse_steps_naming_repo_path(steps, repo)
+        else:
+            tool_merge_tree.refuse_steps_naming_repo_path(steps, repo)
+
+    def test_a_description_alone_is_not_scanned(self, tmp_path):
+        repo = self._repo(tmp_path)
+        step = {**_cmd_step(["true"]), "description": f"install from {repo}"}
+        tool_merge_tree.refuse_steps_naming_repo_path([step], repo)
+
+
+class TestMergeTreeEnv:
+    @pytest.mark.parametrize("platform", ["forgejo", "github"])
+    def test_tool_tree_case_exports_the_tree_root(self, tmp_path, platform):
+        work, merged, marker = _scenario(tmp_path, shape="feature", steps=False, platform=platform)
+        ms.write_merge_config(work, [_record_env_step(marker)])
+        assert _merge(work, merged, platform) == verb.EXIT_OK
+        value, cwd = marker.read_text().split("|")
+        assert value.startswith(str(tmp_path / "trees")) and value.endswith(merged)
+        assert cwd == value
+
+    @pytest.mark.parametrize("platform", ["forgejo", "github"])
+    def test_clean_case_exports_the_repository_top_level(self, tmp_path, platform):
+        work, merged, marker = _scenario(tmp_path, shape="clean-base", steps=False, platform=platform)
+        ms.write_merge_config(work, [_record_env_step(marker)])
+        assert _merge(work, merged, platform) == verb.EXIT_OK
+        assert marker.read_text().split("|")[0] == str(work.resolve())
+
+    def test_post_merge_verb_exports_it_in_both_cases(self, tmp_path):
+        work, merged, marker = _scenario(tmp_path, shape="feature", steps=False)
+        ms.write_merge_config(work, [_record_env_step(marker)])
+        assert _post_merge(work, merged) == post_merge_verb.EXIT_OK
+        assert marker.read_text().split("|")[0].startswith(str(tmp_path / "trees"))
+
+    def test_post_merge_verb_clean_case(self, tmp_path):
+        work, merged, marker = _scenario(tmp_path, shape="clean-base", steps=False)
+        ms.write_merge_config(work, [_record_env_step(marker)])
+        assert _post_merge(work, merged) == post_merge_verb.EXIT_OK
+        assert marker.read_text().split("|")[0] == str(work.resolve())
+
+    def test_it_wins_over_a_deployment_override(self, tmp_path, monkeypatch):
+        work, merged, marker = _scenario(tmp_path, shape="clean-base", steps=False)
+        ms.write_merge_config(work, [_record_env_step(marker)])
+        monkeypatch.setenv(f"CLAGENTIC_LOADOUT_POST_MERGE_ENV_{tool_merge_tree.ENV_MERGE_TREE}", "/elsewhere")
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert marker.read_text().split("|")[0] == str(work.resolve())
+
+
+class TestStepsLoadFromRepoPathConfig:
+    def test_untracked_config_is_read_from_repo_path_not_the_tool_tree(self, tmp_path):
+        work, merged, marker = _scenario(tmp_path, shape="feature", steps=False)
+        code = (
+            "import pathlib;"
+            f"pathlib.Path(r'{marker}').write_text(str(pathlib.Path('.clagentic/loadout/config.yaml').exists()))"
+        )
+        ms.write_merge_config(work, [_cmd_step([_PY, "-c", code])])
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert marker.read_text() == "False"
+
+    def test_the_drift_check_prefers_git_tracked_steps_at_the_merged_commit(
+        self, tmp_path, capsys
+    ):
+        work, _, marker = _scenario(tmp_path, shape="feature", steps=False)
+        stale_marker = tmp_path / "stale.txt"
+        ms.write_merge_config(work, [_cmd_step([_PY, "-c", f"open(r'{stale_marker}', 'w').close()"])])
+        tracked = yaml.safe_dump(
+            {"merge": {"post_merge_steps": [_cmd_step([_PY, "-c", f"open(r'{marker}', 'w').close()"])]}}
+        )
+
+        def write(clone):
+            (clone / ".clagentic" / "loadout").mkdir(parents=True)
+            (clone / ".clagentic" / "loadout" / "config.yaml").write_text(tracked, encoding="utf-8")
+            _git(["add", "-f", ".clagentic/loadout/config.yaml"], clone)
+
+        merged = _commit_to_origin(work, tmp_path, "config-clone", write)
+        before = _snapshot(work)
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert "DRIFT" in capsys.readouterr().err
+        assert marker.exists() and not stale_marker.exists()
+        assert _snapshot(work) == before
+
+
+@pytest.fixture
+def _allow_file_submodules(monkeypatch):
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+
+
+class TestSubmodules:
+    def _submodule_scenario(self, tmp_path, marker_code):
+        work, _, marker = _scenario(tmp_path, shape="feature", steps=False)
+        sub = tmp_path / "sub-source"
+        sub.mkdir()
+        _git(["init", "-b", _BASE, str(sub)], tmp_path)
+        _git(["config", "user.email", "t@example.com"], sub)
+        _git(["config", "user.name", "t"], sub)
+        (sub / "s.txt").write_text("pinned\n", encoding="utf-8")
+        _git(["add", "s.txt"], sub)
+        _git(["commit", "-m", "sub"], sub)
+
+        def write(clone):
+            _git(["submodule", "add", str(sub), "vendor/sub"], clone)
+
+        merged = _commit_to_origin(work, tmp_path, "submodule-clone", write)
+        ms.write_merge_config(work, [_cmd_step([_PY, "-c", marker_code.format(marker=marker)])])
+        return work, merged, marker, sub
+
+    def test_the_pinned_submodule_is_checked_out_in_the_tool_tree(
+        self, tmp_path, _allow_file_submodules
+    ):
+        code = "import pathlib; pathlib.Path(r'{marker}').write_text(pathlib.Path('vendor/sub/s.txt').read_text())"
+        work, merged, marker, _ = self._submodule_scenario(tmp_path, code)
+        before = _snapshot(work)
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert marker.read_text() == "pinned\n"
+        assert _snapshot(work) == before
+        _assert_tool_tree_gone(work, tmp_path, merged)
+
+    def test_a_submodule_that_will_not_check_out_refuses_before_any_step(
+        self, tmp_path, capsys, _allow_file_submodules
+    ):
+        work, merged, marker, sub = self._submodule_scenario(tmp_path, "open(r'{marker}', 'w').close()")
+        shutil.rmtree(sub)
+        before = _snapshot(work)
+        assert _merge(work, merged) == verb.EXIT_POST_MERGE_FAILED
+        err = capsys.readouterr().err
+        assert tool_merge_tree.OUTCOME_TREE_UNAVAILABLE in err and "submodule" in err
+        assert not marker.exists()
+        assert _snapshot(work) == before
+        _assert_tool_tree_gone(work, tmp_path, merged)
+
+
+class TestFailureMessageInTheToolTree:
+    def _failing(self, tmp_path):
+        work, merged, _ = _scenario(tmp_path, shape="feature", steps=False)
+        ms.write_merge_config(work, [_cmd_step([_PY, "-c", "import sys; sys.exit(3)"])])
+        return work, merged
+
+    def test_merge_verb_failure_says_it_ran_in_a_fresh_tree(self, tmp_path, capsys):
+        work, merged = self._failing(tmp_path)
+        assert _merge(work, merged) == verb.EXIT_POST_MERGE_FAILED
+        err = capsys.readouterr().err
+        assert "failed (exit 3)" in err
+        assert "fresh tree of the merged commit's tracked content" in err
+        assert "untracked files from --repo-path" in err
+
+    def test_post_merge_verb_failure_says_it_ran_in_a_fresh_tree(self, tmp_path, capsys):
+        work, merged = self._failing(tmp_path)
+        assert _post_merge(work, merged) == post_merge_verb.EXIT_POST_MERGE_FAILED
+        assert "fresh tree of the merged commit's tracked content" in capsys.readouterr().err
+
+    def test_a_clean_checkout_failure_has_no_such_note(self, tmp_path, capsys):
+        work, merged, _ = _scenario(tmp_path, shape="clean-base", steps=False)
+        ms.write_merge_config(work, [_cmd_step([_PY, "-c", "import sys; sys.exit(3)"])])
+        assert _merge(work, merged) == verb.EXIT_POST_MERGE_FAILED
+        assert "fresh tree" not in capsys.readouterr().err

@@ -2600,12 +2600,45 @@ trees directory (`CLAGENTIC_LOADOUT_MERGE_TREES_DIR`, then user config
 merged commit. The worktree is removed when the steps finish, pass or fail. The
 steps' working directory is the same path relative to the repository top-level, so
 relative paths in a step resolve to the merged content; the tree used is named on
-stderr by both verbs and as `post_merge_tree` in `loadout-post-merge`'s JSON result.
+stderr by both verbs and as `post_merge_tree` in `loadout-post-merge`'s JSON result,
+with `post_merge_tree_removed: true` because the tree no longer exists by the time the
+result is printed.
 `--repo-path`'s branch, HEAD, index and files are not touched. If the worktree cannot
 be made (git error, unwritable directory, a leftover at the same path, or the merged
 commit lacking the step directory) the verb exits with the post-merge-failed code and a
 `merge-tree-unavailable` message before any step runs; it never falls back to moving
 `--repo-path`. `sync_tree_after_merge: false` still applies to `loadout-merge` only.
+
+What a step can rely on in the tool tree:
+
+- **The tree is ephemeral.** It is removed after the steps, pass or fail. A step must
+  install or copy what it produces to a location outside the tree and must never leave
+  a process running from it (a `detaches: true` step started from the tree loses its
+  working directory when the tree is removed).
+- **Tracked content only.** The tree is a fresh checkout of the merged commit. When
+  the commit has a `.gitmodules`, `git submodule update --init --recursive` runs in
+  the tree first, and if it fails the verb refuses with `merge-tree-unavailable`
+  before any step runs. Untracked files in `--repo-path` (`.env`, `node_modules`, a
+  virtualenv) are the builder's state, not merged content, and are not copied in. When
+  a step fails in the tool tree its failure message says so, so a step that needed an
+  untracked file reads as that and not as a mystery.
+- **`CLAGENTIC_LOADOUT_MERGE_TREE`.** Every step (and its `verify` command and
+  liveness probe) gets this variable set to the absolute path of the tree the steps
+  run in: the tool tree in the case above, the repository top-level when `--repo-path`
+  is a clean base-branch checkout. A step that needs the tree's root reads it instead
+  of hardcoding a path. It overrides a deployment override of the same name.
+- **A step may not name `--repo-path` as an absolute path.** In the tool-tree case,
+  before any step runs, the verb refuses with `merge-tree-step-names-repo-path` when a
+  step's `cmd` (string or list form, including text inside `bash -c '...'`), `verify`
+  or `liveness_probe` command names the repository top-level as an absolute path, as
+  given or by realpath, on a path boundary: `/x/repo` and `/x/repo/sub` match,
+  `/x/repo-other` does not. Such a step would install the builder's stale checkout and
+  report success. The message names the step and the path; fix it by making the step
+  relative to the repository top-level, using `CLAGENTIC_LOADOUT_MERGE_TREE`, or
+  merging from a clean base checkout. A clean base-branch checkout is unaffected.
+- **Steps come from `--repo-path`'s config**, as before: untracked config, or config
+  at the wrapper level, is read from `--repo-path`, never from the tool tree. The drift
+  check against git-tracked steps at the merged commit is unchanged.
 
 A per-repo `merge:` section key, `sync_tree_after_merge` (boolean, default
 `true`), is the only way to turn this phase off entirely — set it to `false`

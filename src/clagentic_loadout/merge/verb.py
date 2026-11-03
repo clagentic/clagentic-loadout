@@ -634,6 +634,9 @@ from clagentic_loadout.merge.tree_sync import (
     resolve_base_sha,
 )
 from clagentic_loadout.merge.tool_merge_tree import (
+    TOOL_TREE_FAILURE_NOTE,
+    merge_tree_env,
+    refuse_steps_naming_repo_path,
     steps_dir_in_tree,
     tool_merge_tree,
     unsafe_tree_reason,
@@ -2888,10 +2891,13 @@ def _run(
                             run_post_merge_steps(
                                 steps,
                                 args.repo_path,
-                                deployment_env_overrides=deployment_env_overrides,
+                                deployment_env_overrides=merge_tree_env(
+                                    deployment_env_overrides, git_tree_path
+                                ),
                                 default_timeout_seconds=default_step_timeout,
                             )
                         else:
+                            refuse_steps_naming_repo_path(steps, git_tree_path)
                             with tool_merge_tree(git_tree_path, landed_sha) as tool_tree:
                                 tool_steps_dir = steps_dir_in_tree(
                                     tool_tree, git_tree_path, args.repo_path
@@ -2901,12 +2907,24 @@ def _run(
                                     f"{tool_steps_dir} at merged SHA {landed_sha!r}",
                                     file=sys.stderr,
                                 )
-                                run_post_merge_steps(
-                                    steps,
-                                    tool_steps_dir,
-                                    deployment_env_overrides=deployment_env_overrides,
-                                    default_timeout_seconds=default_step_timeout,
-                                )
+                                try:
+                                    run_post_merge_steps(
+                                        steps,
+                                        tool_steps_dir,
+                                        deployment_env_overrides=merge_tree_env(
+                                            deployment_env_overrides, tool_tree
+                                        ),
+                                        default_timeout_seconds=default_step_timeout,
+                                    )
+                                except (
+                                    PostMergeStepFailedError,
+                                    PostMergeStepTimeoutError,
+                                    PostMergeLivenessError,
+                                ) as step_exc:
+                                    _fail(
+                                        f"{step_exc}{TOOL_TREE_FAILURE_NOTE}",
+                                        code=EXIT_POST_MERGE_FAILED,
+                                    )
                     except TreeSyncError as exc:
                         _fail(
                             f"post-merge working-tree sync FAILED -- {exc}",

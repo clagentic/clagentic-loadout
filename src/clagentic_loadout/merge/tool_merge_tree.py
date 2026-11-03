@@ -19,15 +19,27 @@ WHY A TOOL TREE AND NOT A REFUSAL: refusing would stop every merge whose
 tree to avoid that (``merge.git_working_tree`` must name ``--repo-path``'s own git
 top-level). A tool tree meets the requirement with no per-repository change.
 
-If the worktree cannot be made (old git, no disk, a leftover at the same path) the
-tool raises `MergeTreeUnavailableError` before any step runs and never falls back to
-moving ``--repo-path``.
+If the worktree cannot be made (old git, no disk, a leftover at the same path, a
+submodule that will not check out) the tool raises `MergeTreeUnavailableError` before
+any step runs and never falls back to moving ``--repo-path``.
+
+THE TREE IS EPHEMERAL: it holds the merged commit's tracked content only (plus its
+submodules), is removed once the steps finish, and so must never be the place a step
+installs to or leaves a process running from. Untracked files in ``--repo-path``
+(``.env``, ``node_modules``, a virtualenv) are the builder's state, not merged
+content, and are deliberately not copied in.
+
+A step that names ``--repo-path`` as an absolute path would act on the builder's
+checkout, not on the merged content, and install stale code with a passing exit. So
+`refuse_steps_naming_repo_path` refuses such a step before any step runs. Every step
+is given the tree it runs in as ``CLAGENTIC_LOADOUT_MERGE_TREE`` (`merge_tree_env`).
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Iterator, Mapping
@@ -49,13 +61,35 @@ _TREES_KIND = StoreKind(
     default_subdir="merge-trees",
 )
 
-#: Outcome name carried at the front of every refusal message from this module.
+#: Outcome names carried at the front of every refusal message from this module.
 OUTCOME_TREE_UNAVAILABLE = "merge-tree-unavailable"
+OUTCOME_STEP_NAMES_REPO_PATH = "merge-tree-step-names-repo-path"
+
+#: Exported to every post-merge step: the absolute path of the tree the steps run in
+#: (the repository top-level when --repo-path is a clean base checkout, the tool tree
+#: otherwise).
+ENV_MERGE_TREE = "CLAGENTIC_LOADOUT_MERGE_TREE"
+
+#: Appended to a step's failure message when it ran in the tool tree, because the
+#: tree holds tracked content only and a step that needed an untracked file fails here.
+TOOL_TREE_FAILURE_NOTE = (
+    " [this step ran in a fresh tree of the merged commit's tracked content, so "
+    "untracked files from --repo-path (.env, node_modules, a virtualenv) are not present]"
+)
+
+#: Step keys whose values are commands that run in the tree.
+_COMMAND_KEYS = ("cmd", "verify", "liveness_probe")
 
 
 class MergeTreeUnavailableError(TreeSyncError):
     """The tool-owned tree for the post-merge steps could not be made or used.
     Raised before any step runs; ``--repo-path`` has not been touched."""
+
+
+class StepNamesRepoPathError(TreeSyncError):
+    """A post-merge step names ``--repo-path``'s git top-level as an absolute path
+    while the steps run in the tool tree. Raised before any step runs;
+    ``--repo-path`` has not been touched."""
 
 
 def _git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -144,6 +178,17 @@ def tool_merge_tree(
             f"--repo-path was not touched"
         )
     try:
+        if (path / ".gitmodules").is_file():
+            # A submodule pin is merged content: a step that reads it needs it
+            # checked out, and an empty directory would pass silently.
+            submodules = _git(["submodule", "update", "--init", "--recursive"], cwd=path)
+            if submodules.returncode != 0:
+                raise MergeTreeUnavailableError(
+                    f"{OUTCOME_TREE_UNAVAILABLE}: git submodule update failed (exit "
+                    f"{submodules.returncode}) in {path}: "
+                    f"{submodules.stderr.strip()[:400]}; no step ran and --repo-path "
+                    f"was not touched"
+                )
         yield path
     finally:
         removed = _git(["worktree", "remove", "--force", str(path)], cwd=tree)
@@ -179,10 +224,91 @@ def steps_dir_in_tree(tool_tree: Path, git_tree: str | Path, steps_dir: str | Pa
     return mapped
 
 
+def _command_strings(value: object) -> Iterator[str]:
+    """Every string in a step's command value (a string, a list, or a mapping that
+    holds either)."""
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            yield from _command_strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _command_strings(item)
+
+
+def _repo_path_spellings(git_tree: Path, top: str) -> list[str]:
+    """The ways *git_tree*'s top-level can be written as an absolute path: as given
+    and by realpath, without a trailing slash. The filesystem root is never one."""
+    candidates = [
+        str(git_tree),
+        top,
+        os.path.realpath(top),
+        os.path.realpath(git_tree),
+    ]
+    seen: list[str] = []
+    for candidate in candidates:
+        trimmed = candidate.rstrip("/")
+        if trimmed and trimmed not in seen:
+            seen.append(trimmed)
+    return seen
+
+
+def refuse_steps_naming_repo_path(steps: list[dict], git_tree: str | Path) -> None:
+    """Raise `StepNamesRepoPathError` when any step's command names *git_tree*'s
+    top-level as an absolute path, in a string command, a list command, or text
+    inside a ``bash -c`` string. Also covers a step's ``verify`` and
+    ``liveness_probe`` commands, which run in the same tree.
+
+    The match is on a path boundary: ``/x/repo`` matches ``/x/repo`` and
+    ``/x/repo/sub`` but not ``/x/repo-other`` or ``/y/x/repo``. A command spelled
+    ``-C/x/repo`` (no separator before the path) is not recognised.
+    """
+    tree = Path(git_tree)
+    top = _git(["rev-parse", "--show-toplevel"], cwd=tree)
+    if top.returncode != 0:
+        raise MergeTreeUnavailableError(
+            f"{OUTCOME_TREE_UNAVAILABLE}: cannot read the top-level of {git_tree} "
+            f"(git exit {top.returncode})"
+        )
+    for path in _repo_path_spellings(tree, top.stdout.strip()):
+        pattern = re.compile(r"(?<![\w.~])" + re.escape(path) + r"(?![\w.-])")
+        for index, step in enumerate(steps, start=1):
+            for key in _COMMAND_KEYS:
+                for text in _command_strings(step.get(key)):
+                    if pattern.search(text):
+                        label = step.get("description") or text
+                        raise StepNamesRepoPathError(
+                            f"{OUTCOME_STEP_NAMES_REPO_PATH}: post-merge step {index} "
+                            f"({label!r}) names the checkout path {path} as an absolute "
+                            f"path, but --repo-path is not a clean checkout of the base "
+                            f"branch, so the steps run in a tool-owned tree and that path "
+                            f"would act on the stale checkout instead of the merged "
+                            f"content. Make the step relative to the repository "
+                            f"top-level, use {ENV_MERGE_TREE}, or merge from a clean "
+                            f"base checkout. No step ran and --repo-path was not touched"
+                        )
+
+
+def merge_tree_env(
+    overrides: Mapping[str, str] | None, tree: str | Path
+) -> dict[str, str]:
+    """*overrides* plus ``CLAGENTIC_LOADOUT_MERGE_TREE`` set to the absolute path of
+    *tree*, the tree the steps run in. It wins over a deployment override of the
+    same name, so a step always reads the tree it actually runs in."""
+    return {**(overrides or {}), ENV_MERGE_TREE: str(Path(tree).resolve())}
+
+
 __all__ = [
+    "ENV_MERGE_TREE",
     "MergeTreeUnavailableError",
+    "OUTCOME_STEP_NAMES_REPO_PATH",
     "OUTCOME_TREE_UNAVAILABLE",
+    "StepNamesRepoPathError",
+    "TOOL_TREE_FAILURE_NOTE",
     "TREES_DIR_ENV_VAR",
+    "merge_tree_env",
+    "refuse_steps_naming_repo_path",
     "steps_dir_in_tree",
     "tool_merge_tree",
     "trees_root",
