@@ -146,6 +146,7 @@ from clagentic_loadout.merge.tree_sync import (
 from clagentic_loadout.merge.tool_merge_tree import (
     TOOL_TREE_FAILURE_NOTE,
     merge_tree_env,
+    refuse_detached_steps,
     refuse_steps_naming_repo_path,
     steps_dir_in_tree,
     tool_merge_tree,
@@ -704,6 +705,7 @@ def _run(
                         default_timeout_seconds=default_step_timeout,
                     )
                 else:
+                    refuse_detached_steps(steps)
                     refuse_steps_naming_repo_path(steps, git_tree_path)
                     with tool_merge_tree(git_tree_path, landed_sha) as tool_tree:
                         tool_steps_dir = steps_dir_in_tree(

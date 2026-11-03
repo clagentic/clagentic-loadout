@@ -2613,8 +2613,10 @@ What a step can rely on in the tool tree:
 
 - **The tree is ephemeral.** It is removed after the steps, pass or fail. A step must
   install or copy what it produces to a location outside the tree and must never leave
-  a process running from it (a `detaches: true` step started from the tree loses its
-  working directory when the tree is removed).
+  a process running from it. A `detaches: true` step is therefore refused in the tool
+  tree, before any step runs, with `merge-tree-detached-step` naming the step: a detached
+  step must run from a clean base checkout, or install outside the tree and detach from
+  there. A clean base checkout runs `detaches: true` steps as before.
 - **Tracked content only.** The tree is a fresh checkout of the merged commit. When
   the commit has a `.gitmodules`, `git submodule update --init --recursive` runs in
   the tree first, and if it fails the verb refuses with `merge-tree-unavailable`

@@ -25,7 +25,8 @@ any step runs and never falls back to moving ``--repo-path``.
 
 THE TREE IS EPHEMERAL: it holds the merged commit's tracked content only (plus its
 submodules), is removed once the steps finish, and so must never be the place a step
-installs to or leaves a process running from. Untracked files in ``--repo-path``
+installs to or leaves a process running from. For that reason `refuse_detached_steps`
+refuses a ``detaches: true`` step before any step runs. Untracked files in ``--repo-path``
 (``.env``, ``node_modules``, a virtualenv) are the builder's state, not merged
 content, and are deliberately not copied in.
 
@@ -64,6 +65,7 @@ _TREES_KIND = StoreKind(
 #: Outcome names carried at the front of every refusal message from this module.
 OUTCOME_TREE_UNAVAILABLE = "merge-tree-unavailable"
 OUTCOME_STEP_NAMES_REPO_PATH = "merge-tree-step-names-repo-path"
+OUTCOME_DETACHED_STEP = "merge-tree-detached-step"
 
 #: Exported to every post-merge step: the absolute path of the tree the steps run in
 #: (the repository top-level when --repo-path is a clean base checkout, the tool tree
@@ -90,6 +92,11 @@ class StepNamesRepoPathError(TreeSyncError):
     """A post-merge step names ``--repo-path``'s git top-level as an absolute path
     while the steps run in the tool tree. Raised before any step runs;
     ``--repo-path`` has not been touched."""
+
+
+class DetachedStepInToolTreeError(TreeSyncError):
+    """A post-merge step sets ``detaches: true`` while the steps run in the tool
+    tree. Raised before any step runs; ``--repo-path`` has not been touched."""
 
 
 def _git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
@@ -290,6 +297,27 @@ def refuse_steps_naming_repo_path(steps: list[dict], git_tree: str | Path) -> No
                         )
 
 
+def refuse_detached_steps(steps: list[dict]) -> None:
+    """Raise `DetachedStepInToolTreeError` when any step sets ``detaches: true``.
+
+    A detached step outlives the steps run, but the tool tree is removed as soon as
+    they finish, which would delete the code and working directory of the process it
+    started while the step still reported success. The tree does not support such a
+    step; it must run from a clean base checkout.
+    """
+    for index, step in enumerate(steps, start=1):
+        if step.get("detaches") is True:
+            label = step.get("description") or step.get("cmd")
+            raise DetachedStepInToolTreeError(
+                f"{OUTCOME_DETACHED_STEP}: post-merge step {index} ({label!r}) sets "
+                f"detaches: true, but --repo-path is not a clean checkout of the base "
+                f"branch, so the steps run in a tool-owned tree that is removed when "
+                f"they finish. A detached step must run from a clean base checkout, or "
+                f"install outside the tree and detach from there. No step ran and "
+                f"--repo-path was not touched"
+            )
+
+
 def merge_tree_env(
     overrides: Mapping[str, str] | None, tree: str | Path
 ) -> dict[str, str]:
@@ -301,13 +329,16 @@ def merge_tree_env(
 
 __all__ = [
     "ENV_MERGE_TREE",
+    "DetachedStepInToolTreeError",
     "MergeTreeUnavailableError",
+    "OUTCOME_DETACHED_STEP",
     "OUTCOME_STEP_NAMES_REPO_PATH",
     "OUTCOME_TREE_UNAVAILABLE",
     "StepNamesRepoPathError",
     "TOOL_TREE_FAILURE_NOTE",
     "TREES_DIR_ENV_VAR",
     "merge_tree_env",
+    "refuse_detached_steps",
     "refuse_steps_naming_repo_path",
     "steps_dir_in_tree",
     "tool_merge_tree",

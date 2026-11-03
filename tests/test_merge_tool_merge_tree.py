@@ -14,6 +14,7 @@ import json
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 import yaml
@@ -445,6 +446,46 @@ class TestRepoPathNamedByAStepIsRefused:
         ms.write_merge_config(work, [_step(marker), _cmd_step([_PY, "-c", "pass", str(work)])])
         assert _merge(work, merged) == verb.EXIT_OK
         assert marker.exists()
+
+
+class TestDetachedStepIsRefusedInTheToolTree:
+    """A `detaches: true` step would outlive the tool tree it starts from, so the
+    tool tree refuses it before any step runs; a clean base checkout runs it."""
+
+    @staticmethod
+    def _detached(marker) -> dict:
+        code = f"import pathlib; pathlib.Path(r'{marker}').write_text('ran')"
+        return {"cmd": [_PY, "-c", code], "on_failure": "warn", "detaches": True,
+                "description": "start the daemon"}
+
+    @pytest.mark.parametrize("verb_name", ["merge", "post-merge"])
+    def test_refused_before_any_step_runs(self, tmp_path, capsys, verb_name):
+        work, merged, marker = _scenario(tmp_path, shape="feature", steps=False)
+        detached_marker = tmp_path / "detached.txt"
+        ms.write_merge_config(work, [_step(marker), self._detached(detached_marker)])
+        before = _snapshot(work)
+        if verb_name == "merge":
+            code, expected = _merge(work, merged), verb.EXIT_POST_MERGE_FAILED
+        else:
+            code, expected = _post_merge(work, merged), post_merge_verb.EXIT_POST_MERGE_FAILED
+        assert code == expected
+        err = capsys.readouterr().err
+        assert tool_merge_tree.OUTCOME_DETACHED_STEP in err
+        assert "step 2" in err and "start the daemon" in err and "clean base checkout" in err
+        assert not marker.exists() and not detached_marker.exists()
+        assert _snapshot(work) == before
+        _assert_tool_tree_gone(work, tmp_path, merged)
+
+    def test_a_clean_base_checkout_runs_the_same_config(self, tmp_path):
+        work, merged, marker = _scenario(tmp_path, shape="clean-base", steps=False)
+        detached_marker = tmp_path / "detached.txt"
+        ms.write_merge_config(work, [_step(marker), self._detached(detached_marker)])
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert marker.exists()
+        deadline = time.time() + 10
+        while not detached_marker.exists() and time.time() < deadline:
+            time.sleep(0.1)
+        assert detached_marker.exists()
 
 
 class TestRefuseStepsUnit:
