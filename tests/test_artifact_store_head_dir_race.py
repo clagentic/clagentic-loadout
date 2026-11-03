@@ -73,7 +73,7 @@ def test_two_gates_writing_the_same_new_head_both_leave_a_record(tmp_path, monke
         except BaseException as exc:  # collected so the main thread can assert
             errors.append(exc)
 
-    threads = [threading.Thread(target=run, args=(g,)) for g in ("reviewer:peaches", "reviewer:bobbie")]
+    threads = [threading.Thread(target=run, args=(g,)) for g in ("reviewer:agent-alpha", "reviewer:agent-beta")]
     for t in threads:
         t.start()
     for t in threads:
@@ -81,7 +81,7 @@ def test_two_gates_writing_the_same_new_head_both_leave_a_record(tmp_path, monke
 
     assert errors == []
     gates = sorted(r.gate for r in records_at_head(root, HEAD).records)
-    assert gates == ["reviewer:bobbie", "reviewer:peaches"]
+    assert gates == ["reviewer:agent-alpha", "reviewer:agent-beta"]
 
 
 def test_a_head_directory_made_by_another_writer_is_used_and_not_chmodded(tmp_path, monkeypatch):
@@ -102,7 +102,7 @@ def test_a_head_directory_made_by_another_writer_is_used_and_not_chmodded(tmp_pa
     monkeypatch.setattr(
         Path, "exists", lambda self, *a, **kw: False if self == existing else real_exists(self, *a, **kw)
     )
-    _emit(root, "reviewer:peaches")
+    _emit(root, "reviewer:agent-alpha")
 
     assert str(existing) not in chmodded
     assert stat.S_IMODE(existing.stat().st_mode) == 0o2775
@@ -116,7 +116,7 @@ def test_a_symlink_at_the_head_path_is_still_refused(tmp_path):
     elsewhere.mkdir()
     (root / HEAD).symlink_to(elsewhere)
     with pytest.raises(StoreError, match="symlink"):
-        _emit(root, "reviewer:peaches")
+        _emit(root, "reviewer:agent-alpha")
     assert list(elsewhere.iterdir()) == []
 
 
@@ -135,7 +135,7 @@ def test_a_symlink_swapped_in_before_the_creation_is_refused(tmp_path, monkeypat
 
     monkeypatch.setattr(Path, "mkdir", mkdir)
     with pytest.raises(StoreError, match="symlink"):
-        _emit(root, "reviewer:peaches")
+        _emit(root, "reviewer:agent-alpha")
     assert list(elsewhere.iterdir()) == []
 
 
@@ -175,7 +175,7 @@ def test_a_failure_that_survives_the_retry_warns_with_the_directory_and_errno(tm
         Path, "mkdir", lambda self, *a, **kw: always_exists(self, *a, **kw) if self == root / HEAD else real_mkdir(self, *a, **kw)
     )
     result = try_emit_record(
-        "prog", gate="reviewer:peaches", head_sha=HEAD, tool="t", exit=0, started=T0, finished=T1, root=root
+        "prog", gate="reviewer:agent-alpha", head_sha=HEAD, tool="t", exit=0, started=T0, finished=T1, root=root
     )
     err = capsys.readouterr().err
     assert result is None
