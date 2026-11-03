@@ -11,9 +11,11 @@ output a reviewer could have edited.
                  and it blocks under the evaluator like any finding whose facts
                  say so, unless the reviewer lists it in ``--dropped`` with a
                  reason (review.dropped_overlap).
-  outside range  the hit is on a line the change leaves alone, or in a file it
-                 does not touch. It is never a finding and takes no part in the
-                 verdict; it is kept as context.
+  outside range  the hit is on a context line of a file the diff shows (the file
+                 has a new-side path and the line is not added). It is never a
+                 finding and takes no part in the verdict; it is kept as context.
+                 Every other hit is in range, including one in a file the diff
+                 does not list.
 
 Duplicates: a reviewer's finding with the same ``file:line:rule_id`` as a scanner
 finding is replaced by the scanner finding, so the location is counted once and
@@ -109,9 +111,9 @@ def ingest(
 ) -> Ingestion:
     """Classify every hit of *scanner_input* against *diff_text* and return the
     findings to add and the context to list. The diff is read only when there is
-    a hit to classify; a diff that cannot be read then raises
-    changed_lines.DiffUnreadableError, because no hit can be called outside the
-    range of a diff nothing can be said about."""
+    a hit to classify; a diff that cannot be read (none, or cut
+    short) then raises changed_lines.DiffUnreadableError, because no hit can be
+    called outside the range of a diff nothing can be said about."""
     hits = scanner_input.hits
     if not hits:
         return Ingestion((), (), ())
@@ -119,10 +121,14 @@ def ingest(
     in_range: list[dict[str, Any]] = []
     outside: list[dict[str, Any]] = []
     for hit in hits:
-        if hit.line in added.get(hit.file, frozenset()):
-            in_range.append(finding_of(hit, categories))
-        else:
+        # Outside range needs positive evidence: the diff lists the file and the
+        # line is not one it adds. A file the diff does not list is a gap in what
+        # was read, never proof that the file is unchanged.
+        listed = added.get(hit.file)
+        if listed is not None and hit.line not in listed:
             outside.append(_context_of(hit))
+        else:
+            in_range.append(finding_of(hit, categories))
     scanner_ids = {candidate_id(item) for item in in_range}
     replaced = tuple(
         candidate_id(item) for item in reviewer_findings if candidate_id(item) in scanner_ids

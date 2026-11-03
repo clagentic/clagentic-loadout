@@ -171,20 +171,33 @@ class TestAnOutsideRangeHit:
         assert [f["rule_id"] for f in fence["evaluated_findings"]] == ["R1"]
         assert "findings_open" not in fence
 
-    def test_a_hit_in_a_file_the_change_does_not_touch_is_context(self, world, capsys):
+    def test_a_hit_in_a_file_the_diff_does_not_list_blocks(self, world, capsys):
         code, result, _ = world.post(
-            [_scanner(hits=[_hit(9, file="elsewhere.py")])], status="clean", capsys=capsys
+            [_scanner(hits=[_hit(9, file="elsewhere.py")])], status="blocking", capsys=capsys
         )
 
-        assert code == 0 and result["outside_range_count"] == 1
-        assert world.fence()["evaluated_findings"] == []
+        assert code == 0
+        assert result["scanner_finding_count"] == 1 and result["outside_range_count"] == 0
+        assert result["status"] == "blocking"
 
-    def test_a_hit_in_a_deleted_file_is_context(self, world, capsys):
+    def test_a_hit_in_a_deleted_file_blocks(self, world, capsys):
         code, result, _ = world.post(
-            [_scanner(hits=[_hit(1, file="gone.py")])], status="clean", capsys=capsys
+            [_scanner(hits=[_hit(1, file="gone.py")])], status="blocking", capsys=capsys
         )
 
-        assert code == 0 and result["outside_range_count"] == 1
+        assert code == 0
+        assert result["scanner_finding_count"] == 1 and result["outside_range_count"] == 0
+
+    def test_a_truncated_diff_refuses_instead_of_calling_a_hit_outside_range(
+        self, world, capsys
+    ):
+        world.host.diff = DIFF.split("+import newthing")[0]
+        code, _, err = world.post(
+            [_scanner(hits=[_hit(ADDED_LINE)])], status="blocking", capsys=capsys
+        )
+
+        assert code == review_cli.EXIT_ACQUIRE_FAILED
+        assert "cannot classify" in err and world.host.last_body is None
 
     def test_extra_findings_file_fields_claiming_outside_range_do_not_move_the_hit(
         self, world, capsys

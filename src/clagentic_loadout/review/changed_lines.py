@@ -6,8 +6,9 @@ the diff, so it is answered here from the unified diff the host served for the
 reviewed head and from nothing a reviewer or a scanner wrote.
 
 A line is in the change when the diff adds it (a ``+`` line, numbered on the
-new side). A context line, a line outside every hunk, a line of a file the diff
-does not touch, and a line of a deleted file are not.
+new side). A line is shown as unchanged only when it is not added in a file the
+diff lists with a new-side path; the caller treats every other line, including
+one of a file this result omits, as in the change.
 
 Hunk bodies are read by the line counts in each ``@@`` header, so a changed
 line whose own text starts with ``--- `` or ``+++ `` is never mistaken for a
@@ -22,6 +23,7 @@ _HEADER = "diff --git "
 _HUNK_RE = re.compile(r"\A@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _NEW_SIDE_RE = re.compile(r"\A\+\+\+ (.+?)(?:\t.*)?\Z")
 _DEV_NULL = "/dev/null"
+_TRUNCATED = "the diff text ends inside a hunk, so its line counts are not met"
 # One alternation scanned left to right, so each backslash sequence is consumed
 # exactly once and a decoded byte can never start another escape.
 _ESCAPE_RE = re.compile(r'\\([0-7]{3}|[\\"abfnrtv])|([^\\]+)|(\\)')
@@ -68,15 +70,22 @@ def added_lines(diff_text: str) -> dict[str, frozenset[int]]:
     from an untouched one. A deleted, mode-only or binary file has no ``+++`` path
     to name, so it is omitted from the result, as an untouched file is. Raises
     DiffUnreadableError when the text has no ``diff --git`` section at all,
-    because then nothing can be said about any line."""
+    because then nothing can be said about any line, and when a hunk's line
+    counts are not met by the end of its file section or of the text, because a
+    truncated diff would otherwise show a changed line as unchanged."""
     result: dict[str, set[int]] = {}
     current: str | None = None
     in_section = False
     saw_section = False
     old_left = new_left = 0
     new_line = 0
-    for line in diff_text.split("\n"):
+    lines = diff_text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    for line in lines:
         if old_left > 0 or new_left > 0:
+            if line.startswith(_HEADER):
+                raise DiffUnreadableError(_TRUNCATED)
             marker = line[:1]
             if marker == "+":
                 if current is not None:
@@ -111,6 +120,8 @@ def added_lines(diff_text: str) -> dict[str, frozenset[int]]:
             old_left = int(hunk.group(1)) if hunk.group(1) is not None else 1
             new_line = int(hunk.group(2))
             new_left = int(hunk.group(3)) if hunk.group(3) is not None else 1
+    if old_left > 0 or new_left > 0:
+        raise DiffUnreadableError(_TRUNCATED)
     if not saw_section:
         raise DiffUnreadableError("the diff text has no 'diff --git' file section to read")
     return {path: frozenset(lines) for path, lines in result.items()}

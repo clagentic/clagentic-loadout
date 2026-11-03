@@ -50,8 +50,13 @@ and any tool that can write it can feed a review.
 
 The tool classifies each hit; the file never does. A hit is **in range** when its line is
 one the pull request adds, read from the unified diff the host serves for the reviewed
-head. A context line, a line outside every hunk, a file the change does not touch and a
-deleted file are **outside range**. No field of the scanner file, the findings file, the
+head. A hit is **outside range** only when the diff lists its file (with a new-side path)
+and the line is not one the diff adds: a context line of a file the diff shows. Every other
+case is in range and blocks unless dropped: a file the diff does not list, a deleted file, a
+binary or mode-only file, a path that did not match. Scanners run over the head copies of
+the changed files, so a hit on a file the diff does not list is a gap in the diff read, not
+an unchanged file. A diff that is cut short (a hunk whose line counts are not met) is
+unreadable. No field of the scanner file, the findings file, the
 dropped file or a `run` output is read for this, and a `post` that cannot read the diff
 refuses when there is a hit to classify rather than guess.
 
@@ -96,7 +101,7 @@ so the location is counted once and the tool's facts stand. A reviewer finding o
 line under a different rule is a separate finding: a finding cannot cover a hit by sitting
 next to it.
 
-**Outside range:** never a finding and never part of the verdict. It is listed under
+**Outside range** (a context line of a file the diff shows): never a finding and never part of the verdict. It is listed under
 `Scanner hits outside the changed lines` in the comment and in the fence as
 `outside_range` (`scanner`, `file`, `line`, `rule_id`, `message`).
 

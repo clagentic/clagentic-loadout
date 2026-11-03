@@ -92,3 +92,20 @@ def _quoted_diff(quoted: str) -> str:
 )
 def test_a_c_quoted_path_decodes_each_escape_exactly_once(quoted, path):
     assert added_lines(_quoted_diff(quoted)) == {path: frozenset({1})}
+
+
+def test_a_hunk_whose_counts_are_unmet_at_the_end_of_the_text_is_unreadable():
+    diff = "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n@@ -1,3 +1,4 @@\n ctx\n+new\n"
+
+    with pytest.raises(DiffUnreadableError):
+        added_lines(diff)
+
+
+def test_a_hunk_cut_before_the_next_file_section_is_unreadable():
+    diff = (
+        "diff --git a/m.py b/m.py\n--- a/m.py\n+++ b/m.py\n@@ -1,3 +1,4 @@\n ctx\n+new\n"
+        "diff --git a/n.py b/n.py\n--- a/n.py\n+++ b/n.py\n@@ -0,0 +1,1 @@\n+x\n"
+    )
+
+    with pytest.raises(DiffUnreadableError):
+        added_lines(diff)

@@ -150,3 +150,24 @@ def test_a_hit_path_is_put_in_the_form_the_diff_uses(value):
 def test_a_hit_path_that_does_not_normalize_cleanly_is_refused(value):
     with pytest.raises(si.ScannerInputError):
         _hit_file(value)
+
+
+def test_a_hit_in_a_file_cut_off_by_a_diff_that_ends_after_the_first_file_is_in_range():
+    diff = make_diff({"a.py": 2})
+    hit = {"file": "b.py", "line": 1, "rule_id": "r", "message": "m"}
+
+    ingestion = ingest(_parse(_doc(hits=[hit])), diff, [], {})
+
+    assert len(ingestion.findings) == 1 and ingestion.outside_range == ()
+
+
+def test_a_context_line_of_a_listed_file_is_outside_range():
+    diff = (
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+        "@@ -1,2 +1,3 @@\n ctx\n+new\n ctx2\n"
+    )
+    hit = {"file": "a.py", "line": 1, "rule_id": "r", "message": "m"}
+
+    ingestion = ingest(_parse(_doc(hits=[hit])), diff, [], {})
+
+    assert ingestion.findings == () and len(ingestion.outside_range) == 1
