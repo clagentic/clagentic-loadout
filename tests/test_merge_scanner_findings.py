@@ -13,7 +13,8 @@ from clagentic_loadout.transport import provider_config
 from tests._ruling_support import fence as _fence
 from tests._ruling_support import gate_repo as _repo
 from tests._ruling_support import tip as _tip
-from tests.test_merge_computed_verdict import _comment, _merge
+from tests._ruling_support import comment as _comment
+from tests._ruling_support import merge as _merge
 
 HIT = ScannerHit("sast-one", "src/a.py", 3, "use-safe-parse", "unsafe parse call")
 CONTEXT = {

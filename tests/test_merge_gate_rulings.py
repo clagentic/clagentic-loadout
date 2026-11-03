@@ -34,7 +34,7 @@ from tests._ruling_support import fence as _fence
 from tests._ruling_support import gate_repo as _repo
 from tests._ruling_support import tip as _tip
 from tests._support.merge_verb import AllowingAuthorityProvider, RecordingTokenProvider, base_args
-from tests.test_merge_computed_verdict import LOGIN
+from tests._ruling_support import LOGIN
 
 _MODES = [pytest.param([], id="merge"), pytest.param(["--report-only"], id="report-only")]
 
