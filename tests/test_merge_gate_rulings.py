@@ -20,7 +20,6 @@ from clagentic_loadout.review.ruling_provider import RulingScope
 from tests._ruling_host import PLATFORMS
 from tests._ruling_support import (
     FLOOR,
-    GATE_DAY,
     HEAD,
     NAME,
     OTHER_FP,
@@ -377,16 +376,27 @@ class TestRulingExpiryFollowsTheGateClock:
         assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
         assert "expired" in run.err
 
-    def test_a_ruling_lapses_the_day_after_its_window_and_not_before(
+    def test_a_ruling_still_clears_on_the_last_day_of_its_window(
         self, platform, mode, repo, use_registry, capsys, monkeypatch
     ):
         use_registry([ruling()])
-        assert GATE_DAY < TODAY + dt.timedelta(days=30)
+        pin_gate_clock(monkeypatch, TODAY + dt.timedelta(days=30))
+
+        run = _gate(platform, _blocked(_finding()), repo, capsys, mode)
+
+        assert run.code == verb.EXIT_OK, run.err
+        assert "expired" not in run.err
+
+    def test_a_ruling_lapses_the_day_after_its_window(
+        self, platform, mode, repo, use_registry, capsys, monkeypatch
+    ):
+        use_registry([ruling()])
         pin_gate_clock(monkeypatch, TODAY + dt.timedelta(days=31))
 
         run = _gate(platform, _blocked(_finding()), repo, capsys, mode)
 
         assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "expired" in run.err
 
 
 class TestEveryFenceOfARole:
