@@ -89,7 +89,7 @@ def _split_future(
         if message is None:
             present.append(run)
             continue
-        (undatable if store.dated_time(run) is None else future).append(run)
+        (undatable if store.is_undatable(run) else future).append(run)
         if note is not None:
             note(message)
     return present, future, undatable
