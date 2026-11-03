@@ -22,8 +22,13 @@ _HEADER = "diff --git "
 _HUNK_RE = re.compile(r"\A@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 _NEW_SIDE_RE = re.compile(r"\A\+\+\+ (.+?)(?:\t.*)?\Z")
 _DEV_NULL = "/dev/null"
-_OCTAL_RE = re.compile(r"\\([0-7]{3})")
-_SIMPLE_ESCAPES = {"\\\\": "\\", '\\"': '"', "\\t": "\t", "\\n": "\n", "\\r": "\r"}
+# One alternation scanned left to right, so each backslash sequence is consumed
+# exactly once and a decoded byte can never start another escape.
+_ESCAPE_RE = re.compile(r'\\([0-7]{3}|[\\"abfnrtv])|([^\\]+)|(\\)')
+_SIMPLE_ESCAPES = {
+    "\\": b"\\", '"': b'"', "a": b"\a", "b": b"\b", "f": b"\f",
+    "n": b"\n", "r": b"\r", "t": b"\t", "v": b"\v",
+}
 
 
 class DiffUnreadableError(ValueError):
@@ -32,14 +37,18 @@ class DiffUnreadableError(ValueError):
 
 def _unquote(name: str) -> str:
     """A git C-quoted path (``"a\\303\\251.py"``) as the real path."""
-    inner = name[1:-1]
-    for escaped, plain in _SIMPLE_ESCAPES.items():
-        inner = inner.replace(escaped, plain)
-    raw = _OCTAL_RE.sub(lambda m: chr(int(m.group(1), 8)), inner)
-    try:
-        return raw.encode("latin-1").decode("utf-8")
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        return raw
+    raw = bytearray()
+    for match in _ESCAPE_RE.finditer(name[1:-1]):
+        escape, literal, lone = match.groups()
+        if escape is not None:
+            raw += bytes([int(escape, 8)]) if escape.isdigit() else _SIMPLE_ESCAPES[escape]
+        elif literal is not None:
+            raw += literal.encode("utf-8")
+        else:
+            raw += b"\\"
+    # surrogateescape keeps bytes that are not UTF-8 distinct, so they can only
+    # fail to match a reported path, never be altered into another one.
+    return raw.decode("utf-8", errors="surrogateescape")
 
 
 def _new_path(side: str) -> str | None:

@@ -69,3 +69,26 @@ def test_no_newline_marker_does_not_shift_numbering():
 def test_text_without_a_file_section_is_unreadable(text):
     with pytest.raises(DiffUnreadableError):
         added_lines(text)
+
+
+def _quoted_diff(quoted: str) -> str:
+    return (
+        f'diff --git "a/{quoted}" "b/{quoted}"\n--- "a/{quoted}"\n+++ "b/{quoted}"\n'
+        "@@ -0,0 +1,1 @@\n+x\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("quoted", "path"),
+    [
+        ("x\\\\303.py", "x\\303.py"),
+        ("a\\\\tb", "a\\tb"),
+        ("a\\tb", "a\tb"),
+        ('q\\"n\\\\', 'q"n\\'),
+        ("caf\\303\\251.py", "café.py"),
+        ("日本.py", "日本.py"),
+        ("\\346\\227\\245.py", "日.py"),
+    ],
+)
+def test_a_c_quoted_path_decodes_each_escape_exactly_once(quoted, path):
+    assert added_lines(_quoted_diff(quoted)) == {path: frozenset({1})}
