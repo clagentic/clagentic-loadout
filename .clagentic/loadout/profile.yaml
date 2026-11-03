@@ -19,6 +19,14 @@ review:
   docs_only:
     paths: ["docs/**/*.md", "README.md"]
     depended_on: ["CLAUDE.md", "AGENTS.md", "docs/README.md"]
+  # Security scanners a review run executes, each mapped to the finding
+  # category its hits are posted under. A scanner not named here is reported
+  # as degraded instead of categorized (see docs/scanner-input.md).
+  scanners:
+    gitleaks: {category: secrets_exposure}
+    trufflehog: {category: secrets_exposure}
+    semgrep: {category: injection}
+    osv-scanner: {category: supply_chain}
 paths:
   # Deployment config that ships as disaster-recovery data and carries its own
   # cast identifiers by design.
