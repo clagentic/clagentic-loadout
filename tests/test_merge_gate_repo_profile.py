@@ -18,7 +18,11 @@ from clagentic_loadout.review.chunking import plan_chunks
 from clagentic_loadout.review.policy_source import PROFILE_PATH, read_policy
 from clagentic_loadout.review.profile_settings import ProfileSettings
 from tests._gate_repo import commit_files
-from tests.test_merge_computed_verdict import _comment, _fence, _merge, _repo, _tip
+from tests._ruling_support import comment as _comment
+from tests._ruling_support import fence as _fence
+from tests._ruling_support import gate_repo as _repo
+from tests._ruling_support import merge as _merge
+from tests._ruling_support import tip as _tip
 
 HOST = "host-one.example.test"
 _PROFILE_WITH_DENY = f"class: released-tool\ndeny:\n  hosts: [{HOST}]\n"

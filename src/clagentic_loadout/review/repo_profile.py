@@ -36,6 +36,9 @@ with no internal path)::
         paths: ["docs/**/*.md"]     # globs whose files may be documentation
         depended_on: ["docs/README.md"]  # globs that are code although they look like docs
                                     # (see review.docs_only_policy)
+      scanners:                     # optional; the category each scanner looks for. A
+        gitleaks: {category: secrets_exposure}  # scanner not named is in the security
+                                    # floor (see review.scanner_policy)
     exposure: local_or_ci_only      # optional posture keys, read only by gates from
     data: public_or_none            # the merge base (see review.profile_posture).
     visibility: public              # A missing, unrecognised or unconfirmed value
@@ -62,6 +65,11 @@ from clagentic_loadout.review.docs_only_policy import (
 )
 from clagentic_loadout.review.path_glob import path_matches
 from clagentic_loadout.review.profile_posture import POSTURE_KEY_ORDER
+from clagentic_loadout.review.scanner_policy import (
+    KEY_SCANNERS,
+    ScannerPolicyError,
+    parse_scanner_categories,
+)
 
 CLASS_RELEASED_TOOL = "released-tool"
 CLASS_INTERNAL = "internal"
@@ -161,6 +169,8 @@ class RepoProfile:
     posture: tuple[tuple[str, Any], ...] = ()
     #: The docs allowlist (``review.docs_only``); None when none is declared.
     docs_only: DocsOnlyPolicy | None = None
+    #: ``(scanner, category)`` from ``review.scanners``; a scanner not named has none.
+    scanner_categories: tuple[tuple[str, str], ...] = ()
 
     def posture_values(self) -> dict[str, Any]:
         return dict(self.posture)
@@ -271,7 +281,11 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         raise ProfileFormatError(str(exc)) from exc
     try:
         docs_only = parse_review_block(doc.get("review"))
-    except DocsOnlyFormatError as exc:
+        review_block = doc.get("review")
+        scanner_categories = parse_scanner_categories(
+            review_block.get(KEY_SCANNERS) if isinstance(review_block, dict) else None
+        )
+    except (DocsOnlyFormatError, ScannerPolicyError) as exc:
         raise ProfileFormatError(str(exc)) from exc
     # A field only means something where its class is in effect: the top-level
     # class or a path override. Anywhere else it would be silently ignored.
@@ -292,6 +306,7 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         test=declared_tests if declared_tests.declared_keys() else None,
         posture=tuple((key, doc[key]) for key in POSTURE_KEY_ORDER if key in doc),
         docs_only=docs_only,
+        scanner_categories=scanner_categories,
     )
 
 

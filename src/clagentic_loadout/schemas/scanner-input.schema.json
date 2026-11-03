@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clagentic.ai/schemas/loadout/scanner-input.schema.json",
+  "title": "scanner input",
+  "description": "What a review hands `loadout-review post --scanner-input`: the results of the scanners that examined the reviewed head. The file reports what each scanner did and what it found; it never says whether a hit is part of the change under review. The tool decides that itself from the pull request's diff at the reviewed head, and no field here can set or override it, nor the category of defect a scanner looks for, which comes from the repository's policy at the pull request's base revision. The schema is generic: it names no particular scanner.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["head_sha", "scanners"],
+  "properties": {
+    "head_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "The full SHA of the head the scanners examined. A file stamped for any other head than the reviewed head is refused."
+    },
+    "scanners": {
+      "type": "array",
+      "description": "One entry per scanner. A scanner name appears once.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scanner", "status"],
+        "properties": {
+          "scanner": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_:-]{0,63}$",
+            "description": "Scanner name."
+          },
+          "status": {
+            "type": "string",
+            "enum": ["ran", "not_applicable", "not_invoked", "failed"],
+            "description": "ran: the scanner completed, and `hits` is its complete result. not_applicable: nothing for it to scan; a reason is required. not_invoked: it was not run. failed: it started and did not complete, for any cause including a timeout. Only a scanner that ran may list hits."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "One line. Required for not_applicable; recommended for not_invoked and failed."
+          },
+          "hits": {
+            "type": "array",
+            "description": "The scanner's findings. Empty or absent for a scanner that found nothing.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["file", "line", "rule_id", "message"],
+              "properties": {
+                "file": {"type": "string", "minLength": 1, "description": "Repository-relative path of the file at the reviewed head."},
+                "line": {"type": "integer", "minimum": 1, "description": "Line of the hit in that file at the reviewed head."},
+                "rule_id": {"type": "string", "minLength": 1, "description": "The scanner's own rule identifier. The tool states the finding as scanner.rule_id."},
+                "message": {"type": "string", "minLength": 1, "description": "What the scanner reported."}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

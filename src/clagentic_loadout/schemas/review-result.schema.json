@@ -176,6 +176,22 @@
         }
       }
     },
+    "outside_range": {
+      "type": "array",
+      "description": "OPTIONAL evidence. Scanner hits on a line of a file the diff shows that the change did not add, listed as context; a hit anywhere else is in range and is a finding. Informational: an outside-range hit is not a finding, holds nothing open and takes no part in the computed verdict.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scanner", "file", "line", "rule_id", "message"],
+        "properties": {
+          "scanner": {"type": "string", "minLength": 1, "description": "Scanner that reported the hit."},
+          "file": {"type": "string", "minLength": 1, "description": "Path of the hit."},
+          "line": {"type": "integer", "minimum": 1, "description": "Line of the hit at the reviewed head."},
+          "rule_id": {"type": "string", "minLength": 1, "description": "The scanner's own rule identifier."},
+          "message": {"type": "string", "minLength": 1, "description": "What the scanner reported."}
+        }
+      }
+    },
     "resolved": {
       "type": "array",
       "description": "OPTIONAL evidence. Prior findings a delta review closed this round, each at its prior location: resolved by the reviewer after re-judging it against the new head, or ruled resolved by the caller. Informational: a resolved finding is not open and is not re-posted.",

@@ -175,3 +175,27 @@ class TestInference:
     def test_inference_does_not_depend_on_input_order(self):
         listing = ["z.py", "package.json", ".b/x", ".a/y"]
         assert rp.infer_profile(listing) == rp.infer_profile(list(reversed(listing)))
+
+
+class TestScannerCategories:
+    def _parse(self, scanners):
+        return rp.parse_profile_document(
+            {"class": "internal", "review": {"scanners": scanners}}
+        )
+
+    def test_names_map_to_categories(self):
+        profile = self._parse({"gitleaks": {"category": "secrets_exposure"}, "lint": {"category": "other"}})
+
+        assert dict(profile.scanner_categories) == {"gitleaks": "secrets_exposure", "lint": "other"}
+
+    def test_absent_names_none(self):
+        assert rp.parse_profile_document({"class": "internal"}).scanner_categories == ()
+
+    @pytest.mark.parametrize(
+        "scanners",
+        [["gitleaks"], {"gitleaks": "other"}, {"gitleaks": {"category": "nope"}},
+         {"gitleaks": {"category": "other", "kind": "x"}}, {"bad name": {"category": "other"}}],
+    )
+    def test_a_malformed_entry_makes_the_profile_invalid(self, scanners):
+        with pytest.raises(rp.ProfileFormatError):
+            self._parse(scanners)
