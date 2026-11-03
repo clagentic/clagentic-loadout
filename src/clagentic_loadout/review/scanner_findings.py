@@ -24,8 +24,9 @@ finding and is kept: a finding cannot cover a scanner hit by sitting next to it.
 The facts are stated at their worst reading (reachable, no precondition, full
 impact) because a scanner reports a pattern, not a reachability analysis: the
 judgement that it is not exploitable belongs to the reviewer, and is made by
-dropping the candidate with a reason. A hit from a scanner declared as a secret
-scanner is in the security floor.
+dropping the candidate with a reason. The category comes from the scanner policy
+at the base revision (review.scanner_policy), never from the scanner file; a
+scanner the policy does not name has none, and its hit is in the security floor.
 """
 
 from __future__ import annotations
@@ -37,12 +38,9 @@ from typing import Any
 
 from clagentic_loadout.review.changed_lines import added_lines
 from clagentic_loadout.review.dropped_overlap import candidate_id
-from clagentic_loadout.review.scanner_input import KIND_SECRET, ScannerHit, ScannerInput
+from clagentic_loadout.review.scanner_input import ScannerHit, ScannerInput
 
 KEY_SCANNER = "scanner"
-
-_CATEGORY_SECRET = "secrets_exposure"
-_CATEGORY_OTHER = "other"
 
 
 @dataclass(frozen=True)
@@ -62,9 +60,12 @@ def finding_rule_id(hit: ScannerHit) -> str:
     return f"{hit.scanner}.{hit.rule_id}"
 
 
-def _facts(hit: ScannerHit) -> dict[str, Any]:
+def _facts(hit: ScannerHit, categories: Mapping[str, str]) -> dict[str, Any]:
+    # A scanner the policy does not name gets no category, which the evaluator
+    # counts at its worst case (in the security floor).
+    category = categories.get(hit.scanner)
     return {
-        "category": _CATEGORY_SECRET if hit.kind == KIND_SECRET else _CATEGORY_OTHER,
+        **({"category": category} if category is not None else {}),
         "reachable": "yes",
         "attacker_precondition": "none",
         "impact": {"confidentiality": "full", "integrity": "full", "availability": "full"},
@@ -75,15 +76,16 @@ def _facts(hit: ScannerHit) -> dict[str, Any]:
     }
 
 
-def finding_of(hit: ScannerHit) -> dict[str, Any]:
-    """The finding an in-range *hit* becomes, in the shape a findings file holds."""
+def finding_of(hit: ScannerHit, categories: Mapping[str, str]) -> dict[str, Any]:
+    """The finding an in-range *hit* becomes, in the shape a findings file holds.
+    *categories* is the scanner policy read at the base revision."""
     return {
         "file": hit.file,
         "line": hit.line,
         "rule_id": finding_rule_id(hit),
         "message": hit.message,
         "severity": None,
-        "facts": _facts(hit),
+        "facts": _facts(hit, categories),
     }
 
 
@@ -101,6 +103,7 @@ def ingest(
     scanner_input: ScannerInput,
     diff_text: str,
     reviewer_findings: Sequence[Mapping[str, Any]],
+    categories: Mapping[str, str],
     *,
     prog: str = "loadout-review",
 ) -> Ingestion:
@@ -117,7 +120,7 @@ def ingest(
     outside: list[dict[str, Any]] = []
     for hit in hits:
         if hit.line in added.get(hit.file, frozenset()):
-            in_range.append(finding_of(hit))
+            in_range.append(finding_of(hit, categories))
         else:
             outside.append(_context_of(hit))
     scanner_ids = {candidate_id(item) for item in in_range}

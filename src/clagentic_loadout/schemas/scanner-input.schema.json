@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://clagentic.ai/schemas/loadout/scanner-input.schema.json",
   "title": "scanner input",
-  "description": "What a review hands `loadout-review post --scanner-input`: the results of the scanners that examined the reviewed head. The file reports what each scanner did and what it found; it never says whether a hit is part of the change under review. The tool decides that itself from the pull request's diff at the reviewed head, and no field here can set or override it. The schema is generic: it names no particular scanner.",
+  "description": "What a review hands `loadout-review post --scanner-input`: the results of the scanners that examined the reviewed head. The file reports what each scanner did and what it found; it never says whether a hit is part of the change under review. The tool decides that itself from the pull request's diff at the reviewed head, and no field here can set or override it, nor the category of defect a scanner looks for, which comes from the repository's policy at the pull request's base revision. The schema is generic: it names no particular scanner.",
   "type": "object",
   "additionalProperties": false,
   "required": ["head_sha", "scanners"],
@@ -34,11 +34,6 @@
             "type": "string",
             "minLength": 1,
             "description": "One line. Required for not_applicable; recommended for not_invoked and failed."
-          },
-          "kind": {
-            "type": "string",
-            "enum": ["secret", "other"],
-            "description": "OPTIONAL. secret marks a scanner that looks for credentials; its in-range hits fall in the security floor, which a by-design disposition cannot clear. Default other."
           },
           "hits": {
             "type": "array",

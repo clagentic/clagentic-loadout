@@ -6,8 +6,10 @@ the reviewer's judgement, and it is read strictly: an unknown key, an unknown
 status, a malformed hit, a hit listed under a scanner that did not complete, or
 a file stamped for another head is refused with the reason, never repaired.
 
-Nothing here decides whether a hit is part of the change under review; that is
-review.scanner_findings, from the diff.
+Nothing here decides whether a hit is part of the change under review, or what
+category of defect a scanner looks for: that is review.scanner_findings, from the
+diff and from the repository's policy at the base revision. The file is
+reviewer-writable, so it carries neither.
 """
 
 from __future__ import annotations
@@ -28,10 +30,6 @@ from clagentic_loadout.merge.fence_state import (
 )
 from clagentic_loadout.sha import FULL_SHA_RE
 
-KIND_SECRET = "secret"
-KIND_OTHER = "other"
-KINDS = (KIND_SECRET, KIND_OTHER)
-
 #: Recorded when a scanner that gave no usable answer says nothing about why.
 #: It is only ever attached to a status that is unsatisfied regardless.
 DEFAULT_REASON = "the scanner reported no reason"
@@ -40,7 +38,7 @@ _SCANNER_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 _RULE_RE = re.compile(r"\A[^\s`~]{1,200}\Z")
 _MAX_MESSAGE_CHARS = 300
 _TOP_KEYS = ("head_sha", "scanners")
-_SCANNER_KEYS = ("scanner", "status", "reason", "kind", "hits")
+_SCANNER_KEYS = ("scanner", "status", "reason", "hits")
 _HIT_KEYS = ("file", "line", "rule_id", "message")
 
 
@@ -51,7 +49,6 @@ class ScannerInputError(ValueError):
 @dataclass(frozen=True)
 class ScannerHit:
     scanner: str
-    kind: str
     file: str
     line: int
     rule_id: str
@@ -62,7 +59,6 @@ class ScannerHit:
 class ScannerResult:
     scanner: str
     status: str
-    kind: str
     reason: str | None
     hits: tuple[ScannerHit, ...]
 
@@ -105,7 +101,7 @@ def _object(value: Any, where: str, allowed: tuple[str, ...]) -> dict[str, Any]:
     return value
 
 
-def _hit(raw: Any, where: str, scanner: str, kind: str) -> ScannerHit:
+def _hit(raw: Any, where: str, scanner: str) -> ScannerHit:
     entry = _object(raw, where, _HIT_KEYS)
     file_value, line = entry.get("file"), entry.get("line")
     rule_id, message = entry.get("rule_id"), entry.get("message")
@@ -127,7 +123,7 @@ def _hit(raw: Any, where: str, scanner: str, kind: str) -> ScannerHit:
         )
     if not isinstance(message, str) or not _one_line(message):
         raise ScannerInputError(f"{where}.message must be a non-empty string")
-    return ScannerHit(scanner, kind, path, line, rule_id, _one_line(message))
+    return ScannerHit(scanner, path, line, rule_id, _one_line(message))
 
 
 def _result(raw: Any, where: str) -> ScannerResult:
@@ -142,9 +138,6 @@ def _result(raw: Any, where: str) -> ScannerResult:
         raise ScannerInputError(
             f"{where}.status must be one of {list(SCANNER_STATUSES)}, got {status!r}"
         )
-    kind = entry.get("kind", KIND_OTHER)
-    if kind not in KINDS:
-        raise ScannerInputError(f"{where}.kind must be one of {list(KINDS)}, got {kind!r}")
     reason = entry.get("reason")
     if reason is not None:
         if not isinstance(reason, str) or not _one_line(reason):
@@ -162,8 +155,8 @@ def _result(raw: Any, where: str) -> ScannerResult:
             f"{where}: scanner {name!r} has status {status!r} but lists hits; only a scanner "
             "that ran completely reports a result"
         )
-    hits = tuple(_hit(item, f"{where}.hits[{i}]", name, kind) for i, item in enumerate(raw_hits))
-    return ScannerResult(name, status, kind, reason, hits)
+    hits = tuple(_hit(item, f"{where}.hits[{i}]", name) for i, item in enumerate(raw_hits))
+    return ScannerResult(name, status, reason, hits)
 
 
 def parse_scanner_input(data: Any, *, reviewed_head: str, source: str = "scanner input") -> ScannerInput:
@@ -201,9 +194,6 @@ def load_scanner_input(path: str | Path, *, reviewed_head: str) -> ScannerInput:
 
 __all__ = [
     "DEFAULT_REASON",
-    "KINDS",
-    "KIND_OTHER",
-    "KIND_SECRET",
     "ScannerHit",
     "ScannerInput",
     "ScannerInputError",

@@ -30,10 +30,20 @@ def _parse(document):
 
 def test_the_schema_accepts_what_the_loader_accepts():
     schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
-    document = _doc(hits=[{"file": "a.py", "line": 2, "rule_id": "r", "message": "m"}], kind="secret")
+    document = _doc(hits=[{"file": "a.py", "line": 2, "rule_id": "r", "message": "m"}])
 
     jsonschema.validate(document, schema)
-    assert _parse(document).hits[0].kind == "secret"
+    assert _parse(document).hits[0].scanner == "s1"
+
+
+def test_a_kind_field_is_refused_by_the_loader_and_the_schema():
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    document = _doc(kind="other")
+
+    with pytest.raises(si.ScannerInputError, match="unknown field"):
+        _parse(document)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(document, schema)
 
 
 @pytest.mark.parametrize(
@@ -79,19 +89,19 @@ def test_an_unreadable_file_is_refused(tmp_path):
 
 
 def test_ingestion_reads_the_diff_only_when_there_is_a_hit():
-    assert ingest(_parse(_doc()), "not a diff", []).findings == ()
+    assert ingest(_parse(_doc()), "not a diff", [], {}).findings == ()
     hit = {"file": "a.py", "line": 1, "rule_id": "r", "message": "m"}
     with pytest.raises(DiffUnreadableError):
-        ingest(_parse(_doc(hits=[hit])), "not a diff", [])
+        ingest(_parse(_doc(hits=[hit])), "not a diff", [], {})
 
 
 def test_replacement_counts_a_location_once_and_keeps_other_rules():
     hit = {"file": "a.py", "line": 2, "rule_id": "r", "message": "m"}
-    ingestion = ingest(_parse(_doc(hits=[hit, hit])), make_diff({"a.py": 4}), [])
+    ingestion = ingest(_parse(_doc(hits=[hit, hit])), make_diff({"a.py": 4}), [], {})
     same = {"file": "a.py", "line": 2, "rule_id": "s1.r", "message": "mild"}
     other = {"file": "a.py", "line": 2, "rule_id": "other", "message": "mild"}
 
-    merged = merge_into([same, other], ingest(_parse(_doc(hits=[hit, hit])), make_diff({"a.py": 4}), [same, other]))
+    merged = merge_into([same, other], ingest(_parse(_doc(hits=[hit, hit])), make_diff({"a.py": 4}), [same, other], {}))
 
     assert len(ingestion.findings) == 2
     assert [candidate_id(f) for f in merged] == ["a.py:2:other", "a.py:2:s1.r"]

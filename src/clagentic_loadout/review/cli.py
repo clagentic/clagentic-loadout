@@ -128,6 +128,7 @@ from clagentic_loadout.review.resolutions import (
 )
 from clagentic_loadout.review.ruling_provider import RulingScope
 from clagentic_loadout.review.run_evidence import evidence_from_document
+from clagentic_loadout.review.policy_source import PolicySource
 from clagentic_loadout.review.scanner_findings import Ingestion, ingest, merge_into
 from clagentic_loadout.review.scanner_input import (
     ScannerInput,
@@ -1203,12 +1204,19 @@ def _load_scanner_input_arg(args: argparse.Namespace, head_sha: str) -> ScannerI
 
 
 def _ingest_scanner_hits(
-    scanner_input: ScannerInput, live_pr: AcquiredPr, findings: list[dict[str, Any]]
+    scanner_input: ScannerInput,
+    live_pr: AcquiredPr,
+    findings: list[dict[str, Any]],
+    policy: PolicySource,
 ) -> Ingestion:
     """Classify the hits against the diff the host serves for the live head,
-    which post has just confirmed is the reviewed head."""
+    which post has just confirmed is the reviewed head. The category of a
+    scanner's hits comes from *policy*, read at the base revision; a profile
+    that is missing or unreadable names none, so every hit stays in the floor."""
+    profile = policy.repo_profile
+    categories = dict(profile.scanner_categories) if profile is not None else {}
     try:
-        return ingest(scanner_input, live_pr.diff_text, findings)
+        return ingest(scanner_input, live_pr.diff_text, findings, categories)
     except DiffUnreadableError as exc:
         _fail(
             f"cannot classify the scanner hits against the pull request's changed lines: {exc}",
@@ -1343,26 +1351,6 @@ def _post_command(
         return live
 
     live_pr = assert_head_unmoved()
-    ingestion = Ingestion((), (), ())
-    if scanner_input is not None:
-        # Classified here, at the live head just confirmed equal to the reviewed
-        # head, from the host's diff: the findings file, the dropped file and the
-        # scanner file cannot set it, and an outside-range hit is not carried
-        # into the findings the verdict is computed from. A scanner finding is
-        # added before drops are applied, so --dropped removes it like any other.
-        ingestion = _ingest_scanner_hits(scanner_input, live_pr, findings)
-        findings = drop_overlapping(
-            merge_into(findings, ingestion), evidence.get(KEY_DROPPED) or []
-        )
-        if ingestion.outside_range:
-            evidence = {**evidence, KEY_OUTSIDE_RANGE: list(ingestion.outside_range)}
-            try:
-                normalize_findings_state(
-                    {KEY_OUTSIDE_RANGE: evidence[KEY_OUTSIDE_RANGE]},
-                    head_sha=head_sha, review_status=claimed_status,
-                )
-            except ValueError as exc:
-                _fail(f"scanner input: {exc}", EXIT_FINDINGS_INVALID)
     policy_base = _policy_base_for_post(
         args, loaded_meta.get("policy_base_sha"), live_pr.base_sha
     )
@@ -1389,6 +1377,26 @@ def _post_command(
     # Read once and shared: the docs allowlist and the evaluator's stakes come
     # from the same read of the base revision.
     policy = read_context_policy(evaluation)
+    ingestion = Ingestion((), (), ())
+    if scanner_input is not None:
+        # Classified here, at the live head just confirmed equal to the reviewed
+        # head, from the host's diff: the findings file, the dropped file and the
+        # scanner file cannot set it, and an outside-range hit is not carried
+        # into the findings the verdict is computed from. A scanner finding is
+        # added before drops are applied, so --dropped removes it like any other.
+        ingestion = _ingest_scanner_hits(scanner_input, live_pr, findings, policy)
+        findings = drop_overlapping(
+            merge_into(findings, ingestion), evidence.get(KEY_DROPPED) or []
+        )
+        if ingestion.outside_range:
+            evidence = {**evidence, KEY_OUTSIDE_RANGE: list(ingestion.outside_range)}
+            try:
+                normalize_findings_state(
+                    {KEY_OUTSIDE_RANGE: evidence[KEY_OUTSIDE_RANGE]},
+                    head_sha=head_sha, review_status=claimed_status,
+                )
+            except ValueError as exc:
+                _fail(f"scanner input: {exc}", EXIT_FINDINGS_INVALID)
     docs_decision = _docs_only_decision(
         args, owner=owner, repo=repo, caller=caller, platform=platform,
         token_provider=token_provider, opener=opener, live_pr=live_pr, policy=policy,

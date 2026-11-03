@@ -21,7 +21,7 @@ and any tool that can write it can feed a review.
         {"file": "pkg/parse.py", "line": 12, "rule_id": "unsafe-parse", "message": "..."}
       ]
     },
-    {"scanner": "secret-scan", "status": "failed", "reason": "timed out", "kind": "secret"}
+    {"scanner": "secret-scan", "status": "failed", "reason": "timed out"}
   ]
 }
 ```
@@ -37,7 +37,9 @@ and any tool that can write it can feed a review.
 - Each hit has `file` (repository-relative), `line` (1 or greater), `rule_id` and
   `message`. An unknown field, or a missing or malformed one, is refused. A scanner name
   appears once.
-- `kind: secret` marks a scanner that looks for credentials (default `other`).
+- The file carries no category for a scanner. A `kind` field, like any other unknown
+  field, is refused: the file is written by the reviewer, so it cannot say which hits
+  belong in the security floor (see "Scanner category" below).
 - A message is cut to one line of at most 300 characters, and backticks are replaced, so
   scanner text can never open a fenced block in the posted comment.
 
@@ -54,11 +56,33 @@ refuses when there is a hit to classify rather than guess.
 reviewed head, in the same invocation that computes the verdict, so there is no earlier
 output a reviewer could edit to move a hit.
 
+## Scanner category
+
+What a scanner looks for decides whether its in-range hits are in the security floor,
+which a by-design disposition cannot clear. That is policy, not input: the tool reads it
+from the repo profile (`.clagentic/loadout/profile.yaml`) at the pull request's base
+revision, in the same read as the docs allowlist, so a pull request cannot change the
+classification of its own hits.
+
+```yaml
+review:
+  scanners:
+    gitleaks: {category: secrets_exposure}   # a category from the findings vocabulary
+    style-lint: {category: other}            # not a security category: outside the floor
+```
+
+A scanner the policy does not name gets no category, and an in-range hit from it counts
+in the floor, as any finding without a category does. The default fails closed. Such a
+finding states no category, so the verdict is `DEGRADED` with the reason `category is
+missing` until the scanner is named in the base branch's profile or the hit is dropped
+with a reason. A malformed `review.scanners` entry makes the whole profile invalid, which
+names no scanner, so every hit stays in the floor.
+
 ## What each class becomes
 
 **In range:** a finding with id `file:line:scanner.rule_id` whose facts the tool states
-(reachable, no precondition, full impact on every dimension; a `secret` scanner's hits are
-in the security floor). It blocks under the evaluator like any finding with those facts.
+(reachable, no precondition, full impact on every dimension; the category is the policy's
+for that scanner, see "Scanner category"). It blocks under the evaluator like any finding with those facts.
 The reviewer judges it and, when it is not a defect of the change, lists it in
 `--dropped` with a reason, matched on `file:line:rule_id`; the drop wins and is shown in
 the comment. A base-branch disposition clears it by the usual route, except that the

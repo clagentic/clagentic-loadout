@@ -19,7 +19,10 @@ import pytest
 from clagentic_loadout.merge.verdict import parse_verdict_block
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.transport import provider_config
+from clagentic_loadout.review.evaluate import is_floor_finding
+from clagentic_loadout.review.policy_source import PROFILE_PATH
 from tests._review_cli_support import Env, identity_provider
+from tests._review_evaluate_support import commit_files
 from tests._review_evaluate_support import facts
 from tests._support.review_host import ReviewHost
 
@@ -114,6 +117,21 @@ class World:
     def fence(self) -> dict:
         return parse_verdict_block(self.host.last_body)
 
+    def base_policy(self, profile_text: str) -> None:
+        """Make *profile_text* the repo profile at the PR's base revision."""
+        self.host.pull["base"]["sha"] = commit_files(self.env.repo, {PROFILE_PATH: profile_text})
+
+    def head_only_policy(self, profile_text: str) -> None:
+        """Commit *profile_text* after the base, as a PR's own change would;
+        the base revision stays what it was."""
+        commit_files(self.env.repo, {PROFILE_PATH: profile_text})
+
+
+def _scanner_profile(**categories: str) -> str:
+    lines = ["class: internal", "review:", "  scanners:"]
+    lines += [f"    {name}: {{category: {category}}}" for name, category in categories.items()]
+    return "\n".join(lines) + "\n"
+
 
 @pytest.fixture(params=["github", "forgejo"])
 def world(request, tmp_path, monkeypatch) -> World:
@@ -194,6 +212,7 @@ class TestAnOutsideRangeHit:
 
 class TestAnInRangeHit:
     def test_an_in_range_sast_hit_is_a_finding_that_blocks(self, world, capsys):
+        world.base_policy(_scanner_profile(**{"sast-one": "other"}))
         code, result, _ = world.post(
             [_scanner(hits=[_hit(ADDED_LINE)])], findings=[_reviewer_note()], capsys=capsys
         )
@@ -231,20 +250,79 @@ class TestAnInRangeHit:
         assert "reason: the input is a trusted constant" in body
         assert world.fence()["evaluated_findings"] == []
 
-    def test_a_secret_hit_is_in_the_security_floor_and_blocks(self, world, capsys):
+    def test_a_secret_scanner_hit_is_in_the_floor_with_no_policy(self, world, capsys):
         code, result, _ = world.post(
-            [_scanner("secret-scan", kind="secret", hits=[_hit(ADDED_LINE, rule="token-shape")])],
+            [_scanner("gitleaks", hits=[_hit(ADDED_LINE, rule="token-shape")])], capsys=capsys
+        )
+
+        # No category is stated for a scanner the policy does not name, so the
+        # facts are incomplete (DEGRADED) and the hit counts in the floor.
+        assert code == 0 and result["status"] == "blocking" and result["blocking_count"] == 1
+        stated = world.fence()["evaluated_findings"][0]
+        assert "category" not in stated["facts"]
+        assert is_floor_finding(stated)
+
+    def test_the_input_file_cannot_declare_the_scanner_non_secret(self, world, capsys):
+        code, _, err = world.post(
+            [_scanner("gitleaks", kind="other", hits=[_hit(ADDED_LINE, rule="token-shape")])],
             capsys=capsys,
         )
 
-        assert code == 0 and result["verdict_outcome"] == "BLOCKED"
+        assert code != 0
+        assert "unknown field" in err and "kind" in err
+        assert world.host.last_body is None
+
+    def test_a_policy_naming_the_scanner_secret_puts_the_hit_in_the_floor(self, world, capsys):
+        world.base_policy(_scanner_profile(gitleaks="secrets_exposure"))
+        code, _, err = world.post(
+            [_scanner("gitleaks", hits=[_hit(ADDED_LINE, rule="token-shape")])], capsys=capsys
+        )
+
+        assert code == 0, err
         stated = world.fence()["evaluated_findings"][0]
         assert stated["facts"]["category"] == "secrets_exposure"
-        from clagentic_loadout.review.evaluate import is_floor_finding
-
         assert is_floor_finding(stated)
 
+    def test_a_policy_naming_the_scanner_non_secret_keeps_the_hit_out_of_the_floor(
+        self, world, capsys
+    ):
+        world.base_policy(_scanner_profile(**{"sast-one": "other"}))
+        code, result, err = world.post([_scanner(hits=[_hit(ADDED_LINE)])], capsys=capsys)
+
+        assert code == 0, err
+        assert result["scanner_finding_count"] == 1
+        stated = world.fence()["evaluated_findings"][0]
+        assert stated["facts"]["category"] == "other"
+        assert not is_floor_finding(stated)
+
+    def test_a_scanner_the_policy_does_not_name_stays_in_the_floor(self, world, capsys):
+        world.base_policy(_scanner_profile(**{"other-scanner": "other"}))
+        code, _, err = world.post([_scanner(hits=[_hit(ADDED_LINE)])], capsys=capsys)
+
+        assert code == 0, err
+        assert is_floor_finding(world.fence()["evaluated_findings"][0])
+
+    def test_the_policy_is_read_at_the_base_so_a_pr_cannot_reclassify_its_own_hit(
+        self, world, capsys
+    ):
+        world.head_only_policy(_scanner_profile(**{"sast-one": "other"}))
+        code, _, err = world.post([_scanner(hits=[_hit(ADDED_LINE)])], capsys=capsys)
+
+        assert code == 0, err
+        assert is_floor_finding(world.fence()["evaluated_findings"][0])
+
+    def test_removing_the_naming_at_the_head_does_not_change_the_base_classification(
+        self, world, capsys
+    ):
+        world.base_policy(_scanner_profile(**{"sast-one": "other"}))
+        world.head_only_policy("class: internal\n")
+        code, _, err = world.post([_scanner(hits=[_hit(ADDED_LINE)])], capsys=capsys)
+
+        assert code == 0, err
+        assert not is_floor_finding(world.fence()["evaluated_findings"][0])
+
     def test_a_reviewer_finding_with_the_same_id_cannot_cover_it(self, world, capsys):
+        world.base_policy(_scanner_profile(**{"sast-one": "other"}))
         covering = {
             "file": "a.py", "line": ADDED_LINE, "rule_id": "sast-one." + RULE,
             "message": "fine", "severity": "nit", "facts": MILD,
