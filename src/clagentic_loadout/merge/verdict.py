@@ -126,6 +126,7 @@ from clagentic_loadout.merge.fence_state import (
     KEY_CLEARED_CLAIMS,
     KEY_DOCS_ONLY,
     KEY_DROPPED,
+    KEY_OUTSIDE_RANGE,
     KEY_ENGINES,
     KEY_FINDINGS_OPEN,
     KEY_RANGE,
@@ -424,6 +425,7 @@ def build_findings_verdict_body(
         findings_state, head_sha=head_sha, review_status=review_status
     )
     dropped = evidence.get(KEY_DROPPED, [])
+    outside_range = evidence.get(KEY_OUTSIDE_RANGE, [])
     resolved_by_reviewer = [e for e in evidence.get(KEY_RESOLVED, []) if e["by"] == RESOLVED_BY_REVIEWER]
     resolved_by_caller = [e for e in evidence.get(KEY_RESOLVED, []) if e["by"] == RESOLVED_BY_CALLER]
 
@@ -455,6 +457,17 @@ def build_findings_verdict_body(
             lines.append(
                 f"- {entry['file']}:{entry['line']} [{entry['rule_id']}] "
                 f"{entry['message']} (reason: {entry['reason']})"
+            )
+    if outside_range:
+        lines.append("")
+        lines.append(
+            f"Scanner hits outside the changed lines ({len(outside_range)}), context only, "
+            "not findings:"
+        )
+        for entry in outside_range:
+            lines.append(
+                f"- {entry['file']}:{entry['line']} [{entry['scanner']}.{entry['rule_id']}] "
+                f"{entry['message']}"
             )
     if resolved_by_reviewer:
         lines.append("")

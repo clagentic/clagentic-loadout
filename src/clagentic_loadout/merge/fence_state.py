@@ -28,6 +28,10 @@ the verdict prose shows:
   dropped           [{file, line, rule_id, message, reason}]
                                          candidates the reviewer examined and
                                          dropped, each with the reason
+  outside_range     [{scanner, file, line, rule_id, message}]
+                                         scanner hits on lines the change does not
+                                         add: context only, never a finding and
+                                         never part of the computed verdict
   resolved          [{file, line, rule_id, message, by, reason, fingerprint}]
                                          prior findings a delta review closed:
                                          by "reviewer" (re-judged against the
@@ -145,6 +149,7 @@ STATE_KEYS = (KEY_FINDINGS_OPEN, KEY_SUPERSEDES, KEY_CLEARED_CLAIMS, KEY_SCANNER
 KEY_FAILURE_SEQUENCES = "failure_sequences"
 KEY_DROPPED = "dropped"
 KEY_RESOLVED = "resolved"
+KEY_OUTSIDE_RANGE = "outside_range"
 KEY_RANGE = "range"
 KEY_ENGINES = "engines"
 
@@ -201,6 +206,7 @@ EVIDENCE_KEYS = (
     KEY_FAILURE_SEQUENCES,
     KEY_DROPPED,
     KEY_RESOLVED,
+    KEY_OUTSIDE_RANGE,
     KEY_RANGE,
     KEY_ENGINES,
     *EVALUATION_KEYS,
@@ -360,6 +366,23 @@ def _normalize_dropped(value: Any) -> list[dict[str, Any]]:
                 "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
                 "message": _text(entry.get("message"), f"{where}.message", single_line=False),
                 "reason": _text(entry.get("reason"), f"{where}.reason", single_line=False),
+            }
+        )
+    return rendered
+
+
+def _normalize_outside_range(value: Any) -> list[dict[str, Any]]:
+    rendered = []
+    for index, entry in enumerate(_entries(value, KEY_OUTSIDE_RANGE)):
+        where = f"{KEY_OUTSIDE_RANGE}[{index}]"
+        _exact_keys(entry, ("scanner", "file", "line", "rule_id", "message"), where)
+        rendered.append(
+            {
+                "scanner": _text(entry.get("scanner"), f"{where}.scanner"),
+                "file": _text(entry.get("file"), f"{where}.file"),
+                "line": _line_number(entry.get("line"), f"{where}.line"),
+                "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+                "message": _text(entry.get("message"), f"{where}.message"),
             }
         )
     return rendered
@@ -555,6 +578,8 @@ def normalize_findings_state(
         out[KEY_DROPPED] = _normalize_dropped(raw[KEY_DROPPED])
     if KEY_RESOLVED in raw:
         out[KEY_RESOLVED] = _normalize_resolved(raw[KEY_RESOLVED])
+    if KEY_OUTSIDE_RANGE in raw:
+        out[KEY_OUTSIDE_RANGE] = _normalize_outside_range(raw[KEY_OUTSIDE_RANGE])
     if KEY_RANGE in raw:
         out[KEY_RANGE] = _normalize_range(raw[KEY_RANGE])
     if KEY_ENGINES in raw:
@@ -1002,6 +1027,7 @@ __all__ = [
     "KEY_VERDICT_REASONS",
     "VERDICT_OUTCOMES",
     "KEY_DROPPED",
+    "KEY_OUTSIDE_RANGE",
     "KEY_ENGINES",
     "KEY_FAILURE_SEQUENCES",
     "KEY_RESOLVED",
