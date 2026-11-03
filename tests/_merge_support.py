@@ -118,14 +118,14 @@ def json_resp(status: int, payload) -> FakeResponse:
 
 def make_merge_opener(*, pr_info=None, files=None, comments=None, merge_status=200):
     """CI-status defaults to the no-runner-by-design empty shape (lr-afba)
-    -- this file's own tests reason about post-merge steps, not CI, so they
+    -- the tests using this opener reason about post-merge steps, not CI, so they
     keep passing through the CI-status gate exactly as before that gate
     existed.
 
     lr-7c5540: pr_info's default now carries a "base" ref matching
     BASE_BRANCH -- merge.tree_sync.resolve_base_branch reads this to know
     which branch to fetch before any post_merge_steps entry runs. Every test
-    in this file that reaches step 10's actual tree-sync/run path pairs this
+    using this opener that reaches step 10's actual tree-sync/run path pairs this
     default with init_repo_with_origin(tmp_path), whose bare remote's
     default branch is the SAME BASE_BRANCH name.
     """
@@ -137,11 +137,11 @@ def make_merge_opener(*, pr_info=None, files=None, comments=None, merge_status=2
     files = files if files is not None else ["a.py"]
     comments = comments if comments is not None else []
 
-    # Merge-completion attestation (lr-20e866): see test_merge_verb.py's
-    # make_merge_opener for the identical fixture rationale.
+    # Comments the verb posts (the merge-completion attestation) are kept and
+    # echoed back by later reads, as the host would.
     posted_comments: list[dict] = []
-    # lr-361de3: see test_merge_verb.py's make_merge_opener for the identical
-    # post-merge-readback overlay rationale.
+    # Reports merged only after the merge request arrived, so the verb's
+    # post-merge readback sees the state change a real host would make.
     _merge_landed = [False]
 
     def opener(req, timeout=15):
@@ -178,7 +178,7 @@ def make_merge_opener(*, pr_info=None, files=None, comments=None, merge_status=2
         if method == "GET" and url.endswith("/actions/tasks"):
             return json_resp(200, {"total_count": 0})
         if method == "GET" and "/compare/" in url:
-            # lr-835c57: empty branch-commit list -- this file exercises
+            # lr-835c57: empty branch-commit list -- these tests exercise
             # post_merge_steps wiring, not the commit-subject gate.
             return json_resp(200, {"commits": [], "ahead_by": 0})
         if method == "GET" and "/pulls/" in url:
