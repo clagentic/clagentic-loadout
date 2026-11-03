@@ -56,6 +56,7 @@ from clagentic_loadout.merge.fence_state import (
     KEY_EVALUATED_FINDINGS,
     KEY_FAILURE_SEQUENCES,
     KEY_FINDINGS_OPEN,
+    KEY_OUTSIDE_RANGE,
     KEY_RESOLVED,
     KEY_SCANNERS_RUN,
     KEY_SPEC_COVERAGE,
@@ -89,6 +90,7 @@ from clagentic_loadout.review.docs_only_review import (
     earlier_verdicts_reader,
     split_findings,
 )
+from clagentic_loadout.review.changed_lines import DiffUnreadableError
 from clagentic_loadout.review.dropped_overlap import drop_overlapping
 from clagentic_loadout.review.evaluate import OUTCOME_CLEAN, Verdict
 from clagentic_loadout.review.evaluate_render import finding_notes
@@ -126,6 +128,12 @@ from clagentic_loadout.review.resolutions import (
 )
 from clagentic_loadout.review.ruling_provider import RulingScope
 from clagentic_loadout.review.run_evidence import evidence_from_document
+from clagentic_loadout.review.scanner_findings import Ingestion, ingest, merge_into
+from clagentic_loadout.review.scanner_input import (
+    ScannerInput,
+    ScannerInputError,
+    load_scanner_input,
+)
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
     ReviewProfileError,
@@ -392,6 +400,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "Shown in a 'Dropped candidates' section, counted in the verdict "
         "header, and copied into the fence. Dropped candidates are never "
         "findings and do not change the verdict.",
+    )
+    post.add_argument(
+        "--scanner-input",
+        default=None,
+        help="JSON file of scanner results for the reviewed head (see the scanner input "
+        "schema): per scanner its status and its hits. This tool decides, from the pull "
+        "request's diff at the reviewed head, whether each hit is on a line the change adds. "
+        "An in-range hit becomes a finding with id file:line:scanner.rule that blocks "
+        "unless it is listed in --dropped with a reason; an outside-range hit is listed as "
+        "context and never blocks. Each scanner's status is recorded in the fence. A file "
+        "stamped for another head is refused. Cannot be combined with a scanners_run entry "
+        "in --state-file.",
     )
     post.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
     post.add_argument(
@@ -1170,6 +1190,32 @@ def _churn_command(
     return EXIT_OK
 
 
+def _load_scanner_input_arg(args: argparse.Namespace, head_sha: str) -> ScannerInput | None:
+    """The scanner input named by --scanner-input for the reviewed head, or None
+    when the flag is absent. Refused before any host call when unreadable,
+    malformed or stamped for another head."""
+    if args.scanner_input is None:
+        return None
+    try:
+        return load_scanner_input(args.scanner_input, reviewed_head=head_sha)
+    except ScannerInputError as exc:
+        _fail(str(exc), EXIT_FINDINGS_INVALID)
+
+
+def _ingest_scanner_hits(
+    scanner_input: ScannerInput, live_pr: AcquiredPr, findings: list[dict[str, Any]]
+) -> Ingestion:
+    """Classify the hits against the diff the host serves for the live head,
+    which post has just confirmed is the reviewed head."""
+    try:
+        return ingest(scanner_input, live_pr.diff_text, findings)
+    except DiffUnreadableError as exc:
+        _fail(
+            f"cannot classify the scanner hits against the pull request's changed lines: {exc}",
+            EXIT_ACQUIRE_FAILED,
+        )
+
+
 def _post_command(
     args: argparse.Namespace,
     caller: str,
@@ -1253,6 +1299,20 @@ def _post_command(
             )
             state = {k: v for k, v in state.items() if k != KEY_FINDINGS_OPEN}
 
+    scanner_input = _load_scanner_input_arg(args, head_sha)
+    if scanner_input is not None:
+        if KEY_SCANNERS_RUN in state:
+            _fail(
+                f"state file {args.state_file!r} carries {KEY_SCANNERS_RUN!r}, which "
+                "--scanner-input supplies; remove it from the state file",
+                EXIT_FINDINGS_INVALID,
+            )
+        state = {**state, KEY_SCANNERS_RUN: scanner_input.scanners_run()}
+        try:
+            normalize_findings_state(state, head_sha=head_sha, review_status=claimed_status)
+        except ValueError as exc:
+            _fail(f"scanner input: {exc}", EXIT_FINDINGS_INVALID)
+
     # The evidence is validated for the same reason: a malformed dropped
     # candidate or a fence-shaped sequence fails here, before any I/O.
     sequences = failure_sequences_of(findings)
@@ -1283,6 +1343,26 @@ def _post_command(
         return live
 
     live_pr = assert_head_unmoved()
+    ingestion = Ingestion((), (), ())
+    if scanner_input is not None:
+        # Classified here, at the live head just confirmed equal to the reviewed
+        # head, from the host's diff: the findings file, the dropped file and the
+        # scanner file cannot set it, and an outside-range hit is not carried
+        # into the findings the verdict is computed from. A scanner finding is
+        # added before drops are applied, so --dropped removes it like any other.
+        ingestion = _ingest_scanner_hits(scanner_input, live_pr, findings)
+        findings = drop_overlapping(
+            merge_into(findings, ingestion), evidence.get(KEY_DROPPED) or []
+        )
+        if ingestion.outside_range:
+            evidence = {**evidence, KEY_OUTSIDE_RANGE: list(ingestion.outside_range)}
+            try:
+                normalize_findings_state(
+                    {KEY_OUTSIDE_RANGE: evidence[KEY_OUTSIDE_RANGE]},
+                    head_sha=head_sha, review_status=claimed_status,
+                )
+            except ValueError as exc:
+                _fail(f"scanner input: {exc}", EXIT_FINDINGS_INVALID)
     policy_base = _policy_base_for_post(
         args, loaded_meta.get("policy_base_sha"), live_pr.base_sha
     )
@@ -1466,6 +1546,9 @@ def _post_command(
     for key in ("comment", "reused_from_created_at"):
         if key in posted:
             result[key] = posted[key]
+    if scanner_input is not None:
+        result["scanner_finding_count"] = len(ingestion.findings)
+        result["outside_range_count"] = len(ingestion.outside_range)
     if KEY_DROPPED in evidence:
         result["dropped_count"] = len(evidence[KEY_DROPPED])
     if docs_decision.evidence is not None or (
