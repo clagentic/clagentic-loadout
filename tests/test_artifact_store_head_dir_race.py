@@ -29,16 +29,36 @@ def _emit(root: Path, gate: str):
 
 
 def _hold_head_dir_checks_at_barrier(monkeypatch, directory: Path, parties: int):
-    barrier = threading.Barrier(parties, timeout=10)
+    """Hold every writer, once, after it has seen the head directory absent and
+    again just before it creates the directory, so all of them race to create it
+    whichever way the writer checks first."""
+    barriers = {
+        "exists": threading.Barrier(parties, timeout=10),
+        "mkdir": threading.Barrier(parties, timeout=10),
+    }
+    waited: set[tuple[str, int]] = set()
     real_exists = Path.exists
+    real_mkdir = Path.mkdir
+
+    def wait(kind):
+        key = (kind, threading.get_ident())
+        if key not in waited:
+            waited.add(key)
+            barriers[kind].wait()
 
     def exists(self, *args, **kwargs):
         result = real_exists(self, *args, **kwargs)
         if self == directory and not result:
-            barrier.wait()
+            wait("exists")
         return result
 
+    def mkdir(self, *args, **kwargs):
+        if self == directory:
+            wait("mkdir")
+        return real_mkdir(self, *args, **kwargs)
+
     monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(Path, "mkdir", mkdir)
 
 
 def test_two_gates_writing_the_same_new_head_both_leave_a_record(tmp_path, monkeypatch):
@@ -100,22 +120,21 @@ def test_a_symlink_at_the_head_path_is_still_refused(tmp_path):
     assert list(elsewhere.iterdir()) == []
 
 
-def test_a_symlink_swapped_in_after_the_existence_check_is_refused(tmp_path, monkeypatch):
+def test_a_symlink_swapped_in_before_the_creation_is_refused(tmp_path, monkeypatch):
     root = tmp_path / "records"
     root.mkdir(mode=0o755)
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
     directory = root / HEAD
-    real_exists = Path.exists
+    real_mkdir = Path.mkdir
 
-    def exists(self, *a, **kw):
-        result = real_exists(self, *a, **kw)
-        if self == directory and not result:
+    def mkdir(self, *a, **kw):
+        if self == directory:
             directory.symlink_to(elsewhere)
-        return result
+        return real_mkdir(self, *a, **kw)
 
-    monkeypatch.setattr(Path, "exists", exists)
-    with pytest.raises(StoreError, match="symlink|not a directory"):
+    monkeypatch.setattr(Path, "mkdir", mkdir)
+    with pytest.raises(StoreError, match="symlink"):
         _emit(root, "reviewer:peaches")
     assert list(elsewhere.iterdir()) == []
 
