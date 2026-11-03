@@ -425,3 +425,48 @@ def test_the_clock_is_a_seam_and_the_tolerance_absorbs_small_drift(reports: Path
     assert report_cmd.select_run(reports, "latest", repo=None, sha=None, now=earlier).run_id == (
         "20260101T000000Z-9"
     )
+
+
+def test_latest_and_sha_skip_a_run_whose_id_is_not_a_real_date_and_name_it(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    bad_id = "20261301T000000Z-5"
+    write_run(reports, "20260101T000000Z-10", head_sha=SHA_A)
+    write_run(reports, bad_id, head_sha=SHA_A)
+
+    code, out, err = _report(capsys)
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == "20260101T000000Z-10"
+    assert f"skipped run {bad_id}: its date cannot be read" in err
+
+    code, out, err = _report(capsys, "latest", "--sha", SHA_A)
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == "20260101T000000Z-10"
+    assert f"skipped run {bad_id}: its date cannot be read" in err
+
+    code, out, err = _report(capsys, bad_id)
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == bad_id
+    assert f"opening run {bad_id}: its date cannot be read" in err
+
+
+def test_latest_skips_a_run_whose_recorded_start_is_not_a_timestamp_and_names_it(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, "20260101T000000Z-10")
+    broken = write_run(reports, "20260102T000000Z-11")
+    result = json.loads((broken / store.RESULT_FILE).read_text())
+    result["started_at"] = "not a timestamp"
+    (broken / store.RESULT_FILE).write_text(json.dumps(result))
+
+    code, out, err = _report(capsys)
+
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == "20260101T000000Z-10"
+    assert "skipped run 20260102T000000Z-11: its date cannot be read" in err
+
+
+def test_only_undatable_runs_refuse_latest_and_name_them(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, "20261301T000000Z-5")
+
+    code, out, err = _report(capsys)
+
+    assert code == exits.EXIT_NO_RUNS and out == "" and "20261301T000000Z-5" in err

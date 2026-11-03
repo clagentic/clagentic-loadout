@@ -66,21 +66,33 @@ def _describe_runs(runs: Sequence[RunRecord]) -> str:
     return ", ".join(parts) if parts else "no runs"
 
 
-def _future_note(run: RunRecord, verb: str) -> str:
-    return f"{verb} run {run.run_id}: dated {store.dated_time(run).isoformat()}, later than now"
+def _date_note(run: RunRecord, verb: str, now: datetime | None) -> str | None:
+    """What to say about a run whose date makes it unfit for selection, if anything."""
+    moment = store.dated_time(run)
+    if moment is None:
+        return f"{verb} run {run.run_id}: its date cannot be read"
+    if store.is_future_dated(run, now):
+        return f"{verb} run {run.run_id}: dated {moment.isoformat()}, later than now"
+    return None
 
 
 def _split_future(
     runs: list[RunRecord], now: datetime | None, note: Callable[[str], None] | None
-) -> tuple[list[RunRecord], list[RunRecord]]:
-    """*runs* without the future-dated ones, and those. Each future-dated run is named."""
-    flagged = [(run, store.is_future_dated(run, now)) for run in runs]
-    present = [run for run, is_future in flagged if not is_future]
-    future = [run for run, is_future in flagged if is_future]
-    if note is not None:
-        for run in future:
-            note(_future_note(run, "skipped"))
-    return present, future
+) -> tuple[list[RunRecord], list[RunRecord], list[RunRecord]]:
+    """*runs* without the future-dated and undatable ones, then those two groups.
+    Each skipped run is named."""
+    present: list[RunRecord] = []
+    future: list[RunRecord] = []
+    undatable: list[RunRecord] = []
+    for run in runs:
+        message = _date_note(run, "skipped", now)
+        if message is None:
+            present.append(run)
+            continue
+        (undatable if store.dated_time(run) is None else future).append(run)
+        if note is not None:
+            note(message)
+    return present, future, undatable
 
 
 def _named(future: Sequence[RunRecord]) -> str:
@@ -165,15 +177,17 @@ def select_run(
                 f"run {run.run_id} was recorded for {_repo_key(run)}, not the expected repository {repo!r}",
                 exits.EXIT_REPO_MISMATCH,
             )
-        if note is not None and store.is_future_dated(run, now):
-            note(_future_note(run, "opening"))
+        message = _date_note(run, "opening", now)
+        if note is not None and message is not None:
+            note(message)
         return run
     all_runs = _load_runs(root, repo, cwd, note)
-    runs, future = _split_future(all_runs, now, note)
+    runs, future, undatable = _split_future(all_runs, now, note)
     if sha is None:
         if not runs:
             raise ReportRefused(
-                f"every finished test run is dated later than now; skipped: {_named(future)}",
+                "every finished test run was skipped, as dated later than now or with a date that "
+                f"cannot be read; skipped: {_named([*future, *undatable])}",
                 exits.EXIT_NO_RUNS,
             )
         return runs[-1]
@@ -194,6 +208,7 @@ def select_run(
         )
     if not matching:
         skipped = f"; skipped future-dated: {_named(future)}" if future else ""
+        skipped += f"; skipped undatable: {_named(undatable)}" if undatable else ""
         raise ReportRefused(
             f"no clean test run recorded for commit {sha!r}; runs on record: {_describe_runs(runs)}{skipped}",
             exits.EXIT_SHA_NO_MATCH,
@@ -380,8 +395,9 @@ def load_base_run(
         base = store.load_run(root, base_id)
     except StoreError as exc:
         raise ReportRefused(str(exc), exits.EXIT_BAD_RUN_ID) from exc
-    if note is not None and store.is_future_dated(base, now):
-        note(_future_note(base, "opening"))
+    message = _date_note(base, "opening", now)
+    if note is not None and message is not None:
+        note(message)
     return base
 
 
