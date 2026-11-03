@@ -1,0 +1,8 @@
+dispositions:
+  - path: ".clagentic/loadout/profile.yaml"
+    rule_id: "amos.path-choice.5"
+    kind: mitigated
+    rationale: "Operator-approved remedy (2026-11-03) for an answered process-record finding: the caller-shape record is in the PR 125 body, and the reviewer dropped the re-raised finding with evidence in comment 6605321072. Interim until reviewers can clear their own carried findings. Path+rule_id-wide because the recorded block carries no fingerprint (lr-86799b); expires in 7 days."
+    by: operator
+    at: 2026-11-03
+    expires: 2026-11-10
