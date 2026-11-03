@@ -160,6 +160,27 @@ def _repo_key(git_tree: Path) -> str:
     return hashlib.sha256(str(resolved).encode("utf-8")).hexdigest()[:16]
 
 
+def _is_registered_worktree(tree: Path, path: Path) -> bool:
+    """True when git lists exactly *path* as a linked worktree of *tree*'s repository."""
+    listed = _git(["worktree", "list", "--porcelain"], cwd=tree)
+    if listed.returncode != 0:
+        return False
+    wanted = {str(path), str(path.resolve())}
+    return any(
+        line.startswith("worktree ") and line[len("worktree "):] in wanted
+        for line in listed.stdout.splitlines()
+    )
+
+
+def _clear_own_stale_registration(tree: Path, path: Path) -> None:
+    """Drop a registration left at the tool tree's own *path* by a crash between
+    add and remove. It acts on that one path only: a repository-wide prune would
+    also delete registrations of the builder's own worktrees whose directories are
+    missing (an unmounted disk), which this module must never touch."""
+    if _is_registered_worktree(tree, path):
+        _git(["worktree", "remove", "--force", str(path)], cwd=tree)
+
+
 @contextmanager
 def tool_merge_tree(
     git_tree: str | Path,
@@ -190,7 +211,7 @@ def tool_merge_tree(
             f"{OUTCOME_TREE_UNAVAILABLE}: cannot create {path.parent}: {exc}; "
             f"--repo-path was not touched"
         ) from exc
-    _git(["worktree", "prune"], cwd=tree)
+    _clear_own_stale_registration(tree, path)
     added = _git(["worktree", "add", "--detach", str(path), merged_sha], cwd=tree)
     if added.returncode != 0:
         raise MergeTreeUnavailableError(
@@ -213,7 +234,6 @@ def tool_merge_tree(
         yield path
     finally:
         removed = _git(["worktree", "remove", "--force", str(path)], cwd=tree)
-        _git(["worktree", "prune"], cwd=tree)
         if removed.returncode != 0 or path.exists():
             print(
                 f"merge: WARNING -- tool tree {path} could not be removed (git exit "

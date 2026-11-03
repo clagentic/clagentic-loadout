@@ -348,6 +348,39 @@ class TestToolTreeCannotBeMade:
         assert leftover.exists()
 
 
+class TestToolTreeLeavesOtherWorktreeRegistrations:
+    def _other_worktree_with_missing_dir(self, work, tmp_path):
+        other = tmp_path / "other-wt"
+        _git(["worktree", "add", "--detach", str(other), "HEAD"], work)
+        moved = tmp_path / "moved-away"
+        other.rename(moved)
+        return other
+
+    def test_a_missing_linked_worktree_keeps_its_registration(self, tmp_path):
+        work, merged, _ = _scenario(tmp_path, shape="clean-base")
+        _fetch_origin_objects(work)
+        other = self._other_worktree_with_missing_dir(work, tmp_path)
+        before = _git(["worktree", "list", "--porcelain"], work)
+        assert f"worktree {other}" in before
+        with tool_merge_tree.tool_merge_tree(work, merged):
+            pass
+        assert _git(["worktree", "list", "--porcelain"], work) == before
+
+    def test_a_stale_registration_at_the_tool_path_is_cleared(self, tmp_path):
+        work, merged, _ = _scenario(tmp_path, shape="clean-base")
+        _fetch_origin_objects(work)
+        other = self._other_worktree_with_missing_dir(work, tmp_path)
+        before = _git(["worktree", "list", "--porcelain"], work)
+        path = tmp_path / "trees" / tool_merge_tree._repo_key(work) / merged
+        _git(["worktree", "add", "--detach", str(path), merged], work)
+        shutil.rmtree(path)
+        assert f"worktree {path}" in _git(["worktree", "list", "--porcelain"], work)
+        with tool_merge_tree.tool_merge_tree(work, merged) as tree:
+            assert tree.is_dir()
+        assert _git(["worktree", "list", "--porcelain"], work) == before
+        assert f"worktree {other}" in before
+
+
 class TestPostMergeVerb:
     @pytest.mark.parametrize("platform", ["forgejo", "github"])
     @pytest.mark.parametrize("shape", ["feature", "dirty-base"])
