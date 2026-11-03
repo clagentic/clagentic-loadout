@@ -484,7 +484,7 @@ class TestMergeMethodReachesApiPayload:
             if method == "GET" and url.endswith("/1"):
                 return _json_resp(
                     200, {"head": {"sha": _FULL_SHA}, "title": "feat: a change",
-                          "merged": True, "merge_commit_sha": "e" * 40},
+                          "base": {"ref": "main"}, "merged": True, "merge_commit_sha": "e" * 40},
                 )
             return inner_opener(req, timeout=timeout)
 
@@ -516,7 +516,7 @@ class TestMergeMethodReachesApiPayload:
             if method == "GET" and url.endswith("/1"):
                 return _json_resp(
                     200, {"head": {"sha": _FULL_SHA}, "title": "feat: a change",
-                          "merged": True, "merge_commit_sha": "e" * 40},
+                          "base": {"ref": "main"}, "merged": True, "merge_commit_sha": "e" * 40},
                 )
             return inner_opener(req, timeout=timeout)
 
@@ -548,7 +548,7 @@ class TestMergeMethodReachesApiPayload:
             if method == "GET" and url.endswith("/1"):
                 return _json_resp(
                     200, {"head": {"sha": _FULL_SHA}, "title": "feat: a change",
-                          "merged": True, "merge_commit_sha": "e" * 40},
+                          "base": {"ref": "main"}, "merged": True, "merge_commit_sha": "e" * 40},
                 )
             return inner_opener(req, timeout=timeout)
 
@@ -580,7 +580,7 @@ class TestMergeMethodReachesApiPayload:
             if method == "GET" and url.endswith("/1"):
                 return _json_resp(
                     200, {"head": {"sha": _FULL_SHA}, "title": "feat: a change",
-                          "merged": True, "merge_commit_sha": "e" * 40},
+                          "base": {"ref": "main"}, "merged": True, "merge_commit_sha": "e" * 40},
                 )
             return inner_opener(req, timeout=timeout)
 
@@ -615,7 +615,7 @@ class TestMergeMethodReachesApiPayload:
             if method == "GET" and url.endswith("/1"):
                 return _json_resp(
                     200, {"head": {"sha": _FULL_SHA}, "title": "feat: a change",
-                          "merged": True, "merge_commit_sha": "e" * 40},
+                          "base": {"ref": "main"}, "merged": True, "merge_commit_sha": "e" * 40},
                 )
             return inner_opener(req, timeout=timeout)
 
@@ -652,7 +652,7 @@ class TestMergeTitleFromPrTitleOnGithub:
             if method == "GET" and url.endswith("/1"):
                 return _json_resp(
                     200, {"head": {"sha": _FULL_SHA}, "title": "fix(merge): improve the subject",
-                          "merged": True, "merge_commit_sha": "e" * 40},
+                          "base": {"ref": "main"}, "merged": True, "merge_commit_sha": "e" * 40},
                 )
             return inner_opener(req, timeout=timeout)
 

@@ -259,14 +259,18 @@ class TestPostMergeRunsOnlyAfterSuccess:
             tmp_path,
             [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}],
         )
-        seed_base_commit(tmp_path)
+        base_sha = seed_base_commit(tmp_path)
         argv = _base_args(**{"--repo-path": str(tmp_path)})
         code = verb.main(
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
-                pr_info={"head": {"sha": _FULL_SHA}, "title": "not conventional commits"}
+                pr_info={
+                    "head": {"sha": _FULL_SHA},
+                    "title": "not conventional commits",
+                    "base": {"ref": "main", "sha": base_sha},
+                }
             ),
         )
         assert code == verb.EXIT_PR_TITLE_INVALID

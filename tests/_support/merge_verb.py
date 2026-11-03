@@ -15,8 +15,10 @@ from tests._support.fakes import (
     FakeResponse,
     RecordingTokenProvider,
     RefusingTokenProvider,
+    branch_tip_response,
     json_resp,
     paged,
+    with_default_base_ref,
 )
 
 __all__ = [
@@ -70,6 +72,9 @@ def make_opener(
     ci_run_total_count=0,
     branch_commits=None,
     post_merge_readback_confirms=True,
+    branch_tip=None,
+    branch_tip_http=200,
+    no_base_ref=False,
 ):
     """Route GET/POST calls to canned responses keyed by URL shape. No real
     network call is ever made.
@@ -88,6 +93,7 @@ def make_opener(
     exercise the readback-failure path.
     """
     pr_info = pr_info if pr_info is not None else {"head": {"sha": FULL_SHA}, "title": "feat: a change"}
+    pr_info = with_default_base_ref(pr_info, no_base_ref=no_base_ref)
     files = files if files is not None else ["a.py"]
     comments = comments if comments is not None else []
     branch_commits = branch_commits if branch_commits is not None else []
@@ -146,6 +152,8 @@ def make_opener(
             return json_resp(200, {"state": ci_state, "statuses": ci_statuses})
         if method == "GET" and url.endswith("/actions/tasks"):
             return json_resp(200, {"total_count": ci_run_total_count})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(pr_info, branch_tip, branch_tip_http, url)
         if method == "GET" and "/compare/" in url:
             return json_resp(200, {"commits": branch_commits, "ahead_by": len(branch_commits)})
         if method == "GET" and "/pulls/" in url:

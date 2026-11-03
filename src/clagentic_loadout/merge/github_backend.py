@@ -59,6 +59,7 @@ https://docs.github.com/rest/pulls/pulls#merge-a-pull-request):
 from __future__ import annotations
 
 import urllib.error
+import urllib.parse
 from typing import Any
 
 from clagentic_loadout.merge.ci_payload import (
@@ -209,6 +210,42 @@ def get_pr_info(
             f"cannot read PR #{pr_number} in {owner}/{repo}: HTTP {status}"
         )
     return body
+
+
+def get_branch_tip_sha(
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    token: str,
+    opener=None,
+) -> str:
+    """Fetch the commit SHA a branch points at right now
+    (GET /repos/{owner}/{repo}/branches/{branch}).
+
+    A pull request record keeps the base commit it had at the last head push,
+    so only this read says where the base branch is at merge time. Raises
+    merge.errors.GateFactUnavailableError on any non-200 response, network
+    failure or a body without a commit SHA: an unreadable tip is never
+    replaced by a guess."""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/branches/{urllib.parse.quote(branch, safe='/')}"
+    try:
+        status, body = _github_request("GET", url, token, opener=opener)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise GateFactUnavailableError(
+            f"cannot read the tip of branch {branch!r} in {owner}/{repo}: {exc}"
+        ) from exc
+    if status != 200:
+        raise GateFactUnavailableError(
+            f"cannot read the tip of branch {branch!r} in {owner}/{repo}: HTTP {status}"
+        )
+    commit = body.get("commit") if isinstance(body, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not sha:
+        raise GateFactUnavailableError(
+            f"the host returned no commit for branch {branch!r} in {owner}/{repo}"
+        )
+    return sha
 
 
 def get_pr_head_sha(pr_info: dict[str, Any]) -> str:

@@ -13,7 +13,7 @@ import urllib.parse
 from datetime import datetime, timezone
 
 from clagentic_loadout.merge import verb
-from tests._support.fakes import FakeResponse, json_resp, paged
+from tests._support.fakes import FakeResponse, branch_tip_response, json_resp, paged
 from tests._support.merge_verb import AllowingAuthorityProvider, RecordingTokenProvider, base_args
 
 __all__ = [
@@ -160,6 +160,8 @@ def github_ci_opener(
             return json_resp(200, {"total_count": len(runs), "check_runs": window})
         if method == "GET" and "/compare/" in path:
             return json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in path:
+            return branch_tip_response(pr_info, None, 200, path)
         if method == "GET" and "/pulls/" in path:
             return _merge_json(url, pr_info, landed)
         raise AssertionError(f"unexpected call: {method} {url}")
@@ -219,6 +221,8 @@ def forgejo_ci_opener(
             return json_resp(200, combined_status(state, entries))
         if method == "GET" and "/compare/" in path:
             return json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in path:
+            return branch_tip_response(pr_info, None, 200, path)
         if method == "GET" and "/pulls/" in path:
             return _merge_json(url, pr_info, landed)
         raise AssertionError(f"unexpected call: {method} {url}")

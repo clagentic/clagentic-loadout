@@ -44,7 +44,7 @@ from clagentic_loadout.merge.errors import (
 )
 from clagentic_loadout.merge.repo_gate_runtime import gate_from_tracked_text
 from clagentic_loadout.merge.required_reviewers import resolve_required_reviewers
-from clagentic_loadout.merge.tree_sync import resolve_base_sha
+from clagentic_loadout.merge.live_base import resolve_live_base_tip
 from clagentic_loadout.merge.verdict import read_reviewer_verdict
 from clagentic_loadout.platform_detect import PLATFORM_GITHUB
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
@@ -79,6 +79,7 @@ class _Host:
     pr_info: Mapping[str, Any]
     comments: list[dict[str, Any]]
     policy: HostPolicyReader
+    base_tip: str
 
 
 def _read_host(
@@ -95,13 +96,24 @@ def _read_host(
         pr_info = github_backend.get_pr_info(owner, repo, pr, token=token, opener=opener)
         comments = github_backend.fetch_comments(owner, repo, pr, token=token, opener=opener)
         files = GithubAcquireBackend(token, opener=opener)
+
+        def read_tip(branch: str) -> str:
+            return github_backend.get_branch_tip_sha(owner, repo, branch, token=token, opener=opener)
     else:
         pr_info = forgejo_backend.get_pr_info(git_host_base, owner, repo, pr, token=token, opener=opener)
         comments = forgejo_backend.fetch_comments(
             git_host_base, owner, repo, pr, token=token, opener=opener
         )
         files = ForgejoAcquireBackend(token, git_host_base=git_host_base, opener=opener)
-    return _Host(pr_info, comments, HostPolicyReader(files, owner=owner, repo=repo))
+
+        def read_tip(branch: str) -> str:
+            return forgejo_backend.get_branch_tip_sha(
+                git_host_base, owner, repo, branch, token=token, opener=opener
+            )
+    # The roles are read at the base branch's tip now, not the base commit the
+    # pull request record kept at its last head push.
+    base_tip = resolve_live_base_tip(read_tip, pr_info)
+    return _Host(pr_info, comments, HostPolicyReader(files, owner=owner, repo=repo), base_tip)
 
 
 def _required_reviewer_logins(
@@ -113,12 +125,7 @@ def _required_reviewer_logins(
     tool). Both go through ``merge.required_reviewers``, the resolution the merge
     verb itself uses. Refused when neither yields a role: a fence is then not
     attributable."""
-    base_sha = resolve_base_sha(dict(host.pr_info))
-    if not base_sha:
-        raise FenceRefusedError(
-            f"the host reports no base commit for {owner}/{repo}'s pull request, so the "
-            "required reviewer roles cannot be read from a revision the pull request cannot change"
-        )
+    base_sha = host.base_tip
     try:
         text = (
             host.policy.read_text(base_sha, TRACKED_GATE_RELATIVE_PATH)

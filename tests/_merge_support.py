@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import yaml
 
 from tests._gate_repo import make_origin_confirmable
+from tests._support.fakes import branch_tip_response
 
 FULL_SHA = "a" * 40
 MERGED_SHA = "b" * 40
@@ -181,6 +182,8 @@ def make_merge_opener(*, pr_info=None, files=None, comments=None, merge_status=2
             # lr-835c57: empty branch-commit list -- these tests exercise
             # post_merge_steps wiring, not the commit-subject gate.
             return json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(pr_info, None, 200, url)
         if method == "GET" and "/pulls/" in url:
             if _merge_landed[0]:
                 return json_resp(
@@ -246,6 +249,8 @@ def make_merge_github_opener(*, pr_info=None, files=None, comments=None, merged_
             return json_resp(200, {"total_count": 0, "check_runs": []})
         if method == "GET" and "/compare/" in url:
             return json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(pr_info, None, 200, url)
         if method == "GET" and url.endswith(f"/pulls/{1}"):
             if _merge_landed[0]:
                 return json_resp(

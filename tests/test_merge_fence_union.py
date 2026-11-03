@@ -28,7 +28,7 @@ from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
 from clagentic_loadout.transport import provider_config
 from tests._gate_repo import commit_files, git, init_gate_repo
 from tests._review_evaluate_support import facts
-from tests._support.fakes import json_resp, paged
+from tests._support.fakes import branch_tip_response, json_resp, paged
 from tests._support.merge_verb import (
     AllowingAuthorityProvider,
     RecordingTokenProvider,
@@ -100,8 +100,10 @@ def _github_opener(comments):
             return json_resp(200, {"total_count": 0, "check_runs": []})
         if method == "GET" and "/compare/" in url:
             return json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(None, None, 200, url)
         if method == "GET" and "/pulls/" in url:
-            return json_resp(200, {"head": {"sha": HEAD}, "title": "feat: x"})
+            return json_resp(200, {"head": {"sha": HEAD}, "title": "feat: x", "base": {"ref": "main"}})
         raise AssertionError(f"unexpected call: {method} {url}")
 
     return opener

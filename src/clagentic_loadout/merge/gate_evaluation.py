@@ -6,7 +6,10 @@ from (``evaluated_findings``). The gate does not take that outcome on trust, and
 it does not re-judge a finding either: it runs the same evaluator
 (review.evaluate) over the same findings again, at merge time, with the policy
 (dispositions and stakes) read at the PR's LIVE base revision and the PR's
-current head as the expected head. Nothing in a fence or a findings file picks
+current head as the expected head. The live base revision is the base branch's
+tip at merge time, resolved by merge.live_base.resolve_live_base_tip through the
+host's branch API; the base commit on the host's PR record lags the branch after
+the last head push, so it is never used and an unreadable tip refuses. Nothing in a fence or a findings file picks
 the revision policy is read from; the ``policy_base_sha`` a fence records is
 provenance only.
 

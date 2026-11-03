@@ -283,7 +283,7 @@ class TestModelAttestation:
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=self._opener_with_comment(block),
+            opener=self._opener_with_comment(block, tmp_path),
         )
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
 
@@ -301,7 +301,7 @@ class TestModelAttestation:
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=self._opener_with_comment(block),
+            opener=self._opener_with_comment(block, tmp_path),
         )
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
 
@@ -350,7 +350,7 @@ class TestModelAttestation:
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=self._opener_with_comment(block),
+            opener=self._opener_with_comment(block, tmp_path),
         )
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
 
@@ -372,7 +372,7 @@ class TestModelAttestation:
             argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=self._opener_with_comment(block),
+            opener=self._opener_with_comment(block, tmp_path),
         )
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
 
@@ -962,6 +962,7 @@ class TestTaskIdGuardCommitSubjectGate:
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path),
                 branch_commits=[
                     {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
                 ],
@@ -1051,6 +1052,7 @@ class TestTaskIdGuardCommitSubjectGate:
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path),
                 branch_commits=[
                     {"sha": "c" * 40, "commit": {"message": "feat: fix WIDGET-42 leak"}},
                 ],
@@ -1072,6 +1074,7 @@ class TestTaskIdGuardCommitSubjectGate:
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
             opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path),
                 branch_commits=[
                     {"sha": "c" * 40, "commit": {"message": "WIDGET-42: id-leading, no type"}},
                 ],

@@ -131,12 +131,13 @@ class TestClean:
 
         assert run.code == verb.EXIT_OK
 
-    def test_a_clean_fence_with_no_base_to_read_policy_at_refuses(self, tmp_path, capsys):
-        run = _merge([_comment(1, _fence("CLEAN", findings=[]))], None, capsys)
+    def test_a_clean_fence_with_no_base_tip_to_read_policy_at_refuses(self, tmp_path, capsys):
+        # The gate has no base to read policy at when the host cannot say where
+        # the base branch points; it refuses rather than judging without policy.
+        run = _merge([_comment(1, _fence("CLEAN", findings=[]))], None, capsys, branch_tip_http=404)
 
-        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
-        assert "records CLEAN" in run.err
-        assert "policy base revision is not known" in run.err
+        assert run.code == verb.EXIT_GATE_FACT_UNAVAILABLE
+        assert "base branch tip" in run.err
 
     def test_a_fence_that_does_not_carry_its_findings_cannot_be_checked(self, tmp_path, capsys):
         repo = _repo(tmp_path)
