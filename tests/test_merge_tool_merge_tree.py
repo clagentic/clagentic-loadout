@@ -44,20 +44,15 @@ def _isolation(tmp_path, monkeypatch):
     ms.SEEDED_BASE["sha"] = ""
 
 
+def _add_values(clone) -> None:
+    (clone / "data").mkdir()
+    (clone / _VALUES).write_text(_MERGED_CONTENT, encoding="utf-8")
+    _git(["add", _VALUES], clone)
+
+
 def _push_merged_commit(work, tmp_path) -> str:
-    """Push commit M (adds data/values.yaml) to the work repo's origin from a
-    second clone; return M."""
-    origin = str(work.parent / f"{work.name}-origin.git")
-    other = tmp_path / "other-clone"
-    _git(["clone", "-b", _BASE, origin, str(other)], tmp_path)
-    _git(["config", "user.email", "t@example.com"], other)
-    _git(["config", "user.name", "t"], other)
-    (other / "data").mkdir()
-    (other / _VALUES).write_text(_MERGED_CONTENT, encoding="utf-8")
-    _git(["add", _VALUES], other)
-    _git(["commit", "-m", "merged change"], other)
-    _git(["push", "origin", f"{_BASE}:{_BASE}"], other)
-    return _git(["rev-parse", "HEAD"], other).strip()
+    """Push commit M (adds data/values.yaml) to the work repo's origin."""
+    return _commit_to_origin(work, tmp_path, "other-clone", _add_values)
 
 
 def _snapshot(work) -> dict:
