@@ -962,6 +962,44 @@ def _require_anchored_fetch_destination(
         require_fetch_destination(tree, base_branch, fetch_auth)
 
 
+def _refuse_tool_tree_steps_before_merge(
+    args: argparse.Namespace, base_branch: str, pr_number: int
+) -> None:
+    """Refuse, before the server-side merge, post-merge steps the tool tree cannot
+    run. Whether the steps will run in a tool tree depends only on --repo-path being
+    a clean checkout of the PR's base branch, which is known now; deciding after the
+    merge would leave the PR merged with no deploy. The same checks run again after
+    the merge against the steps actually run, in case the checkout changed between
+    the two.
+
+    Does nothing when no step will run (--skip-post-merge, no --repo-path, the tree
+    sync turned off) or when the checkout is safe to advance. A config that cannot be
+    read is left for step 10, which reports it.
+    """
+    if args.skip_post_merge or not args.repo_path:
+        return
+    if not _post_merge_sync_enabled(args.repo_path):
+        return
+    try:
+        declared = resolve_git_working_tree(args.repo_path)
+        steps = load_post_merge_steps(args.repo_path)
+    except PostMergeConfigError:
+        return
+    if not steps:
+        return
+    git_tree = str(declared) if declared is not None else args.repo_path
+    if unsafe_tree_reason(git_tree, base_branch) is None:
+        return
+    try:
+        refuse_detached_steps(steps)
+        refuse_steps_naming_repo_path(steps, git_tree)
+    except TreeSyncError as exc:
+        _fail(
+            f"{exc}; refused before merging, so PR #{pr_number} was NOT merged",
+            code=EXIT_POST_MERGE_FAILED,
+        )
+
+
 def _gate_policy_reader(backend, *, owner: str, repo: str, repo_path: str | None) -> PolicyReader:
     """Where the gate reads policy from, the same choice loadout-review makes: a
     local repository only when the caller names one, else the host API. The
@@ -2227,6 +2265,12 @@ def _run(
         _require_anchored_fetch_destination(
             args.repo_path, resolve_base_branch(pr_info), fetch_auth
         )
+
+    # The post-merge steps are judged against the tool tree now too, for the same
+    # reason: a refused step must stop the merge, not follow it.
+    _refuse_tool_tree_steps_before_merge(
+        args, resolve_base_branch(pr_info), args.pr_number
+    )
 
     # 9. All gates passed -- execute the merge.
     print(

@@ -488,6 +488,64 @@ class TestDetachedStepIsRefusedInTheToolTree:
         assert detached_marker.exists()
 
 
+class TestRefusalStopsTheMerge:
+    """The tool-tree refusals are decided before the server-side merge, so a refused
+    step leaves the PR unmerged instead of merged with no deploy."""
+
+    @staticmethod
+    def _merge_recording(work, merged):
+        seen: list[tuple[str, str]] = []
+        inner = ms.make_merge_opener()
+
+        def opener(req, timeout=15):
+            seen.append((req.get_method(), req.full_url))
+            return inner(req, timeout)
+
+        argv = ms.merge_base_args(**{"--repo-path": str(work), "--platform": "forgejo"})
+        code = verb.main(
+            argv,
+            token_provider=ms.RecordingTokenProvider(),
+            authority_provider=ms.AllowingAuthorityProvider(),
+            opener=opener,
+        )
+        merge_calls = [c for c in seen if c[0] in ("POST", "PUT") and c[1].endswith("/merge")]
+        return code, merge_calls
+
+    def _bad_steps(self, kind, work, tmp_path):
+        if kind == "detaches":
+            return [{"cmd": [_PY, "-c", "pass"], "on_failure": "warn", "detaches": True}]
+        return [_cmd_step([_PY, "-c", "pass", f"{work}/scripts/install.sh"])]
+
+    @pytest.mark.parametrize("kind", ["detaches", "repo-path"])
+    def test_a_feature_branch_checkout_is_refused_with_nothing_merged(
+        self, tmp_path, capsys, kind
+    ):
+        work, merged, marker = _scenario(tmp_path, shape="feature", steps=False)
+        ms.write_merge_config(work, self._bad_steps(kind, work, tmp_path))
+        before = _snapshot(work)
+        code, merge_calls = self._merge_recording(work, merged)
+        assert code == verb.EXIT_POST_MERGE_FAILED
+        assert merge_calls == []
+        err = capsys.readouterr().err
+        outcome = (
+            tool_merge_tree.OUTCOME_DETACHED_STEP
+            if kind == "detaches"
+            else tool_merge_tree.OUTCOME_STEP_NAMES_REPO_PATH
+        )
+        assert outcome in err and "was NOT merged" in err
+        assert "all gates PASSED -- merging" not in err
+        assert _snapshot(work) == before
+        _assert_tool_tree_gone(work, tmp_path, merged)
+
+    @pytest.mark.parametrize("kind", ["detaches", "repo-path"])
+    def test_a_clean_base_checkout_merges_the_same_config(self, tmp_path, kind):
+        work, merged, marker = _scenario(tmp_path, shape="clean-base", steps=False)
+        ms.write_merge_config(work, self._bad_steps(kind, work, tmp_path))
+        code, merge_calls = self._merge_recording(work, merged)
+        assert code == verb.EXIT_OK
+        assert len(merge_calls) == 1
+
+
 class TestRefuseStepsUnit:
     def _repo(self, tmp_path):
         repo = tmp_path / "x" / "repo"
