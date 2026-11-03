@@ -171,3 +171,26 @@ def test_a_context_line_of_a_listed_file_is_outside_range():
     ingestion = ingest(_parse(_doc(hits=[hit])), diff, [], {})
 
     assert ingestion.findings == () and len(ingestion.outside_range) == 1
+
+
+def _evidence(diff, file, line):
+    hit = {"file": file, "line": line, "rule_id": "r", "message": "m"}
+    ingestion = ingest(_parse(_doc(hits=[hit])), diff, [], {})
+    return ingestion.findings[0]["facts"]["evidence"]
+
+
+def test_the_evidence_of_a_hit_on_an_added_line_says_the_change_adds_it():
+    diff = (
+        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n"
+        "@@ -1,2 +1,3 @@\n ctx\n+new\n ctx2\n"
+    )
+
+    assert _evidence(diff, "a.py", 2).endswith("the change adds this line")
+
+
+def test_the_evidence_of_a_hit_not_shown_as_context_does_not_claim_the_line_is_added():
+    diff = make_diff({"a.py": 2})
+    unlisted = _evidence(diff, "b.py", 1)
+
+    assert "adds" not in unlisted
+    assert unlisted.endswith("so it is counted in range")

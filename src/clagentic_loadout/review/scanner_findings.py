@@ -62,7 +62,13 @@ def finding_rule_id(hit: ScannerHit) -> str:
     return f"{hit.scanner}.{hit.rule_id}"
 
 
-def _facts(hit: ScannerHit, categories: Mapping[str, str]) -> dict[str, Any]:
+EVIDENCE_ADDED = "the change adds this line"
+EVIDENCE_NOT_CONTEXT = (
+    "the diff does not show this line as unchanged context, so it is counted in range"
+)
+
+
+def _facts(hit: ScannerHit, categories: Mapping[str, str], added: bool) -> dict[str, Any]:
     # A scanner the policy does not name gets no category, which the evaluator
     # counts at its worst case (in the security floor).
     category = categories.get(hit.scanner)
@@ -73,21 +79,26 @@ def _facts(hit: ScannerHit, categories: Mapping[str, str]) -> dict[str, Any]:
         "impact": {"confidentiality": "full", "integrity": "full", "availability": "full"},
         "durability": "durable",
         "evidence": (
-            f"scanner {hit.scanner} reported rule {hit.rule_id} on a line this change adds"
+            f"scanner {hit.scanner} reported rule {hit.rule_id}; "
+            f"{EVIDENCE_ADDED if added else EVIDENCE_NOT_CONTEXT}"
         ),
     }
 
 
-def finding_of(hit: ScannerHit, categories: Mapping[str, str]) -> dict[str, Any]:
+def finding_of(
+    hit: ScannerHit, categories: Mapping[str, str], *, added: bool = False
+) -> dict[str, Any]:
     """The finding an in-range *hit* becomes, in the shape a findings file holds.
-    *categories* is the scanner policy read at the base revision."""
+    *categories* is the scanner policy read at the base revision; *added* is true
+    only when the diff shows the hit's line as added, and selects the evidence
+    wording (every other in-range hit is counted for want of positive evidence)."""
     return {
         "file": hit.file,
         "line": hit.line,
         "rule_id": finding_rule_id(hit),
         "message": hit.message,
         "severity": None,
-        "facts": _facts(hit, categories),
+        "facts": _facts(hit, categories, added),
     }
 
 
@@ -128,7 +139,9 @@ def ingest(
         if listed is not None and hit.line not in listed:
             outside.append(_context_of(hit))
         else:
-            in_range.append(finding_of(hit, categories))
+            in_range.append(
+                finding_of(hit, categories, added=listed is not None and hit.line in listed)
+            )
     scanner_ids = {candidate_id(item) for item in in_range}
     replaced = tuple(
         candidate_id(item) for item in reviewer_findings if candidate_id(item) in scanner_ids
