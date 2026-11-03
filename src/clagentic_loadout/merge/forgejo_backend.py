@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import re
+import urllib.parse
 from typing import Any
 
 from clagentic_loadout.merge.ci_payload import parse_forgejo_combined_status
@@ -125,6 +126,50 @@ def get_pr_info(
             f"cannot read PR #{pr_number} in {owner}/{repo}: HTTP {status}"
         )
     return git_host_api.parse_json_body(raw)
+
+
+def get_branch_tip_sha(
+    api_base: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    token: str,
+    opener=None,
+) -> str:
+    """Fetch the commit SHA a branch points at right now
+    (GET .../branches/{branch}).
+
+    A pull request record keeps the base commit it had when it was last
+    updated, so only this read says where the base branch is at merge time.
+    Raises merge.errors.GateFactUnavailableError on any non-200 response,
+    network failure or a body without a commit id: an unreadable tip is never
+    replaced by a guess."""
+    quoted = urllib.parse.quote(branch, safe="/")
+    try:
+        status, raw = git_host_api.request(
+            api_base,
+            "GET",
+            f"/api/v1/repos/{owner}/{repo}/branches/{quoted}",
+            token,
+            opener=opener,
+        )
+    except git_host_api.GitHostApiError as exc:
+        raise GateFactUnavailableError(
+            f"cannot read the tip of branch {branch!r} in {owner}/{repo}: {exc}"
+        ) from exc
+    if status != 200:
+        raise GateFactUnavailableError(
+            f"cannot read the tip of branch {branch!r} in {owner}/{repo}: HTTP {status}"
+        )
+    body = git_host_api.parse_json_body(raw)
+    commit = body.get("commit") if isinstance(body, dict) else None
+    sha = commit.get("id") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not sha:
+        raise GateFactUnavailableError(
+            f"the host returned no commit for branch {branch!r} in {owner}/{repo}"
+        )
+    return sha
 
 
 def get_pr_head_sha(pr_info: dict[str, Any]) -> str:

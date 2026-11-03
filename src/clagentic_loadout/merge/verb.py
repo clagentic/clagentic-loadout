@@ -623,6 +623,7 @@ from clagentic_loadout.merge.record_gate import (
     required_gates,
     unmeasured_reviewer_message,
 )
+from clagentic_loadout.merge.live_base import resolve_live_base_tip
 from clagentic_loadout.merge.reviewer_login import resolve_reviewer_login
 from clagentic_loadout.merge.stale_sha import check_stale_head_sha
 from clagentic_loadout.merge.tree_sync import (
@@ -631,7 +632,6 @@ from clagentic_loadout.merge.tree_sync import (
     fetch_merged_sha_object,
     land_on_base_branch,
     resolve_base_branch,
-    resolve_base_sha,
 )
 from clagentic_loadout.merge.tool_merge_tree import (
     TOOL_TREE_FAILURE_NOTE,
@@ -838,6 +838,11 @@ class _ForgejoMergeBackend:
             self._git_host_base, owner, repo, pr_number, token=self._token, opener=self._opener
         )
 
+    def get_branch_tip_sha(self, owner: str, repo: str, branch: str) -> str:
+        return forgejo_backend.get_branch_tip_sha(
+            self._git_host_base, owner, repo, branch, token=self._token, opener=self._opener
+        )
+
     def fetch_comments(self, owner: str, repo: str, pr_number: int) -> list:
         return forgejo_backend.fetch_comments(
             self._git_host_base, owner, repo, pr_number, token=self._token, opener=self._opener
@@ -908,6 +913,11 @@ class _GithubMergeBackend:
 
     def get_pr_info(self, owner: str, repo: str, pr_number: int) -> dict:
         return github_backend.get_pr_info(owner, repo, pr_number, token=self._token, opener=self._opener)
+
+    def get_branch_tip_sha(self, owner: str, repo: str, branch: str) -> str:
+        return github_backend.get_branch_tip_sha(
+            owner, repo, branch, token=self._token, opener=self._opener
+        )
 
     def fetch_comments(self, owner: str, repo: str, pr_number: int) -> list:
         return github_backend.fetch_comments(owner, repo, pr_number, token=self._token, opener=self._opener)
@@ -1605,9 +1615,23 @@ def _run(
     # than degrading the gate. Everything before this point talked to the platform
     # API only; no git command has touched a network.
     fetch_auth = backend.fetch_auth()
+    # Every base-dependent read below (the repo gate, the gate's policy, the
+    # pre_checks merge result, the tree-safety check) uses the base branch's tip
+    # now. The PR record's base.sha is the tip as of the last head push; it is
+    # provenance only and never a fallback, so an unreadable tip refuses.
+    try:
+        live_base_sha = resolve_live_base_tip(
+            lambda branch: backend.get_branch_tip_sha(owner, repo, branch), pr_info
+        )
+    except GateFactUnavailableError as exc:
+        _fail(
+            f"cannot resolve the base branch tip for PR #{args.pr_number} in "
+            f"{owner}/{repo}: {exc}",
+            code=EXIT_GATE_FACT_UNAVAILABLE,
+        )
     repo_gate = load_repo_gate_at_base(
         args.repo_path,
-        base_sha=resolve_base_sha(pr_info),
+        base_sha=live_base_sha,
         base_branch=resolve_base_branch(pr_info),
         config_binding=config_binding,
         fetch_auth=fetch_auth,
@@ -1693,7 +1717,6 @@ def _run(
         policy_reader = _gate_policy_reader(
             backend, owner=owner, repo=repo, repo_path=args.repo_path
         )
-        live_base_sha = resolve_base_sha(pr_info)
         host_visibility = repository_visibility(pr_info)
         # Per-PR rulings are looked up for exactly this repository and PR; a
         # registry inside the --repo-path checkout is refused as a source.
@@ -2097,7 +2120,7 @@ def _run(
             check_env = pre_check_env(passthrough=passthrough.names)
             with merge_result_clone(
                 gate_git_tree,
-                resolve_base_sha(pr_info),
+                live_base_sha,
                 current_head_sha,
                 base_branch=resolve_base_branch(pr_info),
                 env=check_env,
@@ -2106,7 +2129,7 @@ def _run(
                 print(
                     f"merge: pre_checks gate -- running {len(pre_checks)} declared "
                     f"check(s) in the merge-result clone {str(check_tree)!r} (head "
-                    f"{current_head_sha!r} merged onto base {resolve_base_sha(pr_info)!r}, "
+                    f"{current_head_sha!r} merged onto base {live_base_sha!r}, "
                     f"where the checks are declared) before authorizing PR "
                     f"#{args.pr_number} in {owner}/{repo}; the checkout at "
                     f"{args.repo_path!r} is not used for execution; identity, attestation "
@@ -2271,7 +2294,7 @@ def _run(
     # The post-merge steps are judged against the tool tree now too, for the same
     # reason: a refused step must stop the merge, not follow it.
     _refuse_tool_tree_steps_before_merge(
-        args, resolve_base_branch(pr_info), args.pr_number, resolve_base_sha(pr_info)
+        args, resolve_base_branch(pr_info), args.pr_number, live_base_sha
     )
 
     # 9. All gates passed -- execute the merge.
