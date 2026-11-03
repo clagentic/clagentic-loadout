@@ -5,6 +5,7 @@ Every case runs the real verb, on both platforms, merging and under
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 
@@ -23,6 +24,8 @@ from tests._ruling_support import (
     NAME,
     OTHER_FP,
     REPO,
+    TODAY,
+    pin_gate_clock,
     ruling,
     write_registry,
 )
@@ -77,6 +80,11 @@ def _gate(platform, comments, repo, capsys, mode=()):
     )
     captured = capsys.readouterr()
     return _Run(code, captured.out, captured.err)
+
+
+@pytest.fixture(autouse=True)
+def gate_clock(monkeypatch):
+    pin_gate_clock(monkeypatch)
 
 
 @pytest.fixture
@@ -182,8 +190,6 @@ class TestRulingClearsAtTheGate:
     def test_an_expired_ruling_no_longer_clears_and_is_named(
         self, platform, mode, repo, use_registry, capsys
     ):
-        import datetime as dt
-
         use_registry([ruling(kind="false_positive", at=dt.date(2026, 1, 1), expires=dt.date(2026, 2, 1))])
 
         run = _gate(platform, _blocked(_finding()), repo, capsys, mode)
@@ -349,6 +355,48 @@ class TestRulingAppliesInEverySameRoleFenceAtTheHead:
         assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
         assert "src/a.py:20:R2 (computed severity" in run.err
         assert "src/a.py:10:R1 (computed severity" not in run.err
+
+
+@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize("platform", sorted(PLATFORMS))
+class TestRulingExpiryFollowsTheGateClock:
+    def test_a_default_ruling_clears_inside_its_window(self, platform, mode, repo, use_registry, capsys):
+        use_registry([ruling()])
+
+        assert _gate(platform, _blocked(_finding()), repo, capsys, mode).code == verb.EXIT_OK
+
+    def test_the_same_ruling_lapses_when_the_clock_is_far_in_the_future(
+        self, platform, mode, repo, use_registry, capsys, monkeypatch
+    ):
+        use_registry([ruling()])
+        pin_gate_clock(monkeypatch, dt.date(2999, 1, 1))
+
+        run = _gate(platform, _blocked(_finding()), repo, capsys, mode)
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "expired" in run.err
+
+    def test_a_ruling_still_clears_on_the_last_day_of_its_window(
+        self, platform, mode, repo, use_registry, capsys, monkeypatch
+    ):
+        use_registry([ruling()])
+        pin_gate_clock(monkeypatch, TODAY + dt.timedelta(days=30))
+
+        run = _gate(platform, _blocked(_finding()), repo, capsys, mode)
+
+        assert run.code == verb.EXIT_OK, run.err
+        assert "expired" not in run.err
+
+    def test_a_ruling_lapses_the_day_after_its_window(
+        self, platform, mode, repo, use_registry, capsys, monkeypatch
+    ):
+        use_registry([ruling()])
+        pin_gate_clock(monkeypatch, TODAY + dt.timedelta(days=31))
+
+        run = _gate(platform, _blocked(_finding()), repo, capsys, mode)
+
+        assert run.code == verb.EXIT_GATE_RESULT_BLOCKED
+        assert "expired" in run.err
 
 
 class TestEveryFenceOfARole:
