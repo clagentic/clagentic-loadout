@@ -26,7 +26,8 @@ from clagentic_loadout.review.facts import CATEGORIES
 KEY_SCANNERS = "scanners"
 KEY_CATEGORY = "category"
 
-_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
+#: The one definition of a valid scanner name, shared with the scanner input.
+SCANNER_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 
 
 class ScannerPolicyError(ValueError):
@@ -42,7 +43,7 @@ def parse_scanner_categories(block: Any, where: str = "review.scanners") -> tupl
         raise ScannerPolicyError(f"{where} must be a mapping of scanner name to a category")
     out: list[tuple[str, str]] = []
     for name, entry in block.items():
-        if not isinstance(name, str) or not _NAME_RE.match(name):
+        if not isinstance(name, str) or not SCANNER_NAME_RE.match(name):
             raise ScannerPolicyError(f"{where} has an invalid scanner name {name!r}")
         here = f"{where}.{name}"
         if not isinstance(entry, dict):
@@ -61,4 +62,4 @@ def parse_scanner_categories(block: Any, where: str = "review.scanners") -> tupl
     return tuple(out)
 
 
-__all__ = ["KEY_CATEGORY", "KEY_SCANNERS", "ScannerPolicyError", "parse_scanner_categories"]
+__all__ = ["KEY_CATEGORY", "KEY_SCANNERS", "SCANNER_NAME_RE", "ScannerPolicyError", "parse_scanner_categories"]

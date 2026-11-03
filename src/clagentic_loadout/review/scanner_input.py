@@ -28,13 +28,13 @@ from clagentic_loadout.merge.fence_state import (
     SCANNER_RAN,
     SCANNER_STATUSES,
 )
+from clagentic_loadout.review.scanner_policy import SCANNER_NAME_RE
 from clagentic_loadout.sha import FULL_SHA_RE
 
 #: Recorded when a scanner that gave no usable answer says nothing about why.
 #: It is only ever attached to a status that is unsatisfied regardless.
 DEFAULT_REASON = "the scanner reported no reason"
 
-_SCANNER_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 _RULE_RE = re.compile(r"\A[^\s`~]{1,200}\Z")
 _MAX_MESSAGE_CHARS = 300
 _TOP_KEYS = ("head_sha", "scanners")
@@ -101,14 +101,28 @@ def _object(value: Any, where: str, allowed: tuple[str, ...]) -> dict[str, Any]:
     return value
 
 
+def _repo_relative(value: str) -> str | None:
+    """*value* in the form a diff names files (posix, repository-relative, no ``.``
+    or empty component), or None when it cannot be put in that form. A path
+    that stays unnormalized would miss the diff's key and read as outside the
+    change, which never blocks, so anything not exactly normalizable is refused."""
+    if value.startswith("/") or "\\" in value or value.endswith("/"):
+        return None
+    parts = value.split("/")
+    if ".." in parts:
+        return None
+    kept = [part for part in parts if part not in ("", ".")]
+    return "/".join(kept) if kept else None
+
+
 def _hit(raw: Any, where: str, scanner: str) -> ScannerHit:
     entry = _object(raw, where, _HIT_KEYS)
     file_value, line = entry.get("file"), entry.get("line")
     rule_id, message = entry.get("rule_id"), entry.get("message")
     if not isinstance(file_value, str) or not file_value.strip():
         raise ScannerInputError(f"{where}.file must be a non-empty string")
-    path = file_value[2:] if file_value.startswith("./") else file_value
-    if path.startswith("/") or "\\" in path or ".." in path.split("/") or not path:
+    path = _repo_relative(file_value)
+    if path is None:
         raise ScannerInputError(
             f"{where}.file must be a repository-relative path, got {file_value!r}"
         )
@@ -129,7 +143,7 @@ def _hit(raw: Any, where: str, scanner: str) -> ScannerHit:
 def _result(raw: Any, where: str) -> ScannerResult:
     entry = _object(raw, where, _SCANNER_KEYS)
     name, status = entry.get("scanner"), entry.get("status")
-    if not isinstance(name, str) or not _SCANNER_NAME_RE.match(name):
+    if not isinstance(name, str) or not SCANNER_NAME_RE.match(name):
         raise ScannerInputError(
             f"{where}.scanner must be 1-64 characters of letters, digits, '.', '_', ':' or '-', "
             f"starting with a letter or digit, got {name!r}"

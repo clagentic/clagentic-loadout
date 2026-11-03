@@ -106,3 +106,21 @@ def test_replacement_counts_a_location_once_and_keeps_other_rules():
     assert len(ingestion.findings) == 2
     assert [candidate_id(f) for f in merged] == ["a.py:2:other", "a.py:2:s1.r"]
     assert merged[1]["message"] == "m"
+
+
+def _hit_file(value):
+    return _parse(_doc(hits=[{"file": value, "line": 1, "rule_id": "r", "message": "m"}])).hits[0].file
+
+
+@pytest.mark.parametrize("value", ["src/./x.py", "src//x.py", "./src/x.py", "././src/x.py"])
+def test_a_hit_path_is_put_in_the_form_the_diff_uses(value):
+    path = _hit_file(value)
+    assert path == "src/x.py"
+    assert ingest(_parse(_doc(hits=[{"file": value, "line": 1, "rule_id": "r", "message": "m"}])),
+                  make_diff({"src/x.py": 2}), [], {}).findings != ()
+
+
+@pytest.mark.parametrize("value", ["/abs", "../x", "a/../b", "src/", "./", "a\\b"])
+def test_a_hit_path_that_does_not_normalize_cleanly_is_refused(value):
+    with pytest.raises(si.ScannerInputError):
+        _hit_file(value)
