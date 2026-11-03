@@ -26,7 +26,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,10 @@ STATE_COMPLETE = "complete"
 STATE_UNRUNNABLE = "unrunnable"
 
 _MAX_RECORD_BYTES = 8 * 1024 * 1024
+
+# How far ahead of the reader's clock a run may be dated before it counts as
+# future-dated: enough for clock drift between the hosts sharing a reports root.
+FUTURE_TOLERANCE = timedelta(minutes=5)
 
 
 class StoreError(Exception):
@@ -112,6 +116,55 @@ def run_sort_key(run_id: str) -> tuple[str, int]:
     if match is None:
         raise StoreError(f"{run_id!r} is not a run id")
     return match.group(1), int(match.group(2))
+
+
+def run_id_time(run_id: str) -> datetime:
+    """The UTC moment a run id encodes. Raises StoreError for an id that matches the
+    grammar but is not a real date, such as month 13."""
+    stamp, _ = run_sort_key(run_id)
+    try:
+        return datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError as exc:
+        raise StoreError(f"{run_id!r} encodes a date that does not exist") from exc
+
+
+def _recorded_start(run: RunRecord) -> datetime | None:
+    """The run's recorded start, or None when it recorded none. Raises ValueError
+    when it recorded one that is not a timestamp."""
+    value = run.result.get("started_at")
+    if not isinstance(value, str):
+        return None
+    moment = datetime.fromisoformat(value)
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def dated_time(run: RunRecord) -> datetime | None:
+    """The latest of the moments a run carries: its id time and its recorded start.
+    None when either cannot be read, which makes the run undatable."""
+    try:
+        moments = [run_id_time(run.run_id)]
+        started = _recorded_start(run)
+    except (StoreError, ValueError):
+        return None
+    if started is not None:
+        moments.append(started)
+    return max(moments)
+
+
+def is_future_dated(run: RunRecord, now: datetime | None = None) -> bool:
+    """Whether the run is dated later than *now* plus FUTURE_TOLERANCE. A recorder
+    with a skewed clock writes such a run, and its id would otherwise sort above
+    every real run recorded after it. An undatable run is not future-dated."""
+    moment = dated_time(run)
+    if moment is None:
+        return False
+    reference = now if now is not None else datetime.now(timezone.utc)
+    return moment > reference + FUTURE_TOLERANCE
+
+
+def is_undatable(run: RunRecord) -> bool:
+    """Whether the run's date cannot be read from its id or its recorded start."""
+    return dated_time(run) is None
 
 
 def _read_json_object(path: Path, run_id: str) -> dict[str, Any]:
@@ -187,11 +240,16 @@ __all__ = [
     "RUN_ID_RE",
     "STATE_COMPLETE",
     "STATE_UNRUNNABLE",
+    "FUTURE_TOLERANCE",
     "RunRecord",
     "StoreError",
+    "dated_time",
+    "is_future_dated",
+    "is_undatable",
     "list_runs",
     "load_run",
     "new_run_id",
     "reports_root",
+    "run_id_time",
     "run_sort_key",
 ]

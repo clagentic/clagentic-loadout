@@ -225,6 +225,10 @@ def _scoping_cwd(args: argparse.Namespace) -> Path | None:
 
 def _report(args: argparse.Namespace) -> int:
     root = store.reports_root()
+
+    def note(text: str) -> None:
+        print(f"{_PROG}: {text}", file=sys.stderr)
+
     try:
         run = report_cmd.select_run(
             root,
@@ -232,10 +236,10 @@ def _report(args: argparse.Namespace) -> int:
             repo=args.repo,
             sha=args.sha,
             cwd=_scoping_cwd(args),
-            note=lambda text: print(f"{_PROG}: {text}", file=sys.stderr),
+            note=note,
         )
         if args.diff is not None:
-            _print_json(report_cmd.diff_of(run, report_cmd.load_base_run(root, args.diff)))
+            _print_json(report_cmd.diff_of(run, report_cmd.load_base_run(root, args.diff, note=note)))
         elif args.failing_ids:
             for test_id in report_cmd.failing_ids_of(run):
                 print(test_id)
