@@ -198,7 +198,7 @@ def _host_files_opener(inner, files: dict[str, str], requests: list[str], conten
 
 def merge(
     comments, repo: Path | None, capsys, *, head=HEAD, extra=None, pr_extra=None,
-    local=True, contents_http=200,
+    local=True, contents_http=200, branch_tip_http=200,
 ):
     """Run the merge verb against *repo*'s main tip as the PR base. *local*
     False passes no --repo-path (the repository is then reachable only through
@@ -209,7 +209,7 @@ def merge(
     if repo is not None:
         info["base"] = {"ref": "main", "sha": tip(repo), "repo": {"private": True}}
     info.update(pr_extra or {})
-    inner = make_opener(pr_info=info, comments=comments)
+    inner = make_opener(pr_info=info, comments=comments, branch_tip_http=branch_tip_http)
     served = _host_files_opener(
         inner, _base_files(repo) if repo is not None else {}, policy_requests, contents_http
     )

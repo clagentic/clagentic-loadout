@@ -70,6 +70,8 @@ def host_opener(
     pr_http: int = 200,
     requests: list[str] | None = None,
     pr_info: dict | None = None,
+    branch_tip: str | None = None,
+    branch_tip_http: int = 200,
 ):
     """Serve the pull request at *head* with base *BASE*, *comments*, and (when
     *with_gate*) a tracked gate file at the base commit requiring *gate_roles*
@@ -80,7 +82,9 @@ def host_opener(
         files[TRACKED_GATE_RELATIVE_PATH] = gate if gate is not None else gate_text(gate_roles)
     if pr_info is None:
         pr_info = {"head": {"sha": head}, "base": {"ref": "main", "sha": BASE}, "title": "feat: x"}
-    inner = make_opener(pr_info=pr_info, comments=list(comments))
+    inner = make_opener(
+        pr_info=pr_info, comments=list(comments), branch_tip=branch_tip, branch_tip_http=branch_tip_http
+    )
 
     def opener(req, timeout=15):
         url = req.full_url

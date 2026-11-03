@@ -51,7 +51,7 @@ from clagentic_loadout.transport.credential_provider import (
     DEFAULT_ROLE,
     CredentialProviderError,
 )
-from tests._support.fakes import paged
+from tests._support.fakes import branch_tip_response, paged
 
 _FULL_SHA = "a" * 40
 
@@ -166,14 +166,18 @@ def _merge_opener():
             # lr-835c57: empty branch-commit list -- this file exercises
             # role/invoker matching, not the commit-subject gate.
             return _json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(None, None, 200, url)
         if method == "GET" and "/pulls/" in url:
             if _merge_landed[0]:
                 return _json_resp(
                     200,
                     {"head": {"sha": _FULL_SHA}, "title": "feat: a change",
-                     "merged": True, "merge_commit_sha": "e" * 40},
+                     "base": {"ref": "main"}, "merged": True, "merge_commit_sha": "e" * 40},
                 )
-            return _json_resp(200, {"head": {"sha": _FULL_SHA}, "title": "feat: a change"})
+            return _json_resp(
+                200, {"head": {"sha": _FULL_SHA}, "title": "feat: a change", "base": {"ref": "main"}}
+            )
         raise AssertionError(f"unexpected call: {method} {url}")
 
     return opener

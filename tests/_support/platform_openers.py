@@ -10,7 +10,13 @@ import urllib.error
 from datetime import datetime, timezone
 
 from tests._support.ci_gate import check_run
-from tests._support.fakes import FakeResponse, json_resp, paged
+from tests._support.fakes import (
+    FakeResponse,
+    branch_tip_response,
+    json_resp,
+    paged,
+    with_default_base_ref,
+)
 
 DEFAULT_HEAD_SHA = "a" * 40
 
@@ -18,6 +24,7 @@ DEFAULT_HEAD_SHA = "a" * 40
 def forgejo_opener(
     *, pr_info=None, files=None, comments=None, merge_status=200, ci_state="",
     ci_run_total_count=0, branch_commits=None,
+    branch_tip=None, branch_tip_http=200, no_base_ref=False,
 ):
     """Understands ONLY Forgejo-shaped URLs -- an unexpected (e.g. GitHub-
     shaped) call raises AssertionError, proving the forgejo backend was the
@@ -34,6 +41,7 @@ def forgejo_opener(
     the fetch regresses and starts calling that endpoint again, this opener's
     fall-through AssertionError will catch it."""
     pr_info = pr_info if pr_info is not None else {"head": {"sha": DEFAULT_HEAD_SHA}, "title": "feat: a change"}
+    pr_info = with_default_base_ref(pr_info, no_base_ref=no_base_ref)
     files = files if files is not None else ["a.py"]
     comments = comments if comments is not None else []
     # Comments are ordered by creation time, so a fixture entry that omits it
@@ -87,6 +95,8 @@ def forgejo_opener(
             return json_resp(200, paged(url, comments + posted_comments))
         if method == "GET" and url.endswith("/status"):
             return json_resp(200, {"state": ci_state, "statuses": ci_statuses})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(pr_info, branch_tip, branch_tip_http, url, "id")
         if method == "GET" and "/compare/" in url:
             return json_resp(200, {"commits": branch_commits, "ahead_by": len(branch_commits)})
         if method == "GET" and "/pulls/" in url:
@@ -110,6 +120,9 @@ def github_opener(
     ci_state="",
     ci_run_total_count=0,
     branch_commits=None,
+    branch_tip=None,
+    branch_tip_http=200,
+    no_base_ref=False,
 ):
     """Understands ONLY GitHub-shaped URLs (api.github.com) -- an unexpected
     (e.g. Forgejo-shaped) call raises AssertionError, proving the github
@@ -122,6 +135,7 @@ def github_opener(
     appends) are served together, mirroring forgejo_opener.
     """
     pr_info = pr_info if pr_info is not None else {"head": {"sha": DEFAULT_HEAD_SHA}, "title": "feat: a change"}
+    pr_info = with_default_base_ref(pr_info, no_base_ref=no_base_ref)
     files = files if files is not None else ["a.py"]
     comments = comments if comments is not None else []
     comments = [
@@ -172,6 +186,8 @@ def github_opener(
         if method == "GET" and url.endswith("/check-runs"):
             runs = [check_run(f"run-{i}", run_id=i + 1, suite_id=1) for i in range(ci_run_total_count)]
             return json_resp(200, {"total_count": ci_run_total_count, "check_runs": runs})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(pr_info, branch_tip, branch_tip_http, url, "sha")
         if method == "GET" and "/compare/" in url:
             return json_resp(200, {"commits": branch_commits, "ahead_by": len(branch_commits)})
         if method == "GET" and "/pulls/" in url:

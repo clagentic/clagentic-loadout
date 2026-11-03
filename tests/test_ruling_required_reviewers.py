@@ -384,3 +384,40 @@ class TestEarlierHeadFencesStayANotice:
 
         assert code == merge_verb.EXIT_GATE_RESULT_BLOCKED
         assert "in verdict comment #1" in err
+
+
+@pytest.mark.parametrize("platform", sorted(PLATFORMS))
+class TestRolesAreReadAtTheBaseTip:
+    """The pull request record's base commit lags the base branch after the last
+    head push; the roles are read at the branch tip, never at that commit."""
+
+    LAGGING, TIP = "c" * 40, "d" * 40
+
+    def _info(self):
+        return {
+            "head": {"sha": HEAD},
+            "title": "feat: x",
+            "base": {"ref": "main", "sha": self.LAGGING},
+        }
+
+    def test_the_gate_file_is_read_at_the_tip(self, platform, registry):
+        requests: list[str] = []
+
+        code = _record(
+            platform, [_blocked_comment(platform)],
+            pr_info=self._info(), branch_tip=self.TIP, requests=requests,
+        )
+
+        assert code == ruling.EXIT_OK
+        reads = [r for r in requests if "/git/trees/" in r or "/contents/" in r or "ref=" in r]
+        assert reads and all(self.LAGGING not in r for r in reads)
+        assert any(self.TIP in r for r in reads)
+
+    def test_an_unreadable_tip_refuses_and_records_nothing(self, platform, registry):
+        code = _record(
+            platform, [_blocked_comment(platform)], pr_info=self._info(), branch_tip_http=404
+        )
+
+        assert code != ruling.EXIT_OK
+        assert not registry.exists()
+

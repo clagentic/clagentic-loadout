@@ -37,6 +37,7 @@ from tests._gate_repo import (
     make_origin_confirmable,
     write_deployment_config,
 )
+from tests._support.fakes import branch_tip_response
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
@@ -85,7 +86,7 @@ def _json_resp(status: int, payload) -> _FakeResponse:
     return _FakeResponse(status, json.dumps(payload).encode("utf-8"))
 
 
-def _make_opener(*, pr_info=None, merge_calls=None):
+def _make_opener(*, pr_info=None, merge_calls=None, branch_tip_http=200):
     """merge_calls, when given, is a mutable list this opener appends to
     every time the merge POST fires -- proving (or disproving) that step 9
     was ever reached, independent of the process exit code."""
@@ -129,6 +130,8 @@ def _make_opener(*, pr_info=None, merge_calls=None):
             return _json_resp(200, {"total_count": 0})
         if method == "GET" and "/compare/" in url:
             return _json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(pr_info, None, branch_tip_http, url)
         if method == "GET" and "/pulls/" in url:
             if _merge_landed[0]:
                 return _json_resp(
@@ -157,7 +160,7 @@ def _base_args(**overrides) -> list[str]:
     return argv
 
 
-def _merge(repo, *, extra_args=None, merge_calls=None, pr_info=None):
+def _merge(repo, *, extra_args=None, merge_calls=None, pr_info=None, branch_tip_http=200):
     argv = _base_args(**{"--repo-path": str(repo.path)})
     argv += ["--skip-post-merge", *(extra_args or [])]
     return verb.main(
@@ -165,7 +168,9 @@ def _merge(repo, *, extra_args=None, merge_calls=None, pr_info=None):
         token_provider=_RecordingTokenProvider(),
         authority_provider=_AllowingAuthorityProvider(),
         opener=_make_opener(
-            pr_info=pr_info if pr_info is not None else repo.pr_info(), merge_calls=merge_calls
+            pr_info=pr_info if pr_info is not None else repo.pr_info(),
+            merge_calls=merge_calls,
+            branch_tip_http=branch_tip_http,
         ),
     )
 
@@ -517,28 +522,27 @@ class TestMalformedGateAtBase:
         assert "required_reviewer_roles NOT ENFORCED" in capsys.readouterr().err
 
 
-class TestNoBaseShaInThePayload:
-    def test_a_missing_base_sha_fails_closed_so_pre_checks_refuse_and_the_pair_falls_back(
-        self, tmp_path, capsys
-    ):
+class TestUnreadableBaseTip:
+    """The gate is read at the base branch's tip now; a host that cannot say
+    where the base branch points leaves no trusted revision to read it at, so
+    the merge refuses before anything runs or lands."""
+
+    def test_an_unreadable_tip_refuses_and_nothing_merges(self, tmp_path, capsys):
         repo = _repo_with(tmp_path, [_FAIL_CHECK])
-        pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
         merge_calls: list[str] = []
-        assert _merge(repo, pr_info=pr_info, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
+        code = _merge(repo, merge_calls=merge_calls, branch_tip_http=404)
+        assert code == verb.EXIT_GATE_FACT_UNAVAILABLE
         assert merge_calls == []
-        err = capsys.readouterr().err
-        assert "no base commit SHA" in err
-        assert "required_reviewer_roles NOT ENFORCED" in err
+        assert "base branch tip" in capsys.readouterr().err
 
-    def test_a_missing_base_sha_refuses_even_when_no_check_is_declared_there(self, tmp_path):
+    def test_it_refuses_even_when_no_check_is_declared_there(self, tmp_path):
         repo = _repo_with(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
-        pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
-        assert _merge(repo, pr_info=pr_info) == verb.EXIT_PRE_CHECKS_FAILED
+        assert _merge(repo, branch_tip_http=500) == verb.EXIT_GATE_FACT_UNAVAILABLE
 
-    def test_skip_pre_checks_is_the_bypass_for_a_missing_base_sha(self, tmp_path):
+    def test_skip_pre_checks_is_not_a_bypass_for_an_unreadable_tip(self, tmp_path):
         repo = _repo_with(tmp_path, [_FAIL_CHECK])
-        pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
-        assert _merge(repo, pr_info=pr_info, extra_args=["--skip-pre-checks"]) == verb.EXIT_OK
+        code = _merge(repo, extra_args=["--skip-pre-checks"], branch_tip_http=404)
+        assert code == verb.EXIT_GATE_FACT_UNAVAILABLE
 
 
 class TestNoGitTreeToReadTheGateFrom:
@@ -552,16 +556,6 @@ class TestNoGitTreeToReadTheGateFrom:
         assert _merge(repo, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
         assert merge_calls == []
         assert "git_working_tree" in capsys.readouterr().err
-
-    def test_a_malformed_git_working_tree_and_no_base_sha_refuses_pre_checks(self, tmp_path, capsys):
-        repo = _repo_with(tmp_path, [_FAIL_CHECK])
-        write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "git_working_tree": 42})
-        pr_info = {**repo.pr_info(), "base": {"ref": "main"}}
-        merge_calls: list[str] = []
-        assert _merge(repo, pr_info=pr_info, merge_calls=merge_calls) == verb.EXIT_PRE_CHECKS_FAILED
-        assert merge_calls == []
-        err = capsys.readouterr().err
-        assert "git_working_tree" in err and "no base commit SHA" in err
 
     def test_skip_pre_checks_is_the_bypass_for_a_malformed_git_working_tree(self, tmp_path):
         repo = _repo_with(tmp_path, [_FAIL_CHECK])

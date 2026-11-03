@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from clagentic_loadout.merge import verb
 from clagentic_loadout.merge.verdict import build_verdict_block
 from tests._support.ci_gate import check_run
-from tests._support.fakes import paged
+from tests._support.fakes import branch_tip_response, paged, with_default_base_ref
 
 _FULL_SHA = "a" * 40
 
@@ -124,6 +124,7 @@ def _forgejo_opener(
     gate-fact call in this fixture is unaffected either way.
     """
     pr_info = pr_info if pr_info is not None else {"head": {"sha": _FULL_SHA}, "title": "feat: a change"}
+    pr_info = with_default_base_ref(pr_info)
     files = files if files is not None else ["a.py"]
     comments = comments if comments is not None else []
     # lr-c14a2d: backfill created_at (monotonic with id) on any comments
@@ -181,6 +182,8 @@ def _forgejo_opener(
             # response keeps every pre-existing fixture reaching its own
             # asserted outcome.
             return _json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(pr_info, None, 200, url)
         if method == "GET" and "/pulls/" in url:
             if _merge_landed[0]:
                 return _json_resp(
@@ -218,6 +221,7 @@ def _github_opener(
     share one list, exactly like _forgejo_opener already does.
     """
     pr_info = pr_info if pr_info is not None else {"head": {"sha": _FULL_SHA}, "title": "feat: a change"}
+    pr_info = with_default_base_ref(pr_info)
     files = files if files is not None else ["a.py"]
     comments = comments if comments is not None else []
     # lr-c14a2d: see _forgejo_opener's identical backfill above.
@@ -274,6 +278,8 @@ def _github_opener(
         if method == "GET" and "/compare/" in url:
             # lr-835c57: see _forgejo_opener's identical rationale above.
             return _json_resp(200, {"commits": [], "ahead_by": 0})
+        if method == "GET" and "/branches/" in url:
+            return branch_tip_response(pr_info, None, 200, url)
         if method == "GET" and "/pulls/" in url:
             if _merge_landed[0]:
                 return _json_resp(
