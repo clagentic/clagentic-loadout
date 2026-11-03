@@ -26,7 +26,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,10 @@ STATE_COMPLETE = "complete"
 STATE_UNRUNNABLE = "unrunnable"
 
 _MAX_RECORD_BYTES = 8 * 1024 * 1024
+
+# How far ahead of the reader's clock a run may be dated before it counts as
+# future-dated: enough for clock drift between the hosts sharing a reports root.
+FUTURE_TOLERANCE = timedelta(minutes=5)
 
 
 class StoreError(Exception):
@@ -112,6 +116,40 @@ def run_sort_key(run_id: str) -> tuple[str, int]:
     if match is None:
         raise StoreError(f"{run_id!r} is not a run id")
     return match.group(1), int(match.group(2))
+
+
+def run_id_time(run_id: str) -> datetime:
+    """The UTC moment a run id encodes."""
+    stamp, _ = run_sort_key(run_id)
+    return datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+
+
+def _recorded_start(run: RunRecord) -> datetime | None:
+    value = run.result.get("started_at")
+    if not isinstance(value, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def dated_time(run: RunRecord) -> datetime:
+    """The latest of the moments a run carries: its id time and its recorded start."""
+    moments = [run_id_time(run.run_id)]
+    started = _recorded_start(run)
+    if started is not None:
+        moments.append(started)
+    return max(moments)
+
+
+def is_future_dated(run: RunRecord, now: datetime | None = None) -> bool:
+    """Whether the run is dated later than *now* plus FUTURE_TOLERANCE. A recorder
+    with a skewed clock writes such a run, and its id would otherwise sort above
+    every real run recorded after it."""
+    reference = now if now is not None else datetime.now(timezone.utc)
+    return dated_time(run) > reference + FUTURE_TOLERANCE
 
 
 def _read_json_object(path: Path, run_id: str) -> dict[str, Any]:
@@ -187,11 +225,15 @@ __all__ = [
     "RUN_ID_RE",
     "STATE_COMPLETE",
     "STATE_UNRUNNABLE",
+    "FUTURE_TOLERANCE",
     "RunRecord",
     "StoreError",
+    "dated_time",
+    "is_future_dated",
     "list_runs",
     "load_run",
     "new_run_id",
     "reports_root",
+    "run_id_time",
     "run_sort_key",
 ]

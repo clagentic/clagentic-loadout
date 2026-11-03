@@ -336,3 +336,92 @@ def test_latest_from_a_removed_working_directory_follows_the_outside_git_rule(
     code, _, err = _report(capsys)
     assert code == exits.EXIT_REPO_MISMATCH
     assert "alpha" in err and "beta" in err
+
+
+FUTURE_ID = "29990101T000000Z-3207341"
+
+
+def test_latest_skips_a_future_dated_run_and_names_it(reports: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    write_run(reports, "20260101T000000Z-10", head_sha=SHA_A)
+    write_run(reports, FUTURE_ID, head_sha=SHA_B)
+    write_run(reports, "20260102T000000Z-11", head_sha=SHA_A)
+    before = tree_snapshot(reports)
+
+    code, out, err = _report(capsys)
+
+    assert code == exits.EXIT_OK
+    assert json.loads(out)["run_id"] == "20260102T000000Z-11"
+    assert err.count(f"skipped run {FUTURE_ID}: dated 2999-01-01T00:00:00+00:00, later than now") == 1
+    assert tree_snapshot(reports) == before
+
+
+def test_sha_skips_a_future_dated_match_and_picks_the_newest_present_one(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, "20260101T000000Z-10", head_sha=SHA_A)
+    write_run(reports, FUTURE_ID, head_sha=SHA_A)
+
+    code, out, err = _report(capsys, "latest", "--sha", SHA_A)
+
+    assert code == exits.EXIT_OK
+    assert json.loads(out)["run_id"] == "20260101T000000Z-10"
+    assert f"skipped run {FUTURE_ID}" in err
+
+
+def test_a_run_whose_recorded_start_is_in_the_future_is_skipped_too(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, "20260101T000000Z-10")
+    skewed = write_run(reports, "20260102T000000Z-11")
+    result = json.loads((skewed / store.RESULT_FILE).read_text())
+    result["started_at"] = "2999-01-01T00:00:00+00:00"
+    (skewed / store.RESULT_FILE).write_text(json.dumps(result))
+
+    code, out, err = _report(capsys)
+
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == "20260101T000000Z-10"
+    assert "skipped run 20260102T000000Z-11" in err
+
+
+def test_only_future_dated_runs_refuse_latest_and_sha_and_name_them(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, FUTURE_ID, head_sha=SHA_A)
+
+    code, out, err = _report(capsys)
+    assert code == exits.EXIT_NO_RUNS and out == "" and FUTURE_ID in err
+
+    code, out, err = _report(capsys, "latest", "--sha", SHA_A)
+    assert code == exits.EXIT_SHA_NO_MATCH and out == ""
+    assert f"skipped future-dated: {FUTURE_ID}" in err
+
+
+def test_an_explicit_future_dated_run_id_opens_with_a_note(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, FUTURE_ID)
+    write_run(reports, "20260101T000000Z-10")
+
+    code, out, err = _report(capsys, FUTURE_ID)
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == FUTURE_ID
+    assert f"opening run {FUTURE_ID}: dated" in err
+
+    code, _, err = _report(capsys, "20260101T000000Z-10", "--diff", FUTURE_ID)
+    assert code == exits.EXIT_OK and f"opening run {FUTURE_ID}" in err
+
+
+def test_the_clock_is_a_seam_and_the_tolerance_absorbs_small_drift(reports: Path) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from clagentic_loadout.repo_test import report_cmd
+
+    write_run(reports, "20260101T001000Z-10")
+    write_run(reports, "20260101T000000Z-9")
+    just_before = datetime(2026, 1, 1, 0, 10, 0, tzinfo=timezone.utc) - store.FUTURE_TOLERANCE
+    assert report_cmd.select_run(reports, "latest", repo=None, sha=None, now=just_before).run_id == (
+        "20260101T001000Z-10"
+    )
+    earlier = just_before - timedelta(seconds=1)
+    assert report_cmd.select_run(reports, "latest", repo=None, sha=None, now=earlier).run_id == (
+        "20260101T000000Z-9"
+    )

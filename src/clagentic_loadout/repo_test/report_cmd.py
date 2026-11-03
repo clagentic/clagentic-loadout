@@ -17,12 +17,19 @@ Selecting a run:
     full SHA, or an unambiguous prefix of 7 or more hex characters). It never
     falls back to ``latest``: with no match it refuses and names what exists. A
     run on a dirty tree, or one that recorded no commit, is never selected.
+  * A future-dated run (its id time or recorded start is later than now plus a
+    few minutes) is never picked by ``latest`` or ``--sha``: a recorder with a
+    skewed clock would otherwise hide every real run after it. Each one skipped
+    is named once through *note*; when only future-dated runs match, the report
+    is refused. An explicit run id still opens one, with the same note. No
+    record is changed or removed.
 """
 
 from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +64,27 @@ def _describe_runs(runs: Sequence[RunRecord]) -> str:
         commit = run.head_sha[:12] if run.head_sha else "commit unknown"
         parts.append(f"{run.run_id} ({commit}{', dirty' if run.dirty else ''})")
     return ", ".join(parts) if parts else "no runs"
+
+
+def _future_note(run: RunRecord, verb: str) -> str:
+    return f"{verb} run {run.run_id}: dated {store.dated_time(run).isoformat()}, later than now"
+
+
+def _split_future(
+    runs: list[RunRecord], now: datetime | None, note: Callable[[str], None] | None
+) -> tuple[list[RunRecord], list[RunRecord]]:
+    """*runs* without the future-dated ones, and those. Each future-dated run is named."""
+    flagged = [(run, store.is_future_dated(run, now)) for run in runs]
+    present = [run for run, is_future in flagged if not is_future]
+    future = [run for run, is_future in flagged if is_future]
+    if note is not None:
+        for run in future:
+            note(_future_note(run, "skipped"))
+    return present, future
+
+
+def _named(future: Sequence[RunRecord]) -> str:
+    return ", ".join(run.run_id for run in future)
 
 
 def _repo_key(run: RunRecord) -> str:
@@ -116,10 +144,12 @@ def select_run(
     sha: str | None,
     cwd: Path | None = None,
     note: Callable[[str], None] | None = None,
+    now: datetime | None = None,
 ) -> RunRecord:
     """The run *target* names, subject to *repo* and *sha*. With an explicit run id,
     *repo* is an assertion about that run. For ``latest`` without *repo*, *cwd*
-    scopes the choice (see ``_scoped_runs``) and *note* receives what it did."""
+    scopes the choice (see ``_scoped_runs``) and *note* receives what it did. *now*
+    is the reader's clock, injectable for tests."""
     if target != LATEST:
         if sha is not None:
             raise ReportRefused(
@@ -135,9 +165,17 @@ def select_run(
                 f"run {run.run_id} was recorded for {_repo_key(run)}, not the expected repository {repo!r}",
                 exits.EXIT_REPO_MISMATCH,
             )
+        if note is not None and store.is_future_dated(run, now):
+            note(_future_note(run, "opening"))
         return run
-    runs = _load_runs(root, repo, cwd, note)
+    all_runs = _load_runs(root, repo, cwd, note)
+    runs, future = _split_future(all_runs, now, note)
     if sha is None:
+        if not runs:
+            raise ReportRefused(
+                f"every finished test run is dated later than now; skipped: {_named(future)}",
+                exits.EXIT_NO_RUNS,
+            )
         return runs[-1]
     if SHA_ARG_RE.match(sha) is None:
         raise ReportRefused(
@@ -155,8 +193,9 @@ def select_run(
             exits.EXIT_SHA_NO_MATCH,
         )
     if not matching:
+        skipped = f"; skipped future-dated: {_named(future)}" if future else ""
         raise ReportRefused(
-            f"no clean test run recorded for commit {sha!r}; runs on record: {_describe_runs(runs)}",
+            f"no clean test run recorded for commit {sha!r}; runs on record: {_describe_runs(runs)}{skipped}",
             exits.EXIT_SHA_NO_MATCH,
         )
     return matching[-1]
@@ -328,13 +367,22 @@ def _failing_id_note(run: RunRecord) -> str | None:
     )
 
 
-def load_base_run(root: Path, base_id: str) -> RunRecord:
+def load_base_run(
+    root: Path,
+    base_id: str,
+    *,
+    note: Callable[[str], None] | None = None,
+    now: datetime | None = None,
+) -> RunRecord:
     if base_id == LATEST:
         raise ReportRefused("--diff takes an explicit run id as the base, not 'latest'", exits.EXIT_USAGE)
     try:
-        return store.load_run(root, base_id)
+        base = store.load_run(root, base_id)
     except StoreError as exc:
         raise ReportRefused(str(exc), exits.EXIT_BAD_RUN_ID) from exc
+    if note is not None and store.is_future_dated(base, now):
+        note(_future_note(base, "opening"))
+    return base
 
 
 __all__ = [
