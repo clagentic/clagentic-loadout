@@ -63,8 +63,10 @@ def _new_path(side: str) -> str | None:
 def added_lines(diff_text: str) -> dict[str, frozenset[int]]:
     """For each file the diff touches, the new-side numbers of the lines it adds.
 
-    A file with no added line (deleted, mode-only, binary) maps to an empty set,
-    so the caller can tell a touched file from an untouched one. Raises
+    A file whose diff has a ``+++`` path but no added line (for example a pure
+    deletion of lines) maps to an empty set, so the caller can tell a touched file
+    from an untouched one. A deleted, mode-only or binary file has no ``+++`` path
+    to name, so it is omitted from the result, as an untouched file is. Raises
     DiffUnreadableError when the text has no ``diff --git`` section at all,
     because then nothing can be said about any line."""
     result: dict[str, set[int]] = {}

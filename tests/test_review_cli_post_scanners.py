@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from clagentic_loadout.merge.verdict import parse_verdict_block
+from clagentic_loadout.merge.verdict import find_all_verdict_blocks, parse_verdict_block
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.review.evaluate import is_floor_finding
@@ -186,11 +186,10 @@ class TestAnOutsideRangeHit:
 
         assert code == 0 and result["outside_range_count"] == 1
 
-    def test_the_reviewer_cannot_move_a_hit_out_of_range_by_any_file_they_write(
+    def test_extra_findings_file_fields_claiming_outside_range_do_not_move_the_hit(
         self, world, capsys, tmp_path
     ):
-        # The findings document, the dropped file and the scanner file all try to
-        # say the in-range hit is outside range; none of them is read for that.
+        # Extra fields in the findings document claiming outside range are not read.
         scanners = [_scanner(hits=[_hit(ADDED_LINE)])]
         code, result, _ = world.post(
             scanners,
@@ -208,6 +207,58 @@ class TestAnOutsideRangeHit:
         fence = world.fence()
         assert "outside_range" not in fence
         assert [f["rule_id"] for f in fence["evaluated_findings"]] == ["sast-one." + RULE]
+
+
+    @pytest.mark.parametrize("claim", [{"outside_range": True}, {"in_range": False}])
+    def test_a_scanner_hit_claiming_to_be_outside_range_is_refused(self, world, capsys, claim):
+        code, _, err = world.post(
+            [_scanner(hits=[{**_hit(ADDED_LINE), **claim}])], capsys=capsys
+        )
+
+        assert code == review_cli.EXIT_FINDINGS_INVALID
+        assert next(iter(claim)) in err and world.host.last_body is None
+
+    @pytest.mark.parametrize("claim", [{"outside_range": True}, {"in_range": False}])
+    def test_a_scanner_entry_claiming_its_hits_are_outside_range_is_refused(
+        self, world, capsys, claim
+    ):
+        code, _, err = world.post(
+            [_scanner(hits=[_hit(ADDED_LINE)], **claim)], capsys=capsys
+        )
+
+        assert code == review_cli.EXIT_FINDINGS_INVALID
+        assert next(iter(claim)) in err and world.host.last_body is None
+
+    @pytest.mark.parametrize(
+        "other",
+        [{"rule_id": "sast-one.some-other-rule"}, {"line": CONTEXT_LINE}, {"file": "elsewhere.py"}],
+    )
+    def test_a_dropped_entry_for_a_different_hit_does_not_affect_the_real_one(
+        self, world, capsys, other
+    ):
+        dropped = [
+            {"file": "a.py", "line": ADDED_LINE, "rule_id": "sast-one." + RULE,
+             "message": "unsafe parse call", "reason": "r", **other}
+        ]
+        code, result, _ = world.post(
+            [_scanner(hits=[_hit(ADDED_LINE)])], dropped=dropped, capsys=capsys
+        )
+
+        assert code == 0
+        assert result["status"] == "blocking" and result["scanner_finding_count"] == 1
+        assert "outside_range" not in world.fence()
+
+    @pytest.mark.parametrize("key", ["outside_range", "classification"])
+    def test_a_dropped_entry_with_an_unknown_key_is_refused(self, world, capsys, key):
+        dropped = [
+            {"file": "a.py", "line": ADDED_LINE, "rule_id": "sast-one." + RULE,
+             "message": "unsafe parse call", "reason": "r", key: True}
+        ]
+        code, _, _ = world.post(
+            [_scanner(hits=[_hit(ADDED_LINE)])], dropped=dropped, capsys=capsys
+        )
+
+        assert code == review_cli.EXIT_FINDINGS_INVALID and world.host.last_body is None
 
 
 class TestAnInRangeHit:
@@ -447,8 +498,6 @@ class TestRefusals:
         code, _, _ = world.post([_scanner(hits=[hostile])], status="clean", capsys=capsys)
 
         assert code == 0
-        from clagentic_loadout.merge.verdict import find_all_verdict_blocks
-
         assert len(find_all_verdict_blocks(world.host.last_body)) == 1
 
 
