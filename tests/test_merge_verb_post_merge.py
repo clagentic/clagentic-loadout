@@ -35,10 +35,8 @@ rather than cross-imported -- tests/ is not a package in this project).
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
-from datetime import datetime, timezone
 
 import pytest
 import yaml
@@ -46,15 +44,23 @@ import yaml
 from clagentic_loadout.merge import verb
 from clagentic_loadout.transport import provider_config
 from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, make_origin_confirmable, seed_base_commit
+from tests._merge_support import (
+    SEEDED_BASE as _SEEDED_BASE,
+    AllowingAuthorityProvider as _AllowingAuthorityProvider,
+    RecordingTokenProvider as _RecordingTokenProvider,
+    init_repo_with_origin as _init_repo_with_origin,
+    make_merge_github_opener as _make_github_opener,
+    make_merge_opener as _make_opener,
+    merge_base_args as _base_args,
+    record_base_sha as _record_base_sha,
+    run_git as _run_git,
+    write_merge_config as _write_merge_config,
+)
 
 _PY = sys.executable
 _FULL_SHA = "a" * 40
 _BASE_BRANCH = "main"
 
-
-def _run_git(args: list[str], *, cwd) -> None:
-    result = subprocess.run(["git", *args], capture_output=True, text=True, cwd=str(cwd))
-    assert result.returncode == 0, f"git {args!r} failed: {result.stderr}"
 
 
 def _head_sha(repo_dir) -> str:
@@ -94,55 +100,6 @@ def _assert_landed_on_base_branch(repo_dir, expected_sha: str) -> None:
     assert rev_parse_ref.stdout.strip() == expected_sha
 
 
-def _init_repo_with_origin(tmp_path):
-    """Build a REAL local git repo at *tmp_path* (the --repo-path under
-    test) with a bare 'origin' remote sharing the same base branch content --
-    lr-7c5540's fix runs `git fetch origin` + a detached checkout against
-    --repo-path before any post_merge_steps entry, so every test exercising
-    that path needs an actual git repo to fetch/checkout against, not a bare
-    tmp_path. The bare remote lives in a SIBLING tmp_path dir (never inside
-    the working tree itself) and starts with the identical single commit, so
-    `git fetch origin main` + checking out FETCH_HEAD is a no-op content-wise
-    but still a REAL git operation this fixture proves succeeds.
-
-    Returns the resulting merged-commit SHA (the bare remote's `main` tip) --
-    tests assert `pr_info`'s "base" carries this same branch name so
-    merge.tree_sync.resolve_base_branch can resolve it.
-    """
-    remote_dir = tmp_path.parent / f"{tmp_path.name}-origin.git"
-    _run_git(["init", "--bare", "-b", _BASE_BRANCH, str(remote_dir)], cwd=tmp_path.parent)
-
-    _run_git(["init", "-b", _BASE_BRANCH, str(tmp_path)], cwd=tmp_path.parent)
-    _run_git(["config", "user.email", "test@example.com"], cwd=tmp_path)
-    _run_git(["config", "user.name", "test"], cwd=tmp_path)
-    (tmp_path / "README.md").write_text("seed\n", encoding="utf-8")
-    _run_git(["add", "README.md"], cwd=tmp_path)
-    _run_git(["commit", "-m", "seed"], cwd=tmp_path)
-    _run_git(["remote", "add", "origin", str(remote_dir)], cwd=tmp_path)
-    _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=tmp_path)
-    make_origin_confirmable(tmp_path)
-
-    rev_parse = subprocess.run(
-        ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
-    )
-    return _record_base_sha(rev_parse.stdout.strip())
-
-
-#: The seed commit of the repo the current test built. The merge gate reads its
-#: declaration at the PR's base commit and fails closed without one, so the
-#: default PR payloads below carry this as `base.sha` whenever a repo was built.
-_SEEDED_BASE: dict[str, str] = {"sha": ""}
-
-
-def _record_base_sha(sha: str) -> str:
-    _SEEDED_BASE["sha"] = sha
-    return sha
-
-
-def _default_base() -> dict:
-    return {"ref": _BASE_BRANCH, **({"sha": _SEEDED_BASE["sha"]} if _SEEDED_BASE["sha"] else {})}
-
-
 @pytest.fixture(autouse=True)
 def _reset_seeded_base():
     _SEEDED_BASE["sha"] = ""
@@ -161,212 +118,6 @@ def _isolate_user_config_root(tmp_path, monkeypatch):
     never depend on, or leak into, real host state."""
     isolated_root = tmp_path / "isolated-user-config-root"
     monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", isolated_root)
-
-
-class _RecordingTokenProvider:
-    def __init__(self, token: str = "tok-123"):
-        self.resolved_for: list[str] = []
-        self._token = token
-
-    def resolve_token(self, role: str) -> str:
-        self.resolved_for.append(role)
-        return self._token
-
-
-class _AllowingAuthorityProvider:
-    def authority_allows(self, role, owner, repo, pr_number) -> bool:
-        return True
-
-
-class _FakeResponse:
-    def __init__(self, status: int, body: bytes):
-        self.status = status
-        self._body = body
-
-    def read(self):
-        return self._body
-
-    def getcode(self):
-        return self.status
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-def _json_resp(status: int, payload) -> _FakeResponse:
-    return _FakeResponse(status, json.dumps(payload).encode("utf-8"))
-
-
-def _make_opener(*, pr_info=None, files=None, comments=None, merge_status=200):
-    """CI-status defaults to the no-runner-by-design empty shape (lr-afba)
-    -- this file's own tests reason about post-merge steps, not CI, so they
-    keep passing through the CI-status gate exactly as before that gate
-    existed.
-
-    lr-7c5540: pr_info's default now carries a "base" ref matching
-    _BASE_BRANCH -- merge.tree_sync.resolve_base_branch reads this to know
-    which branch to fetch before any post_merge_steps entry runs. Every test
-    in this file that reaches step 10's actual tree-sync/run path pairs this
-    default with _init_repo_with_origin(tmp_path), whose bare remote's
-    default branch is the SAME _BASE_BRANCH name.
-    """
-    pr_info = pr_info if pr_info is not None else {
-        "head": {"sha": _FULL_SHA},
-        "title": "feat: a change",
-        "base": _default_base(),
-    }
-    files = files if files is not None else ["a.py"]
-    comments = comments if comments is not None else []
-
-    # Merge-completion attestation (lr-20e866): see test_merge_verb.py's
-    # _make_opener for the identical fixture rationale.
-    posted_comments: list[dict] = []
-    # lr-361de3: see test_merge_verb.py's _make_opener for the identical
-    # post-merge-readback overlay rationale.
-    _merge_landed = [False]
-
-    def opener(req, timeout=15):
-        url = req.full_url
-        method = req.get_method()
-        if method == "POST" and url.endswith("/merge"):
-            if merge_status in (200, 204):
-                _merge_landed[0] = True
-                return _FakeResponse(merge_status, b"{}")
-            import io
-            import urllib.error
-
-            raise urllib.error.HTTPError(url, merge_status, "err", {}, io.BytesIO(b"{}"))
-        if method == "POST" and "/comments" in url:
-            posted_body = json.loads(req.data.decode("utf-8"))["body"]
-            posted_comments.append(
-                {
-                    "id": 9001 + len(posted_comments),
-                    "user": {"login": "loadout-merger"},
-                    "body": posted_body,
-                    "html_url": "https://forgejo.example/comment/9001",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            return _json_resp(201, posted_comments[-1])
-        if method == "GET" and url.endswith("/user"):
-            return _json_resp(200, {"login": "loadout-merger"})
-        if method == "GET" and url.endswith("/files"):
-            return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and url.split("?")[0].endswith("/comments"):
-            return _json_resp(200, comments + posted_comments)
-        if method == "GET" and url.endswith("/status"):
-            return _json_resp(200, {"state": "", "statuses": []})
-        if method == "GET" and url.endswith("/actions/tasks"):
-            return _json_resp(200, {"total_count": 0})
-        if method == "GET" and "/compare/" in url:
-            # lr-835c57: empty branch-commit list -- this file exercises
-            # post_merge_steps wiring, not the commit-subject gate.
-            return _json_resp(200, {"commits": [], "ahead_by": 0})
-        if method == "GET" and "/pulls/" in url:
-            if _merge_landed[0]:
-                return _json_resp(
-                    200, {**pr_info, "merged": True, "merge_commit_sha": "e" * 40}
-                )
-            return _json_resp(200, pr_info)
-        raise AssertionError(f"unexpected call: {method} {url}")
-
-    return opener
-
-
-def _make_github_opener(*, pr_info=None, files=None, comments=None, merged_sha=None):
-    """GitHub-platform counterpart to _make_opener above (lr-d95cdb GitHub-
-    parity coverage for the tree-sync-after-merge default). Shapes requests
-    per merge.github_backend's own documented endpoints: PUT .../merge
-    returns {"merged": true, "sha": merged_sha} (the ONE field
-    advance_repo_to_merged_sha's known_merged_sha path consumes -- see that
-    backend's merge_pr docstring), GET check-runs/compare/status endpoints
-    return the same no-runner-by-design-empty / empty-commit-list shapes
-    _make_opener's Forgejo path uses."""
-    pr_info = pr_info if pr_info is not None else {
-        "head": {"sha": _FULL_SHA},
-        "title": "feat: a change",
-        "base": _default_base(),
-    }
-    files = files if files is not None else ["a.py"]
-    comments = comments if comments is not None else []
-    posted_reviews: list[dict] = []
-    # lr-361de3: see _make_opener's identical post-merge-readback overlay
-    # rationale above.
-    _merge_landed = [False]
-
-    def opener(req, timeout=15):
-        url = req.full_url
-        method = req.get_method()
-        if method == "PUT" and url.endswith("/merge"):
-            _merge_landed[0] = True
-            body = {"merged": True}
-            if merged_sha is not None:
-                body["sha"] = merged_sha
-            return _json_resp(200, body)
-        if method == "GET" and url.endswith("/user"):
-            return _json_resp(200, {"login": "loadout-merger[bot]"})
-        if method == "POST" and "/reviews" in url:
-            posted_reviews.append(
-                {
-                    "id": 9001 + len(posted_reviews),
-                    "user": {"login": "loadout-merger[bot]"},
-                    "body": json.loads(req.data.decode("utf-8")).get("body", ""),
-                    "submitted_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-            return _json_resp(200, posted_reviews[-1])
-        if method == "GET" and url.endswith("/files"):
-            return _json_resp(200, [{"filename": f} for f in files])
-        if method == "GET" and "/issues/" in url and url.split("?")[0].endswith("/comments"):
-            return _json_resp(200, comments)
-        if method == "GET" and "/reviews" in url:
-            return _json_resp(200, posted_reviews)
-        if method == "GET" and url.endswith("/status"):
-            return _json_resp(200, {"state": "", "statuses": []})
-        if method == "GET" and url.endswith("/check-runs"):
-            return _json_resp(200, {"total_count": 0, "check_runs": []})
-        if method == "GET" and "/compare/" in url:
-            return _json_resp(200, {"commits": [], "ahead_by": 0})
-        if method == "GET" and url.endswith(f"/pulls/{1}"):
-            if _merge_landed[0]:
-                return _json_resp(
-                    200, {**pr_info, "merged": True, "merge_commit_sha": merged_sha or "e" * 40}
-                )
-            return _json_resp(200, pr_info)
-        raise AssertionError(f"unexpected call: {method} {url}")
-
-    return opener
-
-
-def _base_args(**overrides) -> list[str]:
-    args = {
-        "--platform": "forgejo",
-        "--role": "merger",
-        "--authorized-role": "merger",
-        "--repo": "some-owner/some-repo",
-        "--pr": "1",
-    }
-    args.update(overrides)
-    argv: list[str] = []
-    for key, value in args.items():
-        if value is None:
-            continue
-        argv.extend([key, str(value)])
-    return argv
-
-
-def _write_merge_config(repo_root, steps: list[dict], *, git_working_tree: str | None = None) -> None:
-    config_dir = repo_root / ".clagentic" / "loadout"
-    config_dir.mkdir(parents=True, exist_ok=True)
-    merge_section: dict = {"post_merge_steps": steps}
-    if git_working_tree is not None:
-        merge_section["git_working_tree"] = git_working_tree
-    (config_dir / "config.yaml").write_text(
-        yaml.safe_dump({"merge": merge_section}), encoding="utf-8"
-    )
 
 
 class TestAbsentRepoPathIsNeverASilentSkip:

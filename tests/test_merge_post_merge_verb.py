@@ -26,7 +26,6 @@ providers):
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
@@ -38,6 +37,11 @@ from clagentic_loadout.merge import post_merge_verb
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.credential_provider import CredentialProviderError
 from tests._gate_repo import CONFIRMABLE_GITHUB_ORIGIN, make_origin_confirmable
+from tests._merge_support import (
+    make_post_merge_github_opener as _make_github_opener,
+    make_post_merge_opener as _make_opener,
+    post_merge_base_args as _base_args,
+)
 
 _PY = sys.executable
 _OWNER = "some-owner"
@@ -144,47 +148,6 @@ class _FakeResponse:
         return False
 
 
-def _make_opener(*, merged=True, merge_commit_sha=_MERGED_SHA, base_ref=_BASE_BRANCH):
-    """A forgejo-shaped opener that answers GET .../pulls/{n} with a
-    merged/unmerged PR payload -- never a merge or comment endpoint, proving
-    this verb never calls anything but a read."""
-    pr_info = {
-        "merged": merged,
-        "merge_commit_sha": merge_commit_sha,
-        "base": {"ref": base_ref},
-    }
-
-    def opener(req, timeout=15):
-        url = req.full_url
-        method = req.get_method()
-        if method == "GET" and "/api/v1/repos/" in url and "/pulls/" in url:
-            return _FakeResponse(200, json.dumps(pr_info).encode("utf-8"))
-        raise AssertionError(
-            f"unexpected call: {method} {url} -- this verb must only ever "
-            f"read PR info via the Forgejo API, never merge/comment"
-        )
-
-    return opener
-
-
-def _make_github_opener(*, merged=True, merge_commit_sha=_MERGED_SHA, base_ref=_BASE_BRANCH):
-    """A github-shaped opener that answers GET .../pulls/{n} with a
-    merged/unmerged PR payload -- proves a --platform github invocation
-    dispatches to github_backend.get_pr_info, never forgejo_backend's."""
-    pr_info = {
-        "merged": merged,
-        "merge_commit_sha": merge_commit_sha,
-        "base": {"ref": base_ref},
-    }
-
-    def opener(req, timeout=30):
-        assert req.full_url == f"https://api.github.com/repos/{_OWNER}/{_REPO}/pulls/1"
-        assert req.get_method() == "GET"
-        return _FakeResponse(200, json.dumps(pr_info).encode("utf-8"))
-
-    return opener
-
-
 def _bare_git_tree(path) -> None:
     """Make *path* an empty git tree: --repo-path must be inside one before the
     guards under test run."""
@@ -197,24 +160,6 @@ def _write_merge_config(repo_root, steps: list[dict]) -> None:
     (config_dir / "config.yaml").write_text(
         yaml.safe_dump({"merge": {"post_merge_steps": steps}}), encoding="utf-8"
     )
-
-
-def _base_args(repo_path: str, **overrides) -> list[str]:
-    args = {
-        "--platform": "forgejo",
-        "--role": "merger",
-        "--authorized-role": "merger",
-        "--repo": f"{_OWNER}/{_REPO}",
-        "--pr": "1",
-        "--repo-path": repo_path,
-    }
-    args.update(overrides)
-    argv: list[str] = []
-    for key, value in args.items():
-        if value is None:
-            continue
-        argv.extend([key, str(value)])
-    return argv
 
 
 class TestHelpAndVersion:
