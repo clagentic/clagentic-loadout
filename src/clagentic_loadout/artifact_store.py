@@ -121,14 +121,7 @@ def write_into_head_dir(
     refuse_untrusted(root, untrusted_roots, kind)
     directory = head_dir(root, head_sha)
     try:
-        # A writer that loses the race to create the head directory fails once
-        # with FileExistsError; the second pass uses the directory the winner
-        # made. A second loss is a real fault and is reported with the
-        # directory and errno.
-        try:
-            return _write_once(root, directory, file_name, payload)
-        except FileExistsError:
-            return _write_once(root, directory, file_name, payload)
+        return _write_once(root, directory, file_name, payload)
     except OSError as exc:
         raise StoreError(
             f"cannot write {description} under {str(root)!r} "
@@ -166,8 +159,16 @@ def _write_once(root: Path, directory: Path, file_name: str, payload: bytes) -> 
     # setgid included, so a root an administrator pre-created with a shared
     # group stays writable to every identity in that group. Only a directory
     # this call created is chmodded: one another writer made is used as it is.
-    if _make_dir(root, DIR_MODE, parents=True):
-        os.chmod(root, DIR_MODE)
+    # An existing root is used as it is, symlink or not: whether the root is
+    # trusted is refuse_untrusted's job, not this writer's.
+    if not root.exists():
+        try:
+            root.mkdir(mode=DIR_MODE, parents=True)
+        except FileExistsError:
+            if not root.is_dir():
+                raise
+        else:
+            os.chmod(root, DIR_MODE)
     head_mode = stat.S_IMODE(root.stat().st_mode)
     if _make_dir(directory, head_mode):
         os.chmod(directory, head_mode)

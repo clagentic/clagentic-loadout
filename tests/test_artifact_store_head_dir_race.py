@@ -180,3 +180,28 @@ def test_a_failure_that_survives_the_retry_warns_with_the_directory_and_errno(tm
     err = capsys.readouterr().err
     assert result is None
     assert "WARNING" in err and str(root / HEAD) in err and "errno 17" in err
+
+
+def test_a_root_that_is_a_symlink_to_a_directory_accepts_two_concurrent_gates(tmp_path, monkeypatch):
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    root = tmp_path / "records"
+    root.symlink_to(shared)
+    _hold_head_dir_checks_at_barrier(monkeypatch, root / HEAD, parties=2)
+    errors: list[BaseException] = []
+
+    def run(gate):
+        try:
+            _emit(root, gate)
+        except BaseException as exc:  # collected so the main thread can assert
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(g,)) for g in ("reviewer:agent-alpha", "reviewer:agent-beta")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=20)
+
+    assert errors == []
+    gates = sorted(r.gate for r in records_at_head(root, HEAD).records)
+    assert gates == ["reviewer:agent-alpha", "reviewer:agent-beta"]
