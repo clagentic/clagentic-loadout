@@ -633,6 +633,15 @@ from clagentic_loadout.merge.tree_sync import (
     resolve_base_branch,
     resolve_base_sha,
 )
+from clagentic_loadout.merge.tool_merge_tree import (
+    TOOL_TREE_FAILURE_NOTE,
+    merge_tree_env,
+    refuse_detached_steps,
+    refuse_steps_naming_repo_path,
+    steps_dir_in_tree,
+    tool_merge_tree,
+    unsafe_tree_reason,
+)
 from clagentic_loadout.merge.fetch_transport import MergeFetchAuth, require_fetch_destination
 from clagentic_loadout.platform_detect import DEFAULT_GITHUB_HOSTNAME, PLATFORM_FORGEJO, PLATFORM_GITHUB
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
@@ -951,6 +960,46 @@ def _require_anchored_fetch_destination(
         gate_tree = repo_path
     for tree in dict.fromkeys((gate_tree, repo_path)):
         require_fetch_destination(tree, base_branch, fetch_auth)
+
+
+def _refuse_tool_tree_steps_before_merge(
+    args: argparse.Namespace, base_branch: str, pr_number: int, base_sha: str
+) -> None:
+    """Refuse, before the server-side merge, post-merge steps the tool tree cannot
+    run. Whether the steps will run in a tool tree depends only on --repo-path being
+    a clean checkout of the PR's base branch, which is known now; deciding after the
+    merge would leave the PR merged with no deploy. The same checks run again after
+    the merge against the steps actually run, in case the checkout changed between
+    the two.
+
+    Does nothing when no step will run (--skip-post-merge, no --repo-path, the tree
+    sync turned off) or when the checkout is safe to advance. A config that cannot be
+    read is left for step 10, which reports it.
+    """
+    if args.skip_post_merge or not args.repo_path:
+        return
+    if not _post_merge_sync_enabled(args.repo_path):
+        return
+    try:
+        declared = resolve_git_working_tree(args.repo_path)
+        steps = load_post_merge_steps(args.repo_path)
+    except PostMergeConfigError:
+        return
+    if not steps:
+        return
+    git_tree = str(declared) if declared is not None else args.repo_path
+    # The merged commit does not exist yet, so the checkout is judged against the
+    # PR's base tip: local commits beyond it would be lost by an in-place advance.
+    if unsafe_tree_reason(git_tree, base_branch, base_sha) is None:
+        return
+    try:
+        refuse_detached_steps(steps)
+        refuse_steps_naming_repo_path(steps, git_tree)
+    except TreeSyncError as exc:
+        _fail(
+            f"{exc}; refused before merging, so PR #{pr_number} was NOT merged",
+            code=EXIT_POST_MERGE_FAILED,
+        )
 
 
 def _gate_policy_reader(backend, *, owner: str, repo: str, repo_path: str | None) -> PolicyReader:
@@ -2219,6 +2268,12 @@ def _run(
             args.repo_path, resolve_base_branch(pr_info), fetch_auth
         )
 
+    # The post-merge steps are judged against the tool tree now too, for the same
+    # reason: a refused step must stop the merge, not follow it.
+    _refuse_tool_tree_steps_before_merge(
+        args, resolve_base_branch(pr_info), args.pr_number, resolve_base_sha(pr_info)
+    )
+
     # 9. All gates passed -- execute the merge.
     print(
         f"merge: all gates PASSED -- merging PR #{args.pr_number} in "
@@ -2516,8 +2571,30 @@ def _run(
             # below can safely test it regardless of how early inside the
             # `try` a failure occurs.
             tree_checked_out = False
+            # A checkout that is not on the base branch, or has changes to tracked
+            # files, belongs to someone: its branch, HEAD and files are never moved.
+            # The merged commit is fetched only, and the steps run in a tool-owned
+            # tree (merge.tool_merge_tree). None means the checkout is safe to advance.
+            #
+            # The merged commit is fetched first (fetch only, nothing checked out)
+            # because the in-place advance is safe only when the checkout's HEAD is
+            # contained in it: a local commit outside it would be dropped from the
+            # base branch by the reset.
             try:
-                if steps_will_run:
+                fetched_sha = fetch_merged_sha_object(
+                    git_tree_path,
+                    base_branch=base_branch,
+                    known_merged_sha=merged_sha,
+                    fetch_auth=fetch_auth,
+                )
+            except TreeSyncError as exc:
+                _fail(
+                    f"post-merge working-tree sync FAILED -- {exc}",
+                    code=EXIT_POST_MERGE_FAILED,
+                )
+            isolate_reason = unsafe_tree_reason(git_tree_path, base_branch, fetched_sha)
+            try:
+                if steps_will_run and isolate_reason is None:
                     # lr-7c5540: advance the --repo-path working tree to the
                     # merged main SHA BEFORE running any post_merge_steps --
                     # backend.merge_pr above was a server-side API merge; it
@@ -2535,7 +2612,7 @@ def _run(
                         landed_sha = advance_repo_to_merged_sha(
                             git_tree_path,
                             base_branch=base_branch,
-                            known_merged_sha=merged_sha,
+                            known_merged_sha=fetched_sha,
                             fetch_auth=fetch_auth,
                         )
                     except TreeSyncError as exc:
@@ -2556,18 +2633,7 @@ def _run(
                     # database WITHOUT checking anything out. Never a `git
                     # checkout`, so the working tree/index/HEAD are left exactly
                     # as the caller had them.
-                    try:
-                        landed_sha = fetch_merged_sha_object(
-                            git_tree_path,
-                            base_branch=base_branch,
-                            known_merged_sha=merged_sha,
-                            fetch_auth=fetch_auth,
-                        )
-                    except TreeSyncError as exc:
-                        _fail(
-                            f"post-merge working-tree sync FAILED -- {exc}",
-                            code=EXIT_POST_MERGE_FAILED,
-                        )
+                    landed_sha = fetched_sha
                     # lr-cd3644 followup: tracked so the drift check below can
                     # tell whether a real checkout already happened (the
                     # steps_will_run branch above) or only a fetch (this branch)
@@ -2575,12 +2641,21 @@ def _run(
                     # if it discovers the merged commit's own config declares
                     # steps the stale pre-sync read never saw.
                     tree_checked_out = False
-                    print(
-                        f"merge: fetched merged SHA {landed_sha!r} into "
-                        f"{git_tree_path} (no post_merge_steps to run -- "
-                        f"working tree left untouched, no checkout performed)",
-                        file=sys.stderr,
-                    )
+                    if steps_will_run:
+                        print(
+                            f"merge: fetched merged SHA {landed_sha!r} into "
+                            f"{git_tree_path}, which is left untouched because "
+                            f"{isolate_reason}; the post-merge steps run in a "
+                            f"tool-owned tree instead",
+                            file=sys.stderr,
+                        )
+                    else:
+                        print(
+                            f"merge: fetched merged SHA {landed_sha!r} into "
+                            f"{git_tree_path} (no post_merge_steps to run -- "
+                            f"working tree left untouched, no checkout performed)",
+                            file=sys.stderr,
+                        )
 
                 # lr-cd3644: STALE PRE-SYNC CONFIG DRIFT CHECK. `steps` above was
                 # resolved from `args.repo_path`'s WORKING TREE, BEFORE this
@@ -2735,7 +2810,7 @@ def _run(
                     )
                     steps = landed_steps
                     steps_will_run = bool(steps)
-                    if steps_will_run and not tree_checked_out:
+                    if steps_will_run and not tree_checked_out and isolate_reason is None:
                         # lr-173768's checkout-vs-fetch-only decision (above) ran
                         # off the STALE pre-sync `steps_will_run` and chose the
                         # fetch-only path (fetch_merged_sha_object -- no
@@ -2865,11 +2940,49 @@ def _run(
                             code=EXIT_POST_MERGE_FAILED,
                         )
                     try:
-                        run_post_merge_steps(
-                            steps,
-                            args.repo_path,
-                            deployment_env_overrides=deployment_env_overrides,
-                            default_timeout_seconds=default_step_timeout,
+                        if isolate_reason is None:
+                            run_post_merge_steps(
+                                steps,
+                                args.repo_path,
+                                deployment_env_overrides=merge_tree_env(
+                                    deployment_env_overrides, git_tree_path
+                                ),
+                                default_timeout_seconds=default_step_timeout,
+                            )
+                        else:
+                            refuse_detached_steps(steps)
+                            refuse_steps_naming_repo_path(steps, git_tree_path)
+                            with tool_merge_tree(git_tree_path, landed_sha) as tool_tree:
+                                tool_steps_dir = steps_dir_in_tree(
+                                    tool_tree, git_tree_path, args.repo_path
+                                )
+                                print(
+                                    f"merge: post-merge steps run in tool tree "
+                                    f"{tool_steps_dir} at merged SHA {landed_sha!r}",
+                                    file=sys.stderr,
+                                )
+                                try:
+                                    run_post_merge_steps(
+                                        steps,
+                                        tool_steps_dir,
+                                        deployment_env_overrides=merge_tree_env(
+                                            deployment_env_overrides, tool_tree
+                                        ),
+                                        default_timeout_seconds=default_step_timeout,
+                                    )
+                                except (
+                                    PostMergeStepFailedError,
+                                    PostMergeStepTimeoutError,
+                                    PostMergeLivenessError,
+                                ) as step_exc:
+                                    _fail(
+                                        f"{step_exc}{TOOL_TREE_FAILURE_NOTE}",
+                                        code=EXIT_POST_MERGE_FAILED,
+                                    )
+                    except TreeSyncError as exc:
+                        _fail(
+                            f"post-merge working-tree sync FAILED -- {exc}",
+                            code=EXIT_POST_MERGE_FAILED,
                         )
                     except (
                         PostMergeStepFailedError,
