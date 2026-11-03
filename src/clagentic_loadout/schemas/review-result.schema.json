@@ -178,7 +178,7 @@
     },
     "outside_range": {
       "type": "array",
-      "description": "OPTIONAL evidence. Scanner hits on lines the change does not add, or in files it does not touch, listed as context. Informational: an outside-range hit is not a finding, holds nothing open and takes no part in the computed verdict.",
+      "description": "OPTIONAL evidence. Scanner hits on a line of a file the diff shows that the change did not add, listed as context; a hit anywhere else is in range and is a finding. Informational: an outside-range hit is not a finding, holds nothing open and takes no part in the computed verdict.",
       "items": {
         "type": "object",
         "additionalProperties": false,

@@ -202,7 +202,8 @@ class TestAnOutsideRangeHit:
     def test_extra_findings_file_fields_claiming_outside_range_do_not_move_the_hit(
         self, world, capsys
     ):
-        # Extra fields in the findings document claiming outside range are not read.
+        # Range is decided only from the scanner file and the diff, so a findings document
+        # cannot demote a blocking hit by asserting its own classification.
         scanners = [_scanner(hits=[_hit(ADDED_LINE)])]
         code, result, _ = world.post(
             scanners,

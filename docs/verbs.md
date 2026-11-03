@@ -1036,10 +1036,11 @@ that examined the reviewed head (see [scanner-input.md](scanner-input.md)). `pos
 the step that ingests them: it classifies every hit against the diff it reads from the
 host at the live head, which it has just confirmed is the reviewed head, so nothing in
 a findings file, a `run` output, a dropped file or the scanner file can set the
-classification. A hit on a line the change adds becomes a finding (`file:line:scanner.rule`)
-that blocks unless it is listed in `--dropped`; a hit anywhere else is listed under
-`Scanner hits outside the changed lines` and in the fence as `outside_range`, and takes
-no part in the verdict. Each scanner's status goes into the fence as `scanners_run`.
+classification. A hit on a line of a file the diff shows that the change adds becomes a finding
+(`file:line:scanner.rule`); so does a hit anywhere the diff does not show (an unlisted
+or deleted file). Both block unless listed in `--dropped`. A hit on a line of a shown file
+that the change did not add is listed under `Scanner hits outside the changed lines` and
+in the fence as `outside_range`, and takes no part in the verdict. Each scanner's status goes into the fence as `scanners_run`.
 
 #### `--resolved-findings` — caller rulings on prior findings
 
