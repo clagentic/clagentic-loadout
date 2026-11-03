@@ -631,7 +631,7 @@ loadout-review run  --caller <role> --repo <owner/repo> --pr <n> [--platform git
 loadout-review post --caller <role> --repo <owner/repo> --pr <n> --findings <path>
                     [--status clean|blocking] [--head-sha <sha>] [--base-sha <sha>]
                     [--platform ...] [--repo-path <dir>] [--resolved-findings <path>]
-                    [--profile <name>]
+                    [--profile <name>] [--scanner-input <path>]
 loadout-review churn --caller <role> --repo <owner/repo> --pr <n> [--platform ...]
                     [--repo-path <dir>] [--profile <name>] [--spec-hash <sha256>]
 ```
@@ -1030,6 +1030,16 @@ review) and the engine that answered (`engine: carrier`, or
 `fallback_model` label), with machine-readable `range` and `engines` in the fence.
 These evidence fields never raise the fence schema version, and the merge gate does
 not read them. They are derived, so `--state-file` may not carry them.
+
+**Scanner results.** `post --scanner-input <file>` takes the results of the scanners
+that examined the reviewed head (see [scanner-input.md](scanner-input.md)). `post` is
+the step that ingests them: it classifies every hit against the diff it reads from the
+host at the live head, which it has just confirmed is the reviewed head, so nothing in
+a findings file, a `run` output, a dropped file or the scanner file can set the
+classification. A hit on a line the change adds becomes a finding (`file:line:scanner.rule`)
+that blocks unless it is listed in `--dropped`; a hit anywhere else is listed under
+`Scanner hits outside the changed lines` and in the fence as `outside_range`, and takes
+no part in the verdict. Each scanner's status goes into the fence as `scanners_run`.
 
 #### `--resolved-findings` — caller rulings on prior findings
 
