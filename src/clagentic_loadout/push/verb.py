@@ -285,8 +285,6 @@ from clagentic_loadout.push.git_hermeticity import (
 )
 from clagentic_loadout.push.git_push import git_push_with_token
 from clagentic_loadout.push.host_guard import (
-    PUSH_HOST_CONFIG_KEY,
-    PUSH_HOST_CONFIG_SECTION,
     check_host_allowed,
     resolve_host_ceiling,
 )

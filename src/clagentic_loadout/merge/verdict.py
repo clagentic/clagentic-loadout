@@ -137,7 +137,6 @@ from clagentic_loadout.merge.fence_state import (
     RESOLVED_BY_REVIEWER,
     SCANNER_FAILED,
     FindingsState,
-    failure_sequences_of,
     has_findings_state,
     index_scanners,
     normalize_findings_state,
