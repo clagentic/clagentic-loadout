@@ -70,7 +70,7 @@ from __future__ import annotations
 
 from clagentic_loadout.merge.errors import CommitSubjectInvalidError
 from clagentic_loadout.merge.title_gate import is_conventional_title
-from clagentic_loadout.task_id_guard import TaskIdGuardViolation, check_task_id_guard
+from clagentic_loadout.task_id_guard import check_task_id_guard
 
 #: The one merge_method value this backstop actually gates on. Any other
 #: value (squash, rebase, or an integrator's own custom label) is a no-op --
