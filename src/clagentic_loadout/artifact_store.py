@@ -118,33 +118,63 @@ def write_into_head_dir(
     return its path. *description* names the thing written in the failure
     message. Raises StoreError when the root is a refused location or the file
     cannot be written."""
+    refuse_untrusted(root, untrusted_roots, kind)
+    directory = head_dir(root, head_sha)
+    try:
+        return _write_once(root, directory, file_name, payload)
+    except OSError as exc:
+        raise StoreError(
+            f"cannot write {description} under {str(root)!r} "
+            f"(head directory {str(directory)!r}, errno {exc.errno}): {exc}"
+        ) from exc
+
+
+def _make_dir(path: Path, mode: int, *, parents: bool = False) -> bool:
+    """Create *path* and return True, or return False when another writer
+    already did. Anything already at *path* that is not a real directory
+    (a symlink, a file) is refused: that is checked after the creation attempt,
+    so a swap between a check and the creation is caught too."""
+    try:
+        path.mkdir(mode=mode, parents=parents)
+        return True
+    except FileExistsError:
+        if path.is_symlink():
+            raise StoreError(f"{str(path)!r} is a symlink, refusing to write through it") from None
+        if not path.is_dir():
+            raise
+        return False
+
+
+def _write_once(root: Path, directory: Path, file_name: str, payload: bytes) -> Path:
     # Imported here, not at module level: the review package imports the review
     # verb, which writes records, so a module-level import would make importing
     # this store first (for example from the push verb) a circular import.
     from clagentic_loadout.review.atomic_io import write_bytes_atomic
 
-    refuse_untrusted(root, untrusted_roots, kind)
-    directory = head_dir(root, head_sha)
-    try:
-        if directory.is_symlink():
-            raise StoreError(f"{str(directory)!r} is a symlink, refusing to write through it")
-        # A root this call creates is made traversable for every user (the umask
-        # could otherwise narrow it) and is single-user by design. A head
-        # directory takes the permission bits of the root it is created under,
-        # setgid included, so a root an administrator pre-created with a shared
-        # group stays writable to every identity in that group.
-        if not root.exists():
-            root.mkdir(parents=True, exist_ok=True, mode=DIR_MODE)
+    if directory.is_symlink():
+        raise StoreError(f"{str(directory)!r} is a symlink, refusing to write through it")
+    # A root this call creates is made traversable for every user (the umask
+    # could otherwise narrow it) and is single-user by design. A head
+    # directory takes the permission bits of the root it is created under,
+    # setgid included, so a root an administrator pre-created with a shared
+    # group stays writable to every identity in that group. Only a directory
+    # this call created is chmodded: one another writer made is used as it is.
+    # An existing root is used as it is, symlink or not: whether the root is
+    # trusted is refuse_untrusted's job, not this writer's.
+    if not root.exists():
+        try:
+            root.mkdir(mode=DIR_MODE, parents=True)
+        except FileExistsError:
+            if not root.is_dir():
+                raise
+        else:
             os.chmod(root, DIR_MODE)
-        if not directory.exists():
-            head_mode = stat.S_IMODE(root.stat().st_mode)
-            directory.mkdir(mode=head_mode)
-            os.chmod(directory, head_mode)
-        target = directory / file_name
-        write_bytes_atomic(target, payload, mode=FILE_MODE)
-        os.chmod(target, FILE_MODE)
-    except OSError as exc:
-        raise StoreError(f"cannot write {description} under {str(root)!r}: {exc}") from exc
+    head_mode = stat.S_IMODE(root.stat().st_mode)
+    if _make_dir(directory, head_mode):
+        os.chmod(directory, head_mode)
+    target = directory / file_name
+    write_bytes_atomic(target, payload, mode=FILE_MODE)
+    os.chmod(target, FILE_MODE)
     return target
 
 
