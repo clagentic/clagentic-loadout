@@ -2587,6 +2587,26 @@ state is a local base branch updated to the merged tip, not a detached HEAD
 and not a stale feature branch — exactly where the next dispatch into this
 repo needs it.
 
+**A checkout that is not clean on the base branch is never moved.** The sync above
+(`git checkout --detach`, then `git checkout -B <base>`) applies only when
+`--repo-path` is on the PR's base branch with no changes to tracked files
+(`git status --porcelain --untracked-files=no` empty); a clean checkout keeps today's
+behavior, including ending on the base branch at the merged commit. When it is on any
+other branch, is detached, or has tracked changes, `loadout-merge` and
+`loadout-post-merge` only fetch the merged commit and run the steps in a tool-owned
+detached `git worktree` of the same repository at the merged commit, under the merge
+trees directory (`CLAGENTIC_LOADOUT_MERGE_TREES_DIR`, then user config
+`merge.trees_dir`, then `<user config root>/state/merge-trees`), keyed by repository and
+merged commit. The worktree is removed when the steps finish, pass or fail. The
+steps' working directory is the same path relative to the repository top-level, so
+relative paths in a step resolve to the merged content; the tree used is named on
+stderr by both verbs and as `post_merge_tree` in `loadout-post-merge`'s JSON result.
+`--repo-path`'s branch, HEAD, index and files are not touched. If the worktree cannot
+be made (git error, unwritable directory, a leftover at the same path, or the merged
+commit lacking the step directory) the verb exits with the post-merge-failed code and a
+`merge-tree-unavailable` message before any step runs; it never falls back to moving
+`--repo-path`. `sync_tree_after_merge: false` still applies to `loadout-merge` only.
+
 A per-repo `merge:` section key, `sync_tree_after_merge` (boolean, default
 `true`), is the only way to turn this phase off entirely — set it to `false`
 to leave `--repo-path` exactly where the caller left it, restoring the
