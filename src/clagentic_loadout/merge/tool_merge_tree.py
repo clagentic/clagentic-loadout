@@ -103,12 +103,18 @@ def _git(args: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(["git", *args], capture_output=True, text=True, cwd=str(cwd))
 
 
-def unsafe_tree_reason(git_tree: str | Path, base_branch: str) -> str | None:
+def unsafe_tree_reason(
+    git_tree: str | Path, base_branch: str, target: str
+) -> str | None:
     """Why the checkout at *git_tree* must not be advanced, or None when it may.
 
     A checkout is advanced in place only when it is on *base_branch* (not another
-    branch, not detached) and has no changes to tracked files. Anything git cannot
-    answer counts as unsafe: the tool tree is the side that cannot hurt.
+    branch, not detached), has no changes to tracked files, and its HEAD is an
+    ancestor of *target* (the commit it would be moved to). A HEAD with commits
+    outside *target* would lose them from the branch when the branch is reset to
+    *target*. Anything git cannot answer, including a *target* missing from the
+    local object database, counts as unsafe: the tool tree is the side that cannot
+    hurt.
     """
     tree = Path(git_tree)
     head = _git(["symbolic-ref", "--short", "-q", "HEAD"], cwd=tree)
@@ -125,6 +131,14 @@ def unsafe_tree_reason(git_tree: str | Path, base_branch: str) -> str | None:
         return f"its status could not be read (git exit {status.returncode})"
     if status.stdout.strip():
         return "it has changes to tracked files"
+    ancestry = _git(["merge-base", "--is-ancestor", "HEAD", target], cwd=tree)
+    if ancestry.returncode == 1:
+        return f"it has local commits not in {target}"
+    if ancestry.returncode != 0:
+        return (
+            f"whether its HEAD is contained in {target} could not be read "
+            f"(git exit {ancestry.returncode})"
+        )
     return None
 
 

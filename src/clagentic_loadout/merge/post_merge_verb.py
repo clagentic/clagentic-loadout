@@ -596,23 +596,25 @@ def _run(
     # config names: judge that destination first, so a steered remote refuses here
     # (a usage error, exit 1) before any git network call.
     require_fetch_destination(git_tree_path, base_branch, fetch_auth)
-    # A checkout that is not on the base branch, or has changes to tracked files,
-    # belongs to someone: it is never moved. The merged commit is only fetched
-    # and the steps run in a tool-owned tree (merge.tool_merge_tree).
-    isolate_reason = unsafe_tree_reason(git_tree_path, base_branch)
+    # A checkout that is not on the base branch, has changes to tracked files, or
+    # holds commits outside the merged one belongs to someone: it is never moved.
+    # The steps then run in a tool-owned tree (merge.tool_merge_tree).
+    # The merged commit is fetched first (nothing checked out) because the in-place
+    # advance is safe only when the checkout's HEAD is contained in it: a local
+    # commit outside it would be dropped from the base branch by the reset.
     try:
+        landed_sha = fetch_merged_sha_object(
+            git_tree_path,
+            base_branch=base_branch,
+            known_merged_sha=known_merged_sha,
+            fetch_auth=fetch_auth,
+        )
+        isolate_reason = unsafe_tree_reason(git_tree_path, base_branch, landed_sha)
         if isolate_reason is None:
             landed_sha = advance_repo_to_merged_sha(
                 git_tree_path,
                 base_branch=base_branch,
-                known_merged_sha=known_merged_sha,
-                fetch_auth=fetch_auth,
-            )
-        else:
-            landed_sha = fetch_merged_sha_object(
-                git_tree_path,
-                base_branch=base_branch,
-                known_merged_sha=known_merged_sha,
+                known_merged_sha=landed_sha,
                 fetch_auth=fetch_auth,
             )
     except TreeSyncError as exc:

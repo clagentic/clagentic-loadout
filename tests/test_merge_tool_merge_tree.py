@@ -75,6 +75,13 @@ def _step(marker) -> dict:
     return {"cmd": [_PY, "-c", code], "on_failure": "fail"}
 
 
+def _fetch_origin_objects(work) -> None:
+    """Bring the origin's objects into *work*; its `origin` remote is rewired to a
+    host URL, so the bare repository is named by path."""
+    origin = work.parent / f"{work.name}-origin.git"
+    _git(["fetch", str(origin), _BASE], work)
+
+
 def _worktrees(work) -> list[str]:
     return [
         line for line in _git(["worktree", "list", "--porcelain"], work).splitlines()
@@ -84,7 +91,8 @@ def _worktrees(work) -> list[str]:
 
 def _scenario(tmp_path, *, shape: str, steps=True, platform="forgejo"):
     """shape: 'feature' (feature branch + uncommitted edit), 'dirty-base' (base
-    branch + uncommitted edit), 'clean-base'."""
+    branch + uncommitted edit), 'clean-base', 'local-commit' (base branch, clean
+    tree, one commit that is not on origin)."""
     work = tmp_path / "work"
     work.mkdir()
     ms.init_repo_with_origin(work)
@@ -96,6 +104,10 @@ def _scenario(tmp_path, *, shape: str, steps=True, platform="forgejo"):
         ms.write_merge_config(work, [_step(marker)])
     if shape == "feature":
         _git(["checkout", "-b", "feature/x"], work)
+    if shape == "local-commit":
+        (work / "local.txt").write_text("local\n", encoding="utf-8")
+        _git(["add", "local.txt"], work)
+        _git(["commit", "-m", "local work"], work)
     if shape in ("feature", "dirty-base"):
         (work / "README.md").write_text("seed\nuncommitted edit\n", encoding="utf-8")
     return work, merged, marker
@@ -146,23 +158,66 @@ def _assert_tool_tree_gone(work, tmp_path, merged):
 class TestUnsafeTreeReason:
     def test_clean_checkout_on_the_base_branch_is_safe(self, tmp_path):
         work, _, _ = _scenario(tmp_path, shape="clean-base")
-        assert tool_merge_tree.unsafe_tree_reason(work, _BASE) is None
+        assert tool_merge_tree.unsafe_tree_reason(work, _BASE, "HEAD") is None
 
     def test_untracked_files_alone_do_not_make_it_unsafe(self, tmp_path):
         work, _, _ = _scenario(tmp_path, shape="clean-base")
         (work / "scratch.txt").write_text("x", encoding="utf-8")
-        assert tool_merge_tree.unsafe_tree_reason(work, _BASE) is None
+        assert tool_merge_tree.unsafe_tree_reason(work, _BASE, "HEAD") is None
 
     def test_other_branch_detached_head_and_tracked_changes_are_unsafe(self, tmp_path):
         work, _, _ = _scenario(tmp_path, shape="feature")
-        assert "feature/x" in tool_merge_tree.unsafe_tree_reason(work, _BASE)
+        assert "feature/x" in tool_merge_tree.unsafe_tree_reason(work, _BASE, "HEAD")
         _git(["checkout", "--", "README.md"], work)
         _git(["checkout", "--detach"], work)
-        assert "detached" in tool_merge_tree.unsafe_tree_reason(work, _BASE)
+        assert "detached" in tool_merge_tree.unsafe_tree_reason(work, _BASE, "HEAD")
         _git(["checkout", _BASE], work)
-        assert tool_merge_tree.unsafe_tree_reason(work, _BASE) is None
+        assert tool_merge_tree.unsafe_tree_reason(work, _BASE, "HEAD") is None
         (work / "README.md").write_text("changed\n", encoding="utf-8")
-        assert "tracked files" in tool_merge_tree.unsafe_tree_reason(work, _BASE)
+        assert "tracked files" in tool_merge_tree.unsafe_tree_reason(work, _BASE, "HEAD")
+
+
+    def test_local_commit_outside_the_target_is_unsafe(self, tmp_path):
+        work, merged, _ = _scenario(tmp_path, shape="local-commit")
+        _fetch_origin_objects(work)
+        reason = tool_merge_tree.unsafe_tree_reason(work, _BASE, merged)
+        assert reason == f"it has local commits not in {merged}"
+
+    def test_head_that_is_an_ancestor_of_the_target_is_safe(self, tmp_path):
+        work, merged, _ = _scenario(tmp_path, shape="clean-base")
+        _fetch_origin_objects(work)
+        assert tool_merge_tree.unsafe_tree_reason(work, _BASE, merged) is None
+
+    def test_target_missing_from_the_object_database_is_unsafe(self, tmp_path):
+        work, _, _ = _scenario(tmp_path, shape="clean-base")
+        reason = tool_merge_tree.unsafe_tree_reason(work, _BASE, "0" * 40)
+        assert "could not be read" in reason
+
+
+class TestMergeVerbLocalCommitOnBaseBranch:
+    @pytest.mark.parametrize("platform", ["forgejo", "github"])
+    def test_merge_runs_in_the_tool_tree_and_keeps_the_local_commit(self, tmp_path, platform):
+        work, merged, marker = _scenario(tmp_path, shape="local-commit", platform=platform)
+        before = _snapshot(work)
+        local_commit = before["head"]
+        assert _merge(work, merged, platform) == verb.EXIT_OK
+        assert _snapshot(work) == before
+        assert _git(["symbolic-ref", "--short", "HEAD"], work).strip() == _BASE
+        assert _git(["rev-parse", _BASE], work).strip() == local_commit
+        _assert_step_ran_in_tool_tree(marker, work, tmp_path)
+        _assert_tool_tree_gone(work, tmp_path, merged)
+
+
+class TestPostMergeVerbLocalCommitOnBaseBranch:
+    @pytest.mark.parametrize("platform", ["forgejo", "github"])
+    def test_steps_run_in_the_tool_tree_and_the_local_commit_stays(self, tmp_path, platform):
+        work, merged, marker = _scenario(tmp_path, shape="local-commit", platform=platform)
+        before = _snapshot(work)
+        assert _post_merge(work, merged, platform) == 0
+        assert _snapshot(work) == before
+        assert _git(["rev-parse", _BASE], work).strip() == before["head"]
+        _assert_step_ran_in_tool_tree(marker, work, tmp_path)
+        _assert_tool_tree_gone(work, tmp_path, merged)
 
 
 class TestMergeVerbFeatureBranchWithUncommittedEdit:
