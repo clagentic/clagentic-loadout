@@ -27,7 +27,9 @@ KEY_SCANNERS = "scanners"
 KEY_CATEGORY = "category"
 
 #: The one definition of a valid scanner name, shared with the scanner input.
-SCANNER_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
+#: No '.', so the first '.' of a ``scanner.rule`` finding id always ends the scanner
+#: name and two (scanner, rule) pairs can never share an id.
+SCANNER_NAME_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9_:-]{0,63}\Z")
 
 
 class ScannerPolicyError(ValueError):

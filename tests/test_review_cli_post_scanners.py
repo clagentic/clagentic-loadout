@@ -187,7 +187,7 @@ class TestAnOutsideRangeHit:
         assert code == 0 and result["outside_range_count"] == 1
 
     def test_extra_findings_file_fields_claiming_outside_range_do_not_move_the_hit(
-        self, world, capsys, tmp_path
+        self, world, capsys
     ):
         # Extra fields in the findings document claiming outside range are not read.
         scanners = [_scanner(hits=[_hit(ADDED_LINE)])]
@@ -247,6 +247,25 @@ class TestAnOutsideRangeHit:
         assert code == 0
         assert result["status"] == "blocking" and result["scanner_finding_count"] == 1
         assert "outside_range" not in world.fence()
+
+    def test_dropping_one_scanner_hit_leaves_the_other_scanner_on_the_line_blocking(
+        self, world, capsys
+    ):
+        dropped = [
+            {"file": "a.py", "line": ADDED_LINE, "rule_id": "a." + "b.c",
+             "message": "unsafe parse call", "reason": "r"}
+        ]
+        scanners = [
+            _scanner("a", hits=[_hit(ADDED_LINE, rule="b.c")]),
+            _scanner("ab", hits=[_hit(ADDED_LINE, rule="c")]),
+        ]
+        code, result, err = world.post(scanners, dropped=dropped, capsys=capsys)
+
+        assert code == 0, err
+        assert result["scanner_finding_count"] == 2 and result["dropped_count"] == 1
+        assert result["status"] == "blocking"
+        remaining = [f["rule_id"] for f in world.fence()["evaluated_findings"]]
+        assert remaining == ["ab.c"]
 
     @pytest.mark.parametrize("key", ["outside_range", "classification"])
     def test_a_dropped_entry_with_an_unknown_key_is_refused(self, world, capsys, key):

@@ -108,6 +108,32 @@ def test_replacement_counts_a_location_once_and_keeps_other_rules():
     assert merged[1]["message"] == "m"
 
 
+def test_a_scanner_name_with_a_dot_is_refused_by_the_loader_and_the_schema():
+    schema = json.loads(SCHEMA.read_text(encoding="utf-8"))
+    document = {"head_sha": HEAD, "scanners": [{"scanner": "a.b", "status": "ran"}]}
+
+    with pytest.raises(si.ScannerInputError, match="scanner"):
+        _parse(document)
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(document, schema)
+
+
+def test_scanner_and_rule_pairs_that_would_share_a_dotted_id_stay_distinct():
+    hit = {"file": "a.py", "line": 2, "rule_id": "b.c", "message": "m"}
+    other = {"file": "a.py", "line": 2, "rule_id": "c", "message": "m"}
+    document = {
+        "head_sha": HEAD,
+        "scanners": [
+            {"scanner": "a", "status": "ran", "hits": [hit]},
+            {"scanner": "ab", "status": "ran", "hits": [other]},
+        ],
+    }
+
+    ingestion = ingest(_parse(document), make_diff({"a.py": 4}), [], {})
+
+    assert sorted(f["rule_id"] for f in ingestion.findings) == ["a.b.c", "ab.c"]
+
+
 def _hit_file(value):
     return _parse(_doc(hits=[{"file": value, "line": 1, "rule_id": "r", "message": "m"}])).hits[0].file
 

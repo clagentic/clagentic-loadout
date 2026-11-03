@@ -145,7 +145,7 @@ def _result(raw: Any, where: str) -> ScannerResult:
     name, status = entry.get("scanner"), entry.get("status")
     if not isinstance(name, str) or not SCANNER_NAME_RE.match(name):
         raise ScannerInputError(
-            f"{where}.scanner must be 1-64 characters of letters, digits, '.', '_', ':' or '-', "
+            f"{where}.scanner must be 1-64 characters of letters, digits, '_', ':' or '-', "
             f"starting with a letter or digit, got {name!r}"
         )
     if status not in SCANNER_STATUSES:

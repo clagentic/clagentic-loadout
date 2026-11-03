@@ -37,6 +37,9 @@ and any tool that can write it can feed a review.
 - Each hit has `file` (repository-relative), `line` (1 or greater), `rule_id` and
   `message`. An unknown field, or a missing or malformed one, is refused. A scanner name
   appears once.
+- A scanner name is 1 to 64 letters, digits, `_`, `:` or `-`, starting with a letter or
+  digit. A `.` is refused (in the input and in the policy), so a finding id
+  `<scanner>.<rule>` always decodes to one scanner and one rule.
 - The file carries no category for a scanner. A `kind` field, like any other unknown
   field, is refused: the file is written by the reviewer, so it cannot say which hits
   belong in the security floor (see "Scanner category" below).
