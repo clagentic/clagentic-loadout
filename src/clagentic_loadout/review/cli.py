@@ -19,6 +19,8 @@ one to post its judgement, and nothing else:
         output that never refuses a post.
   churn read-only: the same churn object, computed from the reviewer's own
         posted fences, for a caller that did not run the post.
+  open  read-only: the findings the reviewer's own posted fences hold open at the
+        current head, each with the id `post --clear` takes.
 
 Both bind --caller to the attested invoking identity before any I/O, exactly
 like every other verb. Profiles come from deployment config
@@ -51,6 +53,7 @@ from clagentic_loadout.platform_detect import (
 )
 from clagentic_loadout.merge.fence_state import (
     EVIDENCE_KEYS,
+    KEY_CLEARED_CLAIMS,
     KEY_DOCS_ONLY,
     KEY_DROPPED,
     KEY_EVALUATED_FINDINGS,
@@ -78,6 +81,12 @@ from clagentic_loadout.review import changeset_paths, churn_report, spec_review
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.churn_ledger import ChurnLedgerError
 from clagentic_loadout.review.churn_verb import churn_after_post, churn_on_demand
+from clagentic_loadout.review.clearance_verb import (
+    ClearanceError,
+    clearance_claims,
+    read_open_findings,
+    render_open,
+)
 from clagentic_loadout.review.delta import resolve_delta
 from clagentic_loadout.review.docs_only_review import (
     ADVISORY_NOTE,
@@ -416,6 +425,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     post.add_argument("--resolved-findings", default=None, help=_RESOLVED_HELP)
     post.add_argument(
+        "--clear",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("FINDING_ID", "REASON"),
+        help="Clear a finding this reviewer's own earlier fence holds open at this head: "
+        "FINDING_ID as listed by `loadout-review open`, REASON the one-line evidence that "
+        "answers it. Repeatable. The id must be an open finding of this reviewer at this "
+        "head, and this review must not hold it open itself. The clearance is recorded in "
+        "the fence (cleared_claims) and shown in the comment. It clears nothing of another "
+        "reviewer's, nothing at another head, and is not a ruling that a finding is by "
+        "design; whether the merge gate accepts it for a finding is decided by the "
+        "repository's base-branch policy.",
+    )
+    post.add_argument(
         "--spec-hash",
         default=None,
         help="Review against this sealed spec (its sha256, as printed by `loadout-spec seal`). "
@@ -452,6 +476,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Review profile name under review.profiles in the loadout config, read for "
         "escalation_round (default: the --caller role).",
     )
+
+    open_findings = subparsers.add_parser(
+        "open",
+        help="List the findings this role's own posted fences hold open at the current head.",
+        description="Read-only. Prints the findings the reviewer's own posted verdict fences "
+        "on a pull request leave open at its current head, each with the id that "
+        "`loadout-review post --clear` takes.",
+    )
+    add_common(open_findings)
 
     churn = subparsers.add_parser(
         "churn",
@@ -1145,6 +1178,86 @@ def _post_churn(
     )
 
 
+def _own_login(caller: str, platform: str) -> str:
+    try:
+        return resolve_declared_role(caller, platform).login
+    except ReviewerLoginNotConfiguredError as exc:
+        _fail(str(exc), EXIT_PROFILE_INVALID)
+
+
+def _open_command(
+    args: argparse.Namespace,
+    caller: str,
+    *,
+    owner: str,
+    repo: str,
+    platform: str,
+    token_provider,
+    opener,
+) -> int:
+    """`open`: the role's own open findings at the PR's current head, read-only."""
+    login = _own_login(caller, platform)
+    live = _acquire(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener,
+    )
+    backend = _build_acquire_backend(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener,
+    )
+    try:
+        found = read_open_findings(
+            backend, owner=owner, repo=repo, pr_number=args.pr, login=login, head_sha=live.head_sha
+        )
+    except ClearanceError as exc:
+        _fail(str(exc), EXIT_ACQUIRE_FAILED)
+    print(render_open(login, args.pr, live.head_sha, found))
+    return EXIT_OK
+
+
+def _clearance_state(
+    args: argparse.Namespace,
+    state: dict[str, Any],
+    open_findings: list[dict[str, str]],
+    *,
+    owner: str,
+    repo: str,
+    caller: str,
+    platform: str,
+    head_sha: str,
+    token_provider,
+    opener,
+) -> dict[str, Any]:
+    """*state* with the cleared_claims `--clear` asks for added, each validated
+    against the role's own open findings at *head_sha* read from the host. With
+    no `--clear` the same state is returned and the host is not read."""
+    if not args.clear:
+        return state
+    login = _own_login(caller, platform)
+    backend = _build_acquire_backend(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener,
+    )
+    try:
+        held = read_open_findings(
+            backend, owner=owner, repo=repo, pr_number=args.pr, login=login, head_sha=head_sha
+        )
+        claims = clearance_claims(
+            [(finding_id, reason) for finding_id, reason in args.clear],
+            held,
+            head_sha=head_sha,
+            still_open_ids=[entry["id"] for entry in open_findings],
+        )
+    except ClearanceError as exc:
+        _fail(str(exc), EXIT_FINDINGS_INVALID)
+    merged = {**state, KEY_CLEARED_CLAIMS: [*state.get(KEY_CLEARED_CLAIMS, []), *claims]}
+    try:
+        normalize_findings_state(merged, head_sha=head_sha, review_status="blocking")
+    except ValueError as exc:
+        _fail(f"--clear: {exc}", EXIT_FINDINGS_INVALID)
+    return merged
+
+
 def _churn_command(
     args: argparse.Namespace,
     caller: str,
@@ -1428,6 +1541,10 @@ def _post_command(
     status = "clean" if verdict.outcome == OUTCOME_CLEAN and args.status != "blocking" else "blocking"
     annotated = annotate_findings(judged, verdict)
     open_findings = findings_open_from_verdict(verdict, head_sha, judged)
+    state = _clearance_state(
+        args, state, open_findings, owner=owner, repo=repo, caller=caller, platform=platform,
+        head_sha=head_sha, token_provider=token_provider, opener=opener,
+    )
 
     def spec_note(item: dict[str, Any]) -> list[str]:
         return [f"spec tag: {item[KEY_SPEC_TAG]}"] if spec_fields is not None else []
@@ -1656,6 +1773,11 @@ def main(
                 args, caller, owner=owner, repo=repo, platform=platform,
                 repo_path=repo_path, token_provider=token_provider, opener=opener,
                 config_root=config_root, run_root=run_root, runner=runner,
+            )
+        if args.command == "open":
+            return _open_command(
+                args, caller, owner=owner, repo=repo, platform=platform,
+                token_provider=token_provider, opener=opener,
             )
         if args.command == "churn":
             return _churn_command(
