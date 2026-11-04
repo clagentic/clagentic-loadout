@@ -8,7 +8,11 @@ the reader-side logic that turns a reviewer's fence history into a refusal.
 
 Fields (all optional; fence_schema_version 2 whenever any is present):
 
-  findings_open   [{id, rule_id, head}]  findings the reviewer holds open
+  findings_open   [{id, rule_id, head, fingerprint?}]
+                                         findings the reviewer holds open; the
+                                         fingerprint (fence_schema_version 6)
+                                         is the finding's link hint, stated
+                                         when the review knew it
   supersedes      <comment id>           the earlier comment this one replaces
   cleared_claims  [{id, head, evidence}] findings the reviewer resolved, at
                                          the head it reviewed, with one line
@@ -134,8 +138,13 @@ SPEC_FENCE_SCHEMA_VERSION = 4
 #: version 4.
 DOCS_ONLY_FENCE_SCHEMA_VERSION = 5
 
+#: Version stamped on a fence whose findings_open entries carry a fingerprint.
+#: A superset of version 5: a reader below it refuses the unknown field, so a
+#: fence carrying one is never half-read.
+FINGERPRINT_FENCE_SCHEMA_VERSION = 6
+
 #: Every fence_schema_version a reader accepts.
-FENCE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5)
+FENCE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5, 6)
 
 KEY_FENCE_SCHEMA_VERSION = "fence_schema_version"
 KEY_FINDINGS_OPEN = "findings_open"
@@ -227,6 +236,17 @@ SCANNER_NOT_APPLICABLE = "not_applicable"
 SCANNER_NOT_INVOKED = "not_invoked"
 SCANNER_FAILED = "failed"
 SCANNER_STATUSES = (SCANNER_RAN, SCANNER_NOT_APPLICABLE, SCANNER_NOT_INVOKED, SCANNER_FAILED)
+
+#: Restated from review.finding_identity, which this module cannot import
+#: (the review package imports this one). review.finding_identity owns the
+#: derivation; this is only the shape check on a carried value.
+KEY_FINGERPRINT = "fingerprint"
+_FINGERPRINT_RE = re.compile(r"\Afp2:[0-9a-f]{16}\Z")
+
+
+def is_fingerprint(value: Any) -> bool:
+    return isinstance(value, str) and _FINGERPRINT_RE.match(value) is not None
+
 
 _ID_RE = re.compile(r"\A[A-Za-z0-9][A-Za-z0-9._:-]{0,63}\Z")
 
@@ -497,18 +517,24 @@ def normalize_findings_state(
         rendered = []
         for index, entry in enumerate(_entries(raw[KEY_FINDINGS_OPEN], KEY_FINDINGS_OPEN)):
             where = f"{KEY_FINDINGS_OPEN}[{index}]"
-            _exact_keys(entry, ("id", "rule_id", "head"), where)
+            _exact_keys(entry, ("id", "rule_id", "head", KEY_FINGERPRINT), where)
             finding_id = _finding_id(entry.get("id"), f"{where}.id")
             if finding_id in open_ids:
                 raise ValueError(f"{where}.id {finding_id!r} is listed twice")
             open_ids.add(finding_id)
-            rendered.append(
-                {
-                    "id": finding_id,
-                    "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
-                    "head": _head(entry.get("head"), f"{where}.head"),
-                }
-            )
+            item_open: dict[str, Any] = {
+                "id": finding_id,
+                "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+                "head": _head(entry.get("head"), f"{where}.head"),
+            }
+            if KEY_FINGERPRINT in entry:
+                if not is_fingerprint(entry[KEY_FINGERPRINT]):
+                    raise ValueError(
+                        f"{where}.{KEY_FINGERPRINT} must be a well-formed fingerprint, "
+                        f"got {entry[KEY_FINGERPRINT]!r}"
+                    )
+                item_open[KEY_FINGERPRINT] = entry[KEY_FINGERPRINT]
+            rendered.append(item_open)
         if rendered and review_status == "clean":
             raise ValueError(
                 f"{KEY_FINDINGS_OPEN} lists {len(rendered)} finding(s) on a clean verdict; "
@@ -593,6 +619,8 @@ def normalize_findings_state(
     if KEY_DOCS_ONLY in raw:
         out[KEY_DOCS_ONLY] = normalize_docs_only(raw[KEY_DOCS_ONLY])
         out[KEY_FENCE_SCHEMA_VERSION] = DOCS_ONLY_FENCE_SCHEMA_VERSION
+    if any(KEY_FINGERPRINT in entry for entry in out.get(KEY_FINDINGS_OPEN, ())):
+        out[KEY_FENCE_SCHEMA_VERSION] = FINGERPRINT_FENCE_SCHEMA_VERSION
     return out
 
 
@@ -872,7 +900,7 @@ def has_findings_state(data: Mapping[str, Any]) -> bool:
 _RAW_VERSION_2_RE = re.compile(
     rf"{KEY_FENCE_SCHEMA_VERSION}\W+"
     rf"(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION}|{SPEC_FENCE_SCHEMA_VERSION}"
-    rf"|{DOCS_ONLY_FENCE_SCHEMA_VERSION})\b"
+    rf"|{DOCS_ONLY_FENCE_SCHEMA_VERSION}|{FINGERPRINT_FENCE_SCHEMA_VERSION})\b"
 )
 
 
@@ -996,6 +1024,7 @@ __all__ = [
     "CLASSIFICATION_DOCS_ONLY",
     "DOCS_ONLY_FENCE_SCHEMA_VERSION",
     "FENCE_SCHEMA_VERSIONS",
+    "FINGERPRINT_FENCE_SCHEMA_VERSION",
     "KEY_DOCS_ONLY",
     "docs_only_accepted",
     "docs_only_waiver_line",

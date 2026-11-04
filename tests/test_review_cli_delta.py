@@ -330,7 +330,9 @@ def test_a_delta_findings_file_posts_with_its_carried_findings(env, tmp_path, ca
     assert len(payload["open_finding_ids"]) == 1
 
 
-def test_a_fingerprint_in_the_findings_file_is_never_posted(env, tmp_path, capsys):
+def test_a_fingerprint_in_the_findings_file_is_posted_only_in_the_fence_and_the_suggested_entry(
+    env, tmp_path, capsys
+):
     env.configure(carrier_mode="empty")
     hinted = {**_BLOCKING, "fingerprint": "fp2:" + "a" * 16}
     findings = _prior(tmp_path / "findings.json", [hinted], head_sha=HEAD_SHA)
@@ -340,5 +342,13 @@ def test_a_fingerprint_in_the_findings_file_is_never_posted(env, tmp_path, capsy
     assert code == 0
     assert payload["result"] == "posted"
     assert "a.py:3 [R1] bad" in env.opener_state["posted_body"]
-    assert "fingerprint" not in env.opener_state["posted_body"]
-    assert "fp2:" not in env.opener_state["posted_body"]
+    # The hint is not part of the finding text. It appears in the fence, on the
+    # findings_open entry the gate matches a disposition against, and in the
+    # suggested disposition entry.
+    fp = hinted["fingerprint"]
+    prose, fence_text = env.opener_state["posted_body"].split("```review-result", 1)
+    assert f"[R1] bad {fp}" not in prose
+    assert f'fingerprint: "{fp}"' in prose
+    fence = json.loads(fence_text.split("```", 1)[0])
+    assert fence["findings_open"][0]["fingerprint"] == fp
+    assert fence["fence_schema_version"] == 6

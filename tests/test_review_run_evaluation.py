@@ -255,7 +255,7 @@ def test_a_blocked_post_lists_the_blocking_finding_with_the_stanza_that_would_cl
     assert fence["verdict_outcome"] == "BLOCKED"
     assert fence["review_status"] == "blocking"
     assert fence["policy_base_sha"] == env.base_sha
-    assert fence["fence_schema_version"] == 3
+    assert fence["fence_schema_version"] == 6
 
 
 def test_status_clean_is_refused_when_the_computed_outcome_is_blocked(env, capsys):
@@ -418,7 +418,7 @@ def test_every_role_and_run_shape_posts_the_computed_outcome_and_the_evidence_li
     fence = _fence(env)
     assert fence["reviewer"] == role
     assert fence["verdict_outcome"] == "BLOCKED"
-    assert fence["fence_schema_version"] == 3
+    assert fence["fence_schema_version"] == 6
 
 
 def test_a_kept_prior_finding_is_judged_again_under_the_current_base_and_never_dropped(

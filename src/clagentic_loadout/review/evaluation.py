@@ -258,12 +258,13 @@ def evaluated_findings_for_fence(
     again; carrying what the evaluator saw (not what was posted as prose) is
     what lets the two computations agree on identical policy.
 
-    A finding's fingerprint is a link hint that is not posted, so it is not
-    carried by default; the gate then cannot apply a disposition's fingerprint
-    narrowing, and merge.gate_evaluation refuses to let such a disposition
-    demote a block. With *with_fingerprint* (set only when a ruling registry is
-    configured) it is carried when well formed, because a ruling is keyed to it
-    and the gate must be able to match the same ruling the evaluator did."""
+    A finding's fingerprint is a link hint, so it is not carried here by
+    default; the block's fingerprint is stated on its findings_open entry
+    instead (findings_open_from_verdict), which is what the gate matches a
+    fingerprinted disposition against. With *with_fingerprint* (set only when a
+    ruling registry is configured) it is carried here too when well formed,
+    because a ruling is keyed to it and the gate must be able to match the same
+    ruling the evaluator did."""
     carried: list[dict[str, Any]] = []
     for finding in findings:
         item: dict[str, Any] = {key: finding[key] for key in ("file", "line", "rule_id", "message")}
@@ -286,18 +287,34 @@ def finding_state_id(file: str, line: int, rule_id: str) -> str:
     return f"f-{digest.hexdigest()[:16]}"
 
 
-def findings_open_from_verdict(verdict: Verdict, head_sha: str) -> list[dict[str, str]]:
+def findings_open_from_verdict(
+    verdict: Verdict, head_sha: str, findings: Sequence[Mapping[str, Any]] = ()
+) -> list[dict[str, str]]:
     """The fence's ``findings_open`` for *verdict*: exactly the findings that
     block, after dispositions. A finding a base-revision disposition demoted is
-    advisory and is not listed, so it cannot hold a later merge open."""
+    advisory and is not listed, so it cannot hold a later merge open.
+
+    An entry carries the fingerprint of the findings it stands for, read from
+    *findings* (the findings the verdict was computed from), so a disposition
+    that names a fingerprint can be matched to the block. It is left out unless
+    every finding under the id has a well-formed one and they all agree: a
+    fingerprint that is not certain would let a narrow disposition clear a
+    block it was not written for."""
+    fingerprints: dict[str, set[str | None]] = {}
+    for item in findings:
+        key = finding_state_id(item["file"], item["line"], item["rule_id"])
+        value = item.get(KEY_FINGERPRINT)
+        fingerprints.setdefault(key, set()).add(value if is_fingerprint(value) else None)
     # Two findings with different messages on one line and rule share an id;
     # the fence lists that id once, since it names a location and a rule.
     entries: dict[str, dict[str, str]] = {}
     for finding in verdict.blocking:
         state_id = finding_state_id(finding.file, finding.line, finding.rule_id)
-        entries.setdefault(
-            state_id, {"id": state_id, "rule_id": finding.rule_id, "head": head_sha}
-        )
+        entry = {"id": state_id, "rule_id": finding.rule_id, "head": head_sha}
+        known = fingerprints.get(state_id, set())
+        if len(known) == 1 and None not in known:
+            entry[KEY_FINGERPRINT] = next(iter(known))
+        entries.setdefault(state_id, entry)
     return list(entries.values())
 
 

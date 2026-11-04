@@ -460,7 +460,9 @@ def evaluate(
                 refusal_specific=refusal_specific,
                 possible_duplicates=duplicates,
                 clear_with=(
-                    disp.clearing_stanza(f["file"], f["rule_id"], clear_kind, day)
+                    disp.clearing_stanza(
+                        f["file"], f["rule_id"], clear_kind, day, f.get("fingerprint")
+                    )
                     if blocking
                     else None
                 ),

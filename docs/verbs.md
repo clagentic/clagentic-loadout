@@ -3518,6 +3518,7 @@ every earlier version.
 | --- | --- | --- | --- |
 | verdict record (`verdict-record.schema.json`) | `schema_version` 1 | `schema_version` 2 | adds the optional `docs_only` object. A record that carries it is version 2; every other record is still written as version 1. The object is not allowed on a version 1 record |
 | review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 4 | 1 to 5 | adds the optional `docs_only` object at version 5, a superset of version 4 that adds nothing to the computed verdict. A fence without it keeps the version it had |
+| review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 5 | 1 to 6 | adds the optional `fingerprint` to each `findings_open` entry at version 6, a superset of version 5. A fence whose entries carry none keeps the version it had, and every earlier fence is still read; for those the gate resolves a block's fingerprint from the fence's `evaluated_findings` |
 
 A reader that predates a version refuses a fence or record that carries it, which is why
 the versions moved; an upgrade needs every reader of a deployment to be at this release
