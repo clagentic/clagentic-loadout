@@ -83,6 +83,7 @@ from clagentic_loadout.review.evaluation import (
     evaluate_findings,
     finding_state_id,
 )
+from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
 from clagentic_loadout.review.policy_reader import PolicyReader
 from clagentic_loadout.review.policy_source import DISPOSITIONS_PATH
 from clagentic_loadout.review.ruling_provider import IGNORED_PREFIX, RulingScope
@@ -252,19 +253,55 @@ def _blocking_text(verdict: Verdict) -> str:
     return "\n".join(parts)
 
 
+def _block_fingerprints(
+    entry: Mapping[str, Any], evaluated: Sequence[Mapping[str, Any]]
+) -> frozenset[str] | None:
+    """The fingerprint(s) a recorded block resolves to, or None when it cannot
+    be resolved. A fence posted by a current tool states it on the entry; an
+    older fence does not, so it is read from the same fence's evaluated findings
+    holding the entry's id. Resolution is all or nothing: one evaluated finding
+    under the id without a fingerprint leaves the block unresolved, and a
+    fingerprint on the entry that an evaluated finding contradicts does too."""
+    recorded = entry.get("fingerprint")
+    fingerprints: set[str] = set()
+    complete = True
+    held = False
+    for item in evaluated:
+        if item.get("severity") == "praise":
+            continue
+        if finding_state_id(item.get("file"), item.get("line"), item.get("rule_id")) != entry.get("id"):
+            continue
+        held = True
+        value = item.get(KEY_FINGERPRINT)
+        if is_fingerprint(value):
+            fingerprints.add(value)
+        else:
+            complete = False
+    if is_fingerprint(recorded):
+        if fingerprints - {recorded}:
+            return None
+        return frozenset({recorded})
+    if not held or not complete:
+        return None
+    return frozenset(fingerprints)
+
+
 def unmatched_recorded_blocks(
-    recorded: Sequence[Mapping[str, Any]], computed: Verdict
+    recorded: Sequence[Mapping[str, Any]],
+    computed: Verdict,
+    evaluated: Sequence[Mapping[str, Any]] = (),
 ) -> list[tuple[Mapping[str, Any], str]]:
     """The recorded blocking entries no disposition at the live base matches,
     each with why. A recorded entry is matched when the gate's computation holds
     at least one finding with that id and EVERY such finding carries an applied
     disposition: ids are a digest of location and rule, so two findings with
     different messages can share one, and covering only one of them clears
-    nothing. A disposition that narrows by fingerprint is applied on path and
-    rule alone here because the fence does not carry fingerprints, so it cannot
-    be shown to match and never counts. A per-PR ruling is the exception: it
-    matches only a finding that carries the very fingerprint it names, so its
-    match is shown, and it counts."""
+    nothing. A disposition that narrows by fingerprint counts only when the
+    block's fingerprint is resolved (from the entry, else from *evaluated*, the
+    fence's evaluated findings) and equals the disposition's; an unresolved
+    fingerprint never matches it. A disposition without a fingerprint matches on
+    path and rule alone. A per-PR ruling matches only a finding that carries the
+    very fingerprint it names, so its match is shown, and it counts."""
     by_id: dict[str, list[Any]] = {}
     for finding in computed.findings:
         if finding.praise:
@@ -279,16 +316,33 @@ def unmatched_recorded_blocks(
         group = by_id.get(str(entry.get("id")), [])
         if not group:
             unmatched.append((entry, "the gate's computation holds no such finding"))
-        elif any(f.disposition is None for f in group):
+            continue
+        if any(f.disposition is None for f in group):
             unmatched.append((entry, "no disposition at the live base matches it"))
-        elif any(
-            f.disposition.get("fingerprint") and not _from_registry(f.disposition) for f in group
-        ):
+            continue
+        narrowing = {
+            f.disposition["fingerprint"]
+            for f in group
+            if f.disposition.get("fingerprint") and not _from_registry(f.disposition)
+        }
+        if not narrowing:
+            continue
+        block = _block_fingerprints(entry, evaluated)
+        if block is None:
             unmatched.append(
                 (
                     entry,
-                    "the disposition that applies narrows by fingerprint, which the fence "
-                    "does not carry, so it cannot be shown to match",
+                    "the disposition that applies narrows by fingerprint, but the block's "
+                    "fingerprint cannot be resolved (neither the fence's findings_open nor its "
+                    "evaluated findings carry one), so it cannot be shown to match",
+                )
+            )
+        elif block != narrowing:
+            unmatched.append(
+                (
+                    entry,
+                    f"the disposition that applies narrows by fingerprint {sorted(narrowing)}, "
+                    f"but the block's fingerprint is {sorted(block)}, so it does not match",
                 )
             )
     return unmatched
@@ -533,7 +587,9 @@ def _apply_decision_table(
     # blocking is individually matched by a disposition applied at the live
     # base. A disposition on some other finding, or a finding that stopped
     # blocking for any other reason, clears nothing.
-    unmatched = unmatched_recorded_blocks(state.findings_open, computed)
+    unmatched = unmatched_recorded_blocks(
+        state.findings_open, computed, state.evaluated_findings or ()
+    )
     cleared_by_disposition = (
         fence_outcome == OUTCOME_BLOCKED
         and gate_outcome == OUTCOME_CLEAN
