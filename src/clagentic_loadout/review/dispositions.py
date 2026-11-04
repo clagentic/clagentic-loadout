@@ -170,10 +170,13 @@ def parse_dispositions(doc: Any) -> tuple[Disposition, ...]:
     return tuple(parsed)
 
 
-def clearing_stanza(file: str, rule_id: str, kind: str, today: dt.date) -> str:
+def clearing_stanza(
+    file: str, rule_id: str, kind: str, today: dt.date, fingerprint: str | None = None
+) -> str:
     """The exact ``dispositions.yaml`` entry that would clear a finding, once it
     is present on the base revision. ``rationale`` and ``by`` are left for the
-    person ruling to fill in; an accepted_risk entry names its expiry."""
+    person ruling to fill in; an accepted_risk entry names its expiry. With a
+    *fingerprint* the entry names it, which narrows the entry to that finding."""
     lines = [
         "dispositions:",
         f"  - path: {_quote(file)}",
@@ -183,6 +186,8 @@ def clearing_stanza(file: str, rule_id: str, kind: str, today: dt.date) -> str:
         '    by: "<who is ruling>"',
         f"    at: {today.isoformat()}",
     ]
+    if fingerprint:
+        lines.append(f"    fingerprint: {_quote(fingerprint)}")
     if kind == ACCEPTED_RISK:
         expiry = today + dt.timedelta(days=DEFAULT_ACCEPTED_RISK_DAYS)
         lines.append(f"    expires: {expiry.isoformat()}")

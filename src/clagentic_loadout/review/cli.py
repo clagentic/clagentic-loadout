@@ -1427,7 +1427,7 @@ def _post_command(
     # only thing that can still make the status blocking is the caller asking.
     status = "clean" if verdict.outcome == OUTCOME_CLEAN and args.status != "blocking" else "blocking"
     annotated = annotate_findings(judged, verdict)
-    open_findings = findings_open_from_verdict(verdict, head_sha)
+    open_findings = findings_open_from_verdict(verdict, head_sha, judged)
 
     def spec_note(item: dict[str, Any]) -> list[str]:
         return [f"spec tag: {item[KEY_SPEC_TAG]}"] if spec_fields is not None else []

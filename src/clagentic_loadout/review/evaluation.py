@@ -286,18 +286,34 @@ def finding_state_id(file: str, line: int, rule_id: str) -> str:
     return f"f-{digest.hexdigest()[:16]}"
 
 
-def findings_open_from_verdict(verdict: Verdict, head_sha: str) -> list[dict[str, str]]:
+def findings_open_from_verdict(
+    verdict: Verdict, head_sha: str, findings: Sequence[Mapping[str, Any]] = ()
+) -> list[dict[str, str]]:
     """The fence's ``findings_open`` for *verdict*: exactly the findings that
     block, after dispositions. A finding a base-revision disposition demoted is
-    advisory and is not listed, so it cannot hold a later merge open."""
+    advisory and is not listed, so it cannot hold a later merge open.
+
+    An entry carries the fingerprint of the findings it stands for, read from
+    *findings* (the findings the verdict was computed from), so a disposition
+    that names a fingerprint can be matched to the block. It is left out unless
+    every finding under the id has a well-formed one and they all agree: a
+    fingerprint that is not certain would let a narrow disposition clear a
+    block it was not written for."""
+    fingerprints: dict[str, set[str | None]] = {}
+    for item in findings:
+        key = finding_state_id(item["file"], item["line"], item["rule_id"])
+        value = item.get(KEY_FINGERPRINT)
+        fingerprints.setdefault(key, set()).add(value if is_fingerprint(value) else None)
     # Two findings with different messages on one line and rule share an id;
     # the fence lists that id once, since it names a location and a rule.
     entries: dict[str, dict[str, str]] = {}
     for finding in verdict.blocking:
         state_id = finding_state_id(finding.file, finding.line, finding.rule_id)
-        entries.setdefault(
-            state_id, {"id": state_id, "rule_id": finding.rule_id, "head": head_sha}
-        )
+        entry = {"id": state_id, "rule_id": finding.rule_id, "head": head_sha}
+        known = fingerprints.get(state_id, set())
+        if len(known) == 1 and None not in known:
+            entry[KEY_FINGERPRINT] = next(iter(known))
+        entries.setdefault(state_id, entry)
     return list(entries.values())
 
 
