@@ -42,6 +42,11 @@ review:
   docs_only:
     paths: ["docs/**/*.md", "README.md"]
     depended_on: ["docs/README.md", "AGENTS.md"]
+  # Findings a reviewer may clear itself at the same head with evidence (process record).
+  # Anything not named here is security content and needs a disposition on the base branch.
+  clearance:
+    process_record:
+      rule_ids: ["*.path-choice.5"]
 
 # The commands `clagentic-loadout test run` uses. Each is an argv list run without a shell
 # from the repository root, and must write a JUnit XML report to the {junit} path. Every

@@ -634,7 +634,12 @@ loadout-review post --caller <role> --repo <owner/repo> --pr <n> --findings <pat
                     [--profile <name>] [--scanner-input <path>]
 loadout-review churn --caller <role> --repo <owner/repo> --pr <n> [--platform ...]
                     [--repo-path <dir>] [--profile <name>] [--spec-hash <sha256>]
+loadout-review open --caller <role> --repo <owner/repo> --pr <n> [--platform ...]
+                    [--repo-path <dir>]
 ```
+
+`post` also takes `--clear <finding-id> <reason>` (repeatable) to clear the role's own
+earlier finding at the same head; see [Clearing your own finding](#clearing-your-own-finding).
 
 `--caller` binds to the attested invoking identity before any I/O, exactly like
 every other verb, and is accepted before or after the subcommand. `--platform`
@@ -1041,6 +1046,32 @@ classification. A hit on a line of a file the diff shows that the change adds be
 or deleted file). Both block unless listed in `--dropped`. A hit on a line of a shown file
 that the change did not add is listed under `Scanner hits outside the changed lines` and
 in the fence as `outside_range`, and takes no part in the verdict. Each scanner's status goes into the fence as `scanners_run`.
+
+#### Clearing your own finding
+
+A reviewer that blocked a pull request can answer its own finding at the same head, for example
+once the author has supplied the record it asked for, without a new head and without an
+operator ruling.
+
+`loadout-review open` is read-only. It prints the findings the role's own posted fences leave
+open at the pull request's current head, one object each: `id` (the value `--clear` takes),
+`rule_id`, `fingerprint` when the fence stated one, `head`, `comment_id` (the comment that holds
+it open) and, from that fence's `evaluated_findings`, `file`, `line` and `message`. The fences
+on the pull request are the store the ids live in; only comments by the role's own login at
+this head count, and a finding a later fence of the role cleared is not listed.
+
+`loadout-review post ... --clear <finding-id> <reason>` adds a clearance to the posted fence.
+Each request is checked before anything is posted, and a failed check exits **32** with nothing
+posted: the id must be open for this role at this head (`open` lists them), the reason must be
+non-blank (state the evidence), the id may be named once, and this review must not hold the same
+finding open itself. The clearance is written into the fence as a `cleared_claims` entry
+(`id`, `head`, `evidence`, and the open finding's `fingerprint` when it had one); like the rest of
+the findings state it is rendered by the tool inside the fence, and the merge gate prints it. It is not a `by_design` ruling and it creates no
+disposition. A clearance reaches nothing of another reviewer's, nothing at another head and
+nothing the role did not hold open.
+
+What a clearance is worth to the merge gate is decided there, from the base branch's repo
+profile: see [Reviewer clearance](merge-authority.md#reviewer-clearance).
 
 #### `--resolved-findings` — caller rulings on prior findings
 
@@ -3519,6 +3550,7 @@ every earlier version.
 | verdict record (`verdict-record.schema.json`) | `schema_version` 1 | `schema_version` 2 | adds the optional `docs_only` object. A record that carries it is version 2; every other record is still written as version 1. The object is not allowed on a version 1 record |
 | review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 4 | 1 to 5 | adds the optional `docs_only` object at version 5, a superset of version 4 that adds nothing to the computed verdict. A fence without it keeps the version it had |
 | review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 5 | 1 to 6 | adds the optional `fingerprint` to each `findings_open` entry at version 6, a superset of version 5. A fence whose entries carry none keeps the version it had, and every earlier fence is still read; for those the gate resolves a block's fingerprint from the fence's `evaluated_findings` |
+| review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 6 | 1 to 7 | adds the optional `fingerprint` to each `cleared_claims` entry at version 7, a superset of version 6. It is stamped only on a fence whose clearance states a fingerprint (a `post --clear` of a finding that carried one); every other fence keeps the version it had, and every earlier fence is still read. A reader below version 7 refuses a fence that carries it, so every reader of a deployment (the installed loadout, which the post-merge install refreshes, and any consumer that validates the fence schema) must be at this release before a reviewer clears a fingerprinted finding. A consumer that does not validate the fence's version is unaffected |
 
 A reader that predates a version refuses a fence or record that carries it, which is why
 the versions moved; an upgrade needs every reader of a deployment to be at this release

@@ -39,6 +39,9 @@ with no internal path)::
       scanners:                     # optional; the category each scanner looks for. A
         gitleaks: {category: secrets_exposure}  # scanner not named is in the security
                                     # floor (see review.scanner_policy)
+      clearance:                    # optional; the findings a reviewer may clear itself
+        process_record: {rule_ids: ["*.some-rule.5"]}  # anything unnamed needs a
+                                    # disposition (see review.clearance_policy)
     exposure: local_or_ci_only      # optional posture keys, read only by gates from
     data: public_or_none            # the merge base (see review.profile_posture).
     visibility: public              # A missing, unrecognised or unconfirmed value
@@ -58,6 +61,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from clagentic_loadout.repo_test.spec import DeclaredTests, TestBlockError, parse_test_block
+from clagentic_loadout.review.clearance_policy import (
+    KEY_CLEARANCE,
+    ClearancePolicy,
+    ClearancePolicyError,
+    parse_clearance_policy,
+)
 from clagentic_loadout.review.docs_only_policy import (
     DocsOnlyFormatError,
     DocsOnlyPolicy,
@@ -171,6 +180,8 @@ class RepoProfile:
     docs_only: DocsOnlyPolicy | None = None
     #: ``(scanner, category)`` from ``review.scanners``; a scanner not named has none.
     scanner_categories: tuple[tuple[str, str], ...] = ()
+    #: ``review.clearance``; the empty policy classifies no finding as process record.
+    clearance: ClearancePolicy = field(default_factory=ClearancePolicy)
 
     def posture_values(self) -> dict[str, Any]:
         return dict(self.posture)
@@ -285,7 +296,10 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         scanner_categories = parse_scanner_categories(
             review_block.get(KEY_SCANNERS) if isinstance(review_block, dict) else None
         )
-    except (DocsOnlyFormatError, ScannerPolicyError) as exc:
+        clearance = parse_clearance_policy(
+            review_block.get(KEY_CLEARANCE) if isinstance(review_block, dict) else None
+        )
+    except (DocsOnlyFormatError, ScannerPolicyError, ClearancePolicyError) as exc:
         raise ProfileFormatError(str(exc)) from exc
     # A field only means something where its class is in effect: the top-level
     # class or a path override. Anywhere else it would be silently ignored.
@@ -307,6 +321,7 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         posture=tuple((key, doc[key]) for key in POSTURE_KEY_ORDER if key in doc),
         docs_only=docs_only,
         scanner_categories=scanner_categories,
+        clearance=clearance,
     )
 
 

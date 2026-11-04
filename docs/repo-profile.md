@@ -68,8 +68,9 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
   `files`, a default `base`, and named `tiers`. Review ignores it. Its shape and use are in
   [repo-test.md](repo-test.md).
 
-- **`review`** holds `docs_only`, the docs allowlist (next section). Review reads it; nothing
-  else does.
+- **`review`** holds `docs_only`, the docs allowlist (next section), `scanners`, the category
+  of each scanner's hits, and `clearance`, the findings a reviewer may clear itself (below).
+  Review and the merge gate read it; nothing else does.
 
 ## The docs allowlist (`review.docs_only`)
 
@@ -97,6 +98,33 @@ profile is read at the merge base, so the change that adds it is not classified 
 release that reads `review` must be installed wherever the profile is read, because an older
 release reads an unknown key as an invalid profile; that is why this repository declares the
 list only once the release that reads it is the one installed.
+
+## Clearing your own finding (`review.clearance`)
+
+A reviewer can clear its own earlier blocking finding at the same head (`loadout-review post
+--clear`, [verbs.md](verbs.md#clearing-your-own-finding)). Whether the merge gate accepts that
+clearance in place of a disposition depends on what the finding protects, which is policy:
+
+```yaml
+review:
+  clearance:
+    process_record:
+      rule_ids: ["*.some-rule.5"]   # fnmatch patterns over the rule id
+      categories: [test_gap]        # finding categories (see review-facts)
+```
+
+A finding is **process record** when its rule id matches a `rule_ids` pattern, or when the
+block has findings and every one of them states a listed category. Process record guards
+something a person can supply, such as a compliance record in the pull request body, so an
+evidence-bearing clearance from the reviewer that raised it is enough. Everything else is
+**security content** and still needs a disposition on the base branch. The default is security
+content: an absent block, a missing or invalid profile, or a finding the lists do not name, all
+fail closed. Nothing is named in code. The schema is as strict as the rest of the profile
+(an unknown key, a non-list, a multi-line entry or an unknown category makes the file invalid).
+Like the rest of `review`, it is read at the merge base, so the change that adds it is not
+judged by it, and the release that reads `review.clearance` must be installed wherever the
+profile is read, because an older release reads the unknown key as an invalid profile. The gate's
+rules are in [merge-authority.md](merge-authority.md#reviewer-clearance).
 
 ## Risk posture
 

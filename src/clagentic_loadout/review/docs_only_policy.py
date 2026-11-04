@@ -33,6 +33,7 @@ from typing import Any
 
 from clagentic_loadout.merge.fence_state import CLASSIFICATION_CODE, CLASSIFICATION_DOCS_ONLY
 from clagentic_loadout.review.path_glob import path_matches
+from clagentic_loadout.review.clearance_policy import KEY_CLEARANCE
 from clagentic_loadout.review.scanner_policy import KEY_SCANNERS
 
 KEY_REVIEW = "review"
@@ -186,14 +187,14 @@ def _globs(value: Any, where: str) -> tuple[str, ...]:
 
 def parse_review_block(block: Any) -> DocsOnlyPolicy | None:
     """The docs allowlist in a profile's ``review`` block; None when the block
-    is absent or declares none. ``review.scanners`` is read by
-    review.scanner_policy and only tolerated here. Strict: an unknown or misplaced key makes the
+    is absent or declares none. ``review.scanners`` and ``review.clearance`` are read by
+    review.scanner_policy and review.clearance_policy and only tolerated here. Strict: an unknown or misplaced key makes the
     whole profile invalid, so a half-understood list is never half-applied."""
     if block is None:
         return None
     if not isinstance(block, dict):
         raise DocsOnlyFormatError(f"{KEY_REVIEW} must be a mapping")
-    unknown = sorted(str(k) for k in block if k not in (KEY_DOCS_ONLY, KEY_SCANNERS))
+    unknown = sorted(str(k) for k in block if k not in (KEY_DOCS_ONLY, KEY_SCANNERS, KEY_CLEARANCE))
     if unknown:
         raise DocsOnlyFormatError(
             "unknown or misplaced key: " + ", ".join(f"{KEY_REVIEW}.{key}" for key in unknown)

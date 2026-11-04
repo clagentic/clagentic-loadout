@@ -544,6 +544,7 @@ from clagentic_loadout.merge.errors import (
     VerdictScannerFailedError,
     VerdictStaleError,
 )
+from clagentic_loadout.merge.fence_clearance import supersede_at_gate
 from clagentic_loadout.merge.fence_union import collect_head_fences
 from clagentic_loadout.merge.gate_evaluation import GateEvaluation, evaluate_at_gate
 from clagentic_loadout.merge.merge_readback import verify_merge_landed
@@ -1831,6 +1832,27 @@ def _run(
                         comments, bot_login, args.pr_number, owner, repo
                     ),
                 )
+                # An earlier blocking fence the same role answered with an
+                # evidence-bearing clearance at this head, for a finding the
+                # base-branch policy classes as process record, no longer has
+                # to pass on its own. Everything else is unchanged.
+                head_fences, cleared_records, declined_clearances = supersede_at_gate(
+                    head_fences,
+                    reviewer_name,
+                    current_head_sha=current_head_sha,
+                    live_base_sha=live_base_sha,
+                    policy_reader=policy_reader,
+                    visibility=host_visibility,
+                    ruling_scope=ruling_scope,
+                )
+                for declined in declined_clearances:
+                    print(f"merge: NOTICE -- {reviewer_name.upper()} {declined}", file=sys.stderr)
+                for cleared in cleared_records:
+                    gate_evaluations.append(cleared)
+                    print(
+                        f"merge: NOTICE -- {reviewer_name.upper()} {cleared.attestation_line()}",
+                        file=sys.stderr,
+                    )
                 several = len(head_fences) > 1
                 if several:
                     print(

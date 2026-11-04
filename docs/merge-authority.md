@@ -677,6 +677,57 @@ An evaluated fence that does not carry its `evaluated_findings` cannot be checke
 refused unless the fence itself already records a refusal (BLOCKED, STALE, DEGRADED without
 the role allowed), in which case it is refused on what it records.
 
+### Reviewer clearance
+
+A role's verdict at a head is every fence the role posted at that head, and each must pass. An
+earlier BLOCKED fence is **superseded**, and no longer has to pass on its own, when the same
+role clears what it held open at the same head, in a later fence, with evidence, and the
+finding is process record by the base branch's policy. The clearance is one of:
+
+- a `cleared_claims` entry `{id, head, evidence, fingerprint?}` (what `loadout-review post
+  --clear` writes), or
+- a `dropped` candidate of the later fence whose file, line and rule are those of the finding
+  the earlier fence held open, with a reason. Reviews posted before `cleared_claims` could carry
+  a fingerprint cleared a re-raised finding this way, so the gate reads it as a clearance.
+
+Every one of these must hold, or the earlier fence stays in force exactly as before:
+
+| Condition | Why |
+|---|---|
+| The earlier fence is evaluated, BLOCKED, carries its `evaluated_findings`, and lists its `findings_open`. | Without them nothing can be checked. |
+| **Every** finding it lists is cleared, and the latest word on each, among the role's later fences at the head, is a clearance and not a re-raise. | One finding left open keeps the block. |
+| Each clearance is by the same role (the platform login decides authorship), is for this head, and has a non-blank `evidence` (or `reason`). | A clearance by another reviewer, at another head or without evidence clears nothing. |
+| When the block states a `fingerprint`, the clearance states the same one. | A clearance without one cannot be shown to be for that finding, so it does not answer a fingerprinted block. |
+| Each finding is **process record** in the repo profile at the live base. | Anything the policy does not classify is security content, which keeps needing a disposition on the base branch. |
+| The gate's own recomputation of that fence at the live base is not degraded and finds no blocking finding the clearances do not cover. | The clearance answers what the fence recorded, not something the base now adds. |
+
+The policy is data in the repo profile on the base branch (the PR under review cannot widen it),
+under `review.clearance.process_record` (see [repo-profile.md](repo-profile.md#clearing-your-own-finding-reviewclearance)):
+
+```yaml
+review:
+  clearance:
+    process_record:
+      rule_ids: ["*.some-rule.5"]   # fnmatch patterns over a finding's rule id
+      categories: []                # finding categories; every finding of the block must state a listed one
+```
+
+No rule name or category is built into the gate. An absent or invalid profile, or a finding the
+policy does not classify, is security content: the default fails closed. A security-content
+block (a secret, an injection, a supply-chain finding, any scanner or security category the
+policy does not list) is cleared only by a disposition on the base branch, as before.
+
+The merge prints one `NOTICE` for each superseded fence naming the finding, the comment that
+cleared it, whether by `cleared_claim` or `dropped`, and the evidence, and one for each fence
+whose findings were cleared but which stays in force, with why. The merge result and the
+attestation carry the superseded fence as a verdict evaluation with `applied_clearances`.
+
+Fences posted before this existed are read by the same rules. A blocking fence followed by a
+clean fence that dropped the re-raised candidate at the same location and rule is cleared if
+the policy classifies the rule as process record. A blocking fence followed only by clean fences
+that raised no candidate (nothing was dropped and nothing was claimed) is not: it needs a
+fresh review from the role, which clears the finding with `loadout-review post --clear`.
+
 ### `merge.evaluator`
 
 Read from the tracked gate file at the PR base commit, like every other key that changes what
