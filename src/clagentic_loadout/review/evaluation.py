@@ -258,12 +258,13 @@ def evaluated_findings_for_fence(
     again; carrying what the evaluator saw (not what was posted as prose) is
     what lets the two computations agree on identical policy.
 
-    A finding's fingerprint is a link hint that is not posted, so it is not
-    carried by default; the gate then cannot apply a disposition's fingerprint
-    narrowing, and merge.gate_evaluation refuses to let such a disposition
-    demote a block. With *with_fingerprint* (set only when a ruling registry is
-    configured) it is carried when well formed, because a ruling is keyed to it
-    and the gate must be able to match the same ruling the evaluator did."""
+    A finding's fingerprint is a link hint, so it is not carried here by
+    default; the block's fingerprint is stated on its findings_open entry
+    instead (findings_open_from_verdict), which is what the gate matches a
+    fingerprinted disposition against. With *with_fingerprint* (set only when a
+    ruling registry is configured) it is carried here too when well formed,
+    because a ruling is keyed to it and the gate must be able to match the same
+    ruling the evaluator did."""
     carried: list[dict[str, Any]] = []
     for finding in findings:
         item: dict[str, Any] = {key: finding[key] for key in ("file", "line", "rule_id", "message")}
