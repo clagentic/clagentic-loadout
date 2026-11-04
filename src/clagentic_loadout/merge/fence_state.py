@@ -14,9 +14,13 @@ Fields (all optional; fence_schema_version 2 whenever any is present):
                                          is the finding's link hint, stated
                                          when the review knew it
   supersedes      <comment id>           the earlier comment this one replaces
-  cleared_claims  [{id, head, evidence}] findings the reviewer resolved, at
+  cleared_claims  [{id, head, evidence, fingerprint?}]
+                                         findings the reviewer resolved, at
                                          the head it reviewed, with one line
-                                         of evidence
+                                         of evidence; the fingerprint
+                                         (fence_schema_version 7) is that of
+                                         the open finding it answers, stated
+                                         when the open finding carried one
   scanners_run    [{scanner, status, reason}]
                                          per scanner: ran, not_applicable,
                                          not_invoked or failed
@@ -143,8 +147,13 @@ DOCS_ONLY_FENCE_SCHEMA_VERSION = 5
 #: fence carrying one is never half-read.
 FINGERPRINT_FENCE_SCHEMA_VERSION = 6
 
+#: Version stamped on a fence whose cleared_claims entries carry a fingerprint.
+#: A superset of version 6, for the same reason: a reader below it refuses the
+#: unknown field, so a fence carrying one is never half-read.
+CLEARANCE_FENCE_SCHEMA_VERSION = 7
+
 #: Every fence_schema_version a reader accepts.
-FENCE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5, 6)
+FENCE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5, 6, 7)
 
 KEY_FENCE_SCHEMA_VERSION = "fence_schema_version"
 KEY_FINDINGS_OPEN = "findings_open"
@@ -276,6 +285,10 @@ class FindingsState:
     evaluated_findings: tuple[dict[str, Any], ...] | None = None
     #: The docs-only object the fence carries; None when it carries none.
     docs_only: dict[str, Any] | None = None
+    #: The candidates the reviewer examined and dropped, each with its reason.
+    #: Evidence, not state; read only to answer a finding the same reviewer held
+    #: open at the same head (merge.fence_clearance).
+    dropped: tuple[dict[str, Any], ...] = ()
 
     @property
     def evaluated(self) -> bool:
@@ -555,7 +568,7 @@ def normalize_findings_state(
         seen: set[str] = set()
         for index, entry in enumerate(_entries(raw[KEY_CLEARED_CLAIMS], KEY_CLEARED_CLAIMS)):
             where = f"{KEY_CLEARED_CLAIMS}[{index}]"
-            _exact_keys(entry, ("id", "head", "evidence"), where)
+            _exact_keys(entry, ("id", "head", "evidence", KEY_FINGERPRINT), where)
             finding_id = _finding_id(entry.get("id"), f"{where}.id")
             claim_head = _head(entry.get("head"), f"{where}.head")
             if claim_head != head_sha:
@@ -568,13 +581,19 @@ def normalize_findings_state(
             if finding_id in open_ids:
                 raise ValueError(f"{where}.id {finding_id!r} is both cleared and held open")
             seen.add(finding_id)
-            rendered.append(
-                {
-                    "id": finding_id,
-                    "head": claim_head,
-                    "evidence": _text(entry.get("evidence"), f"{where}.evidence"),
-                }
-            )
+            claim: dict[str, Any] = {
+                "id": finding_id,
+                "head": claim_head,
+                "evidence": _text(entry.get("evidence"), f"{where}.evidence"),
+            }
+            if KEY_FINGERPRINT in entry:
+                if not is_fingerprint(entry[KEY_FINGERPRINT]):
+                    raise ValueError(
+                        f"{where}.{KEY_FINGERPRINT} must be a well-formed fingerprint, "
+                        f"got {entry[KEY_FINGERPRINT]!r}"
+                    )
+                claim[KEY_FINGERPRINT] = entry[KEY_FINGERPRINT]
+            rendered.append(claim)
         out[KEY_CLEARED_CLAIMS] = rendered
 
     if KEY_SCANNERS_RUN in raw:
@@ -621,6 +640,8 @@ def normalize_findings_state(
         out[KEY_FENCE_SCHEMA_VERSION] = DOCS_ONLY_FENCE_SCHEMA_VERSION
     if any(KEY_FINGERPRINT in entry for entry in out.get(KEY_FINDINGS_OPEN, ())):
         out[KEY_FENCE_SCHEMA_VERSION] = FINGERPRINT_FENCE_SCHEMA_VERSION
+    if any(KEY_FINGERPRINT in claim for claim in out.get(KEY_CLEARED_CLAIMS, ())):
+        out[KEY_FENCE_SCHEMA_VERSION] = CLEARANCE_FENCE_SCHEMA_VERSION
     return out
 
 
@@ -900,7 +921,8 @@ def has_findings_state(data: Mapping[str, Any]) -> bool:
 _RAW_VERSION_2_RE = re.compile(
     rf"{KEY_FENCE_SCHEMA_VERSION}\W+"
     rf"(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION}|{SPEC_FENCE_SCHEMA_VERSION}"
-    rf"|{DOCS_ONLY_FENCE_SCHEMA_VERSION}|{FINGERPRINT_FENCE_SCHEMA_VERSION})\b"
+    rf"|{DOCS_ONLY_FENCE_SCHEMA_VERSION}|{FINGERPRINT_FENCE_SCHEMA_VERSION}"
+    rf"|{CLEARANCE_FENCE_SCHEMA_VERSION})\b"
 )
 
 
@@ -931,6 +953,9 @@ def state_from_fence(data: Mapping[str, Any]) -> FindingsState:
             else None
         ),
         docs_only=data[KEY_DOCS_ONLY] if isinstance(data.get(KEY_DOCS_ONLY), dict) else None,
+        dropped=tuple(
+            entry for entry in data.get(KEY_DROPPED) or () if isinstance(entry, dict)
+        ),
     )
 
 
@@ -1020,6 +1045,7 @@ def with_derived_failure_sequences(
 
 __all__ = [
     "CLASSIFICATIONS",
+    "CLEARANCE_FENCE_SCHEMA_VERSION",
     "CLASSIFICATION_CODE",
     "CLASSIFICATION_DOCS_ONLY",
     "DOCS_ONLY_FENCE_SCHEMA_VERSION",

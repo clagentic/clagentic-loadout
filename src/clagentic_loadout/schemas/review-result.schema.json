@@ -34,8 +34,8 @@
     },
     "fence_schema_version": {
       "type": "integer",
-      "enum": [1, 2, 3, 4, 5, 6],
-      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. Version 5 marks a fence that carries the docs_only object; it is a superset of version 4 and adds nothing to the computed verdict. Version 6 marks a fence whose findings_open entries carry a fingerprint; it is a superset of version 5. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated. Readers accept every version from 1 to 6."
+      "enum": [1, 2, 3, 4, 5, 6, 7],
+      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. Version 5 marks a fence that carries the docs_only object; it is a superset of version 4 and adds nothing to the computed verdict. Version 6 marks a fence whose findings_open entries carry a fingerprint; it is a superset of version 5. Version 7 marks a fence whose cleared_claims entries carry a fingerprint; it is a superset of version 6. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated. Readers accept every version from 1 to 7."
     },
     "docs_only": {
       "type": "object",
@@ -120,7 +120,7 @@
     },
     "cleared_claims": {
       "type": "array",
-      "description": "Findings the reviewer resolved at the head this verdict is for, each with one line of evidence.",
+      "description": "Findings the reviewer resolved at the head this verdict is for, each with one line of evidence. A reviewer's claim answers only that reviewer's own open finding at the same head.",
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -128,7 +128,8 @@
         "properties": {
           "id": {"type": "string", "minLength": 1, "description": "Identifier of the finding that was cleared."},
           "head": {"type": "string", "minLength": 1, "description": "Head SHA the finding was cleared at; must equal this verdict's head_sha to count."},
-          "evidence": {"type": "string", "minLength": 1, "description": "One line stating why the finding no longer applies."}
+          "evidence": {"type": "string", "minLength": 1, "description": "One line stating why the finding no longer applies."},
+          "fingerprint": {"type": "string", "pattern": "^fp2:[0-9a-f]{16}$", "description": "OPTIONAL, version 7. The fingerprint of the open finding this claim answers, stated when that finding carried one. The merge gate honours a claim against a finding whose fingerprint it states only when the two are equal."}
         }
       }
     },
