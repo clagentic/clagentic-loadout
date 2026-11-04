@@ -546,3 +546,43 @@ class TestRecordedBlocksMatchedIndividually:
 
         assert unmatched_recorded_blocks([self._entry()], self._computed(covered, praise)) == []
         assert len(unmatched_recorded_blocks([self._entry()], self._computed(praise))) == 1
+
+    _F1, _F2, _F3 = ("fp2:" + c * 16 for c in "123")
+
+    def _sibling_group(self, fingerprinted_names):
+        one = self._found(
+            disposition={**self._APPLIED, "fingerprint": fingerprinted_names}, message="one"
+        )
+        two = self._found(disposition=self._APPLIED, message="two")
+        evaluated = [
+            {"file": PATH, "line": 10, "rule_id": "R1", "message": "one", "fingerprint": self._F1},
+            {"file": PATH, "line": 10, "rule_id": "R1", "message": "two", "fingerprint": self._F2},
+        ]
+        return self._computed(one, two), evaluated
+
+    def _block_entry(self, *fingerprints):
+        # A fence posted by a current tool states one fingerprint on the entry; the
+        # rest of the block comes from the evaluated findings.
+        return {**self._entry(), **({"fingerprint": fingerprints[0]} if fingerprints else {})}
+
+    def test_a_fingerprinted_and_a_path_wide_sibling_together_cover_the_block(self):
+        computed, evaluated = self._sibling_group(self._F1)
+
+        assert unmatched_recorded_blocks([self._block_entry()], computed, evaluated) == []
+
+    def test_a_fingerprinted_disposition_naming_a_fingerprint_outside_the_block_is_refused(self):
+        computed, evaluated = self._sibling_group(self._F3)
+
+        left = unmatched_recorded_blocks([self._block_entry()], computed, evaluated)
+        assert len(left) == 1
+
+    def test_an_unresolvable_block_with_a_fingerprinted_sibling_is_refused(self):
+        computed, _ = self._sibling_group(self._F1)
+
+        assert len(unmatched_recorded_blocks([self._block_entry()], computed, [])) == 1
+
+    def test_a_wide_sibling_that_cannot_be_attributed_a_fingerprint_is_refused(self):
+        computed, evaluated = self._sibling_group(self._F1)
+        evaluated[1] = {**evaluated[1], "message": "other"}
+
+        assert len(unmatched_recorded_blocks([self._block_entry()], computed, evaluated)) == 1

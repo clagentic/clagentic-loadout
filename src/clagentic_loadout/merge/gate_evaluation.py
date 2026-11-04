@@ -286,6 +286,29 @@ def _block_fingerprints(
     return frozenset(fingerprints)
 
 
+def _finding_fingerprint(finding: Any, evaluated: Sequence[Mapping[str, Any]]) -> str | None:
+    """The fingerprint of a computed finding, read from the fence's evaluated
+    finding with the same location, rule and message. None unless exactly one
+    fingerprint is found and every such evaluated finding carries it: a finding
+    that cannot be attributed is never guessed at."""
+    found: set[str] = set()
+    for item in evaluated:
+        if item.get("severity") == "praise":
+            continue
+        if (item.get("file"), item.get("line"), item.get("rule_id"), item.get("message")) != (
+            finding.file,
+            finding.line,
+            finding.rule_id,
+            finding.message,
+        ):
+            continue
+        value = item.get(KEY_FINGERPRINT)
+        if not is_fingerprint(value):
+            return None
+        found.add(value)
+    return next(iter(found)) if len(found) == 1 else None
+
+
 def unmatched_recorded_blocks(
     recorded: Sequence[Mapping[str, Any]],
     computed: Verdict,
@@ -337,12 +360,24 @@ def unmatched_recorded_blocks(
                     "evaluated findings carry one), so it cannot be shown to match",
                 )
             )
-        elif block != narrowing:
+            continue
+        # A fingerprinted disposition covers the fingerprint it names; a
+        # disposition without one covers the fingerprint of the finding it sits
+        # on, when that finding can be attributed one. Every block fingerprint
+        # must be covered and no narrowing may name one outside the block.
+        covered = set(narrowing)
+        for f in group:
+            if not f.disposition.get("fingerprint") or _from_registry(f.disposition):
+                held = _finding_fingerprint(f, evaluated)
+                if held is not None:
+                    covered.add(held)
+        if narrowing - block or block - covered:
             unmatched.append(
                 (
                     entry,
                     f"the disposition that applies narrows by fingerprint {sorted(narrowing)}, "
-                    f"but the block's fingerprint is {sorted(block)}, so it does not match",
+                    f"but the block's fingerprint is {sorted(block)} and the findings' "
+                    f"dispositions cover {sorted(covered & block)}, so it does not match",
                 )
             )
     return unmatched
