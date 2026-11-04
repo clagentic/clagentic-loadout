@@ -27,6 +27,11 @@ review:
     trufflehog: {category: secrets_exposure}
     semgrep: {category: injection}
     osv-scanner: {category: supply_chain}
+  # A process-record rule (a compliance record a person can supply) that the
+  # reviewer which raised it may clear itself; see docs/repo-profile.md.
+  clearance:
+    process_record:
+      rule_ids: ["*.path-choice.5"]
 paths:
   # Deployment config that ships as disaster-recovery data and carries its own
   # cast identifiers by design.
