@@ -191,6 +191,14 @@ dispositions:
 
 - An entry matches a finding on the path glob plus the exact `rule_id`. A `fingerprint`
   narrows the match only when the finding carries one too; it is a hint, never an identity.
+  For a block a fence recorded in `findings_open`, the merge gate is stricter: an entry with
+  a `fingerprint` clears it only when the block's fingerprint is known and equal. The
+  fingerprint is read from the `findings_open` entry (fences at `fence_schema_version` 6),
+  else from the `evaluated_findings` entry of the same fence with the same finding id. A
+  block whose fingerprint cannot be resolved is not cleared by a fingerprinted entry, and
+  the refusal says so; an entry without a `fingerprint` matches on path and `rule_id`.
+  The suggested entry in a post comment and in a merge refusal names the `fingerprint`
+  when the finding has one.
 - A matched finding is annotated with the disposition and demoted to advisory. It is never
   deleted and is still printed.
 - A security-floor finding cannot be cleared by `by_design`. The entry is reported as

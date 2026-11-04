@@ -623,8 +623,9 @@ every fence that carries it.
 
 - A fence carries a finding's `fingerprint` in `evaluated_findings` only when a registry is
   configured; a ruling is keyed to it, so a fence without fingerprints cannot be ruled on.
-  Unlike a disposition that narrows by fingerprint (which never counts here), a ruling
-  matches only a finding that carries the very fingerprint it names, so its match is shown.
+  Like a disposition that narrows by fingerprint, a ruling
+  matches only a finding that carries the very fingerprint it names, so its match is shown. A recorded block carries the fingerprint in `findings_open` from
+  `fence_schema_version` 6 on, independently of the registry.
 - **One roster for the gate and the ruling verb.** The reviewer roles a merge requires are the
   roles the tracked gate file declares at the pull request's base commit (a floor) plus the
   `--required-reviewer` values the merge is given. `loadout-ruling record` resolves them with
@@ -664,7 +665,7 @@ every fence that carries it.
 |---|---|
 | `F` or `G` is STALE | Refused, naming the fence head and the merge head. |
 | `F` is CLEAN, `G` is anything else | Refused, naming the difference: the expired entry, the policy base that moved, the degraded input, the findings that now block. |
-| `F` is BLOCKED, `G` is CLEAN, the fence's `findings_open` is non-empty, and **every** finding in it is individually matched by a standing disposition on the live base | Passes. The gate names each applied disposition on stderr, in the merge result and in the attestation. A disposition on some other finding clears nothing; a recorded finding that stopped blocking for any other reason, or that no disposition matches, refuses the merge and is named. A BLOCKED fence with an empty or absent `findings_open` refuses (nothing can be shown to be cleared). Finding ids are derived from file, line and rule and can be shared by findings with different messages: every finding holding the id must be covered. A disposition that narrows by `fingerprint` never counts: the fence does not carry fingerprints, so it cannot be shown to match. |
+| `F` is BLOCKED, `G` is CLEAN, the fence's `findings_open` is non-empty, and **every** finding in it is individually matched by a standing disposition on the live base | Passes. The gate names each applied disposition on stderr, in the merge result and in the attestation. A disposition on some other finding clears nothing; a recorded finding that stopped blocking for any other reason, or that no disposition matches, refuses the merge and is named. A BLOCKED fence with an empty or absent `findings_open` refuses (nothing can be shown to be cleared). Finding ids are derived from file, line and rule and can be shared by findings with different messages: every finding holding the id must be covered. A disposition that narrows by `fingerprint` counts only when the block's fingerprint is known and equal: it is read from the `findings_open` entry, else from the `evaluated_findings` entry of the same fence with the same finding id (so a fence posted before `findings_open` carried it still works). A block whose fingerprint cannot be resolved is not matched by a fingerprinted disposition (the refusal names the reason); a disposition without a `fingerprint` matches on path and rule. |
 | BLOCKED in `F` or `G` (otherwise) | Refused, naming each open blocking finding and the exact `dispositions.yaml` entry that would clear it (or that the security floor forbids clearing it as `by_design`). |
 | DEGRADED in `F` or `G`, nothing blocked | Refused, naming the reasons, unless `merge.evaluator.allow_degraded` is true for the role. |
 | Both CLEAN | Passes, subject to the rest of the gate chain. |
