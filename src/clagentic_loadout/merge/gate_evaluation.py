@@ -114,6 +114,11 @@ class GateEvaluation:
     #: The audited waiver line when the reviewer accepted a docs-only
     #: justification (see merge.fence_state.docs_only_waiver_line); None otherwise.
     docs_only_waiver: str | None = None
+    #: Set on the record of a fence that a later clearance by the same reviewer
+    #: superseded (merge.fence_clearance): one line per finding, naming the
+    #: clearing comment and the evidence. Empty, and absent from the serialised
+    #: form, for every other evaluation.
+    applied_clearances: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -131,12 +136,19 @@ class GateEvaluation:
             out["unapplied_rulings"] = list(self.unapplied_rulings)
         if self.docs_only_waiver is not None:
             out["docs_only_waiver"] = self.docs_only_waiver
+        if self.applied_clearances:
+            out["applied_clearances"] = list(self.applied_clearances)
         return out
 
     def attestation_line(self) -> str:
         """One line for the merge-completion attestation."""
         if not self.evaluated:
             return f"{self.reviewer}: not evaluated (status asserted by the reviewer)"
+        if self.applied_clearances:
+            return (
+                f"{self.reviewer}: fence {self.fence_outcome} superseded by the reviewer's own "
+                f"clearance at the same head: {'; '.join(self.applied_clearances)}"
+            )
         text = f"{self.reviewer}: fence {self.fence_outcome}, gate {self.gate_outcome}"
         if self.applied_dispositions:
             text += f"; disposition applied: {'; '.join(self.applied_dispositions)}"
@@ -400,15 +412,15 @@ def _finding_dicts(state_findings: Sequence[Mapping[str, Any]]) -> list[dict[str
     return [dict(item) for item in state_findings]
 
 
-def _recompute(
+def recompute_at_gate(
     verdict: ReviewerVerdict,
     *,
     current_head_sha: str,
     live_base_sha: str,
     policy_reader: PolicyReader | None,
     visibility: str | None,
-    config_root: str | Path | None,
-    today: dt.date | None,
+    config_root: str | Path | None = None,
+    today: dt.date | None = None,
     ruling_scope: RulingScope | None = None,
 ) -> Verdict:
     """The gate's own evaluation of the fence's findings. Policy is read through
@@ -586,7 +598,7 @@ def _apply_decision_table(
             f"accepted. Have the reviewer post again, then retry the merge gate."
         )
 
-    computed = _recompute(
+    computed = recompute_at_gate(
         verdict,
         current_head_sha=current_head_sha,
         live_base_sha=live_base_sha,
@@ -739,4 +751,4 @@ def _apply_decision_table(
     )
 
 
-__all__ = ["GateEvaluation", "evaluate_at_gate", "unmatched_recorded_blocks"]
+__all__ = ["GateEvaluation", "evaluate_at_gate", "recompute_at_gate", "unmatched_recorded_blocks"]

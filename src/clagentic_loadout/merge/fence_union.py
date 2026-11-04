@@ -12,9 +12,13 @@ The rule, in the merge gate's terms:
   - Every fence by the role at the PR head is a candidate, and the gate runs its
     full chain on each. A candidate that is refused refuses the role, whatever
     order the fences were posted in.
-  - A finding one fence kept is never covered by another fence dropping it. The
-    only thing that clears a kept finding is a disposition in the base branch,
-    which the gate chain applies to each fence on its own.
+  - A finding one fence kept is never covered by another fence merely leaving it
+    out or dropping it without evidence. A kept finding is cleared by a
+    disposition in the base branch, which the gate chain applies to each fence on
+    its own, or, for a finding the base-branch policy classes as process record,
+    by the SAME role clearing it with evidence at the same head
+    (merge.fence_clearance, applied by the merge verb to the fences collected
+    here).
   - With exactly one fence at the head the result is the single-fence result:
     this module reads the newest fence first, exactly as the reader always did.
 
