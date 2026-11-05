@@ -66,6 +66,11 @@ class _StubHost:
         self.branch_tip: str | None = _PR_SHA
         self.protected = False
         self.delete_status = 204
+        self.pr_sha = _PR_SHA
+        # A push that lands between the close and the cleanup: the branch tip
+        # and the PR record's head both move once the close has happened.
+        self.advance_on_close = False
+        self.fail_pr_reads = 0
         for key, value in overrides.items():
             setattr(self, key, value)
 
@@ -73,7 +78,7 @@ class _StubHost:
         head_repo = {"full_name": self.head_repo} if self.head_repo else None
         return {
             "state": "closed",
-            "head": {"ref": self.head_ref, "sha": _PR_SHA, "repo": head_repo},
+            "head": {"ref": self.head_ref, "sha": self.pr_sha, "repo": head_repo},
             "base": {"ref": self.base_ref, "repo": {"full_name": f"{_OWNER}/{_REPO}"}},
         }
 
@@ -98,8 +103,16 @@ class _StubHost:
         route = self._route(method, req.full_url)
         self.calls.append((method, route))
         if route in ("close",):
+            if self.advance_on_close:
+                self.branch_tip = _NEWER_SHA
+                self.pr_sha = _NEWER_SHA
             return _Resp(200, b"{}")
         if route == "pr":
+            if self.fail_pr_reads > 0:
+                self.fail_pr_reads -= 1
+                raise urllib.error.HTTPError(
+                    req.full_url, 500, "err", {}, io.BytesIO(b"{}")
+                )
             return _Resp(200, json.dumps(self._pr()).encode())
         if route == "repo":
             return _Resp(200, json.dumps({"default_branch": self.default_branch}).encode())
@@ -187,6 +200,29 @@ class TestDeleteBranch:
         assert host.routes == ["close", "pr"]
         assert "branch deletion" not in err
 
+    def test_push_after_pre_close_read_is_kept(self, platform, capsys):
+        host = _StubHost(platform, advance_on_close=True)
+        code, payload, _ = _run(host, capsys, "--delete-branch")
+        assert code == close_verb.EXIT_OK
+        assert payload["branch_deletion"]["outcome"] == "kept"
+        assert payload["branch_deletion"]["reason"] == "head-advanced"
+        assert host.routes[:3] == ["pr", "close", "pr"]
+        assert "delete" not in host.routes
+
+    def test_pre_close_read_failure_keeps_branch_and_still_closes(self, platform, capsys):
+        host = _StubHost(platform, fail_pr_reads=1)
+        code, payload, _ = _run(host, capsys, "--delete-branch")
+        assert code == close_verb.EXIT_OK
+        assert payload["readback"]["verified"] is True
+        assert payload["branch_deletion"]["outcome"] == "kept"
+        assert payload["branch_deletion"]["reason"] == "head-unknown"
+        assert "delete" not in host.routes
+
+    def test_flag_absent_adds_no_pre_close_read(self, platform, capsys):
+        host = _StubHost(platform)
+        _run(host, capsys)
+        assert host.routes[0] == "close"
+
     def test_unconfirmed_close_never_reaches_branch_deletion(self, platform, capsys):
         host = _StubHost(platform)
         original = host._pr
@@ -197,4 +233,4 @@ class TestDeleteBranch:
             token_provider=_Token(), authority_provider=_Allow(), opener=host.opener,
         )
         assert code == close_verb.EXIT_CLOSE_READBACK_FAILED
-        assert host.routes == ["close", "pr"]
+        assert host.routes == ["pr", "close", "pr"]

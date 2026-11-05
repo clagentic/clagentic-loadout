@@ -9,13 +9,19 @@ API under the same credential as the close:
   - the head repository is the PR's own repository (never a fork);
   - the branch is neither the PR's base branch nor the repository default;
   - the branch is not protected;
-  - the branch tip still equals the PR's head SHA.
+  - the branch tip still equals the expected head SHA.
 Any failed condition keeps the branch and names the reason.
+
+The expected head SHA is the PR head as read BEFORE the close call and passed
+in by the caller; it is never re-read after the close, so a push landing
+between the close and the cleanup is compared against the closed head, not
+against itself. Without an expected SHA nothing is deleted.
 
 REMAINING RACE: neither host offers a delete conditional on an expected SHA.
 The tip is read immediately before the delete call, so a push landing in the
 window between that read and the delete is still lost. The window is one HTTP
-round trip; it cannot be closed from the client side.
+round trip; it cannot be closed from the client side. The earlier window (PR
+read to close) is covered by the pre-close expected SHA.
 """
 
 from __future__ import annotations
@@ -36,6 +42,7 @@ REASON_DEFAULT_BRANCH = "default-branch"
 REASON_PROTECTED = "protected"
 REASON_HEAD_ADVANCED = "head-advanced"
 REASON_ALREADY_ABSENT = "branch-absent"
+REASON_HEAD_UNKNOWN = "head-unknown"
 
 
 @dataclass(frozen=True)
@@ -76,23 +83,35 @@ def delete_head_branch(
     owner: str,
     repo: str,
     *,
+    expected_head_sha: str,
     get_pr_info: Callable[[], dict[str, Any]],
     get_default_branch: Callable[[], str],
     get_branch_state: Callable[[str], tuple[str, bool] | None],
     delete_branch: Callable[[str], None],
 ) -> BranchDeletion:
     """Apply the guard chain and delete the PR's head branch when it passes.
-    Never raises for a host failure: that is reported as outcome=error."""
+    `expected_head_sha` is the PR head SHA read before the close; empty means
+    that read failed, and the branch is kept. Never raises for a host failure:
+    that is reported as outcome=error."""
     branch = ""
     try:
         pr = get_pr_info()
         head = pr.get("head") if isinstance(pr.get("head"), dict) else {}
         base = pr.get("base") if isinstance(pr.get("base"), dict) else {}
         branch = head.get("ref") or ""
-        pr_sha = head.get("sha") or ""
-        if not branch or not pr_sha:
+        post_close_sha = head.get("sha") or ""
+        if not branch:
+            return BranchDeletion(OUTCOME_ERROR, branch, "the PR record carries no head branch")
+        if not expected_head_sha:
             return BranchDeletion(
-                OUTCOME_ERROR, branch, "the PR record carries no head branch or head SHA"
+                OUTCOME_KEPT, branch, REASON_HEAD_UNKNOWN,
+                "the PR head SHA could not be read before the close",
+            )
+        pr_sha = expected_head_sha
+        if post_close_sha and post_close_sha != pr_sha:
+            return BranchDeletion(
+                OUTCOME_KEPT, branch, REASON_HEAD_ADVANCED,
+                f"PR head {post_close_sha} differs from head at close {pr_sha}",
             )
 
         head_repo = _full_name(head.get("repo"))

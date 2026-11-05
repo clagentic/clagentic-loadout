@@ -75,6 +75,7 @@ from clagentic_loadout.merge.authority import (
 )
 from clagentic_loadout.merge.errors import (
     AuthorityDeniedError,
+    GateFactUnavailableError,
     MergeExecutionError,
     MergeUsageError,
     PlatformMismatchError,
@@ -499,6 +500,18 @@ def _run(
     except PlatformMismatchError as exc:
         _fail(str(exc), code=EXIT_WRONG_PLATFORM)
 
+    # Head SHA as of BEFORE the close, read only under --delete-branch (flag
+    # absent: no added host call). Branch cleanup compares the branch tip with
+    # this value, so a push landing after this read is never deleted. A failed
+    # read leaves it empty: the close proceeds and cleanup keeps the branch.
+    head_sha_at_close = ""
+    if args.delete_branch:
+        try:
+            pre_head = get_pr_info_callable(args.pr_number).get("head")
+            head_sha_at_close = (pre_head.get("sha") if isinstance(pre_head, dict) else "") or ""
+        except (GateFactUnavailableError, MergeExecutionError):
+            head_sha_at_close = ""
+
     # 4. Execute the close.
     print(
         f"close-pr: closing PR #{args.pr_number} in {owner}/{repo} "
@@ -545,6 +558,7 @@ def _run(
         deletion = branch_cleanup.delete_head_branch(
             owner,
             repo,
+            expected_head_sha=head_sha_at_close,
             get_pr_info=lambda: get_pr_info_callable(args.pr_number),
             **branch_ops,
         )
