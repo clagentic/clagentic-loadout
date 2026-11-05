@@ -646,6 +646,110 @@ def close_pr(
         ) from exc
 
 
+def get_default_branch(
+    api_base: str,
+    owner: str,
+    repo: str,
+    *,
+    token: str,
+    opener=None,
+) -> str:
+    """Fetch the repository's default branch name (GET .../repos/{owner}/{repo}).
+
+    Raises merge.errors.GateFactUnavailableError on any non-200 response,
+    network failure or a body without a default branch: an unreadable default
+    is never replaced by a guess."""
+    try:
+        status, raw = git_host_api.request(
+            api_base, "GET", f"/api/v1/repos/{owner}/{repo}", token, opener=opener
+        )
+    except git_host_api.GitHostApiError as exc:
+        raise GateFactUnavailableError(
+            f"cannot read the default branch of {owner}/{repo}: {exc}"
+        ) from exc
+    if status != 200:
+        raise GateFactUnavailableError(
+            f"cannot read the default branch of {owner}/{repo}: HTTP {status}"
+        )
+    body = git_host_api.parse_json_body(raw)
+    name = body.get("default_branch") if isinstance(body, dict) else None
+    if not isinstance(name, str) or not name:
+        raise GateFactUnavailableError(
+            f"the host returned no default branch for {owner}/{repo}"
+        )
+    return name
+
+
+def get_branch_state(
+    api_base: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    token: str,
+    opener=None,
+) -> tuple[str, bool] | None:
+    """Read a branch's (tip commit SHA, protected flag) in one call
+    (GET .../branches/{branch}). Returns None when the branch does not exist
+    (HTTP 404). Raises merge.errors.GateFactUnavailableError on any other
+    non-200 response, network failure or a body without a commit id."""
+    quoted = urllib.parse.quote(branch, safe="/")
+    try:
+        status, raw = git_host_api.request(
+            api_base,
+            "GET",
+            f"/api/v1/repos/{owner}/{repo}/branches/{quoted}",
+            token,
+            opener=opener,
+        )
+    except git_host_api.GitHostApiError as exc:
+        raise GateFactUnavailableError(
+            f"cannot read branch {branch!r} in {owner}/{repo}: {exc}"
+        ) from exc
+    if status == 404:
+        return None
+    if status != 200:
+        raise GateFactUnavailableError(
+            f"cannot read branch {branch!r} in {owner}/{repo}: HTTP {status}"
+        )
+    body = git_host_api.parse_json_body(raw)
+    commit = body.get("commit") if isinstance(body, dict) else None
+    sha = commit.get("id") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not sha:
+        raise GateFactUnavailableError(
+            f"the host returned no commit for branch {branch!r} in {owner}/{repo}"
+        )
+    return sha, body.get("protected") is True
+
+
+def delete_branch(
+    api_base: str,
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    token: str,
+    opener=None,
+) -> None:
+    """Delete a branch (DELETE .../branches/{branch}). The endpoint takes no
+    expected-SHA precondition, so the caller's pre-delete read is the only
+    guard. Raises merge.errors.MergeExecutionError on any non-2xx response or
+    network failure."""
+    quoted = urllib.parse.quote(branch, safe="/")
+    try:
+        git_host_api.request(
+            api_base,
+            "DELETE",
+            f"/api/v1/repos/{owner}/{repo}/branches/{quoted}",
+            token,
+            opener=opener,
+        )
+    except git_host_api.GitHostApiError as exc:
+        raise MergeExecutionError(
+            f"Forgejo branch delete FAILED for {branch!r} in {owner}/{repo}: {exc}"
+        ) from exc
+
+
 def _extract_http_status(git_host_api_error_message: str) -> int | None:
     """Best-effort extraction of the HTTP status code from a
     transport.git_host_api.GitHostApiError message of the shape
@@ -661,10 +765,13 @@ __all__ = [
     "VALID_DO_VALUES",
     "assert_platform_is_forgejo",
     "close_pr",
+    "delete_branch",
     "fetch_branch_commit_subjects",
     "fetch_changed_files",
     "fetch_ci_status",
     "fetch_comments",
+    "get_branch_state",
+    "get_default_branch",
     "get_pr_head_sha",
     "get_pr_info",
     "get_pr_title",
