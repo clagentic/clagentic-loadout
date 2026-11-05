@@ -113,11 +113,18 @@ def _scenario(tmp_path, *, shape: str, steps=True, platform="forgejo"):
     return work, merged, marker
 
 
+def _pr_info(work) -> dict:
+    """A PR payload whose head is a commit the checkout holds: the refusal before
+    the merge builds the merge result from it."""
+    head = _git(["rev-parse", "HEAD"], work).strip()
+    return {"head": {"sha": head}, "title": "feat: a change", "base": ms.default_base()}
+
+
 def _merge(work, merged, platform="forgejo", **extra):
     if platform == "github":
-        opener = ms.make_merge_github_opener(merged_sha=merged)
+        opener = ms.make_merge_github_opener(pr_info=_pr_info(work), merged_sha=merged)
     else:
-        opener = ms.make_merge_opener()
+        opener = ms.make_merge_opener(pr_info=_pr_info(work))
     argv = ms.merge_base_args(**{"--repo-path": str(work), "--platform": platform, **extra})
     return verb.main(
         argv,
@@ -583,7 +590,7 @@ class TestRefusalStopsTheMerge:
     @staticmethod
     def _merge_recording(work, merged):
         seen: list[tuple[str, str]] = []
-        inner = ms.make_merge_opener()
+        inner = ms.make_merge_opener(pr_info=_pr_info(work))
 
         def opener(req, timeout=15):
             seen.append((req.get_method(), req.full_url))
