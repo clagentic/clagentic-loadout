@@ -589,6 +589,10 @@ from clagentic_loadout.merge.merge_result_clone import (
     merge_result_clone,
 )
 from clagentic_loadout.merge.pre_check_env import pre_check_env
+from clagentic_loadout.merge.premerge_steps import (
+    MergedStepsUnreadableError,
+    read_merged_commit_steps,
+)
 from clagentic_loadout.merge.pre_checks_config import decide_pre_checks_env_passthrough
 from clagentic_loadout.merge.pre_merge_canary import (
     PreMergeCanaryConfigError,
@@ -974,18 +978,27 @@ def _require_anchored_fetch_destination(
 
 
 def _refuse_tool_tree_steps_before_merge(
-    args: argparse.Namespace, base_branch: str, pr_number: int, base_sha: str
+    args: argparse.Namespace,
+    base_branch: str,
+    pr_number: int,
+    base_sha: str,
+    head_sha: str,
+    fetch_auth: MergeFetchAuth,
 ) -> None:
     """Refuse, before the server-side merge, post-merge steps the tool tree cannot
     run. Whether the steps will run in a tool tree depends only on --repo-path being
     a clean checkout of the PR's base branch, which is known now; deciding after the
-    merge would leave the PR merged with no deploy. The same checks run again after
-    the merge against the steps actually run, in case the checkout changed between
-    the two.
+    merge would leave the PR merged with no deploy.
+
+    The steps judged are those of the commit that will be merged (the PR head
+    merged onto the base tip), the source the post-merge path replaces its own
+    list with, so a step the PR removes is not refused and one it adds is. The
+    same checks run again after the merge against the steps actually run, in case
+    the checkout changed between the two. Steps that cannot be read from that
+    commit refuse; the working tree never stands in for them.
 
     Does nothing when no step will run (--skip-post-merge, no --repo-path, the tree
-    sync turned off) or when the checkout is safe to advance. A config that cannot be
-    read is left for step 10, which reports it.
+    sync turned off) or when the checkout is safe to advance.
     """
     if args.skip_post_merge or not args.repo_path:
         return
@@ -993,10 +1006,8 @@ def _refuse_tool_tree_steps_before_merge(
         return
     try:
         declared = resolve_git_working_tree(args.repo_path)
-        steps = load_post_merge_steps(args.repo_path)
+        gate_tree = resolve_gate_git_tree(args.repo_path)
     except PostMergeConfigError:
-        return
-    if not steps:
         return
     git_tree = str(declared) if declared is not None else args.repo_path
     # The merged commit does not exist yet, so the checkout is judged against the
@@ -1004,11 +1015,28 @@ def _refuse_tool_tree_steps_before_merge(
     if unsafe_tree_reason(git_tree, base_branch, base_sha) is None:
         return
     try:
-        refuse_detached_steps(steps)
-        refuse_steps_naming_repo_path(steps, git_tree)
-    except TreeSyncError as exc:
+        merged = read_merged_commit_steps(
+            gate_tree,
+            args.repo_path,
+            base_sha=base_sha,
+            head_sha=head_sha,
+            base_branch=base_branch,
+            fetch_auth=fetch_auth,
+        )
+    except MergedStepsUnreadableError as exc:
         _fail(
             f"{exc}; refused before merging, so PR #{pr_number} was NOT merged",
+            code=EXIT_POST_MERGE_FAILED,
+        )
+    if not merged.steps:
+        return
+    try:
+        refuse_detached_steps(merged.steps)
+        refuse_steps_naming_repo_path(merged.steps, git_tree)
+    except TreeSyncError as exc:
+        _fail(
+            f"{exc} (post_merge_steps read from merged commit {merged.commit})"
+            f"; refused before merging, so PR #{pr_number} was NOT merged",
             code=EXIT_POST_MERGE_FAILED,
         )
 
@@ -2316,7 +2344,12 @@ def _run(
     # The post-merge steps are judged against the tool tree now too, for the same
     # reason: a refused step must stop the merge, not follow it.
     _refuse_tool_tree_steps_before_merge(
-        args, resolve_base_branch(pr_info), args.pr_number, live_base_sha
+        args,
+        resolve_base_branch(pr_info),
+        args.pr_number,
+        live_base_sha,
+        current_head_sha,
+        fetch_auth,
     )
 
     # 9. All gates passed -- execute the merge.
