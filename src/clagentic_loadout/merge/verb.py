@@ -649,7 +649,7 @@ from clagentic_loadout.merge.tool_merge_tree import (
 )
 from clagentic_loadout.merge.fetch_transport import MergeFetchAuth, require_fetch_destination
 from clagentic_loadout.platform_detect import DEFAULT_GITHUB_HOSTNAME, PLATFORM_FORGEJO, PLATFORM_GITHUB
-from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, find_git_top_level
 from clagentic_loadout.task_id_guard import (
     InvalidTaskIdGuardConfigError,
     TaskIdGuardViolation,
@@ -2825,14 +2825,23 @@ def _run(
                 # that the same as "absent from git" -- None, not comparable,
                 # skip -- rather than attempting an outside-the-repository git
                 # show call.
+                # A `<sha>:<path>` spec resolves from the git TOP LEVEL, not
+                # from cwd, so when --repo-path (and thus git_tree_path) is a
+                # subdirectory of its git tree with no `git_working_tree`
+                # declared, the relative paths and the git reads must be
+                # expressed against that top level; otherwise a subdirectory
+                # config reads the top-level file and a top-level config
+                # reads as untrackable. Identical to git_tree_path whenever it
+                # already is the top level (flat and wrapper layouts).
+                git_read_tree = find_git_top_level(git_tree_path) or Path(git_tree_path)
                 git_relative_config_path, git_relative_legacy_path = (
                     resolve_git_tree_relative_config_paths(
-                        args.repo_path, git_tree_path
+                        args.repo_path, git_read_tree
                     )
                 )
                 try:
                     landed_steps = load_post_merge_steps_from_git_sha(
-                        git_tree_path,
+                        git_read_tree,
                         landed_sha,
                         config_relative_path=git_relative_config_path,
                         legacy_relative_path=git_relative_legacy_path,
@@ -2858,7 +2867,7 @@ def _run(
                 # two-case rationale this distinguishes.
                 if landed_steps is None and pre_sync_head_sha is not None:
                     if config_path_tracked_at_git_sha(
-                        git_tree_path,
+                        git_read_tree,
                         pre_sync_head_sha,
                         config_relative_path=git_relative_config_path,
                         legacy_relative_path=git_relative_legacy_path,
