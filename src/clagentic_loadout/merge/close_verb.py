@@ -46,6 +46,13 @@ this package's own AGENT.md contract reserves to a merge-authority role):
      merge_pr contract: MergeExecutionError on any non-2xx response or
      network failure, never a silent partial success).
 
+OPT-IN BRANCH CLEANUP: with --delete-branch, after the close readback
+confirms, merge.branch_cleanup deletes the PR's head branch under the same
+credential, subject to its guard chain (same-repo head, not base/default, not
+protected, tip still equal to the PR head SHA). Its outcome is reported under
+a separate 'branch_deletion' key and never changes the close exit code.
+Without the flag the verb's behaviour and output are unchanged.
+
 The state-change body ({"state": "closed"}) is constructed by the two
 close_pr backend functions themselves, in-process — it never touches
 --body-stdin/--body-env or transport.git_host_api.validate_body_stdin_content
@@ -60,7 +67,7 @@ import json
 import sys
 
 from clagentic_loadout._version import get_version
-from clagentic_loadout.merge import forgejo_backend, github_backend
+from clagentic_loadout.merge import branch_cleanup, forgejo_backend, github_backend
 from clagentic_loadout.merge.authority import (
     AuthorityProvider,
     StaticRoleAuthorityProvider,
@@ -68,6 +75,7 @@ from clagentic_loadout.merge.authority import (
 )
 from clagentic_loadout.merge.errors import (
     AuthorityDeniedError,
+    GateFactUnavailableError,
     MergeExecutionError,
     MergeUsageError,
     PlatformMismatchError,
@@ -168,7 +176,7 @@ def _resolve_backend(
     opener,
 ):
     """Resolve platform guard -> mint/resolve token -> return
-    (call_close_pr, get_pr_info). Mirrors merge.verb._resolve_backend's shape
+    (call_close_pr, get_pr_info, branch_ops). Mirrors merge.verb._resolve_backend's shape
     (lr-9c69 precedent): the platform guard ALWAYS runs before token
     resolution, for both platforms.
 
@@ -179,6 +187,11 @@ def _resolve_backend(
     the PR's state AFTER the close PATCH, via the SAME get_pr_info() each
     backend already provides for merge.verb's gate chain (no second PR-read
     endpoint added).
+
+    `branch_ops` is a dict of the callables merge.branch_cleanup.
+    delete_head_branch needs (get_default_branch, get_branch_state,
+    delete_branch), bound to the same backend and the same token as the
+    close; nothing is called unless --delete-branch is set.
 
     Raises CloseVerbError(code=EXIT_USAGE) for an unrecognized --platform
     value, PlatformMismatchError for a recognized-but-wrong platform (the
@@ -211,6 +224,18 @@ def _resolve_backend(
 
         def _get_pr_info(pr_number: int) -> dict:
             return github_backend.get_pr_info(owner, repo, pr_number, token=token, opener=opener)
+
+        branch_ops = {
+            "get_default_branch": lambda: github_backend.get_default_branch(
+                owner, repo, token=token, opener=opener
+            ),
+            "get_branch_state": lambda branch: github_backend.get_branch_state(
+                owner, repo, branch, token=token, opener=opener
+            ),
+            "delete_branch": lambda branch: github_backend.delete_branch(
+                owner, repo, branch, token=token, opener=opener
+            ),
+        }
     else:
         def _close(pr_number: int) -> None:
             forgejo_backend.close_pr(
@@ -221,7 +246,19 @@ def _resolve_backend(
             return forgejo_backend.get_pr_info(
                 git_host_base, owner, repo, pr_number, token=token, opener=opener
             )
-    return _close, _get_pr_info
+
+        branch_ops = {
+            "get_default_branch": lambda: forgejo_backend.get_default_branch(
+                git_host_base, owner, repo, token=token, opener=opener
+            ),
+            "get_branch_state": lambda branch: forgejo_backend.get_branch_state(
+                git_host_base, owner, repo, branch, token=token, opener=opener
+            ),
+            "delete_branch": lambda branch: forgejo_backend.delete_branch(
+                git_host_base, owner, repo, branch, token=token, opener=opener
+            ),
+        }
+    return _close, _get_pr_info, branch_ops
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +340,17 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "(repeatable). When omitted, falls back to "
         f"{ALLOWED_NAMESPACES_ENV_VAR} (comma-separated); when neither is "
         f"set, no namespace restriction is enforced.",
+    )
+    parser.add_argument(
+        "--delete-branch",
+        action="store_true",
+        dest="delete_branch",
+        help="After the close is confirmed, delete the PR's head branch. "
+        "Deletes only a same-repository branch that is not the base or "
+        "default branch, is not protected, and whose tip still equals the "
+        "PR head SHA; otherwise the branch is kept and the reason is "
+        "reported under 'branch_deletion'. The branch outcome never changes "
+        "the close result or exit code.",
     )
     return parser
 
@@ -440,7 +488,7 @@ def _run(
     # 3. Platform guard (BOTH directions, fail-closed, BEFORE any credential
     # mint or API call) -> credential resolution -> resolved close callable.
     try:
-        close_callable, get_pr_info_callable = _resolve_backend(
+        close_callable, get_pr_info_callable, branch_ops = _resolve_backend(
             args.platform,
             owner=owner,
             repo=repo,
@@ -451,6 +499,18 @@ def _run(
         )
     except PlatformMismatchError as exc:
         _fail(str(exc), code=EXIT_WRONG_PLATFORM)
+
+    # Head SHA as of BEFORE the close, read only under --delete-branch (flag
+    # absent: no added host call). Branch cleanup compares the branch tip with
+    # this value, so a push landing after this read is never deleted. A failed
+    # read leaves it empty: the close proceeds and cleanup keeps the branch.
+    head_sha_at_close = ""
+    if args.delete_branch:
+        try:
+            pre_head = get_pr_info_callable(args.pr_number).get("head")
+            head_sha_at_close = (pre_head.get("sha") if isinstance(pre_head, dict) else "") or ""
+        except (GateFactUnavailableError, MergeExecutionError):
+            head_sha_at_close = ""
 
     # 4. Execute the close.
     print(
@@ -486,10 +546,25 @@ def _run(
         f"{close_readback.detail.get('state')!r}",
         file=sys.stderr,
     )
-    print(json.dumps({
+    envelope = {
         "pr_number": args.pr_number, "owner": owner, "repo": repo,
         READBACK_ENVELOPE_KEY: close_readback.to_dict(),
-    }))
+    }
+    if args.delete_branch:
+        # Reached only after the readback above confirmed the close. The
+        # outcome is reported beside the close result and never alters it: a
+        # kept branch or a host error here still returns EXIT_OK, because the
+        # PR is closed and callers key retry decisions off this exit code.
+        deletion = branch_cleanup.delete_head_branch(
+            owner,
+            repo,
+            expected_head_sha=head_sha_at_close,
+            get_pr_info=lambda: get_pr_info_callable(args.pr_number),
+            **branch_ops,
+        )
+        print(f"close-pr: {deletion.describe(owner, repo)}", file=sys.stderr)
+        envelope["branch_deletion"] = deletion.to_dict()
+    print(json.dumps(envelope))
     return EXIT_OK
 
 

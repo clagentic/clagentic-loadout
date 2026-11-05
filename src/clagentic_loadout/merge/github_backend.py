@@ -693,15 +693,115 @@ def close_pr(
     )
 
 
+def get_default_branch(
+    owner: str,
+    repo: str,
+    *,
+    token: str,
+    opener=None,
+) -> str:
+    """Fetch the repository's default branch name (GET /repos/{owner}/{repo}).
+
+    Raises merge.errors.GateFactUnavailableError on any non-200 response,
+    network failure or a body without a default branch."""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}"
+    try:
+        status, body = _github_request("GET", url, token, opener=opener)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise GateFactUnavailableError(
+            f"cannot read the default branch of {owner}/{repo}: {exc}"
+        ) from exc
+    if status != 200:
+        raise GateFactUnavailableError(
+            f"cannot read the default branch of {owner}/{repo}: HTTP {status}"
+        )
+    name = body.get("default_branch") if isinstance(body, dict) else None
+    if not isinstance(name, str) or not name:
+        raise GateFactUnavailableError(
+            f"the host returned no default branch for {owner}/{repo}"
+        )
+    return name
+
+
+def get_branch_state(
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    token: str,
+    opener=None,
+) -> tuple[str, bool] | None:
+    """Read a branch's (tip commit SHA, protected flag) in one call
+    (GET /repos/{owner}/{repo}/branches/{branch}). Returns None when the
+    branch does not exist (HTTP 404). Raises
+    merge.errors.GateFactUnavailableError on any other non-200 response,
+    network failure or a body without a commit SHA."""
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/branches/{urllib.parse.quote(branch, safe='/')}"
+    try:
+        status, body = _github_request("GET", url, token, opener=opener)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise GateFactUnavailableError(
+            f"cannot read branch {branch!r} in {owner}/{repo}: {exc}"
+        ) from exc
+    if status == 404:
+        return None
+    if status != 200:
+        raise GateFactUnavailableError(
+            f"cannot read branch {branch!r} in {owner}/{repo}: HTTP {status}"
+        )
+    commit = body.get("commit") if isinstance(body, dict) else None
+    sha = commit.get("sha") if isinstance(commit, dict) else None
+    if not isinstance(sha, str) or not sha:
+        raise GateFactUnavailableError(
+            f"the host returned no commit for branch {branch!r} in {owner}/{repo}"
+        )
+    return sha, body.get("protected") is True
+
+
+def delete_branch(
+    owner: str,
+    repo: str,
+    branch: str,
+    *,
+    token: str,
+    opener=None,
+) -> None:
+    """Delete a branch ref (DELETE /repos/{owner}/{repo}/git/refs/heads/{branch}).
+    The endpoint takes no expected-SHA precondition, so the caller's
+    pre-delete read is the only guard. Raises merge.errors.MergeExecutionError
+    on any non-2xx response or network failure."""
+    url = (
+        f"{GITHUB_API_BASE}/repos/{owner}/{repo}/git/refs/heads/"
+        f"{urllib.parse.quote(branch, safe='/')}"
+    )
+    try:
+        status, body = _github_request("DELETE", url, token, opener=opener)
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise MergeExecutionError(
+            f"GitHub branch delete FAILED for {branch!r} in {owner}/{repo}: {exc}"
+        ) from exc
+    if status in (200, 204):
+        return
+    server_msg = body.get("message", "") if isinstance(body, dict) else ""
+    detail = f": {server_msg}" if server_msg else ""
+    raise MergeExecutionError(
+        f"GitHub branch delete FAILED for {branch!r} in {owner}/{repo}: "
+        f"HTTP {status}{detail}"
+    )
+
+
 __all__ = [
     "DEFAULT_MERGE_METHOD",
     "GITHUB_API_BASE",
     "assert_platform_is_github",
     "close_pr",
+    "delete_branch",
     "fetch_branch_commit_subjects",
     "fetch_changed_files",
     "fetch_ci_status",
     "fetch_comments",
+    "get_branch_state",
+    "get_default_branch",
     "get_pr_head_sha",
     "get_pr_info",
     "get_pr_title",
