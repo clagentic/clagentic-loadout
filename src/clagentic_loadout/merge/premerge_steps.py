@@ -8,10 +8,13 @@ module builds the merge result in a private clone (merge.merge_result_clone,
 the same construction the pre_checks gate uses) and reads the steps from it.
 
 One case has no merged-commit source: a config file that is not git-tracked at
-the base commit and absent from the merge result. The post-merge path keeps the
-working-tree steps for exactly that case, so this module returns them too, and
-only then; a tracked config that the merge result no longer carries is zero
-steps, as it is after the merge.
+the checkout HEAD and absent from the merge result. The post-merge path judges
+tracking at the HEAD its declared working tree is on before it syncs (which is
+not the base commit when the checkout is not a clean checkout at the base tip),
+and keeps the working-tree steps for exactly that case, so this module resolves
+the same HEAD and returns them too, and only then; a tracked config that the
+merge result no longer carries is zero steps, as it is after the merge. An
+unresolvable HEAD counts as not tracked, as it does after the merge.
 """
 
 from __future__ import annotations
@@ -62,10 +65,23 @@ def _clone_head(clone: Path) -> str:
     return result.stdout.strip()
 
 
+def _checkout_head(checkout_tree: str | Path) -> str | None:
+    """HEAD of the declared working tree, or None when it cannot be resolved."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, cwd=str(checkout_tree),
+        )
+    except OSError:
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
 def read_merged_commit_steps(
     git_tree: str | Path,
     config_root: str | Path,
     *,
+    checkout_tree: str | Path,
     base_sha: str,
     head_sha: str,
     base_branch: str,
@@ -75,7 +91,9 @@ def read_merged_commit_steps(
 
     *git_tree* is the repository the merge result is built from, *config_root*
     the directory the repo's deployment config is resolved from (the two differ
-    only in a wrapper layout).
+    only in a wrapper layout). *checkout_tree* is the declared working tree whose
+    HEAD decides whether the config counts as tracked, the tree the post-merge
+    path calls its git tree.
 
     Raises:
         MergedStepsUnreadableError: the merge result cannot be built (a missing
@@ -104,8 +122,10 @@ def read_merged_commit_steps(
             f"could not be built: {exc}"
         ) from exc
     if steps is None:
-        tracked = config_path_tracked_at_git_sha(
-            git_tree, base_sha, config_relative_path=relative, legacy_relative_path=legacy
+        checkout_head = _checkout_head(checkout_tree)
+        tracked = checkout_head is not None and config_path_tracked_at_git_sha(
+            checkout_tree, checkout_head,
+            config_relative_path=relative, legacy_relative_path=legacy,
         )
         if tracked:
             steps = []

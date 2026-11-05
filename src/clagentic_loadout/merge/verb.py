@@ -1018,6 +1018,7 @@ def _refuse_tool_tree_steps_before_merge(
         merged = read_merged_commit_steps(
             gate_tree,
             args.repo_path,
+            checkout_tree=git_tree,
             base_sha=base_sha,
             head_sha=head_sha,
             base_branch=base_branch,

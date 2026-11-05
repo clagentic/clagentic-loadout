@@ -196,3 +196,64 @@ def test_a_head_commit_that_cannot_be_built_refuses(tmp_path, capsys, platform):
     assert code == verb.EXIT_POST_MERGE_FAILED
     assert "could not be built" in err and "was NOT merged" in err
     assert merge_calls == []
+
+
+_CONFIG = ".clagentic/loadout/config.yaml"
+
+
+def _head_that_deletes_the_config(work) -> str:
+    _git(["checkout", "-q", "pr-head"], work)
+    _git(["rm", "-q", _CONFIG], work)
+    head_sha = _commit(work, "head drops the config")
+    _git(["checkout", "-q", "feature/x"], work)
+    return head_sha
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_config_tracked_at_base_but_untracked_at_checkout_head_judges_working_tree(
+    tmp_path, capsys, platform
+):
+    work, base_sha, _ = _build(
+        tmp_path, platform=platform, base_steps=lambda w: _benign(), head_steps=lambda w: _changed(_benign())
+    )
+    head_sha = _head_that_deletes_the_config(work)
+    # The checkout's own HEAD stops tracking the config, though the base does;
+    # the file stays in the working tree, naming the repo path.
+    _git(["rm", "-q", "--cached", _CONFIG], work)
+    _commit(work, "checkout untracks the config")
+    write_merge_config(work, _naming(work))
+    assert _git(["rev-parse", "HEAD"], work) != base_sha
+    code, merge_calls = _run(work, head_sha, platform)
+    err = capsys.readouterr().err
+    assert code == verb.EXIT_POST_MERGE_FAILED
+    assert tool_merge_tree.OUTCOME_STEP_NAMES_REPO_PATH in err
+    assert merge_calls == []
+
+
+@pytest.mark.parametrize("platform", _PLATFORMS)
+def test_config_untracked_at_base_but_tracked_at_checkout_head_is_zero_steps(
+    tmp_path, capsys, platform
+):
+    work = tmp_path / "work"
+    work.mkdir()
+    ms.init_repo_with_origin(work)
+    if platform == "github":
+        make_origin_confirmable(work, url=CONFIRMABLE_GITHUB_ORIGIN)
+    base_sha = _git(["rev-parse", "HEAD"], work)
+    _git(["checkout", "-q", "-b", "pr-head"], work)
+    (work / "head.txt").write_text("head\n", encoding="utf-8")
+    _git(["add", "head.txt"], work)
+    head_sha = _commit(work, "head change")
+    _git(["checkout", "-q", "main"], work)
+    ms.record_base_sha(base_sha)
+    _git(["checkout", "-q", "-b", "feature/x"], work)
+    # The checkout's HEAD tracks a config the base does not, and the merge result
+    # (head onto base) has none: the merged commit declares zero steps.
+    write_merge_config(work, _naming(work))
+    _git(["add", _CONFIG], work)
+    _commit(work, "checkout tracks the config")
+    code, merge_calls = _run(work, head_sha, platform)
+    err = capsys.readouterr().err
+    assert "refused before merging" not in err
+    assert tool_merge_tree.OUTCOME_STEP_NAMES_REPO_PATH not in err
+    assert len(merge_calls) == 1
