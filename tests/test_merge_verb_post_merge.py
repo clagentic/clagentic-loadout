@@ -1360,7 +1360,11 @@ def _push_deleted_tracked_config_commit_to_origin(
 
 
 def _push_tracked_config_text_commit_to_origin(
-    tmp_path, config_text: str, *, parent_sha: str | None = None
+    tmp_path,
+    config_text: str,
+    *,
+    parent_sha: str | None = None,
+    config_path: str = ".clagentic/loadout/config.yaml",
 ) -> str:
     """Advance origin's own `main` tip (NOT the local clone's working tree or
     index at tmp_path) by one commit that rewrites the ALREADY-TRACKED
@@ -1410,7 +1414,6 @@ def _push_tracked_config_text_commit_to_origin(
         ["git", "read-tree", parent_sha], capture_output=True, text=True, cwd=str(tmp_path), env=env
     )
     assert read_tree.returncode == 0, read_tree.stderr
-    config_path = ".clagentic/loadout/config.yaml"
     update_index = subprocess.run(
         ["git", "update-index", "--add", "--cacheinfo", f"100644,{blob_sha},{config_path}"],
         capture_output=True, text=True, cwd=str(tmp_path), env=env,
@@ -1441,6 +1444,73 @@ def _push_tracked_config_text_commit_to_origin(
     )
     assert push.returncode == 0, push.stderr
     return new_sha
+
+
+class TestDriftCheckSubdirectoryRepoPath:
+    """--repo-path below its git top level with no `merge.git_working_tree`:
+    the drift check's git reads must resolve the same config file the
+    pre-sync read used, whichever of the subdirectory or the top level holds
+    it."""
+
+    def _seed(self, tmp_path, *, sub_config: bool) -> str:
+        _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        sub = tmp_path / "sub"
+        sub.mkdir()
+        (sub / "keep.txt").write_text("x\n", encoding="utf-8")
+        paths = ["sub/keep.txt"]
+        if sub_config:
+            _write_merge_config(sub, [])
+            paths.append("sub/.clagentic/loadout/config.yaml")
+        _run_git(["add", "-f", *paths], cwd=tmp_path)
+        _run_git(["commit", "-m", "add sub"], cwd=tmp_path)
+        _run_git(["push", "mirror", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=tmp_path)
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
+        _record_base_sha(
+            subprocess.run(
+                ["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=str(tmp_path)
+            ).stdout.strip()
+        )
+        return str(sub)
+
+    def _merge(self, tmp_path, sub, merged_sha):
+        argv = _base_args(**{"--repo-path": sub, "--platform": "github"})
+        return verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_github_opener(merged_sha=merged_sha),
+        )
+
+    def test_config_in_subdirectory_is_read_from_the_subdirectory(self, tmp_path):
+        # The top-level config stays at no steps; only the subdirectory's
+        # config gains a step in the merged commit. A read that resolved
+        # against the top level would see no drift and skip the step.
+        sub = self._seed(tmp_path, sub_config=True)
+        marker = tmp_path / "ran-from-sub-config.txt"
+        merged_sha = _push_tracked_config_text_commit_to_origin(
+            tmp_path,
+            yaml.safe_dump(
+                {"merge": {"post_merge_steps": [
+                    {"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}
+                ]}}
+            ),
+            config_path="sub/.clagentic/loadout/config.yaml",
+        )
+        assert self._merge(tmp_path, sub, merged_sha) == verb.EXIT_OK
+        assert marker.read_text() == "ok"
+
+    def test_config_at_top_level_stays_comparable_from_a_subdirectory(self, tmp_path):
+        # No config in the subdirectory, so the top-level file governs; the
+        # drift check must still be able to compare it, not treat it as
+        # untrackable.
+        sub = self._seed(tmp_path, sub_config=False)
+        marker = tmp_path / "ran-from-top-config.txt"
+        merged_sha = _push_tracked_config_commit_to_origin(
+            tmp_path,
+            [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ok')"]}],
+        )
+        assert self._merge(tmp_path, sub, merged_sha) == verb.EXIT_OK
+        assert marker.read_text() == "ok"
 
 
 class TestStalePreSyncConfigDriftCheck:
