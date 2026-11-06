@@ -1360,7 +1360,8 @@ finding: the evaluator does not read them, and neither does the merge gate.
     "classes": [{"defect_class": "...", "class_fix": "...", "findings": ["a.py:3:R1"]}],
     "more": 0,
     "class_repeated": false,
-    "text": "<fixed guidance text>"
+    "text": "<fixed guidance text>",
+    "tests": ["a.py: Cover the fix as one row in the area's existing test table, ..."]
   }
   ```
 
@@ -1373,15 +1374,30 @@ finding: the evaluator does not read them, and neither does the merge gate.
   empty when no finding states a class. For `churn` the findings are those the role's
   last fence carries; with the breaker off `churn` reads no comments, so it prints no
   `guidance`.
-- **Comment.** When `classes` is not empty, the posted comment has a `Class guidance`
-  section after the findings, worded by the tool from the same text. The staged body
+- **Test guidance.** `tests` holds one static line for each file that has a blocking
+  finding and one `NIT:` line when any finding is a nit; it is empty when there is
+  neither. The lines are fixed product text and never name a test to write beyond "one
+  row in the area's existing test table". The same rule, `TEST_RULE`, is what
+  `loadout-profile brief --role builder` returns under `guidance.tests` (beside
+  `guidance.classes`, the class guidance text) and what the reviewer prompt carries in a
+  `Tests` section after the class rules and before the diff, with the output contract
+  still last. The gate-class brief is unchanged. The prompt also says a nit gets no
+  prescribed test, and that a one-off test where a row would do, a test duplicating
+  existing coverage, or one test per variant is reportable as a maintainability defect
+  only under a rule id the deployment's rulebook provides. loadout ships no rulebook rule
+  and no rulebook content. A sample statement for a deployment's rulebook: "A new test
+  function or file where the area has a test table, a test that repeats existing coverage,
+  or a test per variant, is a maintainability defect; report it under this rule id."
+- **Comment.** When `classes` or `tests` is not empty, the posted comment has a `Class
+  guidance` section after the findings (when there are classes) and a `Test guidance`
+  section, worded by the tool from the same text. The staged body
   carries only the structure (`class_guidance`: class names, fixes, finding ids), never
   prose.
 - **Settings.** `review.profiles.<name>.defect_class` (boolean, default **true**): false
   removes the keys from the prompt, drops them from findings, and leaves the guidance
   and the fence version as they were before the keys existed. `guidance_in_comment`
-  (boolean, default **true**): false keeps `guidance` in the result and leaves the
-  section out of the comment. Both are in the user-level config only; a repo-level value
+  (boolean, default **true**): false keeps `guidance` (including `tests`) in the result and
+  leaves both sections out of the comment. Both are in the user-level config only; a repo-level value
   is ignored with a warning, and a value that is not a boolean is a profile error naming
   the key (exit **3**).
 

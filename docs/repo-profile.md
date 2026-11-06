@@ -30,6 +30,7 @@ deny:                           # optional; released-tool only
 tool_packages: [some_tool]      # optional; internal only
 test:                           # optional; the commands `clagentic-loadout test run` uses
   full: [python3, -m, pytest, "--junitxml={junit}"]
+  paths: ["spec/**"]            # extra globs that count as test files
 review:                         # optional; read only by gates, from the merge base
   docs_only:
     paths: ["docs/**/*.md"]     # files that may count as documentation
@@ -66,7 +67,12 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
 
 - **`test`** declares the argv `clagentic-loadout test run` uses for `full`, `impacted` and
   `files`, a default `base`, and named `tiers`. Review ignores it. Its shape and use are in
-  [repo-test.md](repo-test.md).
+  [repo-test.md](repo-test.md). `test.paths` lists globs of files that count as tests in
+  addition to the built-in rule (a `test`, `tests` or `__tests__` directory; a base name that
+  starts `test_` or ends `_test.<ext>`; a name containing `.test.` or `.spec.`; `conftest.py`).
+  It extends that rule and never replaces it, and documentation (`.md`, `.txt`, `.rst`, or
+  anything under `docs/`) is never a test whatever it matches. It is read from the merge base.
+  `loadout-profile brief --role builder` shows it under `tests.paths`.
 
 - **`review`** holds `docs_only`, the docs allowlist (next section), `scanners`, the category
   of each scanner's hits, and `clearance`, the findings a reviewer may clear itself (below).
