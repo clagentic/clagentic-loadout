@@ -52,12 +52,13 @@ class World:
     def __post_init__(self):
         self.opener = self.host.opener
 
-    def configure(self, escalation_round) -> None:
+    def configure(self, escalation_round, churn_count="key") -> None:
         self.env.cfg.mkdir(parents=True, exist_ok=True)
+        profile = {"carrier": ["c"], "escalation_round": escalation_round}
+        if churn_count is not None:
+            profile["churn_count"] = churn_count
         (self.env.cfg / "config.yaml").write_text(
-            yaml.safe_dump(
-                {"review": {"profiles": {"reviewer": {"carrier": ["c"], "escalation_round": escalation_round}}}}
-            ),
+            yaml.safe_dump({"review": {"profiles": {"reviewer": profile}}}),
             encoding="utf-8",
         )
 
@@ -136,7 +137,10 @@ def world(request, tmp_path, monkeypatch) -> World:
     monkeypatch.setenv("TMPDIR", str(tmp_path / "tmp"))
     monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "user-config")
     monkeypatch.setattr(github_app_config, "DEFAULT_USER_CONFIG_ROOT", tmp_path / "user-config")
-    return World(env, host, tmp_path, tmp_path)
+    world = World(env, host, tmp_path, tmp_path)
+    # These tests cover the per-key chain; the PR-wide default has its own table.
+    world.configure(2)
+    return world
 
 
 def _churn(result):
@@ -449,6 +453,138 @@ class TestThePostedCommentIsUntouched:
 
         assert "Restate the brief" not in world.host.last_body
         assert "STOP." not in world.host.last_body
+
+
+class TestPrWideCount:
+    """churn_count pr: every blocked head the role posted is a round, whatever it blocked on."""
+
+    OTHER = (("R2", "a.py", 9),)
+
+    def _rounds(self, result):
+        return _churn(result)["rounds"]
+
+    def test_a_second_blocked_round_on_different_keys_briefs(self, world, capsys):
+        world.configure(2, "pr")
+        world.seed(PRIOR_HEAD, blocks_on=self.OTHER)
+
+        code, result, _ = world.post([_finding()], capsys=capsys)
+
+        report = _churn(result)
+        assert code == 0 and report["level"] == churn.LEVEL_BRIEF
+        assert [r["head_sha"] for r in report["rounds"]] == [PRIOR_HEAD, world.host.head_sha]
+        assert "blocked in 2 review rounds" in report["brief"]
+        assert "stop_skipped" not in report
+
+    def test_the_unset_default_is_the_pr_wide_count(self, world, capsys):
+        world.configure(2, None)
+        world.seed(PRIOR_HEAD, blocks_on=self.OTHER)
+
+        _, result, _ = world.post([_finding()], capsys=capsys)
+
+        assert _churn(result)["level"] == churn.LEVEL_BRIEF
+
+    def test_the_key_count_keeps_the_per_key_chain_on_the_same_history(self, world, capsys):
+        world.configure(2, "key")
+        world.seed(PRIOR_HEAD, blocks_on=self.OTHER)
+
+        _, result, _ = world.post([_finding()], capsys=capsys)
+
+        assert _churn(result)["level"] == "none" and "rounds" not in _churn(result)
+
+    def test_a_clean_head_in_between_is_not_a_round_and_does_not_reset_the_count(self, world, capsys):
+        world.configure(2, "pr")
+        world.seed(PRIOR_HEAD, blocks_on=self.OTHER)
+        world.seed(MIDDLE_HEAD, blocks_on=())
+
+        _, result, _ = world.post([_finding()], capsys=capsys)
+
+        assert [r["head_sha"] for r in self._rounds(result)] == [PRIOR_HEAD, world.host.head_sha]
+
+    @pytest.mark.parametrize(
+        ("prior", "level", "skipped"),
+        [
+            ((PRIOR_HEAD, MIDDLE_HEAD), "stop", False),
+            ((PRIOR_HEAD, MIDDLE_HEAD, "f" * 40), "stop", True),
+        ],
+    )
+    def test_the_stop_and_the_second_instruction(self, world, capsys, prior, level, skipped):
+        world.configure(2, "pr")
+        world.seed(*prior, blocks_on=self.OTHER)
+
+        _, result, _ = world.post([_finding()], capsys=capsys)
+
+        report = _churn(result)
+        assert report["level"] == level and report["options"] == ["simplify", "ship", "continue"]
+        assert report.get("stop_skipped", False) is skipped
+        assert ("This is the second instruction to stop." in report["brief"]) is skipped
+        assert ("The stop at round 3 was not taken." in report["brief"]) is skipped
+
+    def test_a_breaker_that_is_off_has_no_brief_options_or_stop_skipped(self, world, capsys):
+        for count in ("pr", "key"):
+            world.configure(0, count)
+            world.seed(PRIOR_HEAD, MIDDLE_HEAD, "f" * 40, blocks_on=self.OTHER)
+            _, result, _ = world.post([_finding()], capsys=capsys)
+            report = _churn(result)
+            assert report["brief"] is None and report["options"] == []
+            assert "stop_skipped" not in report and "rounds" not in report
+
+    def test_a_failed_compare_nulls_that_fix_delta_with_a_reason_and_the_post_succeeds(
+        self, world, capsys
+    ):
+        world.configure(2, "pr")
+        world.seed(PRIOR_HEAD, blocks_on=self.OTHER)
+        inner = world.host.opener
+
+        def no_compare(req, timeout=30):
+            if "/compare/" in req.full_url:
+                return FakeResponse(500, b"{}")
+            return inner(req, timeout)
+
+        world.opener = no_compare
+
+        code, result, _ = world.post([_finding()], capsys=capsys)
+
+        first, second = self._rounds(result)
+        assert code == 0 and result["result"] == "posted"
+        assert first["fix_delta"] is None and first["fix_delta_unavailable"]
+        assert second["fix_delta"] is None
+        assert "range diff could not be read" in second["fix_delta_unavailable"]
+
+    def test_a_readable_compare_gives_added_and_removed(self, world, capsys):
+        world.configure(2, "pr")
+        world.seed(PRIOR_HEAD, blocks_on=self.OTHER)
+
+        _, result, _ = world.post([_finding()], capsys=capsys)
+
+        assert self._rounds(result)[1]["fix_delta"] == {"added": 2, "removed": 0}
+
+    def test_blocking_findings_group_by_defect_class_else_by_rule(self, world, capsys):
+        world.configure(2, "pr")
+        world.seed(PRIOR_HEAD, blocks_on=self.OTHER)
+
+        _, result, _ = world.post(
+            [
+                _finding(rule="R1", line=3, defect_class="shared-guard"),
+                _finding(rule="R3", line=5, defect_class="shared-guard"),
+                _finding(rule="R4", line=7),
+            ],
+            capsys=capsys,
+        )
+
+        first, second = self._rounds(result)
+        assert first["by"] == {"R2": 1} and first["blocking_count"] == 1
+        assert second["by"] == {"R4": 1, "shared-guard": 2} and second["blocking_count"] == 3
+
+    def test_the_verb_and_the_post_agree(self, world, capsys):
+        world.configure(2, "pr")
+        world.seed(PRIOR_HEAD, MIDDLE_HEAD, blocks_on=self.OTHER)
+        if world.host.platform == "github":
+            pytest.skip("the verb resolves a GitHub bot login; covered by the key-count agreement test")
+        _, posted, _ = world.post([_finding()], capsys=capsys)
+
+        _, read, _ = world.review("churn", capsys=capsys)
+
+        assert read["churn"] == posted["churn"]
 
 
 class TestChurnVerbConformance:

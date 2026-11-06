@@ -19,6 +19,7 @@ which is normally the reviewer role):
           max_attempts: 3
           parallel: 4
           escalation_round: 2                         # 0 turns the churn breaker off
+          churn_count: pr                             # pr (default): count blocked rounds PR-wide; key: per (rule_id, file)
           defect_class: true                          # false: reviewers state no defect classes
           guidance_in_comment: true                   # false: no Class guidance section in the comment
 
@@ -33,7 +34,8 @@ cloned repository must never choose what runs on the operator's machine (the
 same direction the credential-provider config takes). ``escalation_round`` is
 deployment-only as well, for a different reason: it switches the churn breaker
 (review.churn) off, which a repository under review must not be able to do. A
-repo-level value is ignored with a stderr warning.
+repo-level value is ignored with a stderr warning. ``churn_count`` is
+deployment-only for the same reason.
 
 ``defect_class`` and ``guidance_in_comment`` (both booleans, default true) are
 deployment-only for the same reason: a repository under review must not choose
@@ -69,6 +71,7 @@ from clagentic_loadout.repo_config import (
     resolve_repo_config_root,
 )
 from clagentic_loadout.review.chunking import DEFAULT_CHUNK_LINES
+from clagentic_loadout.review.churn import CHURN_COUNTS, COUNT_PR
 from clagentic_loadout.transport.provider_config import load_user_config_section
 
 CONFIG_SECTION_REVIEW = "review"
@@ -82,6 +85,10 @@ DEFAULT_PARALLEL = 4
 DEFAULT_ESCALATION_ROUND = 2
 MAX_ESCALATION_ROUND = 10
 CONFIG_KEY_ESCALATION_ROUND = "escalation_round"
+CONFIG_KEY_CHURN_COUNT = "churn_count"
+#: How the churn breaker counts rounds: ``pr`` counts every blocked head the role
+#: posted on the pull request, ``key`` counts consecutive rounds per (rule, file).
+DEFAULT_CHURN_COUNT = COUNT_PR
 
 _REPO_OVERRIDABLE_KEYS = (
     "chunk_lines",
@@ -96,6 +103,7 @@ CONFIG_KEY_DEFECT_CLASS = "defect_class"
 CONFIG_KEY_GUIDANCE_IN_COMMENT = "guidance_in_comment"
 _REPO_DEPLOYMENT_ONLY_KEYS = (
     CONFIG_KEY_ESCALATION_ROUND,
+    CONFIG_KEY_CHURN_COUNT,
     CONFIG_KEY_DEFECT_CLASS,
     CONFIG_KEY_GUIDANCE_IN_COMMENT,
 )
@@ -153,6 +161,7 @@ class ReviewProfile:
     carrier_model: str | None = None
     fallback_model: str | None = None
     escalation_round: int = DEFAULT_ESCALATION_ROUND
+    churn_count: str = DEFAULT_CHURN_COUNT
     defect_class: bool = True
     guidance_in_comment: bool = True
 
@@ -183,6 +192,27 @@ def load_escalation_round(name: str, *, config_root: str | Path | None = None) -
     return _escalation_round(
         entry.get(CONFIG_KEY_ESCALATION_ROUND, DEFAULT_ESCALATION_ROUND), name
     )
+
+
+def _churn_count(value: object, profile: str) -> str:
+    """*value* as the churn counting mode: one of CHURN_COUNTS."""
+    if not isinstance(value, str) or value not in CHURN_COUNTS:
+        raise ReviewProfileError(
+            f"review profile {profile!r}: {CONFIG_KEY_CHURN_COUNT!r} must be one of "
+            f"{', '.join(CHURN_COUNTS)}, got {value!r}"
+        )
+    return value
+
+
+def load_churn_count(name: str, *, config_root: str | Path | None = None) -> str:
+    """How the churn breaker counts rounds for profile *name*, from the
+    user-level config only. A deployment with no such profile, or one that does
+    not state the key, gets DEFAULT_CHURN_COUNT. Raises ReviewProfileError for a
+    value that is not one of CHURN_COUNTS."""
+    entry = _profile_entry(
+        load_user_config_section(CONFIG_SECTION_REVIEW, config_root=config_root), name
+    )
+    return _churn_count(entry.get(CONFIG_KEY_CHURN_COUNT, DEFAULT_CHURN_COUNT), name)
 
 
 def _flag(value: object, key: str, profile: str) -> bool:
@@ -432,6 +462,9 @@ def load_review_profile(
         fallback_model=_label(merged.get("fallback_model"), "fallback_model", name),
         escalation_round=_escalation_round(
             merged.get(CONFIG_KEY_ESCALATION_ROUND, DEFAULT_ESCALATION_ROUND), name
+        ),
+        churn_count=_churn_count(
+            merged.get(CONFIG_KEY_CHURN_COUNT, DEFAULT_CHURN_COUNT), name
         ),
         defect_class=_flag(
             merged.get(CONFIG_KEY_DEFECT_CLASS, True), CONFIG_KEY_DEFECT_CLASS, name
