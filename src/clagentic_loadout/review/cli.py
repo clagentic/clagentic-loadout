@@ -77,6 +77,7 @@ from clagentic_loadout.merge.guidance_section import (
     KEY_CLASSES,
     KEY_COMMENT_GUIDANCE,
     KEY_GUIDANCE,
+    KEY_TESTS,
 )
 from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
@@ -1576,7 +1577,7 @@ def _post_command(
     comment_guidance = (
         guidance
         if guidance is not None
-        and guidance[KEY_CLASSES]
+        and (guidance[KEY_CLASSES] or guidance[KEY_TESTS])
         and class_settings.guidance_in_comment
         else None
     )

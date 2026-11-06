@@ -14,11 +14,14 @@ The guidance object (every key always present)::
                   "findings": ["file:line:rule_id", ...]}],
      "more": 0,
      "class_repeated": false,
-     "text": "<guidance text>" | ""}
+     "text": "<guidance text>" | "",
+     "tests": ["<static test line>", ...]}
 
 ``classes`` is capped at MAX_GUIDANCE_CLASSES, most findings first; ``more``
 counts the classes left out. ``class_repeated`` is true when one class is on
-two findings. ``text`` is empty when there is no class to speak of.
+two findings. ``text`` is empty when there is no class to speak of. ``tests``
+holds one static line per file with a blocking finding and a nit line when any
+finding is a nit (merge.guidance_section.guidance_test_lines); empty when neither.
 """
 
 from __future__ import annotations
@@ -37,8 +40,10 @@ from clagentic_loadout.merge.guidance_section import (
     KEY_CLASSES,
     KEY_FINDINGS,
     KEY_MORE,
+    KEY_TESTS,
     KEY_TEXT,
     guidance_text,
+    guidance_test_lines,
 )
 
 #: The most classes the guidance lists; the rest are counted in ``more``.
@@ -101,8 +106,9 @@ def build_guidance(findings: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     review). A praise note is not a defect and is skipped, as is a finding that
     states no class. Findings group by class ignoring case and spacing; the
     first spelling and the first class_fix stated for a class stand."""
+    findings_list = list(findings)
     groups: dict[str, dict[str, Any]] = {}
-    for item in findings:
+    for item in findings_list:
         if item.get("severity") == "praise":
             continue
         fields = class_fields_of(item)
@@ -128,6 +134,7 @@ def build_guidance(findings: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         KEY_MORE: max(0, len(ordered) - MAX_GUIDANCE_CLASSES),
         KEY_CLASS_REPEATED: repeated,
         KEY_TEXT: guidance_text(repeated=repeated) if listed else "",
+        KEY_TESTS: guidance_test_lines(findings_list),
     }
 
 

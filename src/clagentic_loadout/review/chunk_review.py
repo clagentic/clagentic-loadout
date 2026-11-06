@@ -29,6 +29,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from clagentic_loadout.merge.guidance_section import TEST_REVIEW_RULE, TEST_RULE
 from clagentic_loadout.review.carrier import (
     KIND_FAILED,
     KIND_TIMEOUT,
@@ -83,7 +84,8 @@ def build_prompt(
     weighs it most. *delta_note*, when given, frames the chunk as part of an
     incremental review (see review.delta). *class_rules*, when given, is the
     repository's stated class rules for the chunk's files
-    (review.profile_rules.chunk_class_rules); it sits after the rulebook.
+    (review.profile_rules.chunk_class_rules); it sits after the rulebook. The test guidance
+    (merge.guidance_section) follows it, before the diff.
     *docs_note*, when given, is the docs-only justification to judge
     (review.docs_only_review.render_justification_note); it follows the class rules.
     *defect_class* says whether the output contract describes the two optional
@@ -94,6 +96,7 @@ def build_prompt(
         parts.append("## Rulebook\n\n" + rulebook_text.strip() + "\n\n")
     if class_rules.strip():
         parts.append(class_rules.strip() + "\n\n")
+    parts.append(f"## Tests\n\n{TEST_RULE}\n{TEST_REVIEW_RULE}\n\n")
     if docs_note.strip():
         parts.append(docs_note.strip() + "\n\n")
     if delta_note.strip():
