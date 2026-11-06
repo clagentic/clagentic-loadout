@@ -468,3 +468,69 @@ def test_a_key_without_a_class_has_no_class_fields_in_the_churn_object():
     report = churn_report.build(rounds, 2, backend=object(), owner="o", repo="r", spec=None)
 
     assert "defect_class" not in report["keys"][0]
+
+
+# --- test guidance (one table; a row per case) ---------------------------------
+
+from clagentic_loadout.merge.guidance_section import (  # noqa: E402
+    TEST_FILE_LINE,
+    TEST_NIT_LINE,
+    TEST_RULE,
+    file_test_line,
+)
+
+
+def _blocking(file, line, rule):
+    return {"file": file, "line": line, "rule_id": rule, "message": f"{rule} at {line}", "facts": SERIOUS}
+
+
+def _nit(line=40, rule="N1"):
+    return {
+        "file": "z.py", "line": line, "rule_id": rule, "message": "style", "facts": facts(),
+        "severity": "nit",
+    }
+
+
+# Each row: findings, the guidance.tests lines the post must report.
+TEST_GUIDANCE_ROWS = {
+    "two blocking in one file and a nit": (
+        [_blocking("a.py", 3, "R1"), _blocking("a.py", 9, "R2"), _nit()],
+        [file_test_line("a.py"), TEST_NIT_LINE],
+    ),
+    "blocking in two files": (
+        [_blocking("a.py", 3, "R1"), _blocking("b.py", 4, "R2")],
+        [file_test_line("a.py"), file_test_line("b.py")],
+    ),
+    "no blocking and no nit": ([], []),
+}
+
+
+@pytest.mark.parametrize("name", list(TEST_GUIDANCE_ROWS))
+def test_guidance_tests_is_one_static_line_per_blocking_file_and_the_nit_line(
+    env, tmp_path, capsys, name
+):
+    findings, expected = TEST_GUIDANCE_ROWS[name]
+
+    code, payload = _post(env, tmp_path, capsys, findings)
+
+    assert code == 0
+    assert payload["guidance"]["tests"] == expected
+    prose = _body(env).split("```review-result")[0]
+    assert ("Test guidance" in prose) is bool(expected)
+    assert (TEST_RULE in prose) is bool(expected)
+    assert all(f"- {line}" in prose for line in expected)
+
+
+def test_guidance_in_comment_false_keeps_the_test_lines_in_the_result_only(env, tmp_path, capsys):
+    env.configure(guidance_in_comment=False)
+
+    code, payload = _post(env, tmp_path, capsys, [_blocking("a.py", 3, "R1")])
+
+    assert code == 0
+    assert payload["guidance"]["tests"] == [file_test_line("a.py")]
+    assert "Test guidance" not in _body(env) and TEST_FILE_LINE not in _body(env)
+
+
+def test_the_comment_builder_refuses_a_test_line_that_is_not_the_fixed_wording():
+    with pytest.raises(ValueError, match="not a test guidance line"):
+        validate_guidance({"classes": [], "tests": ["a.py: write three new test files"]})

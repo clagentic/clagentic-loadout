@@ -7,8 +7,12 @@ Schema (strict: an unknown key makes the whole profile invalid)::
       impacted: [./run-tests, --junit, "{junit}", --since, "{base}"]
       files: [python3, -m, pytest, "--junitxml={junit}"]   # file paths are appended
       base: origin/main                                    # default for --base
+      paths: ["spec/**"]                                   # extra test-file globs
       tiers:                                               # named runs, one argv each
         integration: [python3, -m, pytest, "-m", integration, "--junitxml={junit}"]
+
+``paths`` lists globs of files that count as tests in addition to the built-in
+rule (review.test_files); it extends that rule and never replaces it.
 
 Each of ``full``, ``impacted`` and ``files`` is an argv list, run without a
 shell, with the repository root as the working directory. Every command must
@@ -41,7 +45,9 @@ RUN_MODES = (*MODES, MODE_TIER)
 
 KEY_BASE = "base"
 KEY_TIERS = "tiers"
-_ALLOWED_KEYS = (*MODES, KEY_BASE, KEY_TIERS)
+KEY_PATHS = "paths"
+_ALLOWED_KEYS = (*MODES, KEY_BASE, KEY_TIERS, KEY_PATHS)
+_MAX_PATH_GLOBS = 100
 
 TIER_NAME_RE = re.compile(r"\A[a-z][a-z0-9_-]{0,31}\Z")
 _MAX_TIERS = 50
@@ -70,6 +76,7 @@ class DeclaredTests:
     files: tuple[str, ...] | None = None
     base: str | None = None
     tiers: tuple[tuple[str, tuple[str, ...]], ...] = ()
+    paths: tuple[str, ...] = ()
 
     def argv_for(self, mode: str) -> tuple[str, ...] | None:
         """The declared argv template for *mode*, or None when not declared."""
@@ -126,6 +133,25 @@ def _tiers(value: Any, where: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
     return tuple(out)
 
 
+def _paths(value: Any, where: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or len(value) > _MAX_PATH_GLOBS:
+        raise TestBlockError(f"{where} must be a list of at most {_MAX_PATH_GLOBS} path globs")
+    out: list[str] = []
+    for position, item in enumerate(value):
+        if (
+            not isinstance(item, str)
+            or not item.strip()
+            or len(item) > _MAX_ARG_CHARS
+            or "\n" in item
+            or "\r" in item
+        ):
+            raise TestBlockError(f"{where}[{position}] must be a non-empty one-line glob")
+        out.append(item.strip())
+    return tuple(dict.fromkeys(out))
+
+
 def parse_test_block(block: Any, where: str = "test") -> DeclaredTests:
     """The ``test`` block of a parsed profile. ``None`` is no block."""
     if block is None:
@@ -150,13 +176,19 @@ def parse_test_block(block: Any, where: str = "test") -> DeclaredTests:
         if not isinstance(base, str) or not base.strip() or base.startswith("-"):
             raise TestBlockError(f"{where}.{KEY_BASE} must be a revision name, not an option")
         base = base.strip()
-    return DeclaredTests(base=base, tiers=_tiers(block.get(KEY_TIERS), f"{where}.{KEY_TIERS}"), **commands)
+    return DeclaredTests(
+        base=base,
+        tiers=_tiers(block.get(KEY_TIERS), f"{where}.{KEY_TIERS}"),
+        paths=_paths(block.get(KEY_PATHS), f"{where}.{KEY_PATHS}"),
+        **commands,
+    )
 
 
 __all__ = [
     "BASE_PLACEHOLDER",
     "JUNIT_PLACEHOLDER",
     "KEY_BASE",
+    "KEY_PATHS",
     "KEY_TIERS",
     "MODES",
     "MODE_FILES",

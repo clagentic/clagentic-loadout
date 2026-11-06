@@ -476,6 +476,9 @@ above), and the reply contract changes accordingly:
   is an instance of and the change that removes it. Both are optional, bounded to 200
   characters, never change a severity and are never read by the evaluator; see
   [Defect classes and class guidance](verbs.md#defect-classes-and-class-guidance).
+  The prompt also carries the shared test rule (one table row, not a new test function or
+  file; no test for a low or advisory finding), and the post result's `guidance.tests`
+  repeats it as static lines; see the same section.
   They ride in `evaluated_findings` and raise the fence to `fence_schema_version` 8
   (readers accept 7 and 8) only when a finding states one.
 - A reply that still carries a `severity` (an older rulebook asks for one) is accepted. The

@@ -49,6 +49,8 @@ def declared_tests(tests: DeclaredTests | None) -> dict[str, Any] | None:
     }
     if tests.base:
         out["base"] = tests.base
+    if tests.paths:
+        out["paths"] = list(tests.paths)
     if tests.tiers:
         out["tiers"] = {name: list(argv) for name, argv in tests.tiers}
     return out or None
