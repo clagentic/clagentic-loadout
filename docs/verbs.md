@@ -959,6 +959,8 @@ review:
       max_attempts: 3
       parallel: 4
       escalation_round: 2                         # optional; 0 turns the churn breaker off
+      defect_class: true                          # optional; false: no defect classes (default true)
+      guidance_in_comment: true                   # optional; false: no Class guidance section (default true)
 ```
 
 The repo-level config (`.clagentic/loadout/config.yaml`, same
@@ -979,7 +981,9 @@ least 50. Values in the user-level config are not clamped. A repo-level config
 file that cannot be parsed is ignored with a warning on stderr. `escalation_round`
 (see [Churn breaker](#churn-breaker)) is deployment-only: a repo-level value is
 ignored with a warning, since a repository under review must not be able to switch
-the breaker off.
+the breaker off. `defect_class` and `guidance_in_comment` (see
+[Defect classes and class guidance](#defect-classes-and-class-guidance)) are
+deployment-only for the same reason.
 
 **`post`** stages the findings and posts them through the existing
 `loadout-review-post` structured-findings route (`--verdict-findings`), so the
@@ -1313,7 +1317,9 @@ file and round count, and the eight steps:
 4. Add no new mechanism (flag, layer, retry or special case) without stating what
    requires it that the existing code cannot do.
 5. Fix the class once: find every site with the same defect shape and fix them
-   together with one shared change.
+   together with one shared change. When the deciding key's finding names a class,
+   the brief quotes its `defect_class` (and `class_fix`) under this step, labelled
+   as the reviewer's own statement to check against the code.
 6. Send out-of-spec findings to the roadmap as follow-ups; do not fix them in this
    change.
 7. Write test fixtures as rows of one table, not as copies of a test body.
@@ -1326,6 +1332,58 @@ the current round. Exit codes: **0** computed, **1** usage, **3** profile invali
 the role's login not resolvable, **4** wrong platform, **5** comments not readable,
 **7** caller/attested-identity mismatch, **33** `--spec-hash` not in the specs store.
 The fields and exit codes are additive; no existing field or code changed.
+
+### Defect classes and class guidance
+
+A finding may carry two optional keys: `defect_class`, a short name for the recurring
+class of defect it is an instance of, and `class_fix`, the structural change that
+removes the whole class. They are the reviewer's own words, to be checked against the
+code. They never change a severity and are never grounds to add, drop or escalate a
+finding: the evaluator does not read them, and neither does the merge gate.
+
+- **Reply contract.** The prompt describes both keys, says not to invent a class
+  (an isolated finding is a complete answer, with null for both), and states that they
+  never change severity. `run` keeps each as a string of at most 200 characters, one
+  line, with control characters stripped and backticks replaced; a value that is
+  missing, null or not a string is null, and the finding is kept.
+- **Fence.** `evaluated_findings` entries carry the two keys when the finding stated
+  them. A fence that carries any is `fence_schema_version` **8**, a superset of
+  version 7; a fence whose findings state none keeps the version it had. Readers
+  accept 7 and 8 (`loadout-merge`, `loadout-review churn` and the prior-findings
+  readers); a reader that predates version 8 refuses a fence that carries them, so
+  every reader of a deployment must be at this release before the keys are switched on.
+- **Guidance.** `post` adds `guidance` to its result and `churn` prints it beside
+  `churn`:
+
+  ```json
+  "guidance": {
+    "classes": [{"defect_class": "...", "class_fix": "...", "findings": ["a.py:3:R1"]}],
+    "more": 0,
+    "class_repeated": false,
+    "text": "<fixed guidance text>"
+  }
+  ```
+
+  `classes` groups the open and advisory findings by `defect_class` (case and spacing
+  ignored), most findings first, at most 5; `more` counts the classes left out
+  (rendered as `and N more`). `class_repeated` is true when one class is on two
+  findings (a kept prior finding is one of the findings). `text` is fixed product text:
+  fix the class once at the shared primitive, list every site first, add one guard row
+  to the area's existing test table; when repeated it adds the stop-patching line. It is
+  empty when no finding states a class. For `churn` the findings are those the role's
+  last fence carries; with the breaker off `churn` reads no comments, so it prints no
+  `guidance`.
+- **Comment.** When `classes` is not empty, the posted comment has a `Class guidance`
+  section after the findings, worded by the tool from the same text. The staged body
+  carries only the structure (`class_guidance`: class names, fixes, finding ids), never
+  prose.
+- **Settings.** `review.profiles.<name>.defect_class` (boolean, default **true**): false
+  removes the keys from the prompt, drops them from findings, and leaves the guidance
+  and the fence version as they were before the keys existed. `guidance_in_comment`
+  (boolean, default **true**): false keeps `guidance` in the result and leaves the
+  section out of the comment. Both are in the user-level config only; a repo-level value
+  is ignored with a warning, and a value that is not a boolean is a profile error naming
+  the key (exit **3**).
 
 ### `loadout-ruling` — record and list per-PR rulings on kept findings
 
@@ -3551,6 +3609,8 @@ every earlier version.
 | review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 4 | 1 to 5 | adds the optional `docs_only` object at version 5, a superset of version 4 that adds nothing to the computed verdict. A fence without it keeps the version it had |
 | review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 5 | 1 to 6 | adds the optional `fingerprint` to each `findings_open` entry at version 6, a superset of version 5. A fence whose entries carry none keeps the version it had, and every earlier fence is still read; for those the gate resolves a block's fingerprint from the fence's `evaluated_findings` |
 | review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 6 | 1 to 7 | adds the optional `fingerprint` to each `cleared_claims` entry at version 7, a superset of version 6. It is stamped only on a fence whose clearance states a fingerprint (a `post --clear` of a finding that carried one); every other fence keeps the version it had, and every earlier fence is still read. A reader below version 7 refuses a fence that carries it, so every reader of a deployment (the installed loadout, which the post-merge install refreshes, and any consumer that validates the fence schema) must be at this release before a reviewer clears a fingerprinted finding. A consumer that does not validate the fence's version is unaffected |
+
+| review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 7 | 1 to 8 | adds the optional `defect_class` and `class_fix` to each `evaluated_findings` entry at version 8, a superset of version 7 that adds nothing to the computed verdict. It is stamped only on a fence whose findings state a class; every other fence keeps the version it had, and every earlier fence is still read. A reader below version 8 refuses a fence that carries them, so every reader of a deployment must be at this release before `defect_class` is switched on for a reviewer |
 
 A reader that predates a version refuses a fence or record that carries it, which is why
 the versions moved; an upgrade needs every reader of a deployment to be at this release

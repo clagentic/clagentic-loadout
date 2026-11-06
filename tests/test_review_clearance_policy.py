@@ -77,8 +77,8 @@ class TestClassification:
 
 
 class TestFenceVersion:
-    def test_every_version_up_to_seven_is_accepted(self):
-        assert fence_state.FENCE_SCHEMA_VERSIONS == (1, 2, 3, 4, 5, 6, 7)
+    def test_every_version_up_to_eight_is_accepted(self):
+        assert fence_state.FENCE_SCHEMA_VERSIONS == (1, 2, 3, 4, 5, 6, 7, 8)
 
     def test_a_claim_fingerprint_is_checked_for_shape(self):
         claim = {"id": "f-1", "head": "a" * 40, "evidence": "e", "fingerprint": "fp2:nope"}

@@ -73,11 +73,16 @@ from clagentic_loadout.merge.fence_state import (
     failure_sequences_of,
     normalize_findings_state,
 )
+from clagentic_loadout.merge.guidance_section import (
+    KEY_CLASSES,
+    KEY_COMMENT_GUIDANCE,
+    KEY_GUIDANCE,
+)
 from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     resolve_declared_role,
 )
-from clagentic_loadout.review import changeset_paths, churn_report, spec_review
+from clagentic_loadout.review import changeset_paths, churn_report, class_guidance, spec_review
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.churn_ledger import ChurnLedgerError
 from clagentic_loadout.review.churn_verb import churn_after_post, churn_on_demand
@@ -147,6 +152,7 @@ from clagentic_loadout.review.scanner_input import (
 from clagentic_loadout.review.profile_config import (
     ReviewProfile,
     ReviewProfileError,
+    load_class_settings,
     load_escalation_round,
     load_review_profile,
     load_run_root_override,
@@ -827,6 +833,7 @@ def _load_findings(
     head_flag: str,
     meta: dict[str, Any] | None = None,
     carry_spec_tag: bool = False,
+    carry_class: bool = True,
 ) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
     """Read a findings file (a `run` output or a bare array) for this PR and
     return its head SHA, its findings, and the run evidence (commit range and
@@ -837,7 +844,9 @@ def _load_findings(
     is empty. When *meta* is given, the base revision the run read policy from
     (``policy_base_sha``) is stored in it when the file records a valid one.
     With *carry_spec_tag* every finding must carry exactly one spec tag, which
-    is kept."""
+    is kept. With *carry_class* a finding's defect_class and class_fix are kept;
+    without it they are dropped, which is what a deployment that states no
+    classes gets even from a findings file that carries them."""
     evidence: dict[str, Any] = {}
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -887,6 +896,7 @@ def _load_findings(
                 validate_finding(
                     item, position, lenient_severity=True, truncate_message=False,
                     carry_fingerprint=True, carry_facts=True, carry_spec_tag=carry_spec_tag,
+                    carry_class=carry_class,
                 )
             )
         except InvalidReplyError as exc:
@@ -1157,6 +1167,7 @@ def _post_churn(
     verdict: Verdict,
     escalation_round: int,
     spec_facts: spec_review.SpecFacts | None,
+    classes: dict[tuple[str, str], tuple[str, str | None]] | None = None,
 ) -> dict[str, Any]:
     """The churn object of a post that has landed. Advisory: whatever goes wrong
     reading the host is reported inside the object, never as a failed post."""
@@ -1175,6 +1186,7 @@ def _post_churn(
         blocking={(item.rule_id, item.file) for item in verdict.blocking},
         escalation_round=escalation_round,
         spec=churn_report.spec_quote(spec_facts),
+        classes=classes,
     )
 
 
@@ -1274,6 +1286,10 @@ def _churn_command(
         escalation_round = load_escalation_round(args.profile or caller, config_root=config_root)
     except ReviewProfileError as exc:
         _fail(str(exc), EXIT_PROFILE_INVALID)
+    try:
+        class_settings = load_class_settings(args.profile or caller, config_root=config_root)
+    except ReviewProfileError as exc:
+        _fail(str(exc), EXIT_PROFILE_INVALID)
     facts = _spec_facts_of_flag(args, config_root)
     try:
         login = resolve_declared_role(caller, platform).login
@@ -1284,9 +1300,10 @@ def _churn_command(
         token_provider=token_provider, opener=opener,
     )
     try:
-        report, head = churn_on_demand(
+        report, head, guidance = churn_on_demand(
             backend, owner=owner, repo=repo, pr_number=args.pr, login=login,
             escalation_round=escalation_round, spec=churn_report.spec_quote(facts),
+            with_classes=class_settings.defect_class,
         )
     except ChurnLedgerError as exc:
         _fail(str(exc), EXIT_ACQUIRE_FAILED)
@@ -1298,6 +1315,7 @@ def _churn_command(
                 "reviewer_login": login,
                 "head_sha": head,
                 "churn": report,
+                **({KEY_GUIDANCE: guidance} if guidance is not None else {}),
             }
         )
     )
@@ -1353,10 +1371,14 @@ def _post_command(
     spec_fields, spec_facts = _spec_inputs(args, config_root)
     reject_reason = _reject_reason(args, spec_facts)
     loaded_meta: dict[str, Any] = {}
+    try:
+        class_settings = load_class_settings(args.profile or caller, config_root=config_root)
+    except ReviewProfileError as exc:
+        _fail(str(exc), EXIT_PROFILE_INVALID)
     head_sha, findings, evidence = _load_findings(
         args.findings, owner=owner, repo=repo, pr_number=args.pr,
         head_sha_arg=args.head_sha, head_flag="--head-sha", meta=loaded_meta,
-        carry_spec_tag=spec_fields is not None,
+        carry_spec_tag=spec_fields is not None, carry_class=class_settings.defect_class,
     )
     _check_base_sha_flag(args)
     # Read before anything is posted, so a bad setting costs nothing.
@@ -1546,6 +1568,19 @@ def _post_command(
         head_sha=head_sha, token_provider=token_provider, opener=opener,
     )
 
+    guidance = (
+        class_guidance.build_guidance([*annotated, *advisory])
+        if class_settings.defect_class
+        else None
+    )
+    comment_guidance = (
+        guidance
+        if guidance is not None
+        and guidance[KEY_CLASSES]
+        and class_settings.guidance_in_comment
+        else None
+    )
+
     def spec_note(item: dict[str, Any]) -> list[str]:
         return [f"spec tag: {item[KEY_SPEC_TAG]}"] if spec_fields is not None else []
 
@@ -1567,6 +1602,11 @@ def _post_command(
             }
             for item in advisory
         ],
+        **(
+            {KEY_COMMENT_GUIDANCE: comment_guidance}
+            if comment_guidance is not None
+            else {}
+        ),
         **state,
         **({KEY_FINDINGS_OPEN: open_findings} if open_findings else {}),
         **evidence,
@@ -1671,6 +1711,8 @@ def _post_command(
     for key in ("comment", "reused_from_created_at"):
         if key in posted:
             result[key] = posted[key]
+    if guidance is not None:
+        result[KEY_GUIDANCE] = guidance
     if scanner_input is not None:
         result["scanner_finding_count"] = len(ingestion.findings)
         result["outside_range_count"] = len(ingestion.outside_range)
@@ -1692,6 +1734,11 @@ def _post_command(
         token_provider=token_provider, opener=opener, login=posted.get("verified_by_login"),
         head_sha=head_sha, verdict=verdict, escalation_round=escalation_round,
         spec_facts=spec_facts,
+        classes=class_guidance.first_class_by_key(
+            ((evaluated.rule_id, evaluated.file), item)
+            for item, evaluated in zip(annotated, verdict.findings)
+            if evaluated.blocking
+        ),
     )
 
     # The late re-read above narrows the GitHub race but cannot close it: a

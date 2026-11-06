@@ -21,8 +21,9 @@ reads them from the posted fences), the host is never touched.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from typing import Any
 
 LEVEL_NONE = "none"
 LEVEL_BRIEF = "brief"
@@ -49,6 +50,14 @@ class Round:
 
     head_sha: str | None
     keys: frozenset[Key] = frozenset()
+    #: The reviewer's class statement for a key, as (defect_class, class_fix),
+    #: where the round's findings state one. Advisory text: it takes no part in
+    #: which keys churn, so it is left out of equality.
+    classes: Mapping[Key, tuple[str, str | None]] = field(default_factory=dict, compare=False)
+    #: The round's findings as its fence carried them (file, line, rule_id and
+    #: any class keys), for the guidance object. Left out of equality for the
+    #: same reason.
+    evaluated: tuple[Mapping[str, Any], ...] = field(default=(), compare=False)
 
 
 @dataclass(frozen=True)
@@ -59,6 +68,8 @@ class KeyChurn:
     file: str
     rounds: int
     heads: tuple[str, ...]
+    defect_class: str | None = None
+    class_fix: str | None = None
 
 
 @dataclass(frozen=True)
@@ -108,7 +119,8 @@ def assess(rounds: Sequence[Round], escalation_round: int) -> Assessment:
     for rule_id, file in rounds[-1].keys:
         heads = _chain(rounds, (rule_id, file))
         if listed_from and len(heads) >= listed_from:
-            churning.append(KeyChurn(rule_id, file, len(heads), heads))
+            defect_class, class_fix = rounds[-1].classes.get((rule_id, file), (None, None))
+            churning.append(KeyChurn(rule_id, file, len(heads), heads, defect_class, class_fix))
     churning.sort(key=lambda item: (-item.rounds, item.rule_id, item.file))
     level = level_for(churning[0].rounds, escalation_round) if churning else LEVEL_NONE
     return Assessment(escalation_round, tuple(churning), level)

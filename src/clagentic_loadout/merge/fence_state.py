@@ -60,12 +60,18 @@ fence_schema_version 3 fence adds:
   evaluator_version str                  the rules the verdict was computed under
   policy_base_sha   <sha>                the base revision policy was read from;
                                          omitted when it was not known
-  evaluated_findings [{file, line, rule_id, message, facts?, fingerprint?}]
+  evaluated_findings [{file, line, rule_id, message, facts?, fingerprint?,
+                       defect_class?, class_fix?}]
                                          the findings the outcome was computed
                                          from, so the merge gate can compute it
                                          again under the policy it reads itself;
                                          the fingerprint is present only when a
-                                         ruling registry is configured
+                                         ruling registry is configured; the two
+                                         class keys (fence_schema_version 8) are
+                                         the reviewer's own statement of a
+                                         recurring defect class and the change
+                                         that removes it, and the gate ignores
+                                         both
 
 They are present together or not at all (policy_base_sha excepted). A fence at
 version 1 or 2 carries none of them and reads as NOT EVALUATED: its
@@ -152,10 +158,24 @@ FINGERPRINT_FENCE_SCHEMA_VERSION = 6
 #: unknown field, so a fence carrying one is never half-read.
 CLEARANCE_FENCE_SCHEMA_VERSION = 7
 
+#: Version stamped on a fence whose evaluated_findings carry a defect_class or
+#: class_fix. A superset of version 7: a reader below it refuses the unknown
+#: keys, so a fence carrying one is never half-read. Additive: readers accept 7
+#: and 8, and a review that states no class still stamps what it always did.
+CLASS_FENCE_SCHEMA_VERSION = 8
+
 #: Every fence_schema_version a reader accepts.
-FENCE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5, 6, 7)
+FENCE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8)
 
 KEY_FENCE_SCHEMA_VERSION = "fence_schema_version"
+
+#: A finding's optional class keys, and the bound on each value. review.
+#: class_guidance owns the cleaning of a reply's value; the bound is restated
+#: here because the review package imports this module.
+KEY_DEFECT_CLASS = "defect_class"
+KEY_CLASS_FIX = "class_fix"
+CLASS_KEYS = (KEY_DEFECT_CLASS, KEY_CLASS_FIX)
+MAX_CLASS_CHARS = 200
 KEY_FINDINGS_OPEN = "findings_open"
 KEY_SUPERSEDES = "supersedes"
 KEY_CLEARED_CLAIMS = "cleared_claims"
@@ -642,6 +662,10 @@ def normalize_findings_state(
         out[KEY_FENCE_SCHEMA_VERSION] = FINGERPRINT_FENCE_SCHEMA_VERSION
     if any(KEY_FINGERPRINT in claim for claim in out.get(KEY_CLEARED_CLAIMS, ())):
         out[KEY_FENCE_SCHEMA_VERSION] = CLEARANCE_FENCE_SCHEMA_VERSION
+    if any(
+        key in entry for entry in out.get(KEY_EVALUATED_FINDINGS, ()) for key in CLASS_KEYS
+    ):
+        out[KEY_FENCE_SCHEMA_VERSION] = CLASS_FENCE_SCHEMA_VERSION
     return out
 
 
@@ -878,7 +902,9 @@ def _normalize_evaluated_findings(value: Any) -> list[dict[str, Any]]:
     for index, entry in enumerate(_entries(value, KEY_EVALUATED_FINDINGS)):
         where = f"{KEY_EVALUATED_FINDINGS}[{index}]"
         _exact_keys(
-            entry, ("file", "line", "rule_id", "message", "facts", "severity", "fingerprint"), where
+            entry,
+            ("file", "line", "rule_id", "message", "facts", "severity", "fingerprint", *CLASS_KEYS),
+            where,
         )
         item: dict[str, Any] = {
             "file": _text(entry.get("file"), f"{where}.file"),
@@ -899,6 +925,14 @@ def _normalize_evaluated_findings(value: Any) -> list[dict[str, Any]]:
             if not isinstance(facts, Mapping):
                 raise ValueError(f"{where}.facts must be a JSON object, got {type(facts).__name__}")
             item["facts"] = _plain_json(facts, f"{where}.facts")
+        for class_key in CLASS_KEYS:
+            if entry.get(class_key) is not None:
+                class_text = _text(entry[class_key], f"{where}.{class_key}")
+                if len(class_text) > MAX_CLASS_CHARS:
+                    raise ValueError(
+                        f"{where}.{class_key} must be at most {MAX_CLASS_CHARS} characters"
+                    )
+                item[class_key] = class_text
         if entry.get("severity") is not None:
             if entry["severity"] != _PRAISE:
                 raise ValueError(
@@ -922,7 +956,7 @@ _RAW_VERSION_2_RE = re.compile(
     rf"{KEY_FENCE_SCHEMA_VERSION}\W+"
     rf"(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION}|{SPEC_FENCE_SCHEMA_VERSION}"
     rf"|{DOCS_ONLY_FENCE_SCHEMA_VERSION}|{FINGERPRINT_FENCE_SCHEMA_VERSION}"
-    rf"|{CLEARANCE_FENCE_SCHEMA_VERSION})\b"
+    rf"|{CLEARANCE_FENCE_SCHEMA_VERSION}|{CLASS_FENCE_SCHEMA_VERSION})\b"
 )
 
 
@@ -1045,6 +1079,11 @@ def with_derived_failure_sequences(
 
 __all__ = [
     "CLASSIFICATIONS",
+    "CLASS_FENCE_SCHEMA_VERSION",
+    "CLASS_KEYS",
+    "KEY_CLASS_FIX",
+    "KEY_DEFECT_CLASS",
+    "MAX_CLASS_CHARS",
     "CLEARANCE_FENCE_SCHEMA_VERSION",
     "CLASSIFICATION_CODE",
     "CLASSIFICATION_DOCS_ONLY",

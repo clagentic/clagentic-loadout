@@ -472,6 +472,12 @@ above), and the reply contract changes accordingly:
 
 - A reply states, per finding, `file`, `line`, `rule_id`, `message`, the `facts` object and
   optionally `failure_sequence`. It states no severity and no verdict.
+- A reply may also state `defect_class` and `class_fix`, the recurring class a finding
+  is an instance of and the change that removes it. Both are optional, bounded to 200
+  characters, never change a severity and are never read by the evaluator; see
+  [Defect classes and class guidance](verbs.md#defect-classes-and-class-guidance).
+  They ride in `evaluated_findings` and raise the fence to `fence_schema_version` 8
+  (readers accept 7 and 8) only when a finding states one.
 - A reply that still carries a `severity` (an older rulebook asks for one) is accepted. The
   value is discarded whatever it holds, and a notice on stderr says so. The computed
   severity is used.

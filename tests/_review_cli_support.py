@@ -61,6 +61,9 @@ STUB_SCRIPT = textwrap.dedent(
         print(with_facts(SERIOUS))
     elif mode == "facts_mild":
         print(with_facts(MILD))
+    elif mode == "facts_serious_class":
+        print(with_facts(SERIOUS, defect_class="unchecked path join",
+                         class_fix="one path-join helper that refuses escapes"))
     elif mode == "facts_serious_with_severity":
         print(with_facts(SERIOUS, severity="nit"))
     elif mode == "empty":
