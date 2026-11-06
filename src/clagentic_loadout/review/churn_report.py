@@ -11,6 +11,9 @@ Shape (every key always present)::
      "brief": "<text>" | null,
      "options": ["simplify", "ship", "continue"] | []}
 
+A key entry also carries ``defect_class`` (and ``class_fix``) when the reviewer
+stated them for the key; the brief's step 5 quotes them.
+
 ``net_delta_unavailable`` (a reason) is added when the level is brief or stop
 and the delta is null; ``ledger_unavailable`` (a reason) replaces the computed
 fields' meaning when the pull request's comments could not be read, and the
@@ -27,6 +30,7 @@ from clagentic_loadout.review.churn import (
     LEVEL_NONE,
     LEVEL_STOP,
     STOP_OPTIONS,
+    KeyChurn,
     Round,
     assess,
 )
@@ -56,6 +60,19 @@ def unavailable(escalation_round: int, reason: str) -> dict[str, Any]:
     }
 
 
+def _key_entry(key: KeyChurn) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "rule_id": key.rule_id, "file": key.file, "rounds": key.rounds, "heads": list(key.heads)
+    }
+    # Present only when the reviewer stated a class for the key, so a review
+    # that states none yields the entry it always did.
+    if key.defect_class:
+        entry["defect_class"] = key.defect_class
+        if key.class_fix:
+            entry["class_fix"] = key.class_fix
+    return entry
+
+
 def build(
     rounds: Sequence[Round],
     escalation_round: int,
@@ -71,10 +88,7 @@ def build(
     assessment = assess(rounds, escalation_round)
     report: dict[str, Any] = {
         "escalation_round": assessment.escalation_round,
-        "keys": [
-            {"rule_id": k.rule_id, "file": k.file, "rounds": k.rounds, "heads": list(k.heads)}
-            for k in assessment.keys
-        ],
+        "keys": [_key_entry(k) for k in assessment.keys],
         "level": assessment.level,
         "net_delta": None,
         "brief": None,

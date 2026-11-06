@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from clagentic_loadout.merge.guidance_section import LABEL_LINE
 from clagentic_loadout.review.churn import (
     LEVEL_BRIEF,
     LEVEL_STOP,
@@ -45,6 +46,10 @@ STEPS = (
     "Write test fixtures as rows of one table, not as copies of a test body.",
     "Do not call a failure flaky without a reproduction; record the reproduction with the claim.",
 )
+
+
+#: Position of the "fix the class once" step in the rendered steps.
+_CLASS_STEP_INDEX = 4
 
 
 @dataclass(frozen=True)
@@ -85,6 +90,13 @@ def render(level: str, deciding: KeyChurn, spec: SpecQuote | None) -> str:
     )
     steps = [_restate_step(spec)]
     steps.extend(f"{number}. {step}" for number, step in enumerate(STEPS[1:], start=2))
+    if deciding.defect_class:
+        # Step 5 is "fix the class once"; the deciding finding's own class
+        # statement goes under it, labelled as the reviewer's, not as fact.
+        quote = [f"   {LABEL_LINE}", f"   defect_class: {deciding.defect_class}"]
+        if deciding.class_fix:
+            quote.append(f"   class_fix: {deciding.class_fix}")
+        steps[_CLASS_STEP_INDEX] += "\n" + "\n".join(quote)
     return "\n\n".join(head) + "\n\n" + "\n".join(steps)
 
 

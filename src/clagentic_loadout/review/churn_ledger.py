@@ -14,7 +14,10 @@ Fields read from a fence (nothing else is):
   evaluated_findings[], failure_sequences[]
                                        file, line and rule_id, from which
                                        findings_open ids are joined to a file
-                                       (the id is review.evaluation.finding_state_id)
+                                       (the id is review.evaluation.finding_state_id);
+                                       and from evaluated_findings, any
+                                       defect_class and class_fix, which only
+                                       ever feed advice
 
 Rounds are distinct heads in post order; several fences at one head count once,
 as the last of them. A comment without a fence, or whose fence is for another
@@ -36,6 +39,7 @@ from clagentic_loadout.merge.fence_state import (
 )
 from clagentic_loadout.merge.verdict import find_all_verdict_blocks
 from clagentic_loadout.review.churn import Key, Round
+from clagentic_loadout.review.class_guidance import first_class_by_key
 from clagentic_loadout.review.evaluation import finding_state_id
 from clagentic_loadout.sha import FULL_SHA_RE
 
@@ -99,6 +103,26 @@ def blocking_keys(data: Mapping[str, Any]) -> frozenset[Key] | None:
     return frozenset(keys)
 
 
+def _evaluated_entries(data: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    entries = data.get(KEY_EVALUATED_FINDINGS)
+    if not isinstance(entries, list):
+        return ()
+    return tuple(entry for entry in entries if isinstance(entry, Mapping))
+
+
+def _classes_of(
+    data: Mapping[str, Any], keys: frozenset[Key]
+) -> dict[Key, tuple[str, str | None]]:
+    """The class statement of each of *keys*, read from the fence's
+    evaluated_findings; a key none of whose findings states one is left out."""
+    pairs = []
+    for entry in _evaluated_entries(data):
+        rule_id, file = entry.get("rule_id"), entry.get("file")
+        if isinstance(rule_id, str) and isinstance(file, str) and (rule_id, file) in keys:
+            pairs.append(((rule_id, file), entry))
+    return first_class_by_key(pairs)
+
+
 def _round_of(body: Any, pr_number: int) -> Round | None:
     """The round a comment body is, or None when it is not a round of this PR."""
     if not isinstance(body, str):
@@ -116,10 +140,11 @@ def _round_of(body: Any, pr_number: int) -> Round | None:
     if type(fence_pr) is not int or not isinstance(head, str) or not FULL_SHA_RE.match(head):
         return Round(None)
     status = data.get("review_status")
+    evaluated = _evaluated_entries(data)
     if status == _STATUS_CLEAN:
-        return Round(head)
-    keys = blocking_keys(data) if status == _STATUS_BLOCKING else None
-    return Round(head, keys if keys is not None else frozenset())
+        return Round(head, evaluated=evaluated)
+    keys = (blocking_keys(data) if status == _STATUS_BLOCKING else None) or frozenset()
+    return Round(head, keys, _classes_of(data, keys), evaluated)
 
 
 def rounds_from_comments(

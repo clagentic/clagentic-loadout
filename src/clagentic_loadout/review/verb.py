@@ -172,6 +172,7 @@ from clagentic_loadout.merge.fence_state import (
     normalize_findings_state,
     with_derived_failure_sequences,
 )
+from clagentic_loadout.merge.guidance_section import KEY_COMMENT_GUIDANCE
 from clagentic_loadout.merge.verdict import (
     VERDICT_FENCE,
     assert_single_own_verdict_block,
@@ -647,7 +648,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "bullet, a 'Dropped candidates' section, 'Resolved' and 'Resolved "
         "by caller' sections, 'range:' and 'engine:' lines) and copied into the fence without raising its version. "
         "The 'docs_only' object (a lighter docs-only review and its waiver) is accepted "
-        "the same way, is shown as one line, and raises the fence to fence_schema_version 5.",
+        "the same way, is shown as one line, and raises the fence to fence_schema_version 5. "
+        "An optional 'class_guidance' object (the classes the reviewer named for the findings, "
+        "as structure only) adds a 'Class guidance' section after the findings of an "
+        "evaluated body, worded by the tool; it is not copied into the fence.",
     )
     parser.add_argument(
         "--verdict-head-sha",
@@ -718,6 +722,20 @@ def _staged_findings_state(raw_bytes: bytes) -> dict:
     if not isinstance(parsed, dict):
         return {}
     return {key: parsed[key] for key in (*STATE_KEYS, *EVIDENCE_KEYS) if key in parsed}
+
+
+def _staged_class_guidance(raw_bytes: bytes) -> dict | None:
+    """The guidance object a staged body JSON carries for its comment's Class
+    guidance section, or None. Structure only: the section's wording is fixed
+    product text, so no prose can ride in through it, and a malformed object is
+    refused when the body is built."""
+    try:
+        parsed = json.loads(raw_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed.get(KEY_COMMENT_GUIDANCE)
 
 
 def _parse_owner_repo(owner_repo: str) -> tuple[str, str]:
@@ -1195,6 +1213,7 @@ def _run(
                 verdict_findings,
                 args.model_attested,
                 findings_state,
+                _staged_class_guidance(raw_bytes),
             )
         except ValueError as exc:
             _fail(f"--verdict-findings: {exc}", code=EXIT_VERDICT_BLOCK_USAGE)

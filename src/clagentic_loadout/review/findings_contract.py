@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from clagentic_loadout.merge.fence_state import KEY_SPEC_TAG, SPEC_TAGS
+from clagentic_loadout.review.class_guidance import CLASS_FIELDS_CONTRACT, class_fields_of
 from clagentic_loadout.review import facts as vocab
 from clagentic_loadout.review.facts import KEY_FACTS
 from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
@@ -43,7 +44,7 @@ _IMPACT_KEYS = ", ".join('"' + dimension + '"' for dimension in vocab.IMPACT_DIM
 
 # Built from the facts vocabulary itself, so the prompt can never offer a value
 # the evaluator would not recognise.
-OUTPUT_CONTRACT = f"""\
+_BASE_OUTPUT_CONTRACT = f"""\
 ## Output contract
 
 Reply with exactly one JSON array and nothing else: no prose before or after,
@@ -73,6 +74,25 @@ outside its list is treated as the worst case, which can only make the finding
 block.
 Reply [] when the chunk has no findings.
 """
+
+_CLASS_FIELDS_ANCHOR = "Do not state a severity or a verdict."
+
+#: The contract exactly as it was before the class keys existed: what a
+#: deployment that does not state classes sends.
+OUTPUT_CONTRACT_WITHOUT_CLASSES = _BASE_OUTPUT_CONTRACT
+
+#: The contract the default review sends: the base contract, with the two
+#: optional class keys described before the severity paragraph.
+OUTPUT_CONTRACT = _BASE_OUTPUT_CONTRACT.replace(
+    _CLASS_FIELDS_ANCHOR, CLASS_FIELDS_CONTRACT + _CLASS_FIELDS_ANCHOR, 1
+)
+
+
+def output_contract(defect_class: bool = True) -> str:
+    """The output contract for a reply: OUTPUT_CONTRACT, or with *defect_class*
+    false the contract without the class keys."""
+    return OUTPUT_CONTRACT if defect_class else OUTPUT_CONTRACT_WITHOUT_CLASSES
+
 
 #: Precedes OUTPUT_CONTRACT (which stays last) in an incremental review, the one
 #: place a reply can name prior findings as resolved.
@@ -112,6 +132,7 @@ def validate_finding(
     carry_fingerprint: bool = False,
     carry_facts: bool = False,
     carry_spec_tag: bool = False,
+    carry_class: bool = False,
     reply_contract: bool = False,
     problems: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -148,6 +169,13 @@ def validate_finding(
     SPEC_TAGS, and one that carries none, a value outside the vocabulary, or
     several is refused. Without the flag the key is dropped like any unknown
     key, so a review that is given no spec is unchanged.
+
+    ``defect_class`` and ``class_fix`` (see review.class_guidance) are optional
+    strings, carried only with ``carry_class``: each is cleaned and bounded, and
+    one that is missing, null or malformed is left out without touching the
+    finding. Neither is read by the evaluator. Without the flag they are dropped
+    like any unknown key, which is how a deployment that does not state classes
+    keeps the contract it always had.
 
     ``facts`` (see review.facts) is optional and additive: it is carried through
     only with ``carry_facts``, exactly as the reader found it, because judging it
@@ -218,6 +246,8 @@ def validate_finding(
                 f"{', '.join(SPEC_TAGS)}, got {tag!r}"
             )
         validated[KEY_SPEC_TAG] = tag
+    if carry_class:
+        validated.update(class_fields_of(item))
     if carry_fingerprint and is_fingerprint(item.get(KEY_FINGERPRINT)):
         validated[KEY_FINGERPRINT] = item[KEY_FINGERPRINT]
     if carry_facts and item.get(KEY_FACTS) is not None:
@@ -281,7 +311,7 @@ def _resolved_ids(value: Any) -> list[str]:
     return [i.strip() for i in value]
 
 
-def parse_chunk_output(text: str) -> ChunkReply:
+def parse_chunk_output(text: str, *, carry_class: bool = False) -> ChunkReply:
     """Parse one chunk's reply into validated findings and resolved ids.
 
     Accepts a bare JSON array (findings only), or a JSON object
@@ -314,16 +344,18 @@ def parse_chunk_output(text: str) -> ChunkReply:
         raise InvalidReplyError("reply is not a JSON array")
     problems: list[str] = []
     findings = [
-        validate_finding(item, i + 1, reply_contract=True, problems=problems)
+        validate_finding(
+            item, i + 1, reply_contract=True, carry_class=carry_class, problems=problems
+        )
         for i, item in enumerate(data)
     ]
     ignored = sum(1 for item in data if isinstance(item, dict) and "severity" in item)
     return ChunkReply(findings, resolved, ignored, tuple(problems))
 
 
-def parse_chunk_reply(text: str) -> list[dict[str, Any]]:
+def parse_chunk_reply(text: str, *, carry_class: bool = False) -> list[dict[str, Any]]:
     """The findings of one chunk's reply (see parse_chunk_output)."""
-    return parse_chunk_output(text).findings
+    return parse_chunk_output(text, carry_class=carry_class).findings
 
 
 def merge_findings(

@@ -33,6 +33,7 @@ from clagentic_loadout.merge.fence_state import (
     KEY_VERDICT_OUTCOME,
     KEY_VERDICT_REASONS,
 )
+from clagentic_loadout.review.class_guidance import class_fields_of
 from clagentic_loadout.review.evaluate import (
     EVALUATOR_VERSION,
     OUTCOME_CLEAN,
@@ -274,6 +275,9 @@ def evaluated_findings_for_fence(
             item[KEY_FACTS] = finding[KEY_FACTS]
         if finding.get("severity") == _PRAISE:
             item["severity"] = _PRAISE
+        # The reviewer's class statement rides along as evidence only: the
+        # evaluator never reads it, so it cannot change what the gate computes.
+        item.update(class_fields_of(finding))
         carried.append(item)
     return carried
 

@@ -69,6 +69,7 @@ from clagentic_loadout.review.evaluation import (
 )
 from clagentic_loadout.review.finding_identity import with_fingerprints
 from clagentic_loadout.review.findings_contract import merge_findings
+from clagentic_loadout.review.class_guidance import without_class_keys
 from clagentic_loadout.review.profile_config import ReviewProfile
 from clagentic_loadout.review.profile_rules import (
     chunk_class_rules,
@@ -198,6 +199,7 @@ def _resume_key(
         json.dumps([profile.carrier_model, profile.fallback_model]),
         profile.rulebook_text,
         str(profile.chunk_lines),
+        str(profile.defect_class),
     ):
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
@@ -711,6 +713,10 @@ def run_review(
     if rule_findings:
         per_chunk.append((0, rule_findings))
     merged_findings = merge_findings(per_chunk)
+    if not profile.defect_class:
+        # A prior finding carried forward may state a class from an earlier
+        # review; a deployment that states none keeps none.
+        merged_findings = without_class_keys(merged_findings)
     _mark_prior_locations(merged_findings, kept)
     # Severity and blocking are computed here, after the merge and the accounting
     # of prior findings, so a kept prior finding is judged again under the policy

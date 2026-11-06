@@ -19,6 +19,8 @@ which is normally the reviewer role):
           max_attempts: 3
           parallel: 4
           escalation_round: 2                         # 0 turns the churn breaker off
+          defect_class: true                          # false: reviewers state no defect classes
+          guidance_in_comment: true                   # false: no Class guidance section in the comment
 
 Two tiers, with a deliberate asymmetry. The USER-LEVEL file
 (``~/.config/clagentic/loadout/config.yaml``) is the host default and owns
@@ -32,6 +34,14 @@ same direction the credential-provider config takes). ``escalation_round`` is
 deployment-only as well, for a different reason: it switches the churn breaker
 (review.churn) off, which a repository under review must not be able to do. A
 repo-level value is ignored with a stderr warning.
+
+``defect_class`` and ``guidance_in_comment`` (both booleans, default true) are
+deployment-only for the same reason: a repository under review must not choose
+what its reviewer is asked to state or what the posted comment says. With
+``defect_class`` false the reviewer is not asked for defect classes, none are
+kept, and the fence version is unchanged, which is the old contract exactly.
+With ``guidance_in_comment`` false the guidance is still in the result, and the
+comment carries no Class guidance section.
 
 The carrier contract: the argv is executed directly (no shell), the chunk
 prompt is written to its stdin, and the reply is read from its stdout. Exit
@@ -82,7 +92,13 @@ _REPO_OVERRIDABLE_KEYS = (
     "rulebook",
 )
 _REPO_REFUSED_KEYS = ("carrier", "fallback", "carrier_model", "fallback_model")
-_REPO_DEPLOYMENT_ONLY_KEYS = (CONFIG_KEY_ESCALATION_ROUND,)
+CONFIG_KEY_DEFECT_CLASS = "defect_class"
+CONFIG_KEY_GUIDANCE_IN_COMMENT = "guidance_in_comment"
+_REPO_DEPLOYMENT_ONLY_KEYS = (
+    CONFIG_KEY_ESCALATION_ROUND,
+    CONFIG_KEY_DEFECT_CLASS,
+    CONFIG_KEY_GUIDANCE_IN_COMMENT,
+)
 _MAX_LABEL_CHARS = 100
 
 
@@ -137,6 +153,8 @@ class ReviewProfile:
     carrier_model: str | None = None
     fallback_model: str | None = None
     escalation_round: int = DEFAULT_ESCALATION_ROUND
+    defect_class: bool = True
+    guidance_in_comment: bool = True
 
 
 def _escalation_round(value: object, profile: str) -> int:
@@ -164,6 +182,40 @@ def load_escalation_round(name: str, *, config_root: str | Path | None = None) -
     )
     return _escalation_round(
         entry.get(CONFIG_KEY_ESCALATION_ROUND, DEFAULT_ESCALATION_ROUND), name
+    )
+
+
+def _flag(value: object, key: str, profile: str) -> bool:
+    """*value* as a boolean setting. Only a real boolean counts: a string such
+    as "false" is truthy in Python and would silently switch the wrong way."""
+    if not isinstance(value, bool):
+        raise ReviewProfileError(
+            f"review profile {profile!r}: {key!r} must be true or false, got {value!r}"
+        )
+    return value
+
+
+@dataclass(frozen=True)
+class ClassSettings:
+    """The two deployment switches of the defect-class feature."""
+
+    defect_class: bool = True
+    guidance_in_comment: bool = True
+
+
+def load_class_settings(name: str, *, config_root: str | Path | None = None) -> ClassSettings:
+    """The class switches for profile *name*, from the user-level config only.
+    A deployment with no such profile, or one that does not state a key, gets
+    the default (true). Raises ReviewProfileError for a value that is not a
+    boolean."""
+    entry = _profile_entry(
+        load_user_config_section(CONFIG_SECTION_REVIEW, config_root=config_root), name
+    )
+    return ClassSettings(
+        defect_class=_flag(entry.get(CONFIG_KEY_DEFECT_CLASS, True), CONFIG_KEY_DEFECT_CLASS, name),
+        guidance_in_comment=_flag(
+            entry.get(CONFIG_KEY_GUIDANCE_IN_COMMENT, True), CONFIG_KEY_GUIDANCE_IN_COMMENT, name
+        ),
     )
 
 
@@ -380,5 +432,11 @@ def load_review_profile(
         fallback_model=_label(merged.get("fallback_model"), "fallback_model", name),
         escalation_round=_escalation_round(
             merged.get(CONFIG_KEY_ESCALATION_ROUND, DEFAULT_ESCALATION_ROUND), name
+        ),
+        defect_class=_flag(
+            merged.get(CONFIG_KEY_DEFECT_CLASS, True), CONFIG_KEY_DEFECT_CLASS, name
+        ),
+        guidance_in_comment=_flag(
+            merged.get(CONFIG_KEY_GUIDANCE_IN_COMMENT, True), CONFIG_KEY_GUIDANCE_IN_COMMENT, name
         ),
     )

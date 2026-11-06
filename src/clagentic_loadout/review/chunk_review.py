@@ -43,9 +43,9 @@ from clagentic_loadout.review.chunking import Chunk
 from clagentic_loadout.review.engine_breaker import EngineBreaker
 from clagentic_loadout.review.findings_contract import (
     FORMAT_REPROMPT,
-    OUTPUT_CONTRACT,
     RESOLVED_REPLY_ADDENDUM,
     InvalidReplyError,
+    output_contract,
     parse_chunk_output,
 )
 from clagentic_loadout.review.profile_config import ReviewProfile
@@ -77,6 +77,7 @@ def build_prompt(
     delta_note: str = "",
     class_rules: str = "",
     docs_note: str = "",
+    defect_class: bool = True,
 ) -> str:
     """Chunk prompt with the output contract placed LAST, where a model
     weighs it most. *delta_note*, when given, frames the chunk as part of an
@@ -84,7 +85,10 @@ def build_prompt(
     repository's stated class rules for the chunk's files
     (review.profile_rules.chunk_class_rules); it sits after the rulebook.
     *docs_note*, when given, is the docs-only justification to judge
-    (review.docs_only_review.render_justification_note); it follows the class rules."""
+    (review.docs_only_review.render_justification_note); it follows the class rules.
+    *defect_class* says whether the output contract describes the two optional
+    class keys (review.class_guidance); false gives the contract as it was
+    before they existed."""
     parts = [_REVIEW_ONLY_PREFIX]
     if rulebook_text.strip():
         parts.append("## Rulebook\n\n" + rulebook_text.strip() + "\n\n")
@@ -97,7 +101,7 @@ def build_prompt(
     parts.append(f"## Diff chunk {chunk.index} of {total}\n\n" + chunk.text + "\n")
     if delta_note.strip():
         parts.append(RESOLVED_REPLY_ADDENDUM)
-    parts.append(OUTPUT_CONTRACT)
+    parts.append(output_contract(defect_class))
     return "".join(parts)
 
 
@@ -192,6 +196,7 @@ def _run_one_engine(
     log_dir: Path | None = None,
     runner: Runner,
     breaker: EngineBreaker | None = None,
+    carry_class: bool = False,
 ) -> dict[str, Any] | None:
     """Run one engine for this chunk. Returns the finished record, or None
     when the engine is unavailable (the caller decides whether a fallback
@@ -212,7 +217,7 @@ def _run_one_engine(
         )
 
     try:
-        parsed = parse_chunk_output(result.text)
+        parsed = parse_chunk_output(result.text, carry_class=carry_class)
         reply_result = result
     except InvalidReplyError as first_error:
         retry = run_engine_with_retry(argv, prompt + FORMAT_REPROMPT, timeout, **call)
@@ -226,7 +231,7 @@ def _run_one_engine(
                 record, engine, _transient_reason(retry), retry, retriable=not retry.deterministic
             )
         try:
-            parsed = parse_chunk_output(retry.text)
+            parsed = parse_chunk_output(retry.text, carry_class=carry_class)
             reply_result = retry
         except InvalidReplyError as second_error:
             failed = EngineResult(
@@ -309,6 +314,7 @@ def _fallback_after_carrier_failure(
     finished = _run_one_engine(
         ENGINE_FALLBACK, fallback, profile.fallback_timeout_seconds, prompt, record,
         cwd=cwd, log_dir=log_dir, runner=runner, breaker=breaker,
+        carry_class=profile.defect_class,
     )
     if finished is None:
         # The fallback is absent too: report the carrier's own failure, which
@@ -367,7 +373,10 @@ def _review_chunk(
     class_rules: str,
     docs_note: str,
 ) -> dict[str, Any]:
-    prompt = build_prompt(chunk, total, profile.rulebook_text, delta_note, class_rules, docs_note)
+    prompt = build_prompt(
+        chunk, total, profile.rulebook_text, delta_note, class_rules, docs_note,
+        defect_class=profile.defect_class,
+    )
     record = _new_record(chunk, attempts_before + 1)
 
     skipped = breaker.reason(ENGINE_CARRIER) if breaker is not None else ""
@@ -384,6 +393,7 @@ def _review_chunk(
         finished = _run_one_engine(
             ENGINE_CARRIER, profile.carrier, profile.timeout_seconds, prompt, record,
             cwd=cwd, log_dir=log_dir, runner=runner, breaker=breaker,
+            carry_class=profile.defect_class,
         )
     if finished is not None:
         if _carrier_attempts_exhausted(finished, profile):
@@ -413,6 +423,7 @@ def _review_chunk(
     finished = _run_one_engine(
         ENGINE_FALLBACK, profile.fallback, profile.fallback_timeout_seconds, prompt, record,
         cwd=cwd, log_dir=log_dir, runner=runner, breaker=breaker,
+        carry_class=profile.defect_class,
     )
     if finished is not None:
         finished["carrier_unavailable"] = record.get(f"{ENGINE_CARRIER}_unavailable_detail", "")
