@@ -383,7 +383,8 @@ def _stated_section(env: Env, index: int = 0) -> str:
     """The class rules section exactly as the engine was handed it."""
     prompt = prompts(env.stubs, "carrier")[index]
     start = prompt.index("## Repository class rules")
-    return prompt[start : prompt.index("## Diff chunk", start)].strip()
+    # The class rules section ends where the shared test guidance section begins.
+    return prompt[start : prompt.index("## Tests", start)].strip()
 
 
 def _sha(text: str) -> str:
