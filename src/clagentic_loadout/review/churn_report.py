@@ -11,6 +11,19 @@ Shape (every key always present)::
      "brief": "<text>" | null,
      "options": ["simplify", "ship", "continue"] | []}
 
+Once the level is brief or stop the object also carries ``rounds``, one entry
+per blocked round, oldest first::
+
+    {"head_sha": "<sha>", "blocking_count": 2, "by": {"<group>": 1, "<group>": 1},
+     "fix_delta": {"added": 3, "removed": 1} | null}
+
+``by`` counts the round's blocking keys by the finding's ``defect_class`` when it
+states one, else by ``rule_id``. ``fix_delta`` is the change from the previous
+blocked head to this one, from the host's compare; it is null, with
+``fix_delta_unavailable`` giving the reason, for the first round and for any
+pair the host could not compare. ``stop_skipped`` is added (true) when the
+caller is past the stop.
+
 A key entry also carries ``defect_class`` (and ``class_fix``) when the reviewer
 stated them for the key; the brief's step 5 quotes them.
 
@@ -27,6 +40,8 @@ from typing import Any
 
 from clagentic_loadout.review import churn_brief
 from clagentic_loadout.review.churn import (
+    COUNT_KEY,
+    COUNT_PR,
     LEVEL_NONE,
     LEVEL_STOP,
     STOP_OPTIONS,
@@ -73,6 +88,41 @@ def _key_entry(key: KeyChurn) -> dict[str, Any]:
     return entry
 
 
+def _group(round_: Round, key: tuple[str, str]) -> str:
+    defect_class = round_.classes.get(key, (None, None))[0]
+    return defect_class or key[0]
+
+
+def _round_entries(blocked: Sequence[Round], backend: Any, owner: str, repo: str) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    previous: str | None = None
+    for item in blocked:
+        by: dict[str, int] = {}
+        for key in sorted(item.keys):
+            group = _group(item, key)
+            by[group] = by.get(group, 0) + 1
+        entry: dict[str, Any] = {
+            "head_sha": item.head_sha, "blocking_count": len(item.keys), "by": by,
+            "fix_delta": None,
+        }
+        if previous is None:
+            entry["fix_delta_unavailable"] = "the first blocked round has no earlier head"
+        else:
+            delta, reason = read_net_delta(
+                backend, owner=owner, repo=repo, from_head=previous, to_head=item.head_sha
+            )
+            if delta is None:
+                entry["fix_delta_unavailable"] = reason
+            else:
+                entry["fix_delta"] = {
+                    "added": sum(f.added for f in delta.files),
+                    "removed": sum(f.removed for f in delta.files),
+                }
+        previous = item.head_sha
+        entries.append(entry)
+    return entries
+
+
 def build(
     rounds: Sequence[Round],
     escalation_round: int,
@@ -81,11 +131,13 @@ def build(
     owner: str,
     repo: str,
     spec: churn_brief.SpecQuote | None,
+    churn_count: str = COUNT_KEY,
 ) -> dict[str, Any]:
     """The churn object for *rounds* (oldest first, the last being the current
-    round) under *escalation_round*. The host is read only for a brief or stop
-    level, and only for the net delta."""
-    assessment = assess(rounds, escalation_round)
+    round) under *escalation_round*, counted as *churn_count*. The host is read
+    only for a brief or stop level, for the net delta and the per-round fix
+    deltas."""
+    assessment = assess(rounds, escalation_round, churn_count)
     report: dict[str, Any] = {
         "escalation_round": assessment.escalation_round,
         "keys": [_key_entry(k) for k in assessment.keys],
@@ -95,16 +147,27 @@ def build(
         "options": [],
     }
     deciding = assessment.deciding
-    if assessment.level == LEVEL_NONE or deciding is None:
+    if assessment.level == LEVEL_NONE or (deciding is None and assessment.count != COUNT_PR):
         return report
+    if assessment.count == COUNT_PR:
+        heads = tuple(item.head_sha for item in assessment.blocked)
+    else:
+        heads = deciding.heads if deciding is not None else ()
     delta, reason = read_net_delta(
-        backend, owner=owner, repo=repo, from_head=deciding.heads[0], to_head=deciding.heads[-1]
+        backend, owner=owner, repo=repo, from_head=heads[0], to_head=heads[-1]
     )
     if delta is not None:
         report["net_delta"] = delta.to_dict()
     else:
         report["net_delta_unavailable"] = reason
-    report["brief"] = churn_brief.render(assessment.level, deciding, spec)
+    report["brief"] = churn_brief.render(
+        assessment.level, deciding, spec, count=assessment.count,
+        blocked_rounds=len(assessment.blocked), escalation_round=escalation_round,
+        stop_skipped=assessment.stop_skipped,
+    )
+    report["rounds"] = _round_entries(assessment.blocked, backend, owner, repo)
+    if assessment.stop_skipped:
+        report["stop_skipped"] = True
     if assessment.level == LEVEL_STOP:
         report["options"] = list(STOP_OPTIONS)
     return report

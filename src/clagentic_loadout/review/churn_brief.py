@@ -17,6 +17,8 @@ from clagentic_loadout.review.churn import (
     OPTION_CONTINUE,
     OPTION_SHIP,
     OPTION_SIMPLIFY,
+    COUNT_KEY,
+    COUNT_PR,
     KeyChurn,
 )
 
@@ -71,26 +73,59 @@ def _restate_step(spec: SpecQuote | None) -> str:
     return "\n".join(lines)
 
 
-def _stop_text() -> str:
+def _stop_text(stop_skipped: bool, escalation_round: int) -> str:
     listed = "\n".join(f"  - {name}: {meaning}" for name, meaning in _OPTION_MEANING)
-    return (
+    text = (
         "STOP. Do not start another fix round yet. The project lead decides what happens "
         "next, and chooses one of:\n" + listed
     )
+    if stop_skipped:
+        text += (
+            f"\nThe stop at round {escalation_round + 1} was not taken. This is the second "
+            "instruction to stop."
+        )
+    return text
 
 
-def render(level: str, deciding: KeyChurn, spec: SpecQuote | None) -> str:
-    """The brief for *level* (brief or stop), led by the key that decided it."""
+def _churn_line(deciding: KeyChurn | None, count: str, blocked_rounds: int) -> str:
+    key_line = (
+        f"Rule {deciding.rule_id} in {deciding.file} has blocked {deciding.rounds} "
+        "consecutive review rounds."
+        if deciding is not None
+        else ""
+    )
+    if count == COUNT_PR:
+        pr_line = (
+            f"Churn: this pull request has been blocked in {blocked_rounds} review rounds, "
+            "not necessarily on the same finding."
+        )
+        return " ".join(part for part in (pr_line, key_line) if part) + (
+            " The brief for the next attempt:"
+        )
+    return f"Churn: {key_line[0].lower()}{key_line[1:]} The brief for the next attempt:"
+
+
+def render(
+    level: str,
+    deciding: KeyChurn | None,
+    spec: SpecQuote | None,
+    *,
+    count: str = COUNT_KEY,
+    blocked_rounds: int = 0,
+    escalation_round: int = 0,
+    stop_skipped: bool = False,
+) -> str:
+    """The brief for *level* (brief or stop), led by the key that decided it, or,
+    counting by pull request, by the number of blocked rounds."""
     if level not in (LEVEL_BRIEF, LEVEL_STOP):
         raise ValueError(f"no brief is rendered for level {level!r}")
-    head = [_stop_text()] if level == LEVEL_STOP else []
-    head.append(
-        f"Churn: rule {deciding.rule_id} in {deciding.file} has blocked {deciding.rounds} "
-        "consecutive review rounds. The brief for the next attempt:"
-    )
+    if deciding is None and count != COUNT_PR:
+        raise ValueError("a key-counted brief needs the deciding key")
+    head = [_stop_text(stop_skipped, escalation_round)] if level == LEVEL_STOP else []
+    head.append(_churn_line(deciding, count, blocked_rounds))
     steps = [_restate_step(spec)]
     steps.extend(f"{number}. {step}" for number, step in enumerate(STEPS[1:], start=2))
-    if deciding.defect_class:
+    if deciding is not None and deciding.defect_class:
         # Step 5 is "fix the class once"; the deciding finding's own class
         # statement goes under it, labelled as the reviewer's, not as fact.
         quote = [f"   {LABEL_LINE}", f"   defect_class: {deciding.defect_class}"]

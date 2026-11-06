@@ -11,8 +11,10 @@ from clagentic_loadout.acquire.errors import AcquireFetchError
 from clagentic_loadout.review import churn, churn_brief, churn_delta, churn_ledger
 from clagentic_loadout.review.churn import Round
 from clagentic_loadout.review.profile_config import (
+    DEFAULT_CHURN_COUNT,
     DEFAULT_ESCALATION_ROUND,
     ReviewProfileError,
+    load_churn_count,
     load_escalation_round,
     load_review_profile,
 )
@@ -393,3 +395,43 @@ class TestEscalationRoundSetting:
         )
 
         assert load_review_profile("reviewer", config_root=user, repo_root=repo).escalation_round == 2
+
+
+class TestChurnCountSetting:
+    def test_it_defaults_to_pr_with_or_without_a_profile(self, tmp_path):
+        assert load_churn_count("reviewer", config_root=tmp_path) == DEFAULT_CHURN_COUNT == "pr"
+        _config(tmp_path, {"carrier": ["c"]})
+        assert load_churn_count("reviewer", config_root=tmp_path) == "pr"
+        assert load_review_profile("reviewer", config_root=tmp_path).churn_count == "pr"
+
+    @pytest.mark.parametrize("value", ["pr", "key"])
+    def test_a_known_mode_is_accepted(self, tmp_path, value):
+        _config(tmp_path, {"carrier": ["c"], "churn_count": value})
+
+        assert load_churn_count("reviewer", config_root=tmp_path) == value
+        assert load_review_profile("reviewer", config_root=tmp_path).churn_count == value
+
+    @pytest.mark.parametrize("value", ["PR", "round", "", 2, True, None, ["pr"]])
+    def test_anything_else_is_an_error_naming_the_key_and_value(self, tmp_path, value):
+        _config(tmp_path, {"carrier": ["c"], "churn_count": value})
+
+        for load in (load_churn_count, load_review_profile):
+            with pytest.raises(ReviewProfileError, match="churn_count") as caught:
+                load("reviewer", config_root=tmp_path)
+            assert repr(value) in str(caught.value)
+
+    def test_a_repo_level_value_is_ignored_with_a_warning(self, tmp_path, capsys):
+        user = tmp_path / "user"
+        user.mkdir()
+        _config(user, {"carrier": ["c"], "churn_count": "pr"})
+        repo = tmp_path / "repo"
+        (repo / ".clagentic" / "loadout").mkdir(parents=True)
+        (repo / ".clagentic" / "loadout" / "config.yaml").write_text(
+            yaml.safe_dump({"review": {"profiles": {"reviewer": {"churn_count": "key"}}}}),
+            encoding="utf-8",
+        )
+
+        profile = load_review_profile("reviewer", config_root=user, repo_root=repo)
+
+        assert profile.churn_count == "pr"
+        assert "churn_count" in capsys.readouterr().err

@@ -959,6 +959,7 @@ review:
       max_attempts: 3
       parallel: 4
       escalation_round: 2                         # optional; 0 turns the churn breaker off
+      churn_count: pr                             # optional; pr (default) or key (per rule and file)
       defect_class: true                          # optional; false: no defect classes (default true)
       guidance_in_comment: true                   # optional; false: no Class guidance section (default true)
 ```
@@ -979,9 +980,9 @@ clamped with a warning: `parallel` at most 16, `max_attempts` at most 10,
 `timeout_seconds` and `fallback_timeout_seconds` at most 3600, `chunk_lines` at
 least 50. Values in the user-level config are not clamped. A repo-level config
 file that cannot be parsed is ignored with a warning on stderr. `escalation_round`
-(see [Churn breaker](#churn-breaker)) is deployment-only: a repo-level value is
-ignored with a warning, since a repository under review must not be able to switch
-the breaker off. `defect_class` and `guidance_in_comment` (see
+and `churn_count` (see [Churn breaker](#churn-breaker)) are deployment-only: a
+repo-level value is ignored with a warning, since a repository under review must not
+be able to switch the breaker off or change what it counts. `defect_class` and `guidance_in_comment` (see
 [Defect classes and class guidance](#defect-classes-and-class-guidance)) are
 deployment-only for the same reason.
 
@@ -1237,8 +1238,9 @@ output is read through a bounded tail, so memory stays flat however much it writ
 
 #### Churn breaker
 
-A review that blocks on the same rule in the same file round after round is usually
-a design problem, not a fix problem. The breaker counts those rounds and, from a
+A review that blocks round after round is usually a design problem, not a fix
+problem, whether it names the same finding each time or a new one each time (a fix
+that causes the next finding). The breaker counts those rounds and, from a
 configured round, hands the caller a brief for the next attempt; one round later it
 asks the caller to stop and offers a choice. It is advisory output: it adds fields to
 the `post` result and to the `churn` verb, never refuses a post, and is not read by
@@ -1249,6 +1251,19 @@ the `post` result and to the `churn` verb, never refuses a post, and is not read
 default **2**; **0** turns the breaker off. Anything else (a negative number, above
 10, a float, a string, a boolean) is a profile error naming the value: `post` exits
 **3** before it posts. A repo-level value is ignored with a warning.
+
+`review.profiles.<name>.churn_count`, also user-level only, chooses what a round
+count means: `pr` (the default) counts every distinct blocked head the role posted
+on the pull request, whichever findings it blocked on; `key` counts, per
+`(rule_id, file)`, the consecutive rounds that key stayed blocking. Any other value
+is a profile error naming `churn_count` (`post` exits **3** before it posts); a
+repo-level value is ignored with a warning.
+
+**Behaviour change.** `pr` is the default, so a deployment that sets
+`escalation_round` (or leaves it at its default of 2) now gets the brief and the stop
+on PR-wide blocked rounds, not only on a repeated key. The output stays advisory:
+nothing is refused and `loadout-merge` does not read it. Set `churn_count: key` for
+the previous behaviour.
 
 **Ledger.** The role's own earlier verdict fences on the pull request, read from the
 host's comment listing. Only comments whose author is the posting role's login count:
@@ -1264,13 +1279,20 @@ and so does a fence whose blocking keys cannot be read; a comment with no fence,
 with a fence for another pull request, is not a round. Undercounting is the safe
 direction, so every ambiguity reads as "not blocking".
 
-**Levels.** The highest-round key decides, with N the `escalation_round`:
+**Levels.** With N the `escalation_round`, the round count is the number of blocked
+heads the role posted on the pull request (`churn_count: pr`, the current head
+included, which must itself block; a fence that cannot be read is not counted) or the
+rounds of the highest-round key (`key`):
 
 | level | when | output |
 | --- | --- | --- |
-| `none` | N is 0, or no key has N rounds | no brief, no options |
-| `brief` | the highest key has exactly N rounds | net delta and the 8-step brief |
-| `stop` | the highest key has more than N rounds | the same, led by a stop line, and the options |
+| `none` | N is 0, or the count is below N | no brief, no options |
+| `brief` | the count is exactly N | net delta and the 8-step brief |
+| `stop` | the count is more than N | the same, led by a stop line, and the options |
+
+Past the stop (a count above N+1) the stop at round N+1 was not taken: `stop_skipped`
+is `true` and the stop text gains the line `The stop at round N+1 was not taken. This
+is the second instruction to stop.`
 
 **Output.** `post` adds `churn` to its result JSON, and `churn` prints it under
 `"churn"` beside `result`, `pr_number`, `reviewer_login` and the `head_sha` of the
@@ -1288,9 +1310,25 @@ role's last fence (null when it has none). Every key below is always present:
 }
 ```
 
+At the brief and stop levels the object also carries `rounds`, one entry per blocked
+round, oldest first, and `stop_skipped` when it is true:
+
+```json
+"rounds": [{"head_sha": "<sha>", "blocking_count": 2,
+            "by": {"<defect_class or rule_id>": 1, "<group>": 1},
+            "fix_delta": {"added": 3, "removed": 1}}],
+"stop_skipped": true
+```
+
+`by` counts the round's blocking keys by the finding's `defect_class` when it states
+one, else by `rule_id`. `fix_delta` is the change from the previous blocked head to
+this one, read from the host's compare; it is null, with `fix_delta_unavailable`
+stating why, for the first round and for any pair the host cannot compare. A failed
+compare never fails the post. Below the brief level none of these fields is present.
+
 `keys` lists the keys with at least two rounds (one, when N is 1), most rounds first.
-`net_delta` is the change from the first head of the deciding key's chain to the
-current head, per file, read from the host's range diff; `brief` is null and
+`net_delta` is the change from the first head of the deciding key's chain (under
+`pr`, the first blocked head) to the current head, per file, read from the host's range diff; `brief` is null and
 `options` is `[]` below the brief level, and `options` is `[]` at the brief level.
 When the delta cannot be read (the host cannot compare, the read fails, or the
 history was rewritten so the current head is not a fast-forward of the chain's first

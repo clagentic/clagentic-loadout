@@ -154,6 +154,7 @@ from clagentic_loadout.review.profile_config import (
     ReviewProfile,
     ReviewProfileError,
     load_class_settings,
+    load_churn_count,
     load_escalation_round,
     load_review_profile,
     load_run_root_override,
@@ -263,8 +264,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "\n"
             "`evaluate` computes a verdict from a findings file offline; see "
             "`loadout-review evaluate --help`.\n"
-            "`churn` reports how many consecutive rounds this role's posted reviews have "
-            "blocked on the same rule and file; see `loadout-review churn --help`."
+            "`churn` reports how many rounds this role's posted reviews have blocked a pull "
+            "request (or blocked on the same rule and file, per the churn_count setting); see `loadout-review churn --help`."
         ),
     )
     parser.add_argument(
@@ -496,10 +497,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     churn = subparsers.add_parser(
         "churn",
         help="Report the churn of this role's posted reviews on a pull request.",
-        description="Read-only. Counts the consecutive review rounds this role's own posted "
-        "verdicts have blocked on the same rule and file, and prints the churn object: the "
-        "level (none, brief or stop), the net delta since the chain began and, at the brief "
-        "and stop levels, the builder brief. Advisory output; it never refuses anything.",
+        description="Read-only. Counts the review rounds this role's own posted verdicts have blocked, "
+        "per pull request or per rule and file as the churn_count setting says, and prints "
+        "the churn object: the level (none, brief or stop), the net delta since the chain "
+        "began, the per-round fix deltas and, at the brief and stop levels, the builder brief. Advisory output; it never refuses anything.",
     )
     add_common(churn)
     churn.add_argument(
@@ -1167,6 +1168,7 @@ def _post_churn(
     head_sha: str,
     verdict: Verdict,
     escalation_round: int,
+    churn_count: str,
     spec_facts: spec_review.SpecFacts | None,
     classes: dict[tuple[str, str], tuple[str, str | None]] | None = None,
 ) -> dict[str, Any]:
@@ -1188,6 +1190,7 @@ def _post_churn(
         escalation_round=escalation_round,
         spec=churn_report.spec_quote(spec_facts),
         classes=classes,
+        churn_count=churn_count,
     )
 
 
@@ -1285,6 +1288,7 @@ def _churn_command(
     """`churn`: the churn object from the role's own posted fences, read-only."""
     try:
         escalation_round = load_escalation_round(args.profile or caller, config_root=config_root)
+        churn_count = load_churn_count(args.profile or caller, config_root=config_root)
     except ReviewProfileError as exc:
         _fail(str(exc), EXIT_PROFILE_INVALID)
     try:
@@ -1304,7 +1308,7 @@ def _churn_command(
         report, head, guidance = churn_on_demand(
             backend, owner=owner, repo=repo, pr_number=args.pr, login=login,
             escalation_round=escalation_round, spec=churn_report.spec_quote(facts),
-            with_classes=class_settings.defect_class,
+            with_classes=class_settings.defect_class, churn_count=churn_count,
         )
     except ChurnLedgerError as exc:
         _fail(str(exc), EXIT_ACQUIRE_FAILED)
@@ -1385,6 +1389,7 @@ def _post_command(
     # Read before anything is posted, so a bad setting costs nothing.
     try:
         escalation_round = load_escalation_round(args.profile or caller, config_root=config_root)
+        churn_count = load_churn_count(args.profile or caller, config_root=config_root)
     except ReviewProfileError as exc:
         _fail(str(exc), EXIT_PROFILE_INVALID)
     try:
@@ -1734,7 +1739,7 @@ def _post_command(
         args, owner=owner, repo=repo, caller=caller, platform=platform,
         token_provider=token_provider, opener=opener, login=posted.get("verified_by_login"),
         head_sha=head_sha, verdict=verdict, escalation_round=escalation_round,
-        spec_facts=spec_facts,
+        churn_count=churn_count, spec_facts=spec_facts,
         classes=class_guidance.first_class_by_key(
             ((evaluated.rule_id, evaluated.file), item)
             for item, evaluated in zip(annotated, verdict.findings)
