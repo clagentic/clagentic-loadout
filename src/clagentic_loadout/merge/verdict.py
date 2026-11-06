@@ -149,6 +149,8 @@ from clagentic_loadout.merge.fence_state import (
     with_derived_failure_sequences,
 )
 from clagentic_loadout.merge.fence_syntax import find_fence_syntax
+from clagentic_loadout.merge.guidance_section import section_lines as class_guidance_lines
+from clagentic_loadout.merge.guidance_section import validate_guidance
 from clagentic_loadout.sha import FULL_SHA_RE, InvalidShaError, compare_sha_values, validate_sha
 
 #: The fence language token that marks a machine-readable verdict block.
@@ -288,7 +290,9 @@ def _finding_bullet(finding: Mapping[str, Any]) -> list[str]:
 
 
 def _render_evaluated_findings(
-    findings: list[dict[str, Any]], reasons: list[str]
+    findings: list[dict[str, Any]],
+    reasons: list[str],
+    class_guidance: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """The body of an evaluated verdict: the reasons the outcome is not CLEAN,
     then the blocking findings, then the advisory ones. A finding that does not
@@ -307,6 +311,8 @@ def _render_evaluated_findings(
         lines.append(f"{title} ({len(group)}):")
         for finding in group:
             lines.extend(_finding_bullet(finding))
+    if class_guidance is not None:
+        lines.extend(class_guidance_lines(class_guidance))
     return lines
 
 
@@ -318,6 +324,7 @@ def build_findings_verdict_body(
     findings: list[dict[str, Any]],
     model_attested: str | None = None,
     findings_state: dict[str, Any] | None = None,
+    class_guidance: Mapping[str, Any] | None = None,
 ) -> str:
     """PRIMARY structured-body-construction mechanism (lr-c26110, operator
     reframe: 'enforce good behavior over blocking bad behavior'). Builds the
@@ -366,6 +373,11 @@ def build_findings_verdict_body(
     advisory ones as separate sections. Each finding may carry ``blocking``
     (bool; absent means blocking) and ``notes`` (single lines rendered under
     its bullet).
+
+    class_guidance: OPTIONAL — a guidance object (review.class_guidance). When
+                     it names a class, a "Class guidance" section follows the
+                     findings of an evaluated body. Only its structure is
+                     taken: the section's wording is fixed product text.
 
     Returns the constructed body string: a header line, one bullet per
     finding (in the order given), then build_verdict_block's fence.
@@ -445,7 +457,13 @@ def build_findings_verdict_body(
     if KEY_DOCS_ONLY in evidence:
         lines.append(render_docs_only(evidence[KEY_DOCS_ONLY]))
     if evaluated:
-        lines.extend(_render_evaluated_findings(findings, evidence[KEY_VERDICT_REASONS]))
+        lines.extend(
+            _render_evaluated_findings(
+                findings,
+                evidence[KEY_VERDICT_REASONS],
+                validate_guidance(class_guidance) if class_guidance is not None else None,
+            )
+        )
     else:
         for finding in findings:
             lines.extend(_finding_bullet(finding))
