@@ -3245,6 +3245,18 @@ workflow this verb is one step of.
 `clagentic_loadout.wait.cli`. File-poll and long-running-test-wait
 primitives used by other verbs' callers; not gate logic themselves.
 
+### `loadout-identity` — show or verify the resolved identity
+
+```
+loadout-identity whoami
+loadout-identity verify TOKEN [--dir DIR | --peer-id ID] [--now SECONDS]
+```
+
+`whoami` resolves the identity through the provider seam and prints it as JSON;
+`verify` checks one assertion token. Neither falls back to another identity source.
+Exit codes: `0` ok, `1` usage, `90`-`111` one per refusal kind. Full reference:
+[identity.md](identity.md).
+
 ### `loadout-doctor` — deployment-conformance check suite
 
 `clagentic_loadout.doctor.cli`. **Read-only**: never mutates config, never
