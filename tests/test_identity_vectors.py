@@ -79,7 +79,7 @@ def _run_delivery(vec: dict, tmp_path: Path) -> str:
 def test_vector(major: str, vec: dict, tmp_path: Path) -> None:
     expect = vec["expect"]
     if vec["id"] in V1_READ_AS_VALID_BY_MAJOR_2 and major == "v1":
-        expect = {"ok": True, "actor": None, "grade": None}
+        expect = {"ok": True, "actor": "human:example-user", "grade": "workload"}
     if vec["kind"] == "delivery":
         if expect["ok"]:
             assert _run_delivery(vec, tmp_path) == vec["layout"]["content"]
@@ -91,9 +91,8 @@ def test_vector(major: str, vec: dict, tmp_path: Path) -> None:
     if expect["ok"]:
         claims = _run_token(major, vec)
         actor = actor_from_claims(claims, provider="test")
-        if expect["actor"] is not None:
-            assert actor.actor == expect["actor"]
-            assert actor.grade == expect["grade"]
+        assert actor.actor == expect["actor"]
+        assert actor.grade == expect["grade"]
     else:
         with pytest.raises(errors.IdentityError) as caught:
             _run_token(major, vec)
