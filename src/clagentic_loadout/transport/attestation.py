@@ -516,6 +516,10 @@ SOURCE_BUILTIN = "builtin"
 SOURCE_SIDECAR_SUBAGENT = "sidecar-subagent"
 SOURCE_SIDECAR_SESSION = "sidecar-session"
 
+#: `Identity.source` of an identity adapted from a provider-seam `Actor` (see
+#: `identity_from_actor`). Not produced by any resolution chain in this module.
+SOURCE_ASSERTION = "assertion"
+
 
 
 class AttestationError(Exception):
@@ -584,6 +588,13 @@ class Identity:
             and self.subject == other.subject
             and self.source == other.source
         )
+
+
+class _ActorLike(Protocol):
+    """The one attribute `identity_from_actor` reads, so this module does not
+    import the identity package that itself builds on this one."""
+
+    actor: str
 
 
 @runtime_checkable
@@ -1167,6 +1178,19 @@ def _resolve_bound_identity_policy(*, config_root) -> str:
     )
 
 
+def _effective_bound_policy(policy_override: str | None, *, config_root) -> str:
+    """The policy `resolve_bound_identity` applies: a caller-supplied override
+    (validated against the recognized values) or the configured policy."""
+    if policy_override is None:
+        return _resolve_bound_identity_policy(config_root=config_root)
+    if policy_override not in _BOUND_IDENTITY_POLICIES:
+        raise AttestationConfigError(
+            f"attestation config FAILED -- bound identity policy override "
+            f"{policy_override!r} is not a recognized policy value."
+        )
+    return policy_override
+
+
 #: Public alias (lr-620837 fold-in #4): `transport.caller_binding.
 #: resolve_for_binding` needs to read the effective `bound_identity` policy
 #: to decide whether an omitted --caller/--role requires attestation
@@ -1193,6 +1217,7 @@ def resolve_bound_identity(
     *,
     env: dict[str, str] | None = None,
     config_root: str | Path | None = None,
+    policy_override: str | None = None,
 ) -> Identity:
     """Resolve the attested identity for a caller-BOUND verb -- every
     `bind_caller` call site uses this INSTEAD of `resolve_identity`. See
@@ -1239,6 +1264,12 @@ def resolve_bound_identity(
             tests). Defaults to transport.provider_config.
             DEFAULT_USER_CONFIG_ROOT (via this module's own bound copy of
             that name, same as `resolve_identity`).
+        policy_override: when given, this `bound_identity` policy applies
+            instead of the one read from config. The identity provider seam
+            passes `BOUND_IDENTITY_POLICY_REQUIRED` here for its
+            `prefer-assertion` transition value, so a miss refuses whatever
+            the deployment's own `attestation.bound_identity` says. None (the
+            default) leaves every existing caller on the config-read policy.
 
     Raises:
         BoundAttestationError: layer 1 declined, the ONE sidecar scope
@@ -1278,7 +1309,7 @@ def resolve_bound_identity(
         if unscoped_identity is not None:
             return unscoped_identity
 
-        policy = _resolve_bound_identity_policy(config_root=resolved_config_root)
+        policy = _effective_bound_policy(policy_override, config_root=resolved_config_root)
         if policy == BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK:
             builtin_identity = _BuiltinOsUserProvider().resolve()
             if builtin_identity is not None:
@@ -1345,7 +1376,7 @@ def resolve_bound_identity(
     # UNCONDITIONAL: a per-spawn-declared invocation whose per-spawn
     # adapter misses is refused regardless of policy -- see this module's
     # own docstring, "THE SUBAGENT-DISCRIMINATOR REFUSAL IS UNCONDITIONAL."
-    policy = _resolve_bound_identity_policy(config_root=resolved_config_root)
+    policy = _effective_bound_policy(policy_override, config_root=resolved_config_root)
     if policy == BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK and not is_per_spawn:
         builtin_identity = _BuiltinOsUserProvider().resolve()
         if builtin_identity is not None:
@@ -1360,6 +1391,14 @@ def resolve_bound_identity(
         f"file, before retrying.",
         expected_source=bound_source,
     )
+
+
+def identity_from_actor(actor: "_ActorLike") -> Identity:
+    """Adapt an identity-provider-seam `Actor` to the `Identity` the existing
+    callers consume. Thin on purpose: the subject is the actor string verbatim and
+    no existing caller calls this yet; mapping an actor to a `--caller` role value
+    belongs to the change that moves the verbs onto the seam."""
+    return Identity(subject=actor.actor, source=SOURCE_ASSERTION)
 
 
 __all__ = [
@@ -1379,6 +1418,7 @@ __all__ = [
     "SIDECAR_ADAPTER_KEY_SESSION_ID_ENV",
     "SIDECAR_SCOPE_PER_SPAWN",
     "SIDECAR_SCOPE_SESSION",
+    "SOURCE_ASSERTION",
     "SOURCE_BUILTIN",
     "SOURCE_CONFIGURED",
     "SOURCE_SIDECAR",
@@ -1390,6 +1430,7 @@ __all__ = [
     "Identity",
     "IdentityProvider",
     "attestation_env_var_names",
+    "identity_from_actor",
     "resolve_bound_identity",
     "resolve_bound_identity_policy",
     "resolve_identity",
