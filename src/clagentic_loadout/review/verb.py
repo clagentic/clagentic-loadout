@@ -217,6 +217,7 @@ from clagentic_loadout.transport.body_env import (
     read_body_bytes,
     resolve_caller_body_path,
 )
+from clagentic_loadout.transport.seam_binding import provider_fields, staging_kwargs
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
     bind_caller,
@@ -908,6 +909,10 @@ def _run(
         _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
     caller = args.caller if args.caller is not None else attested_identity.subject
     bind_caller(caller, caller_explicit=True, identity=attested_identity)
+    # Under an assertion identity provider the staged body is read from the
+    # verified delivery directory and only the staging actor may claim it.
+    path_kwargs = staging_kwargs(attested_identity)
+    stage_kwargs = staging_kwargs(attested_identity, actor_key="expect_actor")
 
     # --delete-own-comment (lr-f43c4b) short-circuits here, BEFORE pr_number
     # is parsed/required and BEFORE any body-ingestion/verdict-route
@@ -1067,7 +1072,7 @@ def _run(
     # shape transport.git_host_api uses for every other BodyEnvError this
     # verb (and that one) raises.
     try:
-        _staged_body_path = resolve_caller_body_path(caller=caller)
+        _staged_body_path = resolve_caller_body_path(caller=caller, **path_kwargs)
     except BodyEnvError as exc:
         _fail(str(exc), code=EXIT_BODY_ENV_UNREADABLE)
     if args.body_env and _staged_body_path.exists() and _staged_body_path.stat().st_size > 0:
@@ -1122,6 +1127,7 @@ def _run(
                 expect_verdict_route=(
                     args.verdict_review_status is not None or args.verdict_findings
                 ),
+                **stage_kwargs,
             )
         except VerdictIntentMismatchError as exc:
             _fail(str(exc), code=EXIT_VERDICT_ROUTE_INTENT_MISMATCH)
@@ -1421,6 +1427,7 @@ def _run(
             if coverage_record is not None:
                 result["spec_coverage_record_id"] = coverage_record.id
 
+    result.update(provider_fields(attested_identity))
     print(json.dumps(result))
     return EXIT_OK
 

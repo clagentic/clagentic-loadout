@@ -264,6 +264,7 @@ from clagentic_loadout.platform_detect import (
     PLATFORM_GITHUB,
 )
 from clagentic_loadout.transport import caller_binding as _caller_binding
+from clagentic_loadout.transport import seam_binding as _seam_binding
 from clagentic_loadout.transport import comment_paging
 from clagentic_loadout.transport import github_client
 from clagentic_loadout.transport import redirect_guard
@@ -2344,6 +2345,9 @@ def _run(
                 code=EXIT_USAGE,
             )
     bind_caller(caller, caller_explicit=True, identity=attested_identity)
+    # Under an assertion identity provider the staged body is read from the
+    # verified delivery directory and only the staging actor may claim it.
+    stage_kwargs = _seam_binding.staging_kwargs(attested_identity, actor_key="expect_actor")
 
     # PR number, extracted EARLY (lr-becdef): a pure regex match against
     # path_arg, no I/O, no dependency on --verify-comment -- moved ahead of
@@ -2416,6 +2420,7 @@ def _run(
                     caller=caller,
                     expect_target_pr=body_env_target_pr,
                     expect_head_sha=args.pr_sha,
+                    **stage_kwargs,
                 )
             except BodyEnvError as exc:
                 _fail(str(exc), code=EXIT_BODY_ENV_UNREADABLE)

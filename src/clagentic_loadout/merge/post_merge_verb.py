@@ -165,6 +165,7 @@ from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
 )
+from clagentic_loadout.transport.seam_binding import provider_fields
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
     bind_caller,
@@ -827,6 +828,7 @@ def _run(
                 "owner": owner,
                 "repo": repo,
                 "steps_run": steps_run,
+                **provider_fields(attested_identity),
                 **(
                     {"post_merge_tree": tool_tree_used, "post_merge_tree_removed": True}
                     if tool_tree_used

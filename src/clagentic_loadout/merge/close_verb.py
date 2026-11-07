@@ -93,6 +93,7 @@ from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
 )
+from clagentic_loadout.transport.seam_binding import provider_fields
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
     bind_caller,
@@ -549,6 +550,7 @@ def _run(
     envelope = {
         "pr_number": args.pr_number, "owner": owner, "repo": repo,
         READBACK_ENVELOPE_KEY: close_readback.to_dict(),
+        **provider_fields(attested_identity),
     }
     if args.delete_branch:
         # Reached only after the readback above confirmed the close. The

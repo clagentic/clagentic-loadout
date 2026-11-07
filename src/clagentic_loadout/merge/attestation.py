@@ -136,6 +136,8 @@ def build_attestation_body(
     version: str | None = None,
     verdict_evaluations: "list[str] | tuple[str, ...]" = (),
     docs_only_waivers: "list[str] | tuple[str, ...]" = (),
+    identity_provider: str | None = None,
+    self_declared: bool | None = None,
 ) -> str:
     """Build the merge-completion attestation comment body.
 
@@ -190,6 +192,11 @@ def build_attestation_body(
         docs-only justification, from merge.fence_state.docs_only_waiver_line.
         Rendered as a `Docs-only waivers` row, the audited record that a
         lighter review was accepted; omitted when empty.
+      - `identity_provider`, `self_declared`: which identity provider vouched for
+        the merging actor (`legacy` when no provider is configured) and whether
+        nothing outside the process vouched for it. Rendered as `Identity
+        provider` and `Self-declared` rows so a declared identity is never
+        silent; both rows are omitted when the caller passes None.
       - `version`: the clagentic-loadout package version. Defaults to
         `clagentic_loadout._version.get_version()` when omitted -- a caller
         overrides only for testing against a pinned version string.
@@ -228,6 +235,10 @@ def build_attestation_body(
             ("Docs-only waivers", "<br>".join(_escape_table_cell(line) for line in docs_only_waivers))
         )
     rows.append(("CI status", _escape_table_cell(ci_disposition)))
+    if identity_provider is not None:
+        rows.append(("Identity provider", _escape_table_cell(identity_provider)))
+    if self_declared is not None:
+        rows.append(("Self-declared", "true" if self_declared else "false"))
     if task_id:
         rows.append(("task_id", _escape_table_cell(task_id)))
     if issue_number is not None:

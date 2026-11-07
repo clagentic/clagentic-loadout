@@ -673,6 +673,7 @@ from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
 )
+from clagentic_loadout.transport.seam_binding import provider_fields
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
     bind_caller,
@@ -2439,6 +2440,8 @@ def _run(
         docs_only_waivers=[
             e.docs_only_waiver for e in gate_evaluations if e.docs_only_waiver is not None
         ],
+        identity_provider=provider_fields(attested_identity)["provider"],
+        self_declared=provider_fields(attested_identity)["self_declared"],
     )
     verified_comment_id: "str | int | None" = None
     try:
@@ -2481,6 +2484,7 @@ def _run(
             else {}
         ),
         **({"repo_gate_ignored": list(repo_gate.reviewer_roles)} if args.ignore_repo_gate else {}),
+        **provider_fields(attested_identity),
     }))
 
     # 10. Working-tree sync + post-merge steps -- ONLY reached after the

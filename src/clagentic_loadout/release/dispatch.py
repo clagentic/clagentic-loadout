@@ -330,6 +330,22 @@ def resolve_hook_secret(
         return value
 
     role = secret_env_caller or DEFAULT_ROLE
+    # Imported here: the transport package imports this module while it
+    # initialises, so a top-level import would be circular.
+    from clagentic_loadout.transport.attestation import AttestationError
+    from clagentic_loadout.transport.caller_binding import (
+        CallerBindingError,
+        bind_configured_provider,
+    )
+
+    # With identity.provider configured the role whose secret is read must be
+    # one the resolved actor holds; unset, nothing here changes.
+    try:
+        bound = bind_configured_provider(role, caller_explicit=secret_env_caller is not None)
+    except (AttestationError, CallerBindingError) as exc:
+        _die(EXIT_SECRET_FAILED, f"identity binding REFUSED -- {exc}")
+    if bound is not None:
+        role = bound[0]
     try:
         kvs = read_role_env_file(role, ("STATUS_HOOK_SECRET",))
     except SecretEnvError as exc:

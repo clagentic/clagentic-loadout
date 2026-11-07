@@ -340,6 +340,7 @@ from clagentic_loadout.transport.caller_binding import (
     describe_omitted_caller_behavior as _describe_omitted_caller,
     resolve_for_binding as _resolve_for_binding,
 )
+from clagentic_loadout.transport.seam_binding import provider_fields, staging_kwargs
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -1001,7 +1002,12 @@ def _read_body_stdin() -> str:
 
 
 def _read_body_env(
-    *, staged: "_StagedBody", caller: str, create_branch: str | None = None, target_pr: int | None = None
+    *,
+    staged: "_StagedBody",
+    caller: str,
+    create_branch: str | None = None,
+    target_pr: int | None = None,
+    stage_kwargs: dict | None = None,
 ) -> str:
     """Read + validate --body-env content (lr-e1e2fb): a body a caller's
     harness already staged via `loadout-stage-body`, using the SAME
@@ -1033,6 +1039,7 @@ def _read_body_env(
     try:
         claim = claim_caller_body(
             caller=caller, expect_create_branch=create_branch, expect_target_pr=target_pr,
+            **(stage_kwargs or {}),
         )
     except BodyEnvError as exc:
         _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
@@ -2061,6 +2068,11 @@ def _run(
         _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
     caller = args.caller if args.caller is not None else attested_identity.subject
     bind_caller(caller, caller_explicit=True, identity=attested_identity)
+    # Under an assertion identity provider the staged body lives in the
+    # verified delivery directory and only the staging actor may claim it;
+    # otherwise both stay None and the existing TMPDIR path applies.
+    stage_kwargs = staging_kwargs(attested_identity, actor_key="expect_actor")
+    identity_fields = provider_fields(attested_identity)
 
     project_root = _resolve_repo_root(args.repo_path)
 
@@ -2090,7 +2102,10 @@ def _run(
     body: str | None = None
     if args.body_env:
         if args.update_pr:
-            body = _read_body_env(staged=staged, caller=caller, target_pr=args.pr_number)
+            body = _read_body_env(
+                staged=staged, caller=caller, target_pr=args.pr_number,
+                stage_kwargs=stage_kwargs,
+            )
         else:
             current_branch = git_coords.current_branch(project_root)
             if current_branch in git_coords.PROTECTED_BRANCHES:
@@ -2102,7 +2117,10 @@ def _run(
                     f"real branch.",
                     code=EXIT_PUSH_FAILED,
                 )
-            body = _read_body_env(staged=staged, caller=caller, create_branch=current_branch)
+            body = _read_body_env(
+                staged=staged, caller=caller, create_branch=current_branch,
+                stage_kwargs=stage_kwargs,
+            )
     elif args.body_stdin:
         body = _read_body_stdin()
     elif not args.update_pr:
@@ -2178,7 +2196,7 @@ def _run(
             allowed_namespaces=allowed_namespaces, allowed_hosts=allowed_hosts,
             host_config_is_set=host_config_is_set,
             token_provider=token_provider, opener=opener,
-            staged=staged,
+            staged=staged, identity_fields=identity_fields,
         )
 
     return _run_create_pr(
@@ -2187,7 +2205,7 @@ def _run(
         host_config_is_set=host_config_is_set,
         token_provider=token_provider, opener=opener,
         builder_identity_config_root=builder_identity_config_root,
-        staged=staged,
+        staged=staged, identity_fields=identity_fields,
     )
 
 
@@ -2324,6 +2342,7 @@ def _run_update_pr(
     token_provider: TokenProvider | None,
     opener,
     staged: _StagedBody,
+    identity_fields: dict | None = None,
 ) -> int:
     try:
         owner, repo, api_base = _resolve_owner_repo_for_update(args, project_root)
@@ -2500,6 +2519,7 @@ def _run_update_pr(
         result["verification_sha"] = verification_sha
     if verification_record_ids:
         result["verdict_records"] = verification_record_ids
+    result.update(identity_fields or {})
     print(json.dumps(result))
     return EXIT_OK
 
@@ -2517,6 +2537,7 @@ def _run_create_pr(
     opener,
     builder_identity_config_root: str | Path | None = None,
     staged: _StagedBody,
+    identity_fields: dict | None = None,
 ) -> int:
     branch = git_coords.current_branch(project_root)
     if branch in git_coords.PROTECTED_BRANCHES:
@@ -2947,6 +2968,7 @@ def _run_create_pr(
     envelope.update(remote_readback_envelope)
     if verification_record_ids:
         envelope["verdict_records"] = verification_record_ids
+    envelope.update(identity_fields or {})
 
     print(f"push: PR #{pr_number} opened: {pr_url}")
     print(json.dumps(envelope))
