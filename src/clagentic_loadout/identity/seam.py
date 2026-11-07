@@ -9,10 +9,11 @@ and answers from exactly that provider.
 * `static`: the declared actor, `self_declared` true, no environment read.
 * `module`: a user-supplied provider.
 * `prefer-assertion` (transition): the assertion provider answers when the
-  directory variable is set. Otherwise the legacy chain runs, but only under the
-  `required` bound-identity policy whatever `attestation.bound_identity` says, so
-  a per-spawn miss refuses and no parent or OS-user identity is ever returned.
-  Each fallback emits one stderr notice and one telemetry event.
+  directory variable is set. Otherwise the only legacy answer accepted is a
+  `scope: per-spawn` sidecar adapter resolving on its own session id; layer 1
+  configured env, an unscoped adapter config, the session scope, the OS user and
+  any miss refuse naming the variable. Each fallback attempt emits one stderr
+  notice and one telemetry event.
 * unset: a config with legacy `attestation` keys keeps the legacy chain; a config
   with neither refuses naming `identity.provider`.
 
@@ -71,18 +72,35 @@ def _assertion_provider(kind: str, cfg: IdentityConfig) -> Provider:
     return AssertionProvider(kind, issuers)
 
 
-def _legacy_actor(
-    env: Mapping[str, str], config_root: str | Path | None, *, policy_override: str | None
-) -> Actor:
+def _legacy_actor(env: Mapping[str, str], config_root: str | Path | None) -> Actor:
     """Run the existing chain unchanged and wrap its answer. The legacy chain
     reads sidecars and a configured env value that nothing signed, so the result
     is marked self-declared and given no grade."""
     try:
-        identity = attestation.resolve_bound_identity(
-            env=dict(env), config_root=config_root, policy_override=policy_override
-        )
+        identity = attestation.resolve_bound_identity(env=dict(env), config_root=config_root)
     except attestation.AttestationError as exc:
         raise errors.IdentityError(errors.ATTESTATION_REFUSED, str(exc)) from exc
+    return _wrap_legacy(identity)
+
+
+def _per_spawn_actor(env: Mapping[str, str], config_root: str | Path | None) -> Actor:
+    """The only legacy answer prefer-assertion accepts: a per-spawn sidecar
+    adapter resolving on its own session id. Anything else refuses."""
+    try:
+        identity = attestation.resolve_per_spawn_identity(env=dict(env), config_root=config_root)
+    except attestation.AttestationError as exc:
+        raise errors.IdentityError(errors.IDENTITY_DIR_MISSING, f"{IDENTITY_DIR_ENV}: {exc}") from exc
+    if identity is None:
+        raise errors.IdentityError(
+            errors.IDENTITY_DIR_MISSING,
+            f"{IDENTITY_DIR_ENV} is unset and no per-spawn sidecar adapter resolved an identity; "
+            "prefer-assertion accepts nothing else (no configured env, unscoped sidecar, "
+            "session sidecar or OS user).",
+        )
+    return _wrap_legacy(identity)
+
+
+def _wrap_legacy(identity: attestation.Identity) -> Actor:
     return Actor(
         sub=identity.subject,
         actor=identity.subject,
@@ -98,7 +116,7 @@ def _legacy_actor(
 def _announce_fallback(env: Mapping[str, str]) -> None:
     print(
         f"identity: {IDENTITY_DIR_ENV} is unset; prefer-assertion is using the legacy "
-        "attestation chain under the required policy.",
+        "per-spawn sidecar only; any other legacy source is refused.",
         file=sys.stderr,
     )
     record = {
@@ -122,7 +140,7 @@ def resolve(
 
     if cfg.provider is None:
         if has_legacy_attestation_config(config_root=config_root):
-            return _legacy_actor(active_env, config_root, policy_override=None)
+            return _legacy_actor(active_env, config_root)
         raise errors.IdentityError(
             errors.PROVIDER_UNSET,
             f"{PROVIDER_KEY} is not set; choose one of gatekeeper, jwks, static, "
@@ -146,7 +164,5 @@ def resolve(
         if (active_env.get(IDENTITY_DIR_ENV) or "").strip():
             return provider.resolve(active_env)
         _announce_fallback(active_env)
-        return _legacy_actor(
-            active_env, config_root, policy_override=attestation.BOUND_IDENTITY_POLICY_REQUIRED
-        )
+        return _per_spawn_actor(active_env, config_root)
     raise errors.IdentityError(errors.CONFIG_INVALID, f"{PROVIDER_KEY} {cfg.provider!r} is not supported")

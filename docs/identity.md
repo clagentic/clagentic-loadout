@@ -82,11 +82,12 @@ everywhere. With `assertion_provider` naming the assertion class:
 
 * `CLAGENTIC_IDENTITY_DIR` set: the assertion provider answers, and refuses on any
   failure.
-* `CLAGENTIC_IDENTITY_DIR` unset: the legacy attestation chain runs, but only under
-  the `required` bound-identity policy, whatever `attestation.bound_identity` says.
-  A per-spawn miss therefore refuses, and neither a parent session's identity nor
-  the OS user is ever returned. Each such fallback writes one notice to stderr and
-  emits one telemetry event (schema `identity-fallback/v1`) to the configured sink.
+* `CLAGENTIC_IDENTITY_DIR` unset: the only answer accepted is a `scope: per-spawn`
+  sidecar adapter that resolves on its own `session_id_env`. A configured env value,
+  an unscoped adapter config, the session scope, the OS user and any miss all refuse
+  with `identity_dir_missing`, naming the variable. Each attempt writes one notice
+  to stderr and emits one telemetry event (schema `identity-fallback/v1`) to the
+  configured sink.
 
 ## No provider configured
 

@@ -290,57 +290,73 @@ def test_prefer_assertion_directory_set_but_invalid_refuses_without_fallback(
         resolve(env=env, config_root=cfg)
 
 
-def test_prefer_assertion_falls_back_to_the_legacy_chain_with_one_notice_and_event(
+def _per_spawn_adapter(tmp_path: Path, **extra) -> dict:
+    return {
+        "dir": str(tmp_path / "sc"),
+        "file_prefix": "spawn-",
+        "session_id_env": "SPAWN_ID",
+        "scope": "per-spawn",
+        **extra,
+    }
+
+
+def test_prefer_assertion_accepts_a_per_spawn_sidecar_with_one_notice_and_event(
     tmp_path: Path, issuer: Issuer, capsys
 ) -> None:
-    sidecar = tmp_path / "sidecar"
-    sidecar.write_text("agent:session\n")
-    cfg = _prefer_cfg(
-        tmp_path,
-        issuer,
-        identity_sidecar_path=str(sidecar),
-        bound_identity="builtin-fallback",
-    )
+    (tmp_path / "sc").mkdir()
+    (tmp_path / "sc" / "spawn-s1").write_text("agent:spawned\n")
+    cfg = _prefer_cfg(tmp_path, issuer, sidecars=[_per_spawn_adapter(tmp_path)])
     events = tmp_path / "events"
     env = clean_env(
-        CLAGENTIC_LOADOUT_TELEMETRY_SINK="filesystem", CLAGENTIC_LOADOUT_TELEMETRY_DIR=str(events)
+        SPAWN_ID="s1",
+        CLAGENTIC_LOADOUT_TELEMETRY_SINK="filesystem",
+        CLAGENTIC_LOADOUT_TELEMETRY_DIR=str(events),
     )
     actor = resolve(env=env, config_root=cfg)
-    assert actor.provider == "legacy:sidecar" and actor.actor == "agent:session"
+    assert actor.provider == "legacy:sidecar-subagent" and actor.actor == "agent:spawned"
     err = capsys.readouterr().err
     assert err.count("prefer-assertion is using the legacy") == 1
     written = list(events.glob("identity-fallback*"))
     assert len(written) == 1 and len(written[0].read_text().splitlines()) == 1
 
 
-def test_prefer_assertion_per_spawn_miss_refuses_even_under_builtin_fallback(
-    tmp_path: Path, issuer: Issuer, capsys
+@pytest.mark.parametrize(
+    "source",
+    ["layer1_configured_env", "unscoped_adapter", "session_scope", "os_user", "per_spawn_miss"],
+)
+def test_prefer_assertion_refuses_every_other_legacy_source(
+    tmp_path: Path, issuer: Issuer, capsys, source: str
 ) -> None:
-    # bound_identity says builtin-fallback and an OS user exists; the seam forces the
-    # required policy, so the miss refuses and the OS user is never returned.
-    cfg = _prefer_cfg(
-        tmp_path,
-        issuer,
-        bound_identity="builtin-fallback",
-        sidecars=[
-            {"dir": str(tmp_path / "sc"), "file_prefix": "spawn-", "session_id_env": "SPAWN_ID", "scope": "per-spawn"},
-            {"dir": str(tmp_path / "sc"), "file_prefix": "sess-", "session_id_env": "SESS_ID", "scope": "session"},
-        ],
-    )
     (tmp_path / "sc").mkdir()
     (tmp_path / "sc" / "sess-s1").write_text("agent:parent\n")
-    env = clean_env(SPAWN_ID="missing-spawn", SESS_ID="s1", USER="root", LOGNAME="root")
+    (tmp_path / "sc" / "plain-s1").write_text("agent:unscoped\n")
+    attest: dict = {"bound_identity": "builtin-fallback"}
+    env = clean_env(USER="root", LOGNAME="root")
+    if source == "layer1_configured_env":
+        attest["identity_env"] = "LEGACY_WHO"
+        env["LEGACY_WHO"] = "agent:configured"
+    elif source == "unscoped_adapter":
+        attest["sidecars"] = [
+            {"dir": str(tmp_path / "sc"), "file_prefix": "plain-", "session_id_env": "SESS_ID"}
+        ]
+        env["SESS_ID"] = "s1"
+    elif source == "session_scope":
+        attest["sidecars"] = [
+            {
+                "dir": str(tmp_path / "sc"),
+                "file_prefix": "sess-",
+                "session_id_env": "SESS_ID",
+                "scope": "session",
+            }
+        ]
+        env["SESS_ID"] = "s1"
+    elif source == "per_spawn_miss":
+        attest["sidecars"] = [_per_spawn_adapter(tmp_path)]
+        env["SPAWN_ID"] = "missing-spawn"
+    cfg = _prefer_cfg(tmp_path, issuer, **attest)
     with pytest.raises(IdentityError) as caught:
         resolve(env=env, config_root=cfg)
-    assert caught.value.code == errors.ATTESTATION_REFUSED
-    assert "agent:parent" not in str(caught.value)
+    assert DIR_VAR in str(caught.value)
+    for leaked in ("agent:parent", "agent:configured", "agent:unscoped", "root"):
+        assert f"{leaked}\n" not in str(caught.value)
     assert capsys.readouterr().err.count("prefer-assertion is using the legacy") == 1
-
-
-def test_prefer_assertion_with_nothing_configured_never_returns_the_os_user(
-    tmp_path: Path, issuer: Issuer
-) -> None:
-    cfg = _prefer_cfg(tmp_path, issuer, bound_identity="builtin-fallback")
-    with pytest.raises(IdentityError) as caught:
-        resolve(env=clean_env(USER="root", LOGNAME="root"), config_root=cfg)
-    assert caught.value.code == errors.ATTESTATION_REFUSED

@@ -1,4 +1,4 @@
-"""The thin adapter to the legacy Identity, the policy override the seam uses, the
+"""The thin adapter to the legacy Identity, the narrow per-spawn entry, the
 no-default isolation guarantee and the doctor check."""
 
 from __future__ import annotations
@@ -25,22 +25,10 @@ def test_identity_from_actor_keeps_the_existing_identity_shape() -> None:
     assert identity == attestation.Identity("agent:x", attestation.SOURCE_ASSERTION)
 
 
-def test_policy_override_applies_instead_of_the_configured_policy(tmp_path: Path) -> None:
+def test_resolve_bound_identity_default_path_is_unchanged(tmp_path: Path) -> None:
     cfg = write_config(tmp_path / "cfg", None, attestation={"bound_identity": "builtin-fallback"})
     env = clean_env(USER="someone", LOGNAME="someone")
-    default = attestation.resolve_bound_identity(env=env, config_root=cfg)
-    assert default.source == attestation.SOURCE_BUILTIN
-    with pytest.raises(attestation.BoundAttestationError):
-        attestation.resolve_bound_identity(
-            env=env, config_root=cfg, policy_override=attestation.BOUND_IDENTITY_POLICY_REQUIRED
-        )
-
-
-def test_policy_override_rejects_unrecognized_values(tmp_path: Path) -> None:
-    with pytest.raises(attestation.AttestationConfigError):
-        attestation.resolve_bound_identity(
-            env={}, config_root=tmp_path, policy_override="requried"
-        )
+    assert attestation.resolve_bound_identity(env=env, config_root=cfg).source == attestation.SOURCE_BUILTIN
 
 
 def test_loading_config_with_no_identity_provider_does_not_touch_the_seam(tmp_path: Path) -> None:
