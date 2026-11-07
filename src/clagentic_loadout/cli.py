@@ -158,6 +158,12 @@ def _spec_main(argv: list[str]) -> int:
     return spec_main(argv)
 
 
+def _identity_main(argv: list[str]) -> int:
+    from clagentic_loadout.identity.verb import main as identity_main
+
+    return identity_main(argv)
+
+
 def _rules_main(argv: list[str]) -> int:
     from clagentic_loadout.rules.verb import main as rules_main
 
@@ -211,6 +217,7 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     ),
     "record": ("Read the verdict records gates left for a commit (show, list).", _record_main),
     "spec": ("Create, seal and read the standard spec (new, seal, show).", _spec_main),
+    "identity": ("Show the resolved identity, or verify an assertion token (whoami, verify).", _identity_main),
 }
 
 #: Parent verb name -> {subverb name: (summary, callable)}.
