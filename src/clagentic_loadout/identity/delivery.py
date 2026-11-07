@@ -31,36 +31,41 @@ def read_delivery(env: Mapping[str, str]) -> tuple[str, str]:
         raise _missing("is unset or empty")
     if not os.path.isabs(directory):
         raise _missing(f"{directory!r} is not an absolute path")
+    # Open the directory once and do every later step relative to that
+    # descriptor, so a swap of the path after the check cannot redirect the read.
     try:
-        info = os.lstat(directory)
+        dir_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise errors.IdentityError(
+                errors.IDENTITY_DIR_UNSAFE, f"{IDENTITY_DIR_ENV} {directory!r} is a symlink"
+            ) from exc
+        if exc.errno == errno.ENOTDIR:
+            raise _missing(f"{directory!r} is not a directory") from exc
         raise _missing(f"{directory!r} cannot be read: {exc.strerror}") from exc
-    if stat.S_ISLNK(info.st_mode):
-        raise errors.IdentityError(
-            errors.IDENTITY_DIR_UNSAFE, f"{IDENTITY_DIR_ENV} {directory!r} is a symlink"
-        )
-    if not stat.S_ISDIR(info.st_mode):
-        raise _missing(f"{directory!r} is not a directory")
-    if info.st_uid != os.geteuid():
-        raise errors.IdentityError(
-            errors.IDENTITY_DIR_UNSAFE, f"{IDENTITY_DIR_ENV} {directory!r} is not owned by this user"
-        )
-    if stat.S_IMODE(info.st_mode) != 0o700:
-        raise errors.IdentityError(
-            errors.IDENTITY_DIR_UNSAFE,
-            f"{IDENTITY_DIR_ENV} {directory!r} has mode {stat.S_IMODE(info.st_mode):04o}, need 0700",
-        )
-
-    path = os.path.join(directory, IDENTITY_FILE)
     try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    except FileNotFoundError as exc:
-        raise errors.IdentityError(
-            errors.IDENTITY_FILE_MISSING, f"{IDENTITY_FILE} is absent from {IDENTITY_DIR_ENV}"
-        ) from exc
-    except OSError as exc:
-        code = errors.IDENTITY_FILE_SYMLINK if exc.errno == errno.ELOOP else errors.IDENTITY_FILE_MISSING
-        raise errors.IdentityError(code, f"{IDENTITY_FILE} cannot be opened: {exc.strerror}") from exc
+        info = os.fstat(dir_fd)
+        if info.st_uid != os.geteuid():
+            raise errors.IdentityError(
+                errors.IDENTITY_DIR_UNSAFE,
+                f"{IDENTITY_DIR_ENV} {directory!r} is not owned by this user",
+            )
+        if stat.S_IMODE(info.st_mode) != 0o700:
+            raise errors.IdentityError(
+                errors.IDENTITY_DIR_UNSAFE,
+                f"{IDENTITY_DIR_ENV} {directory!r} has mode {stat.S_IMODE(info.st_mode):04o}, need 0700",
+            )
+        try:
+            fd = os.open(IDENTITY_FILE, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dir_fd)
+        except FileNotFoundError as exc:
+            raise errors.IdentityError(
+                errors.IDENTITY_FILE_MISSING, f"{IDENTITY_FILE} is absent from {IDENTITY_DIR_ENV}"
+            ) from exc
+        except OSError as exc:
+            code = errors.IDENTITY_FILE_SYMLINK if exc.errno == errno.ELOOP else errors.IDENTITY_FILE_MISSING
+            raise errors.IdentityError(code, f"{IDENTITY_FILE} cannot be opened: {exc.strerror}") from exc
+    finally:
+        os.close(dir_fd)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise errors.IdentityError(
