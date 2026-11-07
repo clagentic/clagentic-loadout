@@ -3245,6 +3245,19 @@ workflow this verb is one step of.
 `clagentic_loadout.wait.cli`. File-poll and long-running-test-wait
 primitives used by other verbs' callers; not gate logic themselves.
 
+### Identity binding
+
+Every verb that takes `--caller` or `--role` binds it before any I/O. With
+`identity.provider` unset (the default) it binds through the legacy attestation chain,
+exactly as in earlier releases. With it set, it binds to the provider seam's `Actor`:
+the role minted must be in `Actor.roles`, and the refusal names the role requested and
+the roles present, with the verb's existing caller-mismatch exit code.
+`loadout-stage-body` binds the same way when a provider is set (exit `5` on refusal; it
+binds nothing otherwise), and `loadout-release-dispatch` checks the role whose secret
+it reads. Mint results (`loadout-push`, `loadout-review`, `loadout-review-post`,
+`loadout-acquire`, `loadout-merge`, `loadout-close-pr`, `loadout-post-merge`) gain two
+additive fields, `provider` and `self_declared`. See [identity.md](identity.md#verb-binding).
+
 ### `loadout-identity` — show or verify the resolved identity
 
 ```
