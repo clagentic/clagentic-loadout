@@ -24,7 +24,8 @@ import os
 from pathlib import Path
 from typing import Mapping
 
-from clagentic_loadout.identity import Actor, IdentityError, load_identity_config, resolve
+from clagentic_loadout.identity.actor import Actor
+from clagentic_loadout.identity.errors import IdentityError
 from clagentic_loadout.transport.attestation import (
     SOURCE_ASSERTION,
     AttestationError,
@@ -81,6 +82,13 @@ def configured_actor(
 
     A refusal from the seam surfaces as `AttestationError`, the type every
     caller-bound verb already maps to its own mismatch exit code."""
+    # Imported here: `identity.config` and `identity.seam` import the transport
+    # package, whose initialisation imports this module, so loading the identity
+    # package first (`python -m clagentic_loadout.identity.verb`) would otherwise
+    # hit a partially initialised module.
+    from clagentic_loadout.identity.config import load_identity_config
+    from clagentic_loadout.identity.seam import resolve
+
     try:
         if load_identity_config(config_root=config_root).provider is None:
             return None

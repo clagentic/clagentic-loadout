@@ -167,7 +167,7 @@ from __future__ import annotations
 
 from typing import Callable
 
-from clagentic_loadout.identity import Actor
+from clagentic_loadout.identity.actor import Actor
 from clagentic_loadout.transport.attestation import (
     BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK,
     Identity,
