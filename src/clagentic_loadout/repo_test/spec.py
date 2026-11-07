@@ -8,11 +8,18 @@ Schema (strict: an unknown key makes the whole profile invalid)::
       files: [python3, -m, pytest, "--junitxml={junit}"]   # file paths are appended
       base: origin/main                                    # default for --base
       paths: ["spec/**"]                                   # extra test-file globs
+      ratio_warn: 2                                        # changeset ratio budget
+      ratio_floor_lines: 100                               # changeset ratio floor
       tiers:                                               # named runs, one argv each
         integration: [python3, -m, pytest, "-m", integration, "--junitxml={junit}"]
 
 ``paths`` lists globs of files that count as tests in addition to the built-in
 rule (review.test_files); it extends that rule and never replaces it.
+
+``ratio_warn`` and ``ratio_floor_lines`` tune the advisory test:code ratio of a
+change (review.changeset_ratio). Both are kept as written and judged where they
+are used: a value that is not a positive integer falls back to its default with
+a warning naming the key, so a typo never invalidates the rest of the profile.
 
 Each of ``full``, ``impacted`` and ``files`` is an argv list, run without a
 shell, with the repository root as the working directory. Every command must
@@ -46,7 +53,9 @@ RUN_MODES = (*MODES, MODE_TIER)
 KEY_BASE = "base"
 KEY_TIERS = "tiers"
 KEY_PATHS = "paths"
-_ALLOWED_KEYS = (*MODES, KEY_BASE, KEY_TIERS, KEY_PATHS)
+KEY_RATIO_WARN = "ratio_warn"
+KEY_RATIO_FLOOR_LINES = "ratio_floor_lines"
+_ALLOWED_KEYS = (*MODES, KEY_BASE, KEY_TIERS, KEY_PATHS, KEY_RATIO_WARN, KEY_RATIO_FLOOR_LINES)
 _MAX_PATH_GLOBS = 100
 
 TIER_NAME_RE = re.compile(r"\A[a-z][a-z0-9_-]{0,31}\Z")
@@ -77,6 +86,8 @@ class DeclaredTests:
     base: str | None = None
     tiers: tuple[tuple[str, tuple[str, ...]], ...] = ()
     paths: tuple[str, ...] = ()
+    ratio_warn: Any = None
+    ratio_floor_lines: Any = None
 
     def argv_for(self, mode: str) -> tuple[str, ...] | None:
         """The declared argv template for *mode*, or None when not declared."""
@@ -88,7 +99,7 @@ class DeclaredTests:
 
     def declared_keys(self) -> list[str]:
         """The keys this block sets, for ``loadout-profile check``."""
-        return [key for key in _ALLOWED_KEYS if getattr(self, key)]
+        return [key for key in _ALLOWED_KEYS if getattr(self, key) not in (None, (), "")]
 
 
 def _argv(value: Any, where: str, *, allow_base: bool) -> tuple[str, ...]:
@@ -180,6 +191,8 @@ def parse_test_block(block: Any, where: str = "test") -> DeclaredTests:
         base=base,
         tiers=_tiers(block.get(KEY_TIERS), f"{where}.{KEY_TIERS}"),
         paths=_paths(block.get(KEY_PATHS), f"{where}.{KEY_PATHS}"),
+        ratio_warn=block.get(KEY_RATIO_WARN),
+        ratio_floor_lines=block.get(KEY_RATIO_FLOOR_LINES),
         **commands,
     )
 
@@ -189,6 +202,8 @@ __all__ = [
     "JUNIT_PLACEHOLDER",
     "KEY_BASE",
     "KEY_PATHS",
+    "KEY_RATIO_FLOOR_LINES",
+    "KEY_RATIO_WARN",
     "KEY_TIERS",
     "MODES",
     "MODE_FILES",

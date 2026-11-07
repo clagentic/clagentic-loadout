@@ -46,6 +46,12 @@ def _builtin_test(path: PurePosixPath) -> bool:
     )
 
 
+def is_doc_file(path: str) -> bool:
+    """True when the repo-relative *path* is documentation, which is neither a
+    test nor code for any count of a change."""
+    return _is_doc(PurePosixPath(path[2:] if path.startswith("./") else path))
+
+
 def is_test_file(path: str, extra_globs: Iterable[str] = ()) -> bool:
     """True when the repo-relative *path* is a test file under the built-in rule
     or one of *extra_globs* (the profile's ``test.paths``)."""
@@ -56,4 +62,4 @@ def is_test_file(path: str, extra_globs: Iterable[str] = ()) -> bool:
     return _builtin_test(posix) or any(path_matches(glob, normalized) for glob in extra_globs)
 
 
-__all__ = ["is_test_file"]
+__all__ = ["is_doc_file", "is_test_file"]

@@ -73,6 +73,12 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
   It extends that rule and never replaces it, and documentation (`.md`, `.txt`, `.rst`, or
   anything under `docs/`) is never a test whatever it matches. It is read from the merge base.
   `loadout-profile brief --role builder` shows it under `tests.paths`.
+  `test.ratio_warn` (positive integer, default 2) is the budget of net test lines to net code
+  lines, and `test.ratio_floor_lines` (positive integer, default 100) is the net test growth
+  below which a change is never over budget; both feed the advisory ratio
+  ([verbs.md](verbs.md#testcode-ratio-loadout-changeset-ratio)) and are read from the merge
+  base. A value that is not a positive integer falls back to its default with a warning naming
+  the key; it does not invalidate the profile.
 
 - **`review`** holds `docs_only`, the docs allowlist (next section), `scanners`, the category
   of each scanner's hits, and `clearance`, the findings a reviewer may clear itself (below).

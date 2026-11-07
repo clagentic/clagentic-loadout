@@ -1,6 +1,7 @@
 """review.changeset_verb — `loadout-changeset`: classify a change as docs-only or code.
 
   loadout-changeset classify --base REV [--head REV] [--repo-path DIR]
+  loadout-changeset ratio    --base REV [--head REV] [--repo-path DIR]
 
 ``classify`` decides, deterministically, whether the change from the merge base
 of REV and the head to the head touches documentation only. The docs allowlist
@@ -13,7 +14,14 @@ symlink entries, the loadout configuration directory) is code, and so is a
 change with no profile allowlist at all. The same classification is what
 `loadout-review run` and `post` use (review.docs_only_review).
 
-It prints one JSON object: the classification, the allowlist source (the base
+``ratio`` states the net test:code ratio of the same change as advice (see
+review.changeset_ratio): the per-file line counts come from git, each path is a
+test, documentation or code by the shared test-file rule, and the budget and
+floor come from ``test.ratio_warn`` and ``test.ratio_floor_lines`` in the
+profile at the merge base. It never refuses: counts that cannot be read are
+reported as ``unavailable`` with the reason, and the exit code is 0.
+
+``classify`` prints one JSON object: the classification, the allowlist source (the base
 commit, the profile path, and what reading the profile came to) and every path
 with its class and the reason. Both answers exit 0: the exit code reports
 whether the question could be answered, not what the answer is. It is local and
@@ -22,7 +30,7 @@ read-only, needs no credential and binds no caller.
 Exit codes (the reserved range for this verb; git's own exit codes are never
 passed through):
 
-  0   classified (docs-only or code)
+  0   classified (docs-only or code); ratio stated (or reported unavailable)
   1   usage error
   62  the repository, a revision or the changed paths could not be read
 """
@@ -35,6 +43,7 @@ import sys
 from pathlib import Path
 
 from clagentic_loadout._version import get_version
+from clagentic_loadout.review import changeset_ratio_source
 from clagentic_loadout.review.docs_only_policy import ChangedPath, merge_changed
 from clagentic_loadout.review.docs_only_review import classify_with_profile
 from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReadError
@@ -95,7 +104,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     classify.add_argument(
         "--head", default="HEAD", help="The revision holding the change (default: HEAD)."
     )
+    ratio = sub.add_parser(
+        "ratio",
+        help="State the net test:code ratio of the change from a base revision to a head.",
+        description="State the net test:code line ratio of a change as advice and print it as "
+        "one JSON object. Never refuses; unreadable counts are reported as unavailable.",
+    )
+    ratio.add_argument(
+        "--repo-path", default=".", help="Repository root (default: the current directory)."
+    )
+    ratio.add_argument(
+        "--base", required=True, help="The revision the change merges into; the profile is read "
+        "at its merge base with the head."
+    )
+    ratio.add_argument(
+        "--head", default="HEAD", help="The revision holding the change (default: HEAD)."
+    )
     return parser
+
+
+def _ratio(args: argparse.Namespace) -> int:
+    print(json.dumps(changeset_ratio_source.from_local(args.repo_path, args.base, args.head)))
+    return EXIT_OK
 
 
 def _classify(args: argparse.Namespace) -> int:
@@ -140,7 +170,7 @@ def main(argv: list[str] | None = None) -> int:
         for flag, value in (("--base", args.base), ("--head", args.head)):
             if value.startswith("-"):
                 raise ChangesetVerbError(f"{flag} must be a revision, got {value!r}", EXIT_USAGE)
-        return _classify(args)
+        return _ratio(args) if args.command == "ratio" else _classify(args)
     except ChangesetVerbError as exc:
         print(f"loadout-changeset: {exc}", file=sys.stderr)
         return exc.code

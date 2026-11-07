@@ -189,7 +189,7 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         _profile_main,
     ),
     "changeset": (
-        "Classify a change as docs-only or code from the base's docs allowlist (classify).",
+        "Classify a change as docs-only or code (classify); state its net test:code ratio (ratio).",
         _changeset_main,
     ),
     "rules": ("Print the group rules that apply to a repository.", _rules_main),
