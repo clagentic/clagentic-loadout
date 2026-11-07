@@ -145,6 +145,9 @@ import argparse
 import sys
 
 from clagentic_loadout._version import get_version
+from clagentic_loadout.transport.attestation import AttestationError
+from clagentic_loadout.transport.caller_binding import CallerBindingError, bind_configured_provider
+from clagentic_loadout.transport.seam_binding import staging_kwargs
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
@@ -191,6 +194,10 @@ EXIT_BODY_FILE_UNREADABLE = 3
 #: this verb must never print "staged" and exit 0 when the stamp sidecar is
 #: not actually durable on disk).
 EXIT_STAGE_VERIFY_FAILED = 4
+#: With `identity.provider` configured, --caller is not a role the resolved
+#: actor holds, or the identity provider refused. Never raised when
+#: `identity.provider` is unset (this verb binds nothing then).
+EXIT_CALLER_INVOKER_MISMATCH = 5
 
 
 class StageBodyVerbError(Exception):
@@ -333,6 +340,17 @@ def _run(args: argparse.Namespace, *, body_bytes: bytes) -> int:
     except GitHostApiError as exc:
         _fail(str(exc), code=EXIT_BODY_STDIN_EMPTY)
 
+    # Binds like every other caller-bound verb, but only when an identity
+    # provider is configured: unset, nothing here changes.
+    try:
+        bound = bind_configured_provider(args.caller, caller_explicit=True)
+    except (AttestationError, CallerBindingError) as exc:
+        _fail(f"identity binding FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
+    path_kwargs = staging_kwargs(bound[1]) if bound is not None else {}
+    stage_kwargs = dict(path_kwargs)
+    if path_kwargs:
+        stage_kwargs["stager_identity"] = {"actor": bound[1].actor, "jti": bound[1].jti}
+
     try:
         stage_caller_body(
             caller=args.caller,
@@ -340,6 +358,7 @@ def _run(args: argparse.Namespace, *, body_bytes: bytes) -> int:
             target_pr=args.target_pr,
             create_branch=args.create_branch,
             head_sha=args.head_sha,
+            **stage_kwargs,
         )
     except BodyEnvError as exc:
         # lr-765172: stage_caller_body's own verify-after-write raised --
@@ -371,8 +390,8 @@ def _run(args: argparse.Namespace, *, body_bytes: bytes) -> int:
     # transport layer; a zero-byte BODY is content this verb's own
     # validate_body_stdin_content call above has already accepted, not a
     # write-durability concern for this readback to re-litigate).
-    body_path = resolve_caller_body_path(caller=args.caller)
-    stamp_path = _resolve_caller_stamp_path(caller=args.caller)
+    body_path = resolve_caller_body_path(caller=args.caller, **path_kwargs)
+    stamp_path = _resolve_caller_stamp_path(caller=args.caller, **path_kwargs)
     for staged_path, label in ((body_path, "body"), (stamp_path, "identity stamp")):
         try:
             size = staged_path.stat().st_size
