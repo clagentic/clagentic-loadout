@@ -302,8 +302,9 @@ def github_opener(
     `state` collects the posted body and every request URL. `compare`, when
     given, serves the commit-range endpoint: {"status": "ahead", "diff": "..."}
     (or "http_status" for a failing read; "base_merged": True for a branch the
-    base was merged into since the prior head); without it a compare request is an
-    unexpected call. `pr_fields` adds fields (title, body) to the PR metadata.
+    base was merged into since the prior head); without it a compare request is
+    answered 404, the way a host answers a range it cannot compare. `pr_fields` adds
+    fields (title, body) to the PR metadata.
     `repo_record` is the repository record under `base.repo` (None omits it, as
     a host that does not state one). `base_files`, when given, is the file tree
     served by the git-trees and contents endpoints at any ref (path -> text);
@@ -340,6 +341,8 @@ def github_opener(
                     "merge_base_commit": {"sha": ("f" if merged else "e") * 40},
                 }
             )
+        if method == "GET" and "/compare/" in url and compare is None:
+            return _Response(404, b"{}")
         if method == "GET" and base_files is not None and "/git/trees/" in url:
             if tree_http != 200:
                 return _Response(tree_http, b"{}")

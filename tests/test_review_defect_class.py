@@ -24,7 +24,7 @@ from clagentic_loadout.review.findings_contract import (
     parse_chunk_reply,
 )
 from clagentic_loadout.transport import provider_config
-from tests._review_cli_support import HEAD_SHA, Env, prompts
+from tests._review_cli_support import HEAD_SHA, Env, make_diff, prompts
 from tests._review_evaluate_support import facts
 from tests._support.churn_fences import replace_fence, verdict_comment
 
@@ -536,16 +536,31 @@ def test_the_comment_builder_refuses_a_test_line_that_is_not_the_fixed_wording()
         validate_guidance({"classes": [], "tests": ["a.py: write three new test files"]})
 
 
-def test_post_states_the_ratio_in_guidance_or_null_with_a_reason_and_still_succeeds(
+def test_post_states_the_ratio_from_the_host_compare_and_leaves_the_rest_of_guidance(
+    env, tmp_path, capsys
+):
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps([_finding()]), encoding="utf-8")
+    diff = make_diff({"tests/test_a.py": 300, "src/a.py": 10})
+
+    code, payload = env.post(
+        "--findings", str(path), "--head-sha", HEAD_SHA, "--base-sha", env.base_sha,
+        "--status", "blocking", capsys=capsys, compare={"status": "ahead", "diff": diff},
+    )
+
+    assert code == 0
+    ratio = payload["guidance"]["ratio"]
+    assert ratio["test"]["net"] == 300 and ratio["code"]["net"] == 10
+    assert ratio["over_budget"] is True and "does not block" in ratio["line"]
+    assert payload["guidance"]["classes"] == [] and "ratio_unavailable" not in payload["guidance"]
+
+
+def test_post_with_a_failing_host_compare_has_a_null_ratio_with_a_reason_and_succeeds(
     env, tmp_path, capsys
 ):
     code, payload = _post(env, tmp_path, capsys, [_finding()])
 
     assert code == 0
-    guidance = payload["guidance"]
-    assert "ratio" in guidance
-    if guidance["ratio"] is None:
-        assert guidance["ratio_unavailable"]
-    else:
-        assert guidance["ratio"]["over_budget"] in (True, False)
-    assert guidance["classes"] == []
+    assert payload["guidance"]["ratio"] is None
+    assert "cannot compare" in payload["guidance"]["ratio_unavailable"]
+    assert payload["result"] == "posted"
