@@ -10,9 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from clagentic_loadout.doctor.checks import CheckResult
-from clagentic_loadout.identity.config import PROVIDER_STATIC, load_identity_config
-from clagentic_loadout.identity.errors import IdentityError
-from clagentic_loadout.identity.seam import has_legacy_attestation_config
+from clagentic_loadout.identity import (
+    PROVIDER_STATIC,
+    IdentityError,
+    has_legacy_attestation_config,
+    load_identity_config,
+)
 
 CHECK_NAME = "identity_provider"
 
