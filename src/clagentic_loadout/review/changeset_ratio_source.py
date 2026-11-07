@@ -46,7 +46,7 @@ def from_local(repo_path: str | Path, base: str, head: str) -> dict[str, Any]:
         head_sha = reader.resolve_commit(head)
         merge_base = reader.merge_base(base_sha, head_sha)
         present = set(reader.list_paths(merge_base))
-        counts = reader.numstat(base_sha, head_sha)
+        counts = reader.numstat(merge_base, head_sha)
     except PolicyReadError as exc:
         return changeset_ratio.unavailable(str(exc))
     profile, _state, _problem = read_repo_profile(reader, merge_base, present)

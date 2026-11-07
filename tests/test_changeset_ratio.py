@@ -184,6 +184,22 @@ def test_a_renamed_test_file_nets_to_zero(tmp_path, capsys):
     assert out["code"]["net"] == 0
 
 
+def test_a_branch_behind_its_base_counts_only_its_own_lines(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    commit_files(repo, {"src/a.py": "x\n"})
+    run_git(repo, "checkout", "-q", "-b", "change")
+    commit_files(repo, {"src/b.py": "b\n" * 7, "tests/test_b.py": "t\n" * 20})
+    run_git(repo, "checkout", "-q", "main")
+    commit_files(repo, {"src/late.py": "l\n" * 500, "tests/test_late.py": "t\n" * 900})
+    run_git(repo, "checkout", "-q", "change")
+
+    code, out = _run(repo, capsys)
+
+    assert code == 0
+    assert out["code"] == {"added": 7, "removed": 0, "net": 7}
+    assert out["test"] == {"added": 20, "removed": 0, "net": 20}
+
+
 def test_an_unreadable_revision_is_unavailable_with_a_reason_and_exit_zero(tmp_path, capsys):
     repo = _repo_with_change(tmp_path)
 
