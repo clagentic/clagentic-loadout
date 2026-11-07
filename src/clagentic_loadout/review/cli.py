@@ -83,7 +83,13 @@ from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     resolve_declared_role,
 )
-from clagentic_loadout.review import changeset_paths, churn_report, class_guidance, spec_review
+from clagentic_loadout.review import (
+    changeset_paths,
+    changeset_ratio_source,
+    churn_report,
+    class_guidance,
+    spec_review,
+)
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.churn_ledger import ChurnLedgerError
 from clagentic_loadout.review.churn_verb import churn_after_post, churn_on_demand
@@ -1196,6 +1202,37 @@ def _post_churn(
     )
 
 
+def _post_ratio(
+    args: argparse.Namespace,
+    *,
+    owner: str,
+    repo: str,
+    caller: str,
+    platform: str,
+    token_provider,
+    opener,
+    profile,
+    base_sha: str,
+    head_sha: str,
+) -> dict[str, Any]:
+    """``{"ratio": <object>}`` for the ``guidance`` of a post that has landed, or
+    ``{"ratio": None, "ratio_unavailable": <reason>}`` when the host compare
+    cannot be read. Advisory: it never fails the post."""
+    try:
+        backend = _build_acquire_backend(
+            args, owner=owner, repo=repo, caller=caller, platform=platform,
+            token_provider=token_provider, opener=opener,
+        )
+    except ReviewCliError as exc:
+        return {"ratio": None, "ratio_unavailable": str(exc)}
+    ratio = changeset_ratio_source.from_host(
+        backend, profile, owner=owner, repo=repo, base_sha=base_sha, head_sha=head_sha
+    )
+    if ratio["ratio"] == "unavailable":
+        return {"ratio": None, "ratio_unavailable": ratio["reason"]}
+    return {"ratio": ratio}
+
+
 def _own_login(caller: str, platform: str) -> str:
     try:
         return resolve_declared_role(caller, platform).login
@@ -1728,7 +1765,14 @@ def _post_command(
         if key in posted:
             result[key] = posted[key]
     if guidance is not None:
-        result[KEY_GUIDANCE] = guidance
+        result[KEY_GUIDANCE] = {
+            **guidance,
+            **_post_ratio(
+                args, owner=owner, repo=repo, caller=caller, platform=platform,
+                token_provider=token_provider, opener=opener, profile=policy.repo_profile,
+                base_sha=live_pr.base_sha, head_sha=head_sha,
+            ),
+        }
     if scanner_input is not None:
         result["scanner_finding_count"] = len(ingestion.findings)
         result["outside_range_count"] = len(ingestion.outside_range)

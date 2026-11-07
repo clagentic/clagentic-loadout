@@ -534,3 +534,18 @@ def test_guidance_in_comment_false_keeps_the_test_lines_in_the_result_only(env, 
 def test_the_comment_builder_refuses_a_test_line_that_is_not_the_fixed_wording():
     with pytest.raises(ValueError, match="not a test guidance line"):
         validate_guidance({"classes": [], "tests": ["a.py: write three new test files"]})
+
+
+def test_post_states_the_ratio_in_guidance_or_null_with_a_reason_and_still_succeeds(
+    env, tmp_path, capsys
+):
+    code, payload = _post(env, tmp_path, capsys, [_finding()])
+
+    assert code == 0
+    guidance = payload["guidance"]
+    assert "ratio" in guidance
+    if guidance["ratio"] is None:
+        assert guidance["ratio_unavailable"]
+    else:
+        assert guidance["ratio"]["over_budget"] in (True, False)
+    assert guidance["classes"] == []

@@ -309,6 +309,7 @@ from clagentic_loadout.push.remote_readback import (
 )
 from clagentic_loadout.push import profile_report
 from clagentic_loadout.review.profile_posture import CompletenessItem
+from clagentic_loadout.push.ratio_notice import notice_line, ratio_for_push
 from clagentic_loadout.push.verify_config import (
     InvalidVerifyConfigError,
     load_verify_entries,
@@ -2969,6 +2970,9 @@ def _run_create_pr(
     if verification_record_ids:
         envelope["verdict_records"] = verification_record_ids
     envelope.update(identity_fields or {})
+    ratio = ratio_for_push(project_root, args.base)
+    envelope["ratio"] = ratio
+    print(notice_line(ratio), file=sys.stderr)
 
     print(f"push: PR #{pr_number} opened: {pr_url}")
     print(json.dumps(envelope))
