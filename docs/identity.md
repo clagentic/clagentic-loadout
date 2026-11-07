@@ -5,11 +5,11 @@ inferred from a parent session or from the operating-system user. The identity
 provider seam (`clagentic_loadout.identity`) resolves one `Actor` from the provider
 named by `identity.provider`, or raises a typed `IdentityError`.
 
-This page covers the seam only. No existing verb calls it yet: every verb keeps its
-current attestation behavior, and a config without `identity.provider` changes
-nothing for them. The seam refuses (naming `identity.provider`) only when something
-resolves an identity through `clagentic_loadout.identity.resolve()` or
-`loadout-identity whoami`.
+With `identity.provider` set, the caller-bound verbs take their identity from the
+seam (see [Verb binding](#verb-binding)). With it unset, every verb keeps its
+current attestation behavior exactly, whether or not legacy `attestation` keys are
+present: the no-default refusal below applies to `clagentic_loadout.identity.resolve()`
+and `loadout-identity whoami` only, not to verbs, until the legacy chain is removed.
 
 ## Configuration
 
@@ -89,11 +89,53 @@ everywhere. With `assertion_provider` naming the assertion class:
   to stderr and emits one telemetry event (schema `identity-fallback/v1`) to the
   configured sink.
 
+## Verb binding
+
+With `identity.provider` set, `loadout-push`, `loadout-review` and `loadout-review-post`,
+`loadout-acquire`, `loadout-merge`, `loadout-close-pr`, `loadout-post-merge`,
+`loadout-git-host-api`, `loadout-ruling` and `loadout-stage-body` bind `--caller` /
+`--role` to the seam's `Actor` before any I/O, and `loadout-release-dispatch` does the
+same for the role whose secret it reads. The mapping from an actor to the role a verb
+mints is:
+
+| Request | Result |
+|---|---|
+| `--caller`/`--role` names a role in `Actor.roles` | that role is minted |
+| `--caller`/`--role` names anything else, including the actor's own name | refused; the message names the role requested and the roles present |
+| omitted, and the actor holds exactly one role | that role |
+| omitted, and the actor holds none or several | refused; the actor must name a role |
+| the provider refuses (for example `gatekeeper` or `jwks` with `CLAGENTIC_IDENTITY_DIR` unset) | refused, naming the variable; never a parent, session or OS-user identity |
+
+A refusal exits with the verb's existing caller-mismatch code (numbers unchanged).
+`loadout-stage-body` had no such code and uses `5`. The role list is a ceiling, never
+a grant: credential minting and merge authority still decide what the role may do.
+An answer from the `prefer-assertion` per-spawn sidecar carries no role list and binds
+by name equality, as the legacy chain does.
+
+Every JSON result a binding verb prints carries two additive fields, `provider`
+(`gatekeeper`, `jwks:<iss>`, `declared`, `module:<name>`, `legacy:<source>`, or
+`legacy` when `identity.provider` is unset) and `self_declared` (`false` when
+`identity.provider` is unset). The merge attestation comment carries them as
+`Identity provider` and `Self-declared` rows. `loadout-git-host-api` prints the
+host's response unchanged and adds nothing.
+
+Under `gatekeeper` and `jwks`, `--body-env` staging and `loadout-acquire` scratch move
+to `<dir>/tmp/` (so `<dir>/tmp/clagentic-loadout/` for bodies), where `dir` is the
+verified delivery directory. The body's stamp records the staging actor and the
+assertion `jti`, and a read by a different actor is refused. Under `static`, `module`
+and with the provider unset, `$TMPDIR` applies as before.
+
+`loadout-doctor` reports the provider, the key-set sources it trusts, the
+`self_declared` flag and the number of `prefer-assertion` fallbacks the filesystem
+telemetry sink has recorded (advisory, always exit 0).
+
 ## No provider configured
 
 With no `identity.provider` and no `provider_module`: a config that still carries
-legacy `attestation` keys keeps the legacy chain; a config with neither refuses with
-`provider_unset`, naming `identity.provider`.
+legacy `attestation` keys (any key present, even an empty `sidecars: []`) keeps the
+legacy chain; a config with neither refuses with `provider_unset`, naming
+`identity.provider`. This refusal is the seam's own: no verb applies it yet, so on a
+config without `identity.provider` every verb resolves through the legacy chain.
 
 ## `loadout-identity`
 

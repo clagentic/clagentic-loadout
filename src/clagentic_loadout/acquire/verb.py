@@ -40,6 +40,7 @@ from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
 )
+from clagentic_loadout.transport.seam_binding import provider_fields, staging_kwargs
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
     bind_caller,
@@ -398,7 +399,7 @@ def _run(
 
     if args.stage_scratch:
         try:
-            staged = write_scratch_content(acquired)
+            staged = write_scratch_content(acquired, **staging_kwargs(attested_identity))
         except ScratchWriteError as exc:
             _fail(str(exc), code=EXIT_SCRATCH_WRITE_FAILED)
             return EXIT_SCRATCH_WRITE_FAILED  # unreachable; _fail raises
@@ -407,6 +408,7 @@ def _run(
         result["scratch_files_dir"] = str(staged.files_dir)
         result["scratch_written_files"] = list(staged.written_files)
 
+    result.update(provider_fields(attested_identity))
     print(json.dumps(result))
     return EXIT_OK
 

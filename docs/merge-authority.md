@@ -40,6 +40,12 @@ service, one fixed URL, and one hardcoded role name.
 fail-closed) while making the **mechanism** — which service, which URL,
 which role — entirely a deployment's own configuration.
 
+With `identity.provider` set, the role this model authorizes is a role the verified
+`Actor` holds: `loadout-merge`, `loadout-close-pr` and `loadout-post-merge` refuse a
+`--role` outside `Actor.roles` before any authority check, naming the role and the
+roles present. With it unset, binding is the legacy attestation chain described
+below, unchanged. See [identity.md](identity.md#verb-binding).
+
 ## 2. Fail-closed, with no fail-open variant
 
 Every path through `merge.authority` that cannot **positively confirm**
@@ -498,6 +504,8 @@ sourced from outside the merge that just happened:
 | Reviews | `<login>, <login>` |
 | Verdicts | `<role>: fence <outcome>, gate <outcome>[; disposition applied: ...]` |
 | CI status | `<disposition>` |
+| Identity provider | `<provider>` (`legacy` when `identity.provider` is unset) |
+| Self-declared | `true` or `false` |
 | task_id | `<opaque work-item ref>` |
 | Issue | `#<NN>` |
 

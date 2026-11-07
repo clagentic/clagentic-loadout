@@ -778,6 +778,9 @@ class _StagedStamp:
     head_sha: str | None
     staged_at: str
     carries_review_status: bool
+    #: `{"actor", "jti"}` of the verified identity that staged the body, when
+    #: the stager had one; None for a stamp written without an identity.
+    identity: dict | None = None
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
@@ -860,6 +863,7 @@ def stage_caller_body(
     create_branch: str | None = None,
     head_sha: str | None = None,
     env: dict[str, str] | None = None,
+    stager_identity: dict[str, str] | None = None,
 ) -> None:
     """Stage *body_bytes* at the caller-namespaced fixed path, with an
     identity-stamp sidecar binding it to *target_pr* (and, when supplied,
@@ -908,6 +912,12 @@ def stage_caller_body(
     partial; the contract the module's docstrings already claimed
     ("atomic") is now actually enforced, not just documented.
 
+    *stager_identity* (`{"actor": ..., "jti": ...}`) is the verified identity
+    staging this body, under an assertion identity provider; it is recorded in
+    the stamp so a read by a different actor is refused (see the
+    *expect_actor* parameter of `read_caller_body_bytes`). None records
+    nothing, as before.
+
     ABANDONED-PAIR SWEEP (lr-4c1646): before staging, this function
     opportunistically sweeps stale siblings out of the SAME staging
     subdirectory it is about to write into (`sweep_abandoned_pairs`,
@@ -940,6 +950,8 @@ def stage_caller_body(
         "staged_at": datetime.now(timezone.utc).isoformat(),
         "carries_review_status": _derive_carries_review_status(body_bytes),
     }
+    if stager_identity is not None:
+        stamp["identity"] = {"actor": stager_identity["actor"], "jti": stager_identity["jti"]}
     stamp_bytes = json.dumps(stamp).encode("utf-8")
 
     _atomic_write_bytes(body_path, body_bytes)
@@ -1065,6 +1077,7 @@ def _read_and_validate_stamp(
         # like target_pr, and a caller must not be newly refused merely for
         # reading a stamp staged before this stamp field existed.
         carries_review_status=bool(parsed.get("carries_review_status", False)),
+        identity=parsed.get("identity") if isinstance(parsed.get("identity"), dict) else None,
     )
 
 
@@ -1076,6 +1089,7 @@ def read_body_bytes(
     expect_create_branch: str | None = None,
     expect_head_sha: str | None = None,
     expect_verdict_route: bool | None = None,
+    expect_actor: str | None = None,
 ) -> bytes:
     """Read a staged body and return its raw bytes.
 
@@ -1152,6 +1166,7 @@ def read_body_bytes(
             expect_head_sha=expect_head_sha,
             expect_verdict_route=expect_verdict_route,
             env=env,
+            expect_actor=expect_actor,
         )
     path = resolve_body_path(env=env)
     return _read_staged_bytes(path)
@@ -1166,6 +1181,7 @@ def read_caller_body_bytes(
     expect_verdict_route: bool | None = None,
     env: dict[str, str] | None = None,
     consume: bool = True,
+    expect_actor: str | None = None,
 ) -> bytes:
     """Read the PER-CALLER staged body (`resolve_caller_body_path`), verify
     its identity stamp, consume both files, and return the body's raw bytes
@@ -1285,6 +1301,7 @@ def read_caller_body_bytes(
         expect_create_branch=expect_create_branch,
         expect_head_sha=expect_head_sha,
         expect_verdict_route=expect_verdict_route,
+        expect_actor=expect_actor,
     )
 
     if not consume:
@@ -1309,6 +1326,7 @@ def _validated_staged_bytes(
     expect_create_branch: str | None,
     expect_head_sha: str | None,
     expect_verdict_route: bool | None,
+    expect_actor: str | None = None,
 ) -> bytes:
     """Run every stamp/provenance check against the pair at *path* /
     *stamp_path* and return the body bytes, deleting nothing. Shared by the
@@ -1332,6 +1350,16 @@ def _validated_staged_bytes(
         expect_target_pr=expect_target_pr,
         expect_create_branch=expect_create_branch,
     )
+    if expect_actor is not None:
+        staged_actor = (stamp.identity or {}).get("actor")
+        if staged_actor != expect_actor:
+            raise BodyEnvError(
+                f"--body-env: the body staged for caller {caller!r} was staged by "
+                f"{staged_actor!r}, not by this invocation's identity "
+                f"{expect_actor!r} -- refusing to read another identity's staged body. "
+                f"Fails closed: the staged file is left in place. Re-stage as this "
+                f"identity via: {recovery}"
+            )
     if expect_target_pr is not None:
         if stamp.target_pr != expect_target_pr:
             raise BodyEnvError(
@@ -1487,6 +1515,7 @@ def claim_caller_body(
     expect_head_sha: str | None = None,
     expect_verdict_route: bool | None = None,
     env: dict[str, str] | None = None,
+    expect_actor: str | None = None,
 ) -> ClaimedBody:
     """Atomically claim the PER-CALLER staged pair by renaming it to a
     private per-invocation name in the same directory, then validate THAT
@@ -1520,6 +1549,7 @@ def claim_caller_body(
         "expect_create_branch": expect_create_branch,
         "expect_head_sha": expect_head_sha,
         "expect_verdict_route": expect_verdict_route,
+        "expect_actor": expect_actor,
     }
 
     def _explain_miss() -> BodyEnvError:

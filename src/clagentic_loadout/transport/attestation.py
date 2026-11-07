@@ -590,9 +590,10 @@ class Identity:
         )
 
 
-class _ActorLike(Protocol):
+class ActorLike(Protocol):
     """The one attribute `identity_from_actor` reads, so this module does not
-    import the identity package that itself builds on this one."""
+    import the identity package that itself builds on this one. An
+    `identity.Actor` satisfies it."""
 
     actor: str
 
@@ -1395,7 +1396,7 @@ def resolve_per_spawn_identity(
     return None
 
 
-def identity_from_actor(actor: "_ActorLike") -> Identity:
+def identity_from_actor(actor: ActorLike) -> Identity:
     """Adapt an identity-provider-seam `Actor` to the `Identity` the existing
     callers consume. Thin on purpose: the subject is the actor string verbatim and
     no existing caller calls this yet; mapping an actor to a `--caller` role value
@@ -1426,6 +1427,7 @@ __all__ = [
     "SOURCE_SIDECAR",
     "SOURCE_SIDECAR_SESSION",
     "SOURCE_SIDECAR_SUBAGENT",
+    "ActorLike",
     "AttestationConfigError",
     "AttestationError",
     "BoundAttestationError",

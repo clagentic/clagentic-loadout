@@ -167,6 +167,7 @@ from __future__ import annotations
 
 from typing import Callable
 
+from clagentic_loadout.identity.actor import Actor
 from clagentic_loadout.transport.attestation import (
     BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK,
     Identity,
@@ -174,6 +175,7 @@ from clagentic_loadout.transport.attestation import (
     resolve_bound_identity_policy,
 )
 from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
+from clagentic_loadout.transport.seam_binding import SeamIdentity, configured_actor, identity_for_actor
 
 
 def describe_omitted_caller_behavior(*, flag_name: str = "--caller") -> str:
@@ -235,8 +237,8 @@ class CallerBindingError(Exception):
     verb can render its own resolved-values error message and exit code
     without re-deriving either from a formatted string."""
 
-    def __init__(self, caller: str, identity: Identity) -> None:
-        super().__init__(
+    def __init__(self, caller: str, identity: Identity, *, detail: str | None = None) -> None:
+        super().__init__(detail or (
             f"--caller/--role {caller!r} does not match the ATTESTED invoking "
             f"identity {identity.subject!r} (resolved via the "
             f"{identity.source!r} attestation layer). An identity may act "
@@ -245,7 +247,7 @@ class CallerBindingError(Exception):
             f"authority is checked, unconditionally, with no override (even "
             f"a role a named-agent allowlist would otherwise admit is "
             f"denied here)."
-        )
+        ))
         self.caller = caller
         self.identity = identity
 
@@ -259,7 +261,11 @@ def bind_caller(caller: str, *, caller_explicit: bool, identity: Identity) -> No
     statement, the built-in-OS-user-fallback trade-off (requirement 5), and
     why this seam lives here rather than in transport.git_host_api.
 
-    Raises CallerBindingError when `caller != identity.subject`.
+    Raises CallerBindingError when `caller != identity.subject`, except for an
+    identity that came from the provider seam with a role list (`identity.roles`
+    is not None): there *caller* is the role the verb will mint and must be one
+    the actor holds, else the refusal names the role requested and the roles
+    present. The role list is a ceiling, never a grant.
 
     *caller_explicit* is accepted for call-site symmetry and audit-log
     parity with `resolve_for_binding` (every call site passes the same
@@ -275,6 +281,19 @@ def bind_caller(caller: str, *, caller_explicit: bool, identity: Identity) -> No
     step earlier, when `resolve_for_binding`'s `resolve_identity_fn()` call
     raises `AttestationError`/`BoundAttestationError`.
     """
+    if isinstance(identity, SeamIdentity) and identity.roles is not None:
+        if caller not in identity.roles:
+            present = ", ".join(identity.roles) or "none"
+            raise CallerBindingError(
+                caller,
+                identity,
+                detail=(
+                    f"--caller/--role {caller!r} is not a role the actor {identity.actor!r} "
+                    f"({identity.provider}) holds: requested role {caller!r}, roles present "
+                    f"[{present}]. Refused before any I/O."
+                ),
+            )
+        return
     if caller != identity.subject:
         raise CallerBindingError(caller, identity)
 
@@ -285,8 +304,17 @@ def resolve_for_binding(
     caller: str,
     resolve_identity_fn: Callable[[], Identity],
     bound_identity_policy_fn: Callable[[], str] = resolve_bound_identity_policy,
+    seam_actor_fn: Callable[[], Actor | None] = configured_actor,
 ) -> Identity:
     """Resolve the Identity `bind_caller` needs.
+
+    PROVIDER SEAM FIRST: when `identity.provider` is set, *seam_actor_fn*
+    answers with the seam's `Actor` and everything below is skipped -- the
+    bound identity is that actor (see `transport.seam_binding`), a refusal
+    raises `AttestationError`, and neither the legacy chain nor the
+    `attestation.bound_identity` policy is consulted. When it is unset
+    *seam_actor_fn* answers None and the rest of this function runs exactly as
+    it always has.
 
     EXPLICIT `--caller`/`--role` (*caller_explicit* True): *resolve_identity_fn*
     is ALWAYS called, and its result is returned directly; a resolution
@@ -374,14 +402,41 @@ def resolve_for_binding(
     call site's own logging, and because `bind_caller` accepts the same
     parameter for symmetry.
     """
+    actor = seam_actor_fn()
+    if actor is not None:
+        return identity_for_actor(actor, caller_explicit=caller_explicit)
     if not caller_explicit and bound_identity_policy_fn() == BOUND_IDENTITY_POLICY_BUILTIN_FALLBACK:
         return Identity(DEFAULT_ROLE, SOURCE_CONFIGURED)
     return resolve_identity_fn()
 
 
+def bind_configured_provider(
+    caller: str,
+    *,
+    caller_explicit: bool,
+    seam_actor_fn: Callable[[], Actor | None] = configured_actor,
+) -> tuple[str, Identity] | None:
+    """Bind a verb that had no caller binding before the provider seam existed
+    (`stage-body`, `release dispatch`), only when `identity.provider` is set.
+
+    Returns None when it is unset, so the verb behaves exactly as it always did.
+    Otherwise returns `(role, identity)`: the role to act as (*caller*, or the
+    actor's single role when it was omitted) and the bound identity. Raises
+    `AttestationError` when the seam refuses and `CallerBindingError` when the
+    role is not one the actor holds."""
+    actor = seam_actor_fn()
+    if actor is None:
+        return None
+    identity = identity_for_actor(actor, caller_explicit=caller_explicit)
+    role = caller if caller_explicit else identity.subject
+    bind_caller(role, caller_explicit=True, identity=identity)
+    return role, identity
+
+
 __all__ = [
     "CallerBindingError",
     "bind_caller",
+    "bind_configured_provider",
     "describe_omitted_caller_behavior",
     "resolve_for_binding",
 ]

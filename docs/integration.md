@@ -213,6 +213,14 @@ attestation source for free from layer 3 with zero configuration.
 
 ### Wiring per-spawn subagent attestation (multi-agent-dispatch consumers)
 
+> **Deprecated.** The per-spawn sidecar wiring below is the legacy mechanism. New
+> deployments should set `identity.provider` and deliver a signed assertion through
+> `CLAGENTIC_IDENTITY_DIR` instead (see [identity.md](identity.md)); a harness that
+> cannot deliver assertions yet can set `identity.provider: prefer-assertion`, which
+> keeps accepting exactly this per-spawn sidecar, with one stderr notice and one
+> telemetry event per use, while it migrates. The legacy chain stays in force while
+> `identity.provider` is unset and is removed in a later release.
+
 The chain above is generic across every deployment shape. This section is
 for the specific shape where it goes wrong: a consumer whose dispatch loop
 spawns MULTIPLE concurrent sub-processes under DIFFERENT role identities

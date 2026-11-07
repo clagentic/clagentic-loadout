@@ -172,6 +172,7 @@ from clagentic_loadout.sha import FULL_SHA_RE
 from clagentic_loadout.spec.model import is_spec_hash
 from clagentic_loadout.transport.attestation import (
     AttestationError,
+    Identity,
     resolve_bound_identity as _resolve_identity,
 )
 from clagentic_loadout.transport.body_env import BodyEnvError, stage_caller_body
@@ -188,6 +189,7 @@ from clagentic_loadout.transport.git_host_api import (
     resolve_git_host_base,
 )
 from clagentic_loadout.transport.provider_config import DEFAULT_USER_CONFIG_ROOT
+from clagentic_loadout.transport.seam_binding import staging_kwargs
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -527,7 +529,7 @@ def _parse_owner_repo(value: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def _bind_caller(args: argparse.Namespace, identity_provider) -> str:
+def _bind_caller(args: argparse.Namespace, identity_provider) -> tuple[str, Identity]:
     resolve_identity_fn = identity_provider if identity_provider is not None else _resolve_identity
     try:
         identity = _resolve_for_binding(
@@ -539,7 +541,7 @@ def _bind_caller(args: argparse.Namespace, identity_provider) -> str:
         _fail(f"attested-identity resolution FAILED -- {exc}", EXIT_CALLER_INVOKER_MISMATCH)
     caller = args.caller if args.caller is not None else identity.subject
     bind_caller(caller, caller_explicit=True, identity=identity)
-    return caller
+    return caller, identity
 
 
 def _origin_url(repo_path: Path) -> str:
@@ -1372,6 +1374,7 @@ def _post_command(
     opener,
     identity_provider,
     config_root,
+    identity: Identity | None = None,
 ) -> int:
     spec_fields, spec_facts = _spec_inputs(args, config_root)
     reject_reason = _reject_reason(args, spec_facts)
@@ -1626,11 +1629,18 @@ def _post_command(
         ),
     }
     try:
+        # Staged where the review-post verb will read it: under an assertion
+        # identity provider that is the verified delivery directory, stamped
+        # with the staging actor; otherwise the existing TMPDIR path.
+        stage_kwargs = staging_kwargs(identity) if identity is not None else {}
+        if stage_kwargs:
+            stage_kwargs["stager_identity"] = {"actor": identity.actor, "jti": identity.jti}
         stage_caller_body(
             caller=caller,
             body_bytes=json.dumps(body).encode("utf-8"),
             target_pr=args.pr,
             head_sha=head_sha,
+            **stage_kwargs,
         )
     except BodyEnvError as exc:
         _fail(f"cannot stage the review body: {exc}", EXIT_POST_FAILED)
@@ -1714,7 +1724,7 @@ def _post_command(
         "verified_by_login": posted.get("verified_by_login"),
         "verdict_block_verified": True,
     }
-    for key in ("comment", "reused_from_created_at"):
+    for key in ("comment", "reused_from_created_at", "provider", "self_declared"):
         if key in posted:
             result[key] = posted[key]
     if guidance is not None:
@@ -1813,7 +1823,7 @@ def main(
         owner, repo = _parse_owner_repo(args.repo)
         if args.pr <= 0:
             _fail(f"--pr must be a positive integer, got: {args.pr!r}", EXIT_USAGE)
-        caller = _bind_caller(args, identity_provider)
+        caller, identity = _bind_caller(args, identity_provider)
         repo_path = Path(args.repo_path) if args.repo_path else Path.cwd()
         platform = _resolve_platform(args, repo_path)
         print(
@@ -1840,7 +1850,7 @@ def main(
         return _post_command(
             args, caller, owner=owner, repo=repo, platform=platform, repo_path=repo_path,
             token_provider=token_provider, opener=opener, identity_provider=identity_provider,
-            config_root=config_root,
+            config_root=config_root, identity=identity,
         )
     except ReviewCliError as exc:
         print(f"loadout-review: {exc}", file=sys.stderr)
