@@ -39,6 +39,7 @@ from clagentic_loadout.doctor.checks import (
     check_pre_checks_sandbox,
     check_repo_loadout_schema,
 )
+from clagentic_loadout.doctor.identity_check import check_identity_provider
 from clagentic_loadout.doctor.roles_groups_check import check_roles_and_groups
 
 EXIT_OK = 0
@@ -169,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     results.append(check_builder_identity_config(config_root=config_root))
     results.append(check_attestation_source_configured(config_root=config_root))
+    results.append(check_identity_provider(config_root=config_root))
     results.append(check_pre_checks_sandbox(config_root=config_root))
     results.append(
         check_roles_and_groups(

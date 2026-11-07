@@ -516,6 +516,10 @@ SOURCE_BUILTIN = "builtin"
 SOURCE_SIDECAR_SUBAGENT = "sidecar-subagent"
 SOURCE_SIDECAR_SESSION = "sidecar-session"
 
+#: `Identity.source` of an identity adapted from a provider-seam `Actor` (see
+#: `identity_from_actor`). Not produced by any resolution chain in this module.
+SOURCE_ASSERTION = "assertion"
+
 
 
 class AttestationError(Exception):
@@ -584,6 +588,13 @@ class Identity:
             and self.subject == other.subject
             and self.source == other.source
         )
+
+
+class _ActorLike(Protocol):
+    """The one attribute `identity_from_actor` reads, so this module does not
+    import the identity package that itself builds on this one."""
+
+    actor: str
 
 
 @runtime_checkable
@@ -1362,6 +1373,36 @@ def resolve_bound_identity(
     )
 
 
+def resolve_per_spawn_identity(
+    *,
+    env: dict[str, str] | None = None,
+    config_root: str | Path | None = None,
+) -> Identity | None:
+    """Resolve ONLY a `scope: per-spawn` sidecar adapter that answers on its own
+    `session_id_env`, or return None. Layer 1, unscoped adapter config, the
+    session scope and the built-in OS-user layer are never consulted, and no
+    policy is read. Narrow on purpose: the identity provider seam's
+    `prefer-assertion` transition value accepts nothing broader."""
+    active_env = env if env is not None else dict(os.environ)
+    resolved_config_root = config_root if config_root is not None else DEFAULT_USER_CONFIG_ROOT
+    adapters = _adapters_with_scope(
+        _configured_sidecar_adapters(config_root=resolved_config_root), SIDECAR_SCOPE_PER_SPAWN
+    )
+    for adapter in adapters:
+        identity = _resolve_sidecar_adapter(adapter, env=active_env, source=SOURCE_SIDECAR_SUBAGENT)
+        if identity is not None:
+            return identity
+    return None
+
+
+def identity_from_actor(actor: "_ActorLike") -> Identity:
+    """Adapt an identity-provider-seam `Actor` to the `Identity` the existing
+    callers consume. Thin on purpose: the subject is the actor string verbatim and
+    no existing caller calls this yet; mapping an actor to a `--caller` role value
+    belongs to the change that moves the verbs onto the seam."""
+    return Identity(subject=actor.actor, source=SOURCE_ASSERTION)
+
+
 __all__ = [
     "ATTESTATION_CONFIG_KEY_BOUND_IDENTITY",
     "ATTESTATION_CONFIG_KEY_IDENTITY_ENV",
@@ -1379,6 +1420,7 @@ __all__ = [
     "SIDECAR_ADAPTER_KEY_SESSION_ID_ENV",
     "SIDECAR_SCOPE_PER_SPAWN",
     "SIDECAR_SCOPE_SESSION",
+    "SOURCE_ASSERTION",
     "SOURCE_BUILTIN",
     "SOURCE_CONFIGURED",
     "SOURCE_SIDECAR",
@@ -1390,7 +1432,9 @@ __all__ = [
     "Identity",
     "IdentityProvider",
     "attestation_env_var_names",
+    "identity_from_actor",
     "resolve_bound_identity",
     "resolve_bound_identity_policy",
     "resolve_identity",
+    "resolve_per_spawn_identity",
 ]

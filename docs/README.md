@@ -46,6 +46,7 @@ reference lives.
 | [credentials.md](credentials.md) | The full credential-provider-seam reference: `{repo}`-scoped minting, the argv option-injection guard, per-platform selection precedence, and the shared-minting-command convergence rationale. |
 | [verbs.md](verbs.md) | Every landed CLI verb: purpose, flags, gate behavior, examples. |
 | [provisioning.md](provisioning.md) | The per-role permission-allowlist side: declaring which verbs a role may invoke and generating its allowlist fragment. |
+| [identity.md](identity.md) | The identity provider seam: the `gatekeeper`, `jwks` and `static` classes, the provider interface, accepted contract majors, the `prefer-assertion` transition rule, and `loadout-identity`. |
 | [merge-authority.md](merge-authority.md) | The `loadout-merge` identity-binding model, fail-closed guarantee, attestation-source configuration, and the git-host attestation mark. |
 | [guard-policy.md](guard-policy.md) | The `clagentic_loadout.guard` policy contract: every guard category, its API, its config shape. |
 | [integration.md](integration.md) | The runtime contract a harness spawning a loadout-driven agent must satisfy: env vars, config-file tiers, precedence. |
