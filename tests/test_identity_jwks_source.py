@@ -23,13 +23,17 @@ from tests._support.identity_support import Issuer
         ("https://issuer.example", "https://issuer.example/.well-known/jwks.json"),
         ("https://issuer.example/path/", "https://issuer.example/path/.well-known/jwks.json"),
         ("http://127.0.0.1:8080", "http://127.0.0.1:8080/.well-known/jwks.json"),
-        ("file:///etc/keys.json", "file:///etc/keys.json"),
-        ("unix:///run/issuer.sock", "unix:///run/issuer.sock"),
         ("urn:opaque", None),
     ],
 )
 def test_derive_locator(iss: str, expected) -> None:
     assert derive_locator(iss) == expected
+
+
+@pytest.mark.parametrize("scheme", ["file", "unix"])
+def test_derive_locator_keeps_local_locators_verbatim(tmp_path: Path, scheme: str) -> None:
+    locator = f"{scheme}://{tmp_path / 'keys'}"
+    assert derive_locator(locator) == locator
 
 
 def _code(locator: str, **kwargs) -> str:

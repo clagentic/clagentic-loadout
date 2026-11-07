@@ -136,7 +136,7 @@ def test_each_refusal_names_its_class(tmp_path: Path, issuer: Issuer, case: str,
     elif case == "untrusted_issuer":
         claims = issuer.claims(directory, iss="https://other.example")
     elif case == "wrong_dir":
-        claims = issuer.claims("/somewhere/else")
+        claims = issuer.claims(str(tmp_path / "somewhere-else"))
     token = signer.sign(claims)
     delivered = make_delivery(tmp_path, token)
     if case == "symlinked_file":
@@ -156,7 +156,7 @@ def test_static_returns_the_declaration_and_reads_no_environment(tmp_path: Path)
     cfg = write_config(
         tmp_path / "cfg", {"provider": "static", "static": {"actor": "agent:solo", "roles": ["builder"]}}
     )
-    env = {DIR_VAR: "/does/not/matter", "USER": "someone", "CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_ENV": "x"}
+    env = {DIR_VAR: str(tmp_path / "unused"), "USER": "someone", "CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_ENV": "x"}
     actor = resolve(env=env, config_root=cfg)
     assert (actor.actor, actor.roles, actor.provider, actor.self_declared) == (
         "agent:solo",

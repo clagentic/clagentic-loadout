@@ -65,7 +65,7 @@ def test_verify_prints_claims_and_uses_the_directory_binding(tmp_path: Path, cap
     _, cfg, token, delivered = _setup(tmp_path)
     assert verb.main(["verify", token, "--dir", delivered], env={}, config_root=cfg) == 0
     assert json.loads(capsys.readouterr().out)["sub"] == "agent:example-builder"
-    rc = verb.main(["verify", token, "--dir", "/elsewhere"], env={}, config_root=cfg)
+    rc = verb.main(["verify", token, "--dir", str(tmp_path / "elsewhere")], env={}, config_root=cfg)
     assert rc == errors.EXIT_CODES[errors.DIR_MISMATCH]
     rc = verb.main(["verify", token], env={}, config_root=cfg)
     assert rc == errors.EXIT_CODES[errors.IDENTITY_DIR_MISSING]
@@ -81,7 +81,7 @@ def test_verify_peer_mode_and_now(tmp_path: Path) -> None:
 
 def test_verify_without_an_assertion_provider_is_a_config_error(tmp_path: Path) -> None:
     cfg = write_config(tmp_path / "cfg", {"provider": "static", "static": {"actor": "agent:x"}})
-    rc = verb.main(["verify", "a.b.c", "--dir", "/d"], env={}, config_root=cfg)
+    rc = verb.main(["verify", "a.b.c", "--dir", str(tmp_path / "d")], env={}, config_root=cfg)
     assert rc == errors.EXIT_CODES[errors.CONFIG_INVALID]
 
 
