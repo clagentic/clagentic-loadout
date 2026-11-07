@@ -139,7 +139,7 @@ def compute(
 
 def unavailable(reason: str, settings: RatioSettings = RatioSettings()) -> dict[str, Any]:
     """The ratio object for a change whose per-file counts could not be read."""
-    return {
+    result: dict[str, Any] = {
         "test": None,
         "code": None,
         "ratio": RATIO_UNAVAILABLE,
@@ -148,6 +148,9 @@ def unavailable(reason: str, settings: RatioSettings = RatioSettings()) -> dict[
         "line": f"Net test:code ratio unavailable: {reason}.",
         "reason": reason,
     }
+    if settings.warnings:
+        result["warnings"] = list(settings.warnings)
+    return result
 
 
 __all__ = [

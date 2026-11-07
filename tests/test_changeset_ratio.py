@@ -104,6 +104,30 @@ def test_an_unusable_value_falls_back_with_a_warning_naming_the_key(bad):
     assert len(result["warnings"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("block", "named"),
+    [
+        ({"ratio_warn": 0}, ["test.ratio_warn"]),
+        ({"ratio_floor_lines": "x"}, ["test.ratio_floor_lines"]),
+        ({"ratio_warn": 0, "ratio_floor_lines": -1}, ["test.ratio_warn", "test.ratio_floor_lines"]),
+        ({"ratio_warn": 3}, []),
+    ],
+)
+def test_unreadable_counts_still_name_an_invalid_key(block, named):
+    result = source.from_host(
+        _Backend(error=AcquireFetchError("HTTP 500")),
+        _profile(block),
+        owner="o",
+        repo="r",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+    )
+
+    assert result["ratio"] == "unavailable"
+    assert [key for key in named if any(key in w for w in result.get("warnings", []))] == named
+    assert len(result.get("warnings", [])) == len(named)
+
+
 def test_a_zero_value_still_makes_the_block_declared_so_its_warning_is_seen():
     assert parse_test_block({"ratio_warn": 0}).declared_keys() == ["ratio_warn"]
 
