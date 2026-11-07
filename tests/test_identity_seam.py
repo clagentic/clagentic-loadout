@@ -360,3 +360,22 @@ def test_prefer_assertion_refuses_every_other_legacy_source(
     for leaked in ("agent:parent", "agent:configured", "agent:unscoped", "root"):
         assert f"{leaked}\n" not in str(caught.value)
     assert capsys.readouterr().err.count("prefer-assertion is using the legacy") == 1
+
+
+@pytest.mark.parametrize(
+    "attestation_section,present",
+    [
+        ({"sidecars": []}, True),
+        ({"identity_env": ""}, True),
+        ({"bound_identity": "required"}, True),
+        ({"sidecars": None}, False),
+        ({}, False),
+    ],
+)
+def test_legacy_attestation_config_is_key_presence_not_truthiness(
+    tmp_path: Path, attestation_section: dict, present: bool
+) -> None:
+    from clagentic_loadout.identity import has_legacy_attestation_config
+
+    cfg = write_config(tmp_path / "cfg", None, attestation=attestation_section)
+    assert has_legacy_attestation_config(config_root=cfg) is present

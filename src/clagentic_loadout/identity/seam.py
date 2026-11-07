@@ -64,7 +64,9 @@ _LEGACY_KEYS = (
 
 def has_legacy_attestation_config(*, config_root: str | Path | None = None) -> bool:
     section = load_user_config_section(attestation.ATTESTATION_CONFIG_SECTION, config_root=config_root)
-    return any(section.get(key) for key in _LEGACY_KEYS)
+    # Key presence, not truthiness: an explicit `sidecars: []` is still a legacy
+    # config, and must keep the legacy chain rather than hit the no-default refusal.
+    return any(section.get(key) is not None for key in _LEGACY_KEYS)
 
 
 def _assertion_provider(kind: str, cfg: IdentityConfig) -> Provider:
