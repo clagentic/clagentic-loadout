@@ -15,7 +15,7 @@ class Actor:
     outward and ends with `sub`. `roles` is a ceiling, never a grant.
     `provider` names what produced the value (`gatekeeper`, `jwks:<iss>`,
     `declared`, `module:<name>`, `legacy:<source>`). `self_declared` is true when
-    nothing outside this process vouched for the value.
+    nothing outside this process vouched for the value. `jti` is the assertion id.
     """
 
     sub: str
@@ -30,6 +30,7 @@ class Actor:
     sid: str | None = None
     spawn: str | None = None
     contract_version: int | None = None
+    jti: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         out = asdict(self)
@@ -60,4 +61,5 @@ def actor_from_claims(claims: Mapping[str, Any], *, provider: str) -> Actor:
         sid=claims["sid"],
         spawn=claims.get("spawn"),
         contract_version=claims["cia"],
+        jti=claims["jti"],
     )
