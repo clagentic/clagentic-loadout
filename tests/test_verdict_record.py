@@ -318,6 +318,53 @@ class TestFenceAdapter:
         assert readings[0].status == STATUS_NOT_MEASURED
 
 
+class TestRecordPrecedence:
+    GATE = "reviewer:agent-alpha"
+
+    def _read(self, tmp_path, adapted=None):
+        readings, _ = read_gates(
+            tmp_path / "records", [RequiredGate(self.GATE)], HEAD_A, adapted=adapted
+        )
+        return readings[0]
+
+    def _stand_in(self, comment_id, created_at="2026-01-01T00:00:00Z"):
+        return record_from_fence(
+            gate=self.GATE, head_sha=HEAD_A, exit=0, comment_id=comment_id, created_at=created_at
+        )
+
+    def test_a_ruling_applied_stand_in_replaces_the_stored_record_for_its_comment(self, tmp_path):
+        write_record(
+            tmp_path / "records",
+            _record(gate=self.GATE, exit=1, started=T1, finished=T2, evidence_ref="comment:7"),
+        )
+        reading = self._read(tmp_path, {self.GATE: [self._stand_in(7)]})
+        assert reading.status == STATUS_MEASURED
+        assert reading.record.tool == "verdict-fence"
+        assert len(reading.superseded) == 1
+
+    def test_a_later_passing_record_for_another_comment_does_not_clear_a_failing_one(self, tmp_path):
+        root = tmp_path / "records"
+        write_record(root, _record(gate=self.GATE, exit=1, started=T0, finished=T1, evidence_ref="comment:7"))
+        write_record(root, _record(gate=self.GATE, exit=0, started=T1, finished=T2, evidence_ref="comment:8"))
+        reading = self._read(tmp_path)
+        assert reading.status == STATUS_FAILED
+        assert reading.record.evidence_ref == "comment:7"
+        assert len(reading.deciding) == 2
+
+    def test_a_stand_in_for_one_comment_does_not_cover_a_failing_record_of_another(self, tmp_path):
+        write_record(
+            tmp_path / "records",
+            _record(gate=self.GATE, exit=1, started=T0, finished=T1, evidence_ref="comment:7"),
+        )
+        assert self._read(tmp_path, {self.GATE: [self._stand_in(8)]}).status == STATUS_FAILED
+
+    def test_newest_stored_record_decides_within_one_comment(self, tmp_path):
+        root = tmp_path / "records"
+        write_record(root, _record(gate=self.GATE, exit=1, started=T0, finished=T1, evidence_ref="comment:7"))
+        write_record(root, _record(gate=self.GATE, exit=0, started=T1, finished=T2, evidence_ref="comment:7"))
+        assert self._read(tmp_path).status == STATUS_MEASURED
+
+
 class TestTryEmit:
     def test_a_refused_write_is_reported_and_returns_none(self, tmp_path, capsys):
         result = try_emit_record(
