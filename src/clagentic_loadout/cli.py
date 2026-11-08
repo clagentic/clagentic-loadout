@@ -164,6 +164,12 @@ def _identity_main(argv: list[str]) -> int:
     return identity_main(argv)
 
 
+def _update_main(argv: list[str]) -> int:
+    from clagentic_loadout.update.verb import main as update_main
+
+    return update_main(argv)
+
+
 def _rules_main(argv: list[str]) -> int:
     from clagentic_loadout.rules.verb import main as rules_main
 
@@ -217,6 +223,10 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     ),
     "record": ("Read the verdict records gates left for a commit (show, list).", _record_main),
     "spec": ("Create, seal and read the standard spec (new, seal, show).", _spec_main),
+    "update": (
+        "Install a release built from a source checkout via the verified venv switch.",
+        _update_main,
+    ),
     "identity": ("Show the resolved identity, or verify an assertion token (whoami, verify).", _identity_main),
 }
 

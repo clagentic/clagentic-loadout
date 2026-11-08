@@ -3270,6 +3270,54 @@ loadout-identity verify TOKEN [--dir DIR | --peer-id ID] [--now SECONDS]
 Exit codes: `0` ok, `1` usage, `90`-`111` one per refusal kind. Full reference:
 [identity.md](identity.md).
 
+### `clagentic-loadout update` — install a release through the verified venv switch
+
+Installs the release built from a source checkout into the self-managed
+per-release venv layout: build into `<data dir>/venvs/<release id>`, run every
+console script with `--help`, atomically repoint `<data dir>/venv`, keep the
+previous release as the rollback target. A build or verification failure
+leaves the live release untouched and removes the failed release dir. It is
+the re-install path after a failed or skipped post-merge step, and it does not
+change what `scripts/install.sh` or a deployment's `post_merge_steps` do.
+
+```
+clagentic-loadout update [--source <checkout>] [--dry-run]
+                         [--data-dir <dir>] [--bin-dir <dir>] [--config-root <dir>]
+```
+
+- **Source.** `--source`, else the `update.source` key of
+  `~/.config/clagentic/loadout/config.yaml`. With neither, it refuses before
+  any write and names both places. There is no release channel and no network
+  lookup: the release is the one built from that source. The source must be a
+  checkout carrying `scripts/install.sh`; a bare sdist or wheel path is
+  refused.
+- **Dirs.** Resolved by the installer exactly as it resolves them:
+  `--data-dir`/`--bin-dir`, `CLAGENTIC_LOADOUT_HOME`/`CLAGENTIC_LOADOUT_BIN_DIR`,
+  then HOME-derived defaults, with the same empty-HOME fail-fast.
+- **One implementation.** The verb drives `scripts/install.sh --installer venv`
+  from the source rather than reimplementing the switch, so release ids,
+  verification, switching and pruning cannot diverge. It adds
+  `--no-seed-config`, so it never writes the user config file; the installer's
+  skill copy still runs (`CLAGENTIC_LOADOUT_SKILLS_DIR` redirects it).
+- **`--dry-run`** prints the resolved plan and changes nothing. A dirty
+  checkout gets a fresh release id per run, so its dry-run id is indicative.
+- **Same release.** When the live release already equals the source's release
+  id, it reports nothing to switch, exits 0 and does not rebuild.
+- **Result** (JSON on stdout): `previous_release`, `live_release`, `verified`
+  (`null` when nothing was built), `switched`, plus `target_release`,
+  `source`, `data_dir`, `bin_dir`, `dry_run`.
+
+| Exit | Meaning |
+|------|---------|
+| 0 | switched, nothing to switch, or dry-run |
+| 1 | usage error |
+| 2 | no usable source (none given or configured, missing path, no installer) |
+| 3 | build, verification or switch failed; live release untouched |
+| 4 | the installer refused or died for another reason |
+
+The installer's own exit codes are never passed through; they are remapped
+onto 3 and 4.
+
 ### `loadout-doctor` — deployment-conformance check suite
 
 `clagentic_loadout.doctor.cli`. **Read-only**: never mutates config, never
