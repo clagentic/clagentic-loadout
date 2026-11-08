@@ -3,15 +3,25 @@
 This is the single path every consumer reads records through. ``read_gates``
 answers, for each required gate, one of three things about the commit asked for:
 
-  measured       a record at exactly that head exists and the newest one passed;
-  failed         a record at exactly that head exists and the newest one did not
-                 pass;
+  measured       records at exactly that head exist and every one that decides
+                 passed;
+  failed         records at exactly that head exist and one that decides did
+                 not pass;
   not measured   no record exists at that head. A record at any other head says
                  nothing about this one, and its head is reported only to help
                  the reader see what ran.
 
 Absence is never a pass: a gate that is required and has no record at the head is
 ``not measured``.
+
+WHICH RECORD DECIDES. Records that cite an evidence comment (``comment:<id>``)
+are keyed by that comment. For one comment the adapted record, which is the
+merge's own ruling-applied evaluation of that fence, replaces every stored
+post-time record for it; with none adapted the newest stored one by finish time
+decides. Across comments the verdict is a union: a failing record no adapted
+evaluation replaced blocks whatever was finished later, so a later passing
+record never supersedes an earlier failing one. Records citing no comment form
+one group, where the newest decides.
 
 THE FENCE ADAPTER. A reviewer verdict posted before records existed is a fenced
 block in a pull request comment, not a stored record. ``record_from_fence`` turns
@@ -63,6 +73,11 @@ class GateReading:
     status: str
     #: The record that decided the reading at the expected head; None when not measured.
     record: VerdictRecord | None = None
+    #: Every record that decided, one per evidence comment (and one for all
+    #: records that cite none); ``record`` is the one that sets the status.
+    deciding: tuple[VerdictRecord, ...] = ()
+    #: Stored records an adapted evaluation of the same comment replaced.
+    superseded: tuple[VerdictRecord, ...] = ()
     #: Not measured only: the head of the newest record this gate has at any
     #: other commit, or None when it has none.
     other_head: str | None = None
@@ -73,9 +88,36 @@ class GateReading:
         return self.status == STATUS_MEASURED
 
 
-def _decisive(candidates: Sequence[VerdictRecord]) -> VerdictRecord:
+def _newest(candidates: Sequence[VerdictRecord]) -> VerdictRecord:
     """The newest record by finish time, then by id."""
     return max(candidates, key=lambda record: (record.finished, record.id))
+
+
+def _evidence_key(record: VerdictRecord) -> str | None:
+    ref = record.evidence_ref
+    return ref if isinstance(ref, str) and ref.startswith("comment:") else None
+
+
+def _decisive(
+    stored: Sequence[VerdictRecord], adapted: Sequence[VerdictRecord]
+) -> tuple[VerdictRecord, tuple[VerdictRecord, ...], tuple[VerdictRecord, ...]]:
+    """The record that sets a gate's status, every record that decided (one per
+    evidence comment), and the stored records an adapted one replaced."""
+    groups: dict[str | None, tuple[list[VerdictRecord], list[VerdictRecord]]] = {}
+    for record in stored:
+        groups.setdefault(_evidence_key(record), ([], []))[0].append(record)
+    for record in adapted:
+        groups.setdefault(_evidence_key(record), ([], []))[1].append(record)
+    deciding: list[VerdictRecord] = []
+    superseded: list[VerdictRecord] = []
+    for group_stored, group_adapted in groups.values():
+        if group_adapted:
+            deciding.append(_newest(group_adapted))
+            superseded.extend(group_stored)
+        else:
+            deciding.append(_newest(group_stored))
+    failing = [record for record in deciding if not record.passed]
+    return _newest(failing or deciding), tuple(deciding), tuple(superseded)
 
 
 def read_gates(
@@ -96,14 +138,16 @@ def read_gates(
     extra = adapted or {}
     readings: list[GateReading] = []
     for item in required:
-        candidates = [
-            record
-            for record in (*at_head.records, *extra.get(item.gate, ()))
-            if record.gate == item.gate
-            and record.head_sha == head_sha
-            and (repo is None or record.repo in (None, repo))
-        ]
-        if not candidates:
+        def _counts(record: VerdictRecord, gate: str = item.gate) -> bool:
+            return (
+                record.gate == gate
+                and record.head_sha == head_sha
+                and (repo is None or record.repo in (None, repo))
+            )
+
+        stored = [record for record in at_head.records if _counts(record)]
+        derived = [record for record in extra.get(item.gate, ()) if _counts(record)]
+        if not stored and not derived:
             elsewhere = newest_record_for_gate(
                 root, item.gate, repo=repo, untrusted_roots=untrusted_roots
             )
@@ -117,13 +161,15 @@ def read_gates(
                 )
             )
             continue
-        decisive = _decisive(candidates)
+        decisive, deciding, superseded = _decisive(stored, derived)
         readings.append(
             GateReading(
                 gate=item.gate,
                 expected_head=head_sha,
                 status=STATUS_MEASURED if decisive.passed else STATUS_FAILED,
                 record=decisive,
+                deciding=deciding,
+                superseded=superseded,
                 remedy=item.remedy,
             )
         )

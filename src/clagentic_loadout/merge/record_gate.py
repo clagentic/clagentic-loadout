@@ -193,6 +193,17 @@ def check_gate_records(
     )
     for reason in skipped:
         print(f"merge: WARNING -- verdict record ignored: {reason}", file=sys.stderr)
+    for reading in readings:
+        # Named only when the answer was not a single record's, so the output
+        # for one record per gate is unchanged.
+        if len(reading.deciding) > 1 or reading.superseded:
+            for record in reading.deciding:
+                print(
+                    f"merge: record gate -- {reading.gate!r} "
+                    f"{record.evidence_ref or 'no evidence comment'} decided by record "
+                    f"{record.id} (exit {record.exit})",
+                    file=sys.stderr,
+                )
     problems = [reading for reading in readings if not reading.ok]
     if not problems:
         return None

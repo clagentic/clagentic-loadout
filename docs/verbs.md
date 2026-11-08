@@ -2189,7 +2189,11 @@ root (the optional pre-checks sandbox, `merge.pre_checks_sandbox`, is the contro
 **How the merge reads them.** For the head it is merging, and for each required
 gate, `loadout-merge` reads the records filed under exactly that head (a record at
 any other head says nothing about this one). The newest record by finish time
-decides: passing is measured, anything else is a failed gate, and no record at all
+decides, per evidence comment: a record that cites a comment is keyed by it, and the
+merge's own ruling-applied evaluation of that comment's fence replaces the stored
+record for it. Across comments the verdict is a union, so a failing record that no
+ruling or base disposition covers blocks, whatever was finished later. Passing is
+measured, anything else is a failed gate, and no record at all
 is **not measured**. The refusal names every such gate, the head expected and the
 head of the record found (or `none`):
 
