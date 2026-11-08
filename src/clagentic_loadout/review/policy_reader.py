@@ -101,6 +101,44 @@ class GitPolicyReader:
         raw = self._git(["show", f"{base}:{path}"], f"{path} at {base[:12]}")
         return decode_policy_bytes(raw, path, base)
 
+    def merge_base(self, base: str, head: str) -> str:
+        """The full SHA of the merge base of *base* and *head*."""
+        out = self._git(
+            ["merge-base", "--end-of-options", base, head],
+            f"the merge base of {base[:12]} and {head[:12]}",
+        )
+        sha = out.decode("ascii", "replace").strip()
+        if not _COMMIT_SHA_RE.match(sha):
+            raise PolicyReadError(
+                f"cannot read the merge base of {base[:12]} and {head[:12]}: git printed {sha[:20]!r}"
+            )
+        return sha
+
+    def numstat(self, base: str, head: str) -> list[tuple[str, int, int]]:
+        """``(path, added, removed)`` for every path changed between the merge
+        base of *base* and *head* and *head*. A rename is the deletion of the old
+        path and the addition of the new one, so each side is counted under its
+        own name. A binary file has no line counts and is reported as 0 and 0."""
+        out = self._git(
+            ["diff", "--numstat", "-z", "--no-renames", f"{base}...{head}", "--"],
+            f"the line counts of {base[:12]}...{head[:12]}",
+        )
+        counts: list[tuple[str, int, int]] = []
+        for record in out.decode("utf-8", "replace").split("\0"):
+            if not record:
+                continue
+            fields = record.split("\t", 2)
+            if len(fields) != 3 or not fields[2]:
+                raise PolicyReadError(
+                    f"cannot read the line counts of {base[:12]}...{head[:12]}: "
+                    f"unexpected git output {record[:40]!r}"
+                )
+            added, removed, path = fields
+            counts.append(
+                (path, int(added) if added.isdigit() else 0, int(removed) if removed.isdigit() else 0)
+            )
+        return counts
+
     def changed_paths(self, base: str, head: str) -> list[tuple[str, tuple[str, ...]]]:
         """Every path changed between the merge base of *base* and *head* and
         *head*, each with the file modes of its two sides. A rename is reported as

@@ -51,6 +51,9 @@ def declared_tests(tests: DeclaredTests | None) -> dict[str, Any] | None:
         out["base"] = tests.base
     if tests.paths:
         out["paths"] = list(tests.paths)
+    for key in ("ratio_warn", "ratio_floor_lines"):
+        if getattr(tests, key) is not None:
+            out[key] = getattr(tests, key)
     if tests.tiers:
         out["tiers"] = {name: list(argv) for name, argv in tests.tiers}
     return out or None

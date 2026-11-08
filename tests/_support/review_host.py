@@ -143,7 +143,9 @@ class ReviewHost:
     def _github(self, req, method, url, path):
         n = self.number
         if method == "GET" and "/compare/" in path:
-            assert self.range_diff is not None, f"unexpected compare request: {url}"
+            if self.range_diff is None:
+                # No range is configured: answer as a host does for a range it cannot compare.
+                return FakeResponse(404, b"{}")
             if req.get_header("Accept", "") == "application/vnd.github.v3.diff":
                 response = FakeResponse(200, self.range_diff.encode("utf-8"))
                 response.headers = {"Content-Type": "text/plain"}
@@ -174,7 +176,9 @@ class ReviewHost:
     def _forgejo(self, req, method, url, path):
         n = self.number
         if method == "GET" and "/compare/" in path:
-            assert self.range_diff is not None, f"unexpected compare request: {url}"
+            if self.range_diff is None:
+                # No range is configured: answer as a host does for a range it cannot compare.
+                return FakeResponse(404, b"{}")
             if path.endswith(".diff"):
                 return FakeResponse(200, self.range_diff.encode("utf-8"))
             # The API route reports commits only: one commit forward from the prior

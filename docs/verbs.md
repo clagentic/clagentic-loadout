@@ -3606,6 +3606,45 @@ its merge base with `--head` (default `HEAD`). It prints one JSON object: `resul
 Both answers exit 0. Exit codes: `0` classified, `1` usage, `62` the repository, a
 revision or the changed paths could not be read. It is local, read-only and binds no caller.
 
+### Test:code ratio: `loadout-changeset ratio`
+
+```
+loadout-changeset ratio --base REV [--head REV] [--repo-path DIR]
+```
+
+States the net growth of tests against the net growth of code for the change from the
+merge base of `--base` and `--head` (default `HEAD`), as advice. Each path is a test,
+documentation or code: tests by the shared test-file rule (the built-in rule plus
+`test.paths` from the profile at the merge base), documentation (`.md`, `.txt`, `.rst`,
+anything under `docs/`) not counted. Line counts come from `git diff --numstat`; a rename
+counts as the deletion of the old path and the addition of the new one, and a binary file
+counts no lines. It prints one JSON object:
+
+```
+{"test": {"added": 300, "removed": 0, "net": 300},
+ "code": {"added": 100, "removed": 0, "net": 100},
+ "ratio": "3.0:1", "budget": 2, "over_budget": true, "line": "<one sentence>"}
+```
+
+`ratio` is `<n>:1` (net test over net code, when code grew), `unbounded` (tests grew, code
+did not), `n/a` (neither grew) or `unavailable` (the counts could not be read; `test` and
+`code` are then null and `reason` says why). `over_budget` is true only when the net test
+growth is at least `test.ratio_floor_lines` (default 100) **and** exceeds `test.ratio_warn`
+(default 2) times the net code growth, counting a code shrink as zero, so a consolidation
+that removes more test lines than it adds is never over budget. A key that is not a positive
+integer falls back to its default and a `warnings` entry names it. The verb never refuses and
+exits 0 whatever the answer; `1` is a usage error.
+
+The same object is advice elsewhere, never a gate:
+
+- `loadout-push` (create path) prints its `line` to stderr as `push: Net test:code ratio ...`
+  after the PR opens and adds the object to the result JSON as `ratio`. Push does not write
+  the PR body; the builder puts the line there. Exit codes are unchanged.
+- `loadout-review post` adds `ratio` to `guidance` in its result, computed from the host's
+  compare between the PR base and the reviewed head. When the host compare cannot be read,
+  `guidance.ratio` is null and `guidance.ratio_unavailable` gives the reason. The posted
+  comment is unchanged.
+
 `loadout-review run` records the same classification of the **whole pull request** in its
 result (not in the findings file), under `changeset`: `classification`,
 `allowlist_source`, `path_count`, up to twenty `code_paths` with the reason each is code,

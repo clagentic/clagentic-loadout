@@ -1737,6 +1737,29 @@ class TestCreatePrForgejo:
         r = subprocess.run(["git", "branch"], cwd=str(remote), capture_output=True, text=True, check=True)
         assert "feature" in r.stdout
 
+    def test_the_ratio_is_a_notice_and_a_result_field_and_changes_no_exit_code(
+        self, monkeypatch, capsys, tmp_path
+    ):
+        repo, _remote = _repo_with_directly_resolvable_remote(tmp_path)
+
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo", "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_github_create_opener(pr_number=77),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+
+        captured = capsys.readouterr()
+        payload = json.loads(captured.out.strip().splitlines()[-1])
+        assert code == verb.EXIT_OK
+        assert payload["ratio"]["line"] in captured.err
+        assert "push: Net test:code ratio" in captured.err
+        assert set(payload["ratio"]) >= {"test", "code", "ratio", "budget", "over_budget", "line"}
+
     def test_pr_open_failure_maps_to_exit_code(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
 
