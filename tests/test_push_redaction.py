@@ -66,6 +66,18 @@ def test_auth_header_value_redacted_to_end_of_line():
     assert out == "Authorization: [REDACTED]\nnext line"
 
 
+def test_auth_header_lone_cr_mid_value_is_masked_through_line_end():
+    out = redact_push_secrets("Authorization: Basic abc\rSECRET tail\nnext line")
+    assert "SECRET" not in out
+    assert out == "Authorization: [REDACTED]\nnext line"
+
+
+def test_auth_header_crlf_line_ending_leaves_next_line_untouched():
+    out = redact_push_secrets("Authorization: Basic abc\r\nnext line SECRET2")
+    assert "abc" not in out
+    assert out.endswith("\nnext line SECRET2")
+
+
 @pytest.mark.parametrize("keyword", ["authorization", "AUTHORIZATION", "Credential"])
 def test_auth_header_keywords_case_insensitive(keyword):
     assert redact_push_secrets(f"{keyword}: topsecretvalue") == f"{keyword}: [REDACTED]"

@@ -72,7 +72,7 @@ _URL_PASSWORD_END_RE = re.compile(r"[@\s]")
 #: plain negated class: a lazy `.*?` with a trailing-whitespace lookahead
 #: rescans a long whitespace run once per candidate end.
 _AUTH_HEADER_RE = re.compile(
-    r"((?:Authorization|Credential)\s*:\s*)(\S[^\r\n]*)",
+    r"((?:Authorization|Credential)\s*:\s*)(\S[^\n]*)",
     re.IGNORECASE,
 )
 
