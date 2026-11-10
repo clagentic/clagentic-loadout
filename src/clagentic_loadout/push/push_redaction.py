@@ -59,13 +59,20 @@ _REDACTED = "[REDACTED]"
 
 #: URL userinfo: scheme://user:secret@host -- keep the scheme and host,
 #: redact only the password half of the userinfo.
-_URL_USERINFO_RE = re.compile(r"(https?://[^:/@\s]+:)([^@\s]+)(@)")
+#: Split into a scheme+user prefix and a delimiter finder so the password
+#: scan can be shared across prefixes: one combined pattern rescans the
+#: whole whitespace-free run from every `http://a:` start, which is
+#: quadratic on a long run of them with no `@`.
+_URL_USERINFO_PREFIX_RE = re.compile(r"https?://[^:/@\s]+:", re.IGNORECASE)
+_URL_PASSWORD_END_RE = re.compile(r"[@\s]")
 
 #: Authorization:/Credential: header VALUES -- the header name is kept
 #: (diagnostic value: "an Authorization header was present"), only what
-#: follows the colon is masked.
+#: follows the colon is masked, through the end of the line. The value is a
+#: plain negated class: a lazy `.*?` with a trailing-whitespace lookahead
+#: rescans a long whitespace run once per candidate end.
 _AUTH_HEADER_RE = re.compile(
-    r"((?:Authorization|Credential)\s*:\s*)(\S.*?)(?=\s*(?:\r?\n|$))",
+    r"((?:Authorization|Credential)\s*:\s*)(\S[^\r\n]*)",
     re.IGNORECASE,
 )
 
@@ -128,6 +135,36 @@ def _strip_ansi_and_control_chars(text: str) -> str:
     return _CONTROL_CHAR_RE.sub("", stripped)
 
 
+def _redact_url_userinfo(text: str) -> str:
+    """Mask the password half of `scheme://user:password@host` in linear time.
+
+    The password is the non-whitespace, non-`@` run after `user:` and counts
+    only when an `@` ends it. The end of that run is looked up once and
+    reused by every later prefix that falls inside it, so a long run of
+    prefixes with no `@` is scanned once, not once per prefix."""
+    out: list[str] = []
+    pos = 0  # start of text not yet copied to *out*
+    search_from = 0
+    run_end = -1  # cached index of the next `@`/whitespace at or after a prior start
+    while True:
+        prefix = _URL_USERINFO_PREFIX_RE.search(text, search_from)
+        if prefix is None:
+            break
+        password_start = prefix.end()
+        if run_end < password_start:
+            delim = _URL_PASSWORD_END_RE.search(text, password_start)
+            run_end = delim.start() if delim else len(text)
+        if run_end > password_start and run_end < len(text) and text[run_end] == "@":
+            out.append(text[pos:password_start])
+            out.append(_REDACTED)
+            pos = run_end  # the `@` is kept
+            search_from = run_end + 1
+        else:
+            search_from = password_start
+    out.append(text[pos:])
+    return "".join(out)
+
+
 def redact_push_secrets(text: str, *, known_secrets: tuple[str, ...] = ()) -> str:
     """Return *text* with every known-secret pattern masked AND every ANSI
     escape / control character stripped.
@@ -138,14 +175,15 @@ def redact_push_secrets(text: str, *, known_secrets: tuple[str, ...] = ()) -> st
     short or unusually-shaped token is still caught even if it happens not
     to match `_BEARER_OR_TOKEN_RE`'s shape assumption.
     """
-    redacted = text
+    # Stripped first: a control character spliced into a keyword
+    # (`Bea<BEL>rer <token>`) would otherwise defeat every pattern below.
+    redacted = _strip_ansi_and_control_chars(text)
     for secret in known_secrets:
         if secret:
             redacted = redacted.replace(secret, _REDACTED)
-    redacted = _URL_USERINFO_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}{m.group(3)}", redacted)
+    redacted = _redact_url_userinfo(redacted)
     redacted = _AUTH_HEADER_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", redacted)
     redacted = _BEARER_OR_TOKEN_RE.sub(_REDACTED, redacted)
-    redacted = _strip_ansi_and_control_chars(redacted)
     return redacted
 
 
