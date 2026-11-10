@@ -87,6 +87,14 @@
 #                                           # deployment has to hand-export a
 #                                           # base-URL env var. See
 #                                           # "Git-host config seeding" below.
+#   scripts/install.sh --groups-file <path>
+#                                           # seed the user-level config.yaml's
+#                                           # rules.groups_file key, the
+#                                           # setting loadout-rules, profile
+#                                           # brief and spec creation read to
+#                                           # find the group rules file. See
+#                                           # "Groups-file config seeding"
+#                                           # below.
 #   scripts/install.sh --skills-dir <dir>  # target dir for the global
 #                                           # .claude/skills/-style skill
 #                                           # install (default:
@@ -197,6 +205,19 @@
 #   --git-host-base-url this run -- a prior real value always wins over a
 #   silent template re-write.
 
+# Groups-file config seeding:
+#   --groups-file PATH writes `rules: groups_file: PATH` into the same
+#   ~/.config/clagentic/loadout/config.yaml (same dir/file modes, same symlink
+#   refusal, same soft skip on an empty HOME) -- the lowest-priority tier
+#   rules.groups.resolve_groups_location reads, after --groups-file and
+#   CLAGENTIC_LOADOUT_GROUPS_FILE. A value passed this run replaces any prior
+#   rules.groups_file; without the option an existing value is left alone and
+#   no rules section is written. Every other key and section is preserved.
+#   PATH is a deployment value supplied by the caller; nothing is baked in.
+#   A PATH that is missing or unreadable at install time is still written,
+#   with one stderr notice -- the install never refuses over it. Skipped by
+#   --no-seed-config.
+
 set -eu
 
 PROG="install.sh"
@@ -229,6 +250,9 @@ BIN_DIR=""
 # template instead" -- see _seed_git_host_config below. Never a hardcoded
 # operator host (CLAUDE.md rule 1).
 GIT_HOST_BASE_URL=""
+# Groups file path to seed into config.yaml's rules.groups_file key. Set only
+# via --groups-file; empty means "leave rules.groups_file alone".
+GROUPS_FILE=""
 # Target dir for the global skill install. Overridable via
 # --skills-dir or CLAGENTIC_LOADOUT_SKILLS_DIR. Empty means the HOME-derived
 # default, ~/.claude/skills -- see _install_skills below. Never a hardcoded
@@ -276,6 +300,12 @@ Options:
                         overwrites an existing real value without this flag
                         being passed again. Omit to write a commented
                         template instead of a value.
+  --groups-file PATH     Seed ~/.config/clagentic/loadout/config.yaml's
+                        rules.groups_file key with PATH, replacing any prior
+                        value. Without this option an existing value is left
+                        untouched. A PATH that does not exist yet is still
+                        written, with a notice on stderr. Skipped by
+                        --no-seed-config.
   --skills-dir DIR       Target dir for this repo's global .claude/skills/
                         install (default: ~/.claude/skills, override via
                         CLAGENTIC_LOADOUT_SKILLS_DIR). Each shipped skill is
@@ -338,6 +368,11 @@ while [ "$#" -gt 0 ]; do
         --git-host-base-url)
             [ "$#" -ge 2 ] || { echo "$PROG: --git-host-base-url requires a URL argument" >&2; exit "$EXIT_USAGE"; }
             GIT_HOST_BASE_URL="$2"
+            shift 2
+            ;;
+        --groups-file)
+            [ "$#" -ge 2 ] || { echo "$PROG: --groups-file requires a PATH argument" >&2; exit "$EXIT_USAGE"; }
+            GROUPS_FILE="$2"
             shift 2
             ;;
         --skills-dir)
@@ -427,6 +462,7 @@ DATA_DIR="$(_trim "$DATA_DIR")"
 BIN_DIR="$(_trim "$BIN_DIR")"
 GIT_HOST_BASE_URL="$(_trim "$GIT_HOST_BASE_URL")"
 SKILLS_DIR="$(_trim "$SKILLS_DIR")"
+GROUPS_FILE="$(_trim "$GROUPS_FILE")"
 
 # Fail fast on empty/unset HOME rather than silently resolving
 # ${HOME:-}/.local/... down to root-relative paths (/.local/bin,
@@ -908,6 +944,14 @@ if [ "$REGISTER_TEST_REPORT_PERMISSION" -eq 1 ]; then
     echo "$PROG: would register the test-report allow rule in ${CLAUDE_SETTINGS_FILE:-<default settings file>} after installing." >&2
 fi
 
+if [ -n "$GROUPS_FILE" ]; then
+    if [ "$NO_SEED_CONFIG" -eq 1 ]; then
+        echo "$PROG: --groups-file given but --no-seed-config is set -- rules.groups_file would not be written." >&2
+    else
+        echo "$PROG: would write rules.groups_file=$GROUPS_FILE into the user config.yaml." >&2
+    fi
+fi
+
 if [ "$DRY_RUN" -eq 1 ]; then
     echo "$PROG: --dry-run -- not executing." >&2
     exit "$EXIT_OK"
@@ -1364,10 +1408,79 @@ _seed_git_host_config() {
     echo "$PROG: $_seed_msg ($_CONFIG_FILE)." >&2
 }
 
+# Seed rules.groups_file. Separate from _seed_git_host_config because that
+# function returns early when a real forgejo.base_url already exists, and the
+# two keys are independent. The value reaches awk through the environment, so
+# it is never interpolated into a shell command or an awk program.
+_seed_groups_file_config() {
+    [ -n "$GROUPS_FILE" ] || return 0
+    if [ -z "${HOME:-}" ]; then
+        echo "$PROG: HOME is empty or unset -- skipping groups-file config seeding (nothing writable to seed under)." >&2
+        return 0
+    fi
+    if [ -L "$_CONFIG_FILE" ]; then
+        echo "$PROG: $_CONFIG_FILE is a symlink -- not seeding rules.groups_file through it." >&2
+        return 0
+    fi
+    if [ -e "$_CONFIG_FILE" ] && [ ! -f "$_CONFIG_FILE" ]; then
+        echo "$PROG: $_CONFIG_FILE exists and is not a regular file -- not seeding rules.groups_file." >&2
+        return 0
+    fi
+    if [ ! -r "$GROUPS_FILE" ]; then
+        echo "$PROG: notice: groups file $GROUPS_FILE does not exist or is not readable; writing it to rules.groups_file anyway." >&2
+    fi
+
+    mkdir -p -m 700 "$_CONFIG_ROOT"
+    _groups_tmp="$_CONFIG_ROOT/.config.yaml.groups.$$"
+    rm -f "$_groups_tmp"
+    : > "$_groups_tmp"
+    chmod 600 "$_groups_tmp"
+    _groups_line="groups_file: '$(_yaml_single_quote "$GROUPS_FILE")'"
+    if [ -f "$_CONFIG_FILE" ]; then
+        _groups_src="$_CONFIG_FILE"
+    else
+        _groups_src="/dev/null"
+    fi
+    # Only the direct child of the top-level rules mapping is replaced: the
+    # first indented line under rules: fixes the child indent, and a
+    # groups_file key at any deeper level is left alone. The rules body is
+    # buffered so the new key is written at that detected indent.
+    GROUPS_LINE="$_groups_line" awk '
+        function flush(   i, pad) {
+            pad = (indent == "") ? "  " : indent
+            print pad line
+            for (i = 1; i <= n; i++) print buf[i]
+            n = 0
+        }
+        BEGIN { line = ENVIRON["GROUPS_LINE"]; indent = ""; n = 0 }
+        /^rules:[ \t]*$/ { if (in_rules) flush(); in_rules = 1; seen = 1; indent = ""; print; next }
+        /^[A-Za-z_][A-Za-z0-9_]*:/ { if (in_rules) flush(); in_rules = 0 }
+        in_rules {
+            if (indent == "" && $0 ~ /^[ \t]+[^ \t#]/) {
+                match($0, /^[ \t]+/)
+                indent = substr($0, 1, RLENGTH)
+            }
+            if (indent != "" && index($0, indent "groups_file:") == 1) next
+            buf[++n] = $0
+            next
+        }
+        { print }
+        END {
+            if (in_rules) flush()
+            else if (!seen) { print "rules:"; print "  " line }
+        }
+    ' "$_groups_src" >> "$_groups_tmp"
+    rm -f "$_CONFIG_FILE"
+    mv "$_groups_tmp" "$_CONFIG_FILE"
+    chmod 600 "$_CONFIG_FILE"
+    echo "$PROG: seeded rules.groups_file ($_CONFIG_FILE)." >&2
+}
+
 if [ "$NO_SEED_CONFIG" -eq 1 ]; then
     echo "$PROG: --no-seed-config -- skipping git-host config seeding." >&2
 else
     _seed_git_host_config
+    _seed_groups_file_config
 fi
 
 echo "$PROG: install complete (installer=$INSTALLER)." >&2

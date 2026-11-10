@@ -819,6 +819,8 @@ first invocation:
   install time. Override/transition case:
   `CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL` is exported in the spawn env
   instead.
+- Optional: `scripts/install.sh --groups-file <path>` seeds `rules.groups_file` in the same
+  config file, the released way to point the group-rules verbs at a groups file.
 - `~/.config/clagentic/loadout/roles/<role>.env` exists, mode 600, with
   `CLAGENTIC_LOADOUT_GIT_HOST_TOKEN=<token>`.
 - The role's permission allowlist fragment (see
