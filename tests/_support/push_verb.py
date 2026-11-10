@@ -23,7 +23,9 @@ __all__ = [
     "FakeResponse",
     "RecordingTokenProvider",
     "RefusingTokenProvider",
+    "StubForge",
     "forgejo_create_opener",
+    "forgejo_open_prs_opener",
     "git",
     "isolate_user_config_root",
     "json_resp",
@@ -45,6 +47,62 @@ def forgejo_create_opener(*, pr_number=42):
         raise AssertionError(f"unexpected: {req.get_method()} {req.full_url}")
 
     return opener
+
+
+class StubForge:
+    """A fake git-host for the PR step: records every request, answers the
+    PR-create POST and the open-PR list GET for either platform.
+
+    *create_status* None makes the create succeed (PR number *created_number*);
+    an int raises that HTTP error; "network" raises a URLError. *open_prs* are
+    the numbers the list answers with (head "feature", base "main");
+    *list_status* != 200 makes the list fail."""
+
+    def __init__(
+        self, *, open_prs=(), create_status=None, list_status=200, created_number=99,
+    ):
+        self.open_prs = list(open_prs)
+        self.create_status = create_status
+        self.list_status = list_status
+        self.created_number = created_number
+        self.calls: list[tuple[str, str]] = []
+
+    @property
+    def creates(self):
+        return [c for c in self.calls if c[0] == "POST"]
+
+    @property
+    def lists(self):
+        return [c for c in self.calls if c[0] == "GET"]
+
+    def __call__(self, req, timeout=15):
+        import urllib.error
+
+        method, url = req.get_method(), req.full_url
+        self.calls.append((method, url))
+        if method == "POST" and url.endswith("/pulls"):
+            if self.create_status is None:
+                return json_resp(201, {"number": self.created_number})
+            if self.create_status == "network":
+                raise urllib.error.URLError("unreachable")
+            raise urllib.error.HTTPError(
+                url, self.create_status, "err", {}, io.BytesIO(b'{"message": "refused"}')
+            )
+        if method == "GET" and "/pulls?" in url:
+            if self.list_status != 200:
+                raise urllib.error.HTTPError(
+                    url, self.list_status, "err", {}, io.BytesIO(b'{"message": "refused"}')
+                )
+            items = [
+                {"number": n, "head": {"ref": "feature"}, "base": {"ref": "main"}}
+                for n in self.open_prs
+            ]
+            return json_resp(200, items)
+        raise AssertionError(f"unexpected: {method} {url}")
+
+
+def forgejo_open_prs_opener(open_prs):
+    return StubForge(open_prs=open_prs)
 
 
 @pytest.fixture

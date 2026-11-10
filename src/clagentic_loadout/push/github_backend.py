@@ -14,6 +14,7 @@ specific to the push verb, not force-fit into the shared transport call.
 from __future__ import annotations
 
 import urllib.error
+import urllib.parse
 from typing import Any
 
 from clagentic_loadout.push.errors import PrOpenError
@@ -89,6 +90,53 @@ def create_pr(
             status_code=status,
         )
     return int(pr_number)
+
+
+def find_open_prs(
+    owner: str,
+    repo: str,
+    *,
+    token: str,
+    head: str,
+    base: str,
+    opener=None,
+) -> list[int]:
+    """Return the numbers of open GitHub PRs whose head branch (in this same
+    repository) is *head* and whose base branch is *base* (read-only).
+
+    The server-side head/base filter is re-checked against each returned
+    item, so a lenient server cannot widen the match. Raises PrOpenError on
+    any non-2xx response, an unexpected response shape, or a network failure.
+    """
+    query = urllib.parse.urlencode(
+        {"state": "open", "head": f"{owner}:{head}", "base": base, "per_page": 100}
+    )
+    url = f"{GITHUB_API_BASE}/repos/{owner}/{repo}/pulls?{query}"
+    try:
+        status, resp = request_json(
+            "GET", url, token, None, opener=opener, opener_factory=no_redirect_opener,
+        )
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise PrOpenError(f"network error reaching GitHub API: {exc}") from exc
+    if status != 200:
+        server_msg = resp.get("message", "") if isinstance(resp, dict) else ""
+        detail = f": {server_msg}" if server_msg else ""
+        raise PrOpenError(
+            f"GitHub open-PR lookup returned HTTP {status} for {owner}/{repo}{detail}",
+            status_code=status,
+        )
+    if not isinstance(resp, list):
+        raise PrOpenError(f"GitHub open-PR lookup returned a non-list body for {owner}/{repo}")
+    matches: list[int] = []
+    for item in resp:
+        if not isinstance(item, dict):
+            continue
+        item_head = item.get("head") if isinstance(item.get("head"), dict) else {}
+        item_base = item.get("base") if isinstance(item.get("base"), dict) else {}
+        number = item.get("number")
+        if item_head.get("ref") == head and item_base.get("ref") == base and number:
+            matches.append(int(number))
+    return matches
 
 
 def get_pr_body(
@@ -193,4 +241,4 @@ def update_pr(
         )
 
 
-__all__ = ["GITHUB_API_BASE", "create_pr", "get_pr_body", "get_pr_head_sha", "update_pr"]
+__all__ = ["GITHUB_API_BASE", "create_pr", "find_open_prs", "get_pr_body", "get_pr_head_sha", "update_pr"]

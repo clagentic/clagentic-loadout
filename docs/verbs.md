@@ -1812,21 +1812,25 @@ CLOSED (`EXIT_AUTHOR_MISMATCH`) rather than falling back to ambient git
 config. Forgejo is unaffected by this tier — see that same section for
 why.
 
-**Known trap — a redundant PR-create can 409/422 even after a successful
-push (documented, exit code unchanged):** if a PR for this branch's
-head/base pair already exists, the PR-create call can return HTTP
-409/422 even though the `git push` immediately before it already landed
-successfully. This verb still exits `EXIT_PR_FAILED` in that case — the
-exit code contract is unchanged, since silently returning `EXIT_OK` for a
-call that did not confirm or return a PR number would itself be a new
-failure mode for a caller relying on the current contract — but the error
-message is unambiguous about WHICH part failed: when the post-push
-readback above already confirmed a `remote_head_sha`, the message states
-the push landed and names that SHA, plus a note that HTTP 409/422 likely
-means a redundant create rather than a failed push. A caller that has
-learned to distrust this verb's exit code (the documented origin of that
-distrust) can now read the message instead of falling back to its own
-local `git rev-parse` guess.
+**Fold form — pushing new commits to a branch whose PR is already open.** With no
+`--title` (and no `--update-pr`), the verb looks up the open PRs from the current branch to
+`--base` right after the token mint and before anything moves a ref. If there is exactly
+one, it pushes, makes no create call, reports that PR with `pre_existing: true` in the JSON
+envelope, and exits 0. If there is none (or several, or the lookup fails), it exits
+`EXIT_USAGE` before pushing, with a message naming both forms: `--title` (plus a body) to
+create, or a branch with an open PR to fold. `--body-env`/`--body-stdin` are optional on the
+fold form; a supplied body is not applied. `--pr` is not used by the fold form (the PR is
+derived from the branch); it applies only with `--update-pr`.
+
+**A redundant PR-create is the same success.** If the PR-create call returns HTTP 409/422
+after the push landed, the verb runs one read-only lookup for open PRs from this branch to
+`--base`. Exactly one match: exit 0 with the existing PR's number and URL and
+`pre_existing: true`; the output says the push landed and that the title/body were not
+applied (use `--update-pr --pr <n>` to edit them). No match, several matches, a lookup
+error, or any other create failure (401, 403, 500, network): exit `EXIT_PR_FAILED` with the
+error message, which states the push landed (naming the confirmed `remote_head_sha` when the
+post-push readback obtained one) and, for 409/422, that the status may mean a redundant
+create.
 
 **The push never forces.** The verb sends neither `--force` nor `--force-with-lease`, and
 prints `push: does not force (plain push; history rewritten=<bool>)` to stderr before every
