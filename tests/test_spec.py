@@ -96,9 +96,12 @@ class TestNew:
         assert draft["test_plan"]["source"] == "profile"
         assert draft["test_plan"]["declared"] == {"full": TEST_FULL}
         assert draft["test_plan"]["plan"] == []
-        # No source exists yet for these: present, empty, and saying so.
-        for section in ("group_rules", "consumers"):
-            assert draft[section] == {"source": None, "note": "no source yet", "items": []}
+        # No source exists yet for consumers: present, empty, and saying so. The
+        # group rules are empty here because the fixture names no repository and no groups file.
+        assert draft["consumers"] == {"source": None, "note": "no source yet", "items": []}
+        assert draft["group_rules"]["source"] is None
+        assert draft["group_rules"]["items"] == []
+        assert draft["group_rules"]["note"]
         # The fixture profile states no posture, so every posture key is an item.
         completeness = draft["profile_completeness"]
         assert (completeness["source"], completeness["note"]) == ("profile", None)

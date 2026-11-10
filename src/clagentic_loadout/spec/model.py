@@ -15,10 +15,11 @@ describes. It exists in two forms:
 The role is an opaque key. This module records the string and checks its shape;
 it knows no role, and no section depends on which role authored the spec.
 
-Sections with no automatic source yet (group rules, consumers) are present and
-empty in a new draft, each carrying a ``source`` of null and a note saying so. The
-sections the repo profile can fill (class rules, the declared test commands) are
-filled by `apply_brief`, and the profile completeness items by `apply_completeness`.
+Sections with no automatic source yet (consumers) are present and empty in a new
+draft, each carrying a ``source`` of null and a note saying so. The sections the
+repo profile can fill (class rules, the declared test commands) are filled by
+`apply_brief`, the profile completeness items by `apply_completeness`, and the
+group rules by `apply_group_rules`.
 """
 
 from __future__ import annotations
@@ -159,6 +160,21 @@ def apply_completeness(draft: dict[str, Any], items: Sequence[str]) -> dict[str,
     return out
 
 
+def apply_group_rules(
+    draft: dict[str, Any], items: Sequence[str], *, source: str | None, note: str | None
+) -> dict[str, Any]:
+    """*draft* with its group rules section set to *items* (one string per
+    applying rule, see rules.applying.format_rule_item) from *source*. With no
+    items the section is empty and *note* says why."""
+    out = copy.deepcopy(draft)
+    out["group_rules"] = {
+        "source": source,
+        "note": None if items else (note or NO_SOURCE_NOTE),
+        "items": list(items),
+    }
+    return out
+
+
 def draft_from_sealed(sealed: dict[str, Any], sealed_hash: str) -> dict[str, Any]:
     """A draft that starts from the sealed spec *sealed* (whose hash is
     *sealed_hash*) and names it in ``supersedes``. The only way to change a
@@ -237,6 +253,7 @@ __all__ = [
     "SpecFormatError",
     "apply_brief",
     "apply_completeness",
+    "apply_group_rules",
     "canonical_bytes",
     "draft_from_sealed",
     "hash_bytes",

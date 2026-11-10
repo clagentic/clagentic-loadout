@@ -278,28 +278,20 @@ def _group_rules(
     line saying why there are none when they could not be resolved."""
     # Imported here: rules.verb reads profiles through review.profile_brief,
     # which imports this module.
-    from clagentic_loadout.git_origin import OriginBindingError, read_origin_target
     from clagentic_loadout.rules import groups as gr
-    from clagentic_loadout.rules.verb import build_result
+    from clagentic_loadout.rules.applying import applying_group_rules
 
-    name = gr.bare_repo_name(args.repo) if args.repo else ""
-    if not name:
-        try:
-            name = read_origin_target(args.repo_path).name
-        except OriginBindingError:
-            return [], "group rules not resolved: no --repo and no readable origin to name it"
-    location = gr.resolve_groups_location(args.groups_file, config_root=config_root)
     try:
-        groups = gr.load_groups_file(location.path) if location.path else None
+        found = applying_group_rules(
+            args.repo,
+            args.repo_path,
+            args.groups_file,
+            config_root,
+            known_class=profile.repo_class,
+        )
     except gr.GroupsFileError as exc:
         raise ProfileVerbError(str(exc), EXIT_IO_FAILED) from exc
-    result = build_result(
-        name, location, groups, args.repo_path, known_class=profile.repo_class
-    )
-    if result["result"] == "empty":
-        return [], f"no group rules: {result['reason']}"
-    rules = [rule for group in result["groups"] for rule in group["rules"]]
-    return rules, None
+    return found.rules, found.note
 
 
 def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
