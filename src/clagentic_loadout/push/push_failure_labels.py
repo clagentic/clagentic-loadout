@@ -82,12 +82,19 @@ SUB_CAUSE_LOCAL_HOOK_REJECTED = "local-hook-rejected"
 
 #: Client-side, non-fast-forward-shaped rejection with a parsed per-ref
 #: reject reason recognized as a known non-fast-forward variant — covers
-#: git's "fetch first" AND "stale info" literals (the lr-f57f13 lease-
-#: staleness bug: previously only "fetch first"/"non-fast-forward" matched a
-#: substring, and "stale info" — a DISTINCT THIRD literal git emits for a
-#: --force-with-lease rejection, with NO hint block at all — fell through to
-#: "unknown").
+#: git's "non-fast-forward" and "fetch first" literals (and "stale info",
+#: which git only prints for a leased force this tool no longer sends, but
+#: which an externally configured push could still produce). The push never
+#: forces, so the remedy is NON_FAST_FORWARD_HINT, not a retry.
 SUB_CAUSE_NON_FAST_FORWARD = "non-fast-forward"
+
+#: Remedy appended to a non-fast-forward failure message. Naming it here
+#: keeps the wording in one place for the message and the docs.
+NON_FAST_FORWARD_HINT = (
+    "The remote branch has commits this branch does not contain, and "
+    "loadout-push never forces a push. Open a superseding branch from the "
+    "current base and push that instead."
+)
 
 #: The local refspec itself does not resolve to a real ref ("src refspec ...
 #: does not match any") — a usage/argument-shape defect (e.g. the branch
@@ -136,6 +143,7 @@ SUB_CAUSE_LABELS: frozenset[str] = frozenset(
 )
 
 __all__ = [
+    "NON_FAST_FORWARD_HINT",
     "SUB_CAUSE_AUTH_FAILED",
     "SUB_CAUSE_BAD_REFSPEC",
     "SUB_CAUSE_LABELS",

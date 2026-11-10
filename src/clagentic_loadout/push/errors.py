@@ -152,8 +152,6 @@ class GitPushError(Exception):
         reached_transport: bool = False,
         remote: str | None = None,
         refspec: str | None = None,
-        lease_forced: bool = False,
-        lease_origin: str = "",
         known_secrets: tuple[str, ...] = (),
     ) -> None:
         def _redact(value: str) -> str:
@@ -169,8 +167,6 @@ class GitPushError(Exception):
         self.reached_transport = reached_transport
         self.remote = remote
         self.refspec = refspec
-        self.lease_forced = lease_forced
-        self.lease_origin = lease_origin
 
 
 class PrOpenError(Exception):

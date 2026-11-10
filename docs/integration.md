@@ -551,7 +551,7 @@ host the push reaches. Before any token is minted, `push` therefore requires
 the branch's tracking remote (`branch.<name>.remote`, or `origin` when unset) to
 be a configured remote (`git remote` lists it) and checks every
 push destination (`git remote get-url --push --all`) and every fetch
-destination (`git remote get-url --all`; the pre-lease fetch and the post-push
+destination (`git remote get-url --all`; the pre-reauthor fetch and the post-push
 readback present the token to it):
 
 - an `http(s)` URL must have the same host and port as the platform host: the

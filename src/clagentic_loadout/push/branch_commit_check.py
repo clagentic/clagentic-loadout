@@ -45,7 +45,7 @@ base branch before push was considered and rejected. This package's own
 commit-subject gate at merge time is BLOCK-NEVER-REWRITE by hard constraint
 (merge.commit_subjects' own docstring); push-time already performs ONE
 history mutation (push.identity.pin_commits_to_bot_identity, explicit
-history_rewritten flag threaded through to force-with-lease) and that
+skipping commits already on the remote branch) and that
 mutation's own safety margin is already load-bearing. Silently layering a
 SECOND, unrelated history rewrite (a rebase onto a fetched base) inside the
 same push call multiplies the ways a push can leave a caller's working tree
@@ -161,7 +161,7 @@ def fetch_branch_commit_subjects(
     in *commit_subjects* order" contract.
 
     The fetch runs through push.git_push.git_fetch_with_token, the same
-    destination-aware hermetic primitive the pre-lease fetch uses: no system or
+    destination-aware hermetic primitive the pre-reauthor fetch uses: no system or
     global git config (so a user-level url rewrite cannot redirect it), no
     ambient credential helper, netrc or askpass, and *token* presented only to
     an http(s) destination. A private repository therefore keeps being checked
@@ -263,7 +263,8 @@ def _format_stray_merge_commit_error(offenders: list[tuple[str, str]], *, base_b
         f"commit via patch-id once its originating PR is in "
         f"{base_branch}'s ancestry. VERIFY the rebase changed nothing you "
         f"intended to keep (e.g. `git diff <old-tip> HEAD` is empty) before "
-        f"re-pushing with --force-with-lease. To bypass this gate, pass "
+        f"re-pushing; if the branch is already pushed, push the rebased "
+        f"commits as a superseding branch (loadout-push never forces). To bypass this gate, pass "
         f"--skip-branch-commit-check."
     )
 

@@ -200,7 +200,7 @@ class TestSharedGitPushEntrypointLock:
         assert forgejo_call["fn"] is github_call["fn"]
 
         # Same call SHAPE too (positional signature: remote_name, branch,
-        # token, project_root, plus force_with_lease/platform/
+        # token, project_root, plus platform/
         # other_platform_label keywords) -- a fork that kept the same
         # function object but called it with a platform-specific extra
         # argument would still be a real divergence this should catch.

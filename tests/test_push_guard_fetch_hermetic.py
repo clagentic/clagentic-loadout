@@ -131,7 +131,7 @@ def ambient_home(tmp_path, monkeypatch):
 
 @pytest.fixture
 def guard_fetches(monkeypatch):
-    """The guards fetch the base branch (`main`); the pre-lease fetch names the
+    """The guards fetch the base branch (`main`); the pre-reauthor fetch names the
     pushed branch, so the trailing argument tells them apart."""
     calls: list[list[str]] = []
     real_run = subprocess.run
@@ -189,7 +189,7 @@ _GUARD_MODES = [
 ]
 
 
-@pytest.mark.parametrize("lease", [(), ("--force-with-lease",)], ids=["no-lease", "lease"])
+@pytest.mark.parametrize("lease", [(), ("--no-force-with-lease",)], ids=["no-flag", "no-op-flag"])
 @pytest.mark.parametrize("guards", _GUARD_MODES)
 def test_g1_user_level_insteadof_does_not_carry_an_ambient_credential_to_a_guard_fetch(
     guards, lease, repo_with_remote, listener, ambient_home, guard_fetches, monkeypatch, capsys
@@ -288,7 +288,7 @@ def test_g3_forgejo_rewrite_of_the_anchor_itself_is_refused_by_the_host_ceiling(
     assert not listener.received_a_credential()
 
 
-@pytest.mark.parametrize("lease", [(), ("--force-with-lease",)], ids=["no-lease", "lease"])
+@pytest.mark.parametrize("lease", [(), ("--no-force-with-lease",)], ids=["no-flag", "no-op-flag"])
 @pytest.mark.parametrize("guards", _GUARD_MODES)
 def test_g4_a_local_fetch_url_still_runs_the_guards_and_pushes(
     guards, lease, repo_with_remote, listener, ambient_home, guard_fetches, monkeypatch, capsys

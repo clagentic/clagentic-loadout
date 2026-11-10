@@ -126,13 +126,26 @@ class TestGitPushWithToken:
             git_push_with_token("nonexistent-remote", "feature", secret_token, repo)
         assert secret_token not in str(exc_info.value)
 
-    def test_force_with_lease_flag_is_accepted(self, tmp_path):
+    def test_push_never_forces_a_rewritten_branch(self, tmp_path):
         repo, remote = _make_repo_with_bare_remote(tmp_path)
         git_push_with_token("origin", "feature", "unused-token-value", repo)
-        # Amend to simulate a history rewrite, then push again with
-        # force_with_lease -- would fail as non-fast-forward without it.
+        published = subprocess.run(
+            ["git", "rev-parse", "feature"], cwd=str(remote), capture_output=True, text=True, check=True,
+        ).stdout.strip()
         _git(["commit", "--amend", "-m", "work (amended)"], repo)
-        git_push_with_token("origin", "feature", "unused-token-value", repo, force_with_lease=True)
+        with pytest.raises(GitPushError) as exc_info:
+            git_push_with_token("origin", "feature", "unused-token-value", repo)
+        assert exc_info.value.sub_cause == "non-fast-forward"
+        assert "superseding branch" in str(exc_info.value)
+        after = subprocess.run(
+            ["git", "rev-parse", "feature"], cwd=str(remote), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert after == published
+
+    def test_force_with_lease_parameter_no_longer_exists(self, tmp_path):
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+        with pytest.raises(TypeError):
+            git_push_with_token("origin", "feature", "unused-token-value", repo, force_with_lease=True)
 
     def test_dry_run_updates_no_ref_on_the_remote(self, tmp_path):
         """lr-68039e acceptance criterion: --dry-run through the minted
@@ -667,10 +680,10 @@ class TestGitPushWithToken:
 
 class TestGitFetchWithToken:
     """git_fetch_with_token (lr-f57f13, pre-merge security review finding):
-    the pre-lease fetch used by push.lease_control.resolve_lease must run
+    the pre-reauthor fetch used by push.verb must run
     through the SAME credentialed envelope git_push_with_token uses, never
     a bare ambient `git fetch` -- and its failure message must already be
-    redacted, since push.lease_control folds it directly into a printed
+    redacted, since push.verb folds it directly into a printed
     warning with no second redaction pass."""
 
     def test_successful_fetch_to_local_bare_remote(self, tmp_path):
@@ -694,7 +707,7 @@ class TestGitFetchWithToken:
             git_fetch_with_token("nonexistent-remote", "feature", "some-token-value", repo)
 
     def test_fetch_failure_message_is_already_redacted(self, tmp_path, monkeypatch):
-        """push.lease_control folds str(GitFetchError) directly into a
+        """push.verb folds str(GitFetchError) directly into a
         printed warning with no second redaction step -- this asserts the
         message git_fetch_with_token raises is safe on its own."""
         fake_bin = tmp_path / "fakebin"
