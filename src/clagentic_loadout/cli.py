@@ -28,6 +28,7 @@ from __future__ import annotations
 import sys
 from typing import Callable
 
+from clagentic_loadout._source_commit import get_source_commit
 from clagentic_loadout._version import get_version
 
 #: Reserved for this module's own usage failures — see module docstring.
@@ -256,7 +257,13 @@ def _print_help() -> None:
         "merge-gate enforcement for autonomous coding agents.",
         "",
         f"Usage: {_PROG} <verb> [<subverb>] [args...]",
-        f"       {_PROG} --help | --version",
+        f"       {_PROG} --help | --version | --source-commit",
+        "",
+        "--source-commit prints the commit this install was built from as",
+        "commit=<40-hex sha|unknown> and dirty=<true|false|unknown> lines. It",
+        "reads a record scripts/install.sh writes into each venv-tier release;",
+        "an editable install, an uninstalled checkout or a source without git",
+        "metadata reports unknown. Always exits 0.",
         "",
         "Verbs:",
     ]
@@ -306,6 +313,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if argv[0] == "--version":
         print(f"{_PROG} {get_version()}")
+        return 0
+
+    if argv[0] == "--source-commit":
+        print(get_source_commit().render())
         return 0
 
     resolved = _resolve_dispatch(argv)

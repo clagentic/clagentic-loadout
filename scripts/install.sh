@@ -40,6 +40,11 @@
 # processes still running from it; older ones are pruned. A failed build or
 # verification leaves the live venv untouched (exit 3).
 #
+# Source commit record: each venv-tier release also gets a small file,
+# clagentic-loadout-source-commit, in its venv root holding commit=<full sha or
+# unknown> and dirty=<true|false|unknown>; `clagentic-loadout --source-commit`
+# prints it. See _record_source_commit below.
+#
 # One-time migration: an install that predates this layout has a real
 # DIRECTORY at DATA_DIR/venv, and a symlink cannot be renamed over a non-empty
 # directory. The first install after upgrading therefore moves the old
@@ -339,6 +344,10 @@ Options:
                         `clagentic-loadout update`.
   -h, --help            Show this help and exit.
   --version              Show this script's own version marker and exit.
+
+The venv tier records the full source commit and a dirty flag in each release
+(never in the source checkout); read it with `clagentic-loadout --source-commit`.
+An editable install or a source without git metadata reports unknown.
 EOF
 }
 
@@ -741,8 +750,11 @@ _project_script_names() {
 # an earlier build; an editable install is a different artifact than a built one. A
 # source that is not the top level of a git work tree (sdist/wheel path, plain
 # directory, git absent or unusable) gets a timestamp-pid id, always fresh.
-_release_id() {
-    _rid=""
+#
+# Prints "<full-sha> <dirty>" (dirty = 1 or 0) when SOURCE_PATH is the top level
+# of a git work tree with a resolvable HEAD; prints nothing otherwise. Read-only
+# against the source: rev-parse and status write nothing there.
+_source_git_state() {
     if _have_cmd git && [ -d "$SOURCE_PATH" ]; then
         _src_real="$(CDPATH= cd -- "$SOURCE_PATH" && pwd -P)"
         _top="$(git -C "$SOURCE_PATH" rev-parse --show-toplevel 2>/dev/null || true)"
@@ -753,12 +765,27 @@ _release_id() {
         if [ -n "$_top_real" ] && [ "$_top_real" = "$_src_real" ]; then
             _sha="$(git -C "$SOURCE_PATH" rev-parse HEAD 2>/dev/null || true)"
             if [ -n "$_sha" ]; then
-                _rid="$(printf '%.12s' "$_sha")"
                 _gstatus="$(git -C "$SOURCE_PATH" status --porcelain --untracked-files=all 2>/dev/null || true)"
                 if [ -n "$_gstatus" ]; then
-                    _rid="$_rid-$(date +%Y%m%d%H%M%S)-$$"
+                    echo "$_sha 1"
+                else
+                    echo "$_sha 0"
                 fi
             fi
+        fi
+    fi
+}
+
+#
+# _release_id takes the _source_git_state result as $1 so the release id and the
+# source-commit record derive from ONE probe and cannot disagree on dirty.
+_release_id() {
+    _rid=""
+    _state="$1"
+    if [ -n "$_state" ]; then
+        _rid="$(printf '%.12s' "${_state%% *}")"
+        if [ "${_state##* }" = "1" ]; then
+            _rid="$_rid-$(date +%Y%m%d%H%M%S)-$$"
         fi
     fi
     if [ -z "$_rid" ]; then
@@ -872,6 +899,41 @@ _prune_releases() {
     done
 }
 
+# Record the full source commit and dirty state in the root of release venv $1,
+# where `clagentic-loadout --source-commit` reads it back (it is never written
+# into the source checkout). Runs before the live switch, so the record is in
+# place the moment the release goes live. An existing record is kept: a release
+# directory is only reused for the same clean sha. An editable install records
+# nothing: it runs the live checkout, so a build-time commit would go stale.
+# A source with no usable git metadata records unknown, and a failed write only
+# warns -- the install never fails over this step.
+_record_source_commit() {
+    _rec_dir="$1"
+    _rec_file="$_rec_dir/clagentic-loadout-source-commit"
+    if [ "$EDITABLE" -eq 1 ] || [ -e "$_rec_file" ]; then
+        return 0
+    fi
+    if [ -n "$SOURCE_GIT_STATE" ]; then
+        _rec_commit="${SOURCE_GIT_STATE%% *}"
+        if [ "${SOURCE_GIT_STATE##* }" = "1" ]; then
+            _rec_dirty="true"
+        else
+            _rec_dirty="false"
+        fi
+    else
+        _rec_commit="unknown"
+        _rec_dirty="unknown"
+    fi
+    _rec_tmp="$_rec_file.$$"
+    if printf 'commit=%s\ndirty=%s\n' "$_rec_commit" "$_rec_dirty" > "$_rec_tmp" \
+        && mv "$_rec_tmp" "$_rec_file"; then
+        echo "$PROG: recorded source commit $_rec_commit (dirty=$_rec_dirty) in $_rec_file." >&2
+    else
+        rm -f "$_rec_tmp"
+        echo "$PROG: warning: could not record the source commit in $_rec_file; --source-commit will report unknown." >&2
+    fi
+}
+
 case "$INSTALLER" in
     pipx)
         if [ "$EDITABLE" -eq 1 ]; then
@@ -919,7 +981,11 @@ case "$INSTALLER" in
             SCRIPT_NAMES="$_FALLBACK_SCRIPT_NAMES"
             SCRIPT_NAMES_DECLARED=0
         fi
-        RELEASE_ID="$(_release_id)"
+        # Probed once, before the build, so files the build itself drops into
+        # the source tree can never make a clean checkout read as dirty, and
+        # the release id and the record share one answer.
+        SOURCE_GIT_STATE="$(_source_git_state)"
+        RELEASE_ID="$(_release_id "$SOURCE_GIT_STATE")"
         RELEASE_DIR="$DATA_DIR/venvs/$RELEASE_ID"
         if [ -x "$RELEASE_DIR/bin/python3" ] || [ -x "$RELEASE_DIR/bin/python" ]; then
             echo "$PROG: reusing existing venv at $RELEASE_DIR" >&2
@@ -1028,6 +1094,8 @@ if [ "$INSTALLER" = "venv" ]; then
             exit "$EXIT_INSTALL_FAILED"
         fi
     fi
+
+    _record_source_commit "$RELEASE_DIR"
 
     if [ "$_current_id" = "$RELEASE_ID" ]; then
         echo "$PROG: $VENV_DIR already points at release $RELEASE_ID; nothing to switch." >&2
