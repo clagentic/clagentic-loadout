@@ -55,13 +55,18 @@ class StubForge:
 
     *create_status* None makes the create succeed (PR number *created_number*);
     an int raises that HTTP error; "network" raises a URLError. *open_prs* are
-    the numbers the list answers with (head "feature", base "main");
+    the numbers the list answers with (head "feature", base "main", head repo
+    this repository); *fork_prs* answer with the same branch and base from a
+    different head repository, *repoless_prs* with no head repository at all;
     *list_status* != 200 makes the list fail."""
 
     def __init__(
         self, *, open_prs=(), create_status=None, list_status=200, created_number=99,
+        fork_prs=(), repoless_prs=(),
     ):
         self.open_prs = list(open_prs)
+        self.fork_prs = list(fork_prs)
+        self.repoless_prs = list(repoless_prs)
         self.create_status = create_status
         self.list_status = list_status
         self.created_number = created_number
@@ -94,8 +99,24 @@ class StubForge:
                     url, self.list_status, "err", {}, io.BytesIO(b'{"message": "refused"}')
                 )
             items = [
-                {"number": n, "head": {"ref": "feature"}, "base": {"ref": "main"}}
+                {
+                    "number": n,
+                    "head": {"ref": "feature", "repo": {"full_name": "some-owner/some-repo"}},
+                    "base": {"ref": "main"},
+                }
                 for n in self.open_prs
+            ]
+            items += [
+                {
+                    "number": n,
+                    "head": {"ref": "feature", "repo": {"full_name": "fork-owner/some-repo"}},
+                    "base": {"ref": "main"},
+                }
+                for n in self.fork_prs
+            ]
+            items += [
+                {"number": n, "head": {"ref": "feature"}, "base": {"ref": "main"}}
+                for n in self.repoless_prs
             ]
             return json_resp(200, items)
         raise AssertionError(f"unexpected: {method} {url}")

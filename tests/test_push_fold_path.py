@@ -176,6 +176,50 @@ class TestFoldForm:
         assert forge.creates == []
 
 
+@pytest.mark.parametrize("platform", PLATFORMS)
+class TestForkPrIsNotAMatch:
+    @pytest.mark.parametrize(
+        "forge_kwargs",
+        [{"fork_prs": [5]}, {"repoless_prs": [5]}],
+        ids=["fork", "no-head-repo"],
+    )
+    @pytest.mark.parametrize("status", [409, 422])
+    def test_create_conflict_with_only_a_foreign_pr_keeps_exit_four(
+        self, repo_with_remote, monkeypatch, platform, forge_kwargs, status
+    ):
+        repo, remote = repo_with_remote
+        forge = StubForge(create_status=status, **forge_kwargs)
+        code = _run(_create_argv(repo, remote, platform), forge, monkeypatch, stdin_text=BODY)
+        assert code == verb.EXIT_PR_FAILED
+        assert len(forge.lists) == 1
+
+    @pytest.mark.parametrize(
+        "forge_kwargs",
+        [{"fork_prs": [5]}, {"repoless_prs": [5]}],
+        ids=["fork", "no-head-repo"],
+    )
+    def test_fold_form_with_only_a_foreign_pr_exits_before_pushing(
+        self, repo_with_remote, monkeypatch, platform, forge_kwargs
+    ):
+        repo, remote = repo_with_remote
+        forge = StubForge(**forge_kwargs)
+        code = _run(_argv(repo, remote, platform), forge, monkeypatch)
+        assert code == verb.EXIT_USAGE
+        assert "feature" not in _remote_branches(remote)
+        assert forge.creates == []
+
+    def test_same_repo_pr_plus_fork_pr_is_exactly_one_match(
+        self, repo_with_remote, monkeypatch, capsys, platform
+    ):
+        repo, remote = repo_with_remote
+        forge = StubForge(open_prs=[7], fork_prs=[5], create_status=409)
+        code = _run(_create_argv(repo, remote, platform), forge, monkeypatch, stdin_text=BODY)
+        assert code == verb.EXIT_OK
+        payload, _captured = _stdout_payload(capsys)
+        assert payload["pr_number"] == 7
+        assert payload["pre_existing"] is True
+
+
 def test_github_lookup_filters_by_head_and_base(repo_with_remote, monkeypatch):
     repo, remote = repo_with_remote
     forge = StubForge(open_prs=[7])

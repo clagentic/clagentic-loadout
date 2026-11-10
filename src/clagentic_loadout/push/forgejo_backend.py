@@ -129,7 +129,16 @@ def find_open_prs(
             item_head = item.get("head") if isinstance(item.get("head"), dict) else {}
             item_base = item.get("base") if isinstance(item.get("base"), dict) else {}
             number = item.get("number")
-            if item_head.get("ref") == head and item_base.get("ref") == base and number:
+            # A fork PR can carry the same branch name and base; only a PR whose
+            # head lives in this repository holds the pushed commits. A missing
+            # or unreadable head repo is not a match.
+            head_repo = item_head.get("repo") if isinstance(item_head.get("repo"), dict) else {}
+            if (
+                item_head.get("ref") == head
+                and item_base.get("ref") == base
+                and head_repo.get("full_name") == f"{owner}/{repo}"
+                and number
+            ):
                 matches.append(int(number))
         if len(items) < _LOOKUP_PAGE_SIZE:
             return matches
