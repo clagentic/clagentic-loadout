@@ -20,8 +20,11 @@ in the run and never returned, so none of these can be mistaken for it.
       Reused rather than extended: every one of these is a refusal to act
       on a run or tree that is not the one the caller named, and the range 70-79
       has no free code while 80 and up belong to other verbs.
-  79  installer helper (repo_test.permission): the settings file could not be read
-      or written; not a `clagentic-loadout test` exit
+  79  report: the run is still running (--wait timed out, or --failing-ids/--diff on
+      a running run). Also the installer helper's (repo_test.permission) code for a
+      settings file that could not be read or written; that helper is a separate
+      process that is never a `clagentic-loadout test` invocation, so the two
+      meanings cannot be returned to the same caller.
 """
 
 EXIT_OK = 0
@@ -37,3 +40,4 @@ EXIT_SHA_NO_MATCH = 77
 EXIT_DIFF_REFUSED = 78
 EXIT_REPO_MISMATCH = EXIT_DIFF_REFUSED
 EXIT_SETTINGS = 79
+EXIT_STILL_RUNNING = 79

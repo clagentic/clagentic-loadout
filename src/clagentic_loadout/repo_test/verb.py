@@ -1,10 +1,10 @@
 """repo_test.verb — ``clagentic-loadout test``: run a repository's declared tests
 and read the results by run id.
 
-  clagentic-loadout test run full|impacted [--repo-root DIR] [--base REV] [--timeout S]
-  clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout S]
-  clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout S]
-  clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S]
+  clagentic-loadout test run full|impacted [--repo-root DIR] [--base REV] [--timeout S] [--detach]
+  clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout S] [--detach]
+  clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout S] [--detach]
+  clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
                                 [--summary | --failing-ids | --diff BASE_RUN_ID]
 
 The exit codes are in ``repo_test.exits``; a test command's own exit code is
@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -30,26 +31,31 @@ from typing import Any
 from clagentic_loadout._version import get_version
 from clagentic_loadout.repo_test import exits, report_cmd, store
 from clagentic_loadout.repo_test.report_cmd import LATEST, ReportRefused
-from clagentic_loadout.repo_test.run_cmd import RunRefused, execute_run
+from clagentic_loadout.repo_test.detach import start_detached
+from clagentic_loadout.repo_test.run_cmd import RunRefused, execute_run, prepare_run
 from clagentic_loadout.repo_test.spec import MODE_TIER, RUN_MODES
 
 _PROG = "clagentic-loadout test"
+
+# How often `report --wait` re-reads the run.
+_WAIT_POLL_SECONDS = 0.5
 
 _EXIT_CODES_TEXT = (
     "Exit codes: 0 ok, 1 usage, 70 tests failed, 71 no valid profile, 72 profile does not "
     "declare the command (or base), 73 command could not run or left no JUnit report, "
     "74 run could not be recorded, 75 no reports root or no matching run, 76 bad or unknown "
     "run id, 77 no run for --sha, 78 refused (not the expected repository or commit, a repository "
-    "to scope `latest` to is ambiguous, different repositories, unlike tiers, or a run without results)."
+    "to scope `latest` to is ambiguous, different repositories, unlike tiers, or a run without results), "
+    "79 report: the run is still running (--wait timed out)."
 )
 
 _TOP_HELP = f"""{_PROG} -- run the tests a repository declares, and read the results by run id.
 
 Usage: {_PROG} run full|impacted [--repo-root DIR] [--base REV] [--timeout SECONDS]
-                                    [--expect-repo R] [--expect-head SHA]
-       {_PROG} run files PATH... [--repo-root DIR] [--timeout SECONDS]
-       {_PROG} run tier NAME [--repo-root DIR] [--timeout SECONDS]
-       {_PROG} report [RUN_ID|latest] [--repo R] [--sha S]
+                                    [--expect-repo R] [--expect-head SHA] [--detach]
+       {_PROG} run files PATH... [--repo-root DIR] [--timeout SECONDS] [--detach]
+       {_PROG} run tier NAME [--repo-root DIR] [--timeout SECONDS] [--detach]
+       {_PROG} report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
                                     [--summary | --failing-ids | --diff BASE_RUN_ID]
        {_PROG} --help | --version
 
@@ -114,6 +120,13 @@ def _run_parser() -> argparse.ArgumentParser:
         help="Refuse (exit 78) unless HEAD is this commit: full SHA or a prefix of 7 or more hex "
         "characters. Also refused when the head is unknown.",
     )
+    run.add_argument(
+        "--detach",
+        action="store_true",
+        help="Check the arguments and the tree as usual, then start the run in a separate "
+        "session that outlives this command, print its run id as JSON and exit 0. Read it "
+        "with `report RUN_ID`, optionally with --wait.",
+    )
     return run
 
 
@@ -135,6 +148,14 @@ def _report_parser() -> argparse.ArgumentParser:
         default=None,
         help="Select the newest clean run for this commit (full SHA or a prefix of 7 or more).",
     )
+    report.add_argument(
+        "--wait",
+        metavar="SECONDS",
+        type=_seconds,
+        default=None,
+        help="Wait up to this many seconds for the run to end (complete, unrunnable or "
+        "interrupted) before printing. Exit 79 when it is still running after that.",
+    )
     shape = report.add_mutually_exclusive_group()
     shape.add_argument("--summary", action="store_true", help="Print the run summary (default).")
     shape.add_argument(
@@ -148,6 +169,16 @@ def _report_parser() -> argparse.ArgumentParser:
         "count, as JSON. Refuses runs from different repositories.",
     )
     return report
+
+
+def _seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not value >= 0:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds of zero or more")
+    return value
 
 
 def _print_json(payload: object) -> None:
@@ -171,6 +202,8 @@ def _run(args: argparse.Namespace) -> int:
             print(f"{_PROG}: `tier` takes exactly one tier name, got {len(paths)}", file=sys.stderr)
             return exits.EXIT_USAGE
         tier, paths = paths[0], []
+    if args.detach:
+        return _run_detached(args, paths, tier)
     started: list[tuple[str, Mapping[str, Any]]] = []
 
     def announce(run_id: str, recorded: Mapping[str, Any]) -> None:
@@ -211,6 +244,27 @@ def _run(args: argparse.Namespace) -> int:
     return outcome.exit_code
 
 
+def _run_detached(args: argparse.Namespace, paths: list[str], tier: str | None) -> int:
+    try:
+        prepared = prepare_run(
+            mode=args.mode,
+            paths=paths,
+            repo_root=args.repo_root,
+            base=args.base,
+            timeout_seconds=args.timeout,
+            tier=tier,
+            expect_repo=args.expect_repo,
+            expect_head=args.expect_head,
+        )
+        summary = start_detached(prepared)
+    except RunRefused as exc:
+        print(f"{_PROG}: {exc}", file=sys.stderr)
+        return exc.code
+    _print_json(summary)
+    print(_describe_start(summary["run_id"], summary, "started (detached)"), file=sys.stderr)
+    return exits.EXIT_OK
+
+
 def _scoping_cwd(args: argparse.Namespace) -> Path | None:
     """The working directory, read only where `latest` scoping uses it (no run id,
     no --repo). A directory that no longer exists or cannot be read counts as
@@ -229,6 +283,7 @@ def _report(args: argparse.Namespace) -> int:
     def note(text: str) -> None:
         print(f"{_PROG}: {text}", file=sys.stderr)
 
+    deadline = None if args.wait is None else time.monotonic() + args.wait
     try:
         run = report_cmd.select_run(
             root,
@@ -238,6 +293,14 @@ def _report(args: argparse.Namespace) -> int:
             cwd=_scoping_cwd(args),
             note=note,
         )
+        while deadline is not None and not report_cmd.is_terminal(run):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(_WAIT_POLL_SECONDS, remaining))
+            run = report_cmd.select_run(
+                root, args.run_id, repo=args.repo, sha=args.sha, cwd=_scoping_cwd(args)
+            )
         if args.diff is not None:
             _print_json(report_cmd.diff_of(run, report_cmd.load_base_run(root, args.diff, note=note)))
         elif args.failing_ids:
@@ -248,6 +311,8 @@ def _report(args: argparse.Namespace) -> int:
     except ReportRefused as exc:
         print(f"{_PROG}: {exc}", file=sys.stderr)
         return exc.code
+    if args.wait is not None and not report_cmd.is_terminal(run):
+        return exits.EXIT_STILL_RUNNING
     return exits.EXIT_OK
 
 
