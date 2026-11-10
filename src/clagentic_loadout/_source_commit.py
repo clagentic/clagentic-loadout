@@ -66,6 +66,6 @@ def get_source_commit(prefix: Path | str | None = None) -> SourceCommit:
     root = Path(prefix if prefix is not None else sys.prefix)
     try:
         text = (root / RECORD_FILENAME).read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return _UNRECORDED
     return parse_record(text)

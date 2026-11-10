@@ -776,9 +776,12 @@ _source_git_state() {
     fi
 }
 
+#
+# _release_id takes the _source_git_state result as $1 so the release id and the
+# source-commit record derive from ONE probe and cannot disagree on dirty.
 _release_id() {
     _rid=""
-    _state="$(_source_git_state)"
+    _state="$1"
     if [ -n "$_state" ]; then
         _rid="$(printf '%.12s' "${_state%% *}")"
         if [ "${_state##* }" = "1" ]; then
@@ -978,10 +981,11 @@ case "$INSTALLER" in
             SCRIPT_NAMES="$_FALLBACK_SCRIPT_NAMES"
             SCRIPT_NAMES_DECLARED=0
         fi
-        RELEASE_ID="$(_release_id)"
-        # Captured before the build so files the build itself drops into the
-        # source tree can never make a clean checkout read as dirty.
+        # Probed once, before the build, so files the build itself drops into
+        # the source tree can never make a clean checkout read as dirty, and
+        # the release id and the record share one answer.
         SOURCE_GIT_STATE="$(_source_git_state)"
+        RELEASE_ID="$(_release_id "$SOURCE_GIT_STATE")"
         RELEASE_DIR="$DATA_DIR/venvs/$RELEASE_ID"
         if [ -x "$RELEASE_DIR/bin/python3" ] || [ -x "$RELEASE_DIR/bin/python" ]; then
             echo "$PROG: reusing existing venv at $RELEASE_DIR" >&2

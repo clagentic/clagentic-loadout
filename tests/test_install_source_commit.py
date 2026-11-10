@@ -135,6 +135,33 @@ def test_reader_rejects_malformed_records(tmp_path: Path) -> None:
     assert parse_record(f"commit={SHA}\ndirty=true\n") == SourceCommit(SHA, "true")
 
 
+def test_invalid_utf8_record_reads_as_unknown_and_exits_zero(tmp_path: Path, monkeypatch, capsys) -> None:
+    (tmp_path / RECORD_FILENAME).write_bytes(b"commit=\xff\xfe\ndirty=false\n")
+
+    assert get_source_commit(tmp_path) == SourceCommit("unknown", "unknown")
+
+    monkeypatch.setattr("sys.prefix", str(tmp_path))
+    assert umbrella_main(["--source-commit"]) == 0
+    assert capsys.readouterr().out == "commit=unknown\ndirty=unknown\n"
+
+
+def test_release_id_and_record_agree_on_dirty(tmp_path: Path) -> None:
+    for dirty in (False, True):
+        root = tmp_path / f"d{int(dirty)}"
+        root.mkdir()
+        layout = _Layout(root)
+        src = git_source(root, "src")
+        if dirty:
+            (src / "scratch-untracked.txt").write_text("x\n")
+        assert layout.install(src).returncode == 0
+
+        release = layout.live_release()
+        record = _read_installed(layout).stdout
+        has_nonce = release != _head(src)[:12]
+        assert has_nonce == dirty
+        assert record == f"commit={_head(src)}\ndirty={'true' if dirty else 'false'}\n"
+
+
 def test_umbrella_flag_prints_record_and_exits_zero(capsys) -> None:
     assert umbrella_main(["--source-commit"]) == 0
     out = capsys.readouterr().out

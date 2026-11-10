@@ -3351,7 +3351,8 @@ dirty=false
 - The record is written into the release venv only, never into the source
   checkout. `--version` output is unchanged. The pipx, uv and pip tiers record
   nothing and report unknown.
-- Python readers can call `clagentic_loadout._source_commit.get_source_commit()`.
+- Programmatic readers should parse the `--source-commit` output (two `key=value`
+  lines); there is no other supported read path.
 
 ### `loadout-doctor` — deployment-conformance check suite
 
