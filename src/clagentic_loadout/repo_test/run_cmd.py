@@ -146,7 +146,24 @@ def check_expectation(recorded: Mapping[str, Any], expect_repo: str | None, expe
             )
 
 
-def execute_run(
+@dataclass(frozen=True)
+class PreparedRun:
+    """A validated run whose directory and provenance are recorded and whose
+    command has not started."""
+
+    run_id: str
+    run_dir: Path
+    root: Path
+    mode: str
+    tier: str | None
+    template: tuple[str, ...]
+    files: tuple[str, ...]
+    base_sha: str | None
+    timeout_seconds: float | None
+    recorded: Mapping[str, Any]
+
+
+def prepare_run(
     *,
     mode: str,
     paths: Sequence[str],
@@ -157,15 +174,9 @@ def execute_run(
     tier: str | None = None,
     expect_repo: str | None = None,
     expect_head: str | None = None,
-    on_start: Callable[[str, Mapping[str, Any]], None] | None = None,
-) -> RunOutcome:
-    """Run the declared tests for *mode* and record the run. Mode ``tier`` runs
-    the tier named by *tier*. *expect_repo* and *expect_head* refuse the run when the
-    tree is not that repository or commit. *on_start* is called with the run id and
-    its provenance once the run is recorded, just before the command starts. Raises
-    RunRefused before the run starts (usage, profile, expectation mismatch, store setup)
-    and also after it has started when its result cannot be recorded; the caller still
-    reports the run as finished in that case."""
+) -> PreparedRun:
+    """Every check that happens before a run starts, then the run's directory and
+    provenance. Raises RunRefused (usage, profile, expectation mismatch, store setup)."""
     root = Path(repo_root).resolve()
     if not root.is_dir():
         raise RunRefused(f"repo root {str(repo_root)!r} (resolved {str(root)!r}) is not a directory", exits.EXIT_USAGE)
@@ -224,7 +235,31 @@ def execute_run(
         write_json_atomic(run_dir / store.PROVENANCE_FILE, recorded)
     except OSError as exc:
         raise RunRefused(f"cannot record run {run_id} under {str(reports)!r}: {exc}", exits.EXIT_STORE_WRITE) from exc
+    return PreparedRun(
+        run_id=run_id,
+        run_dir=run_dir,
+        root=root,
+        mode=mode,
+        tier=tier,
+        template=tuple(template),
+        files=tuple(files),
+        base_sha=base_sha,
+        timeout_seconds=timeout_seconds,
+        recorded=recorded,
+    )
 
+
+def finish_run(
+    prepared: PreparedRun,
+    on_start: Callable[[str, Mapping[str, Any]], None] | None = None,
+) -> RunOutcome:
+    """Run the command of a prepared run and record its result. *on_start* is called
+    with the run id and its provenance just before the command starts. Raises
+    RunRefused when the scratch directory or the result cannot be recorded; the
+    caller still reports the run as finished in that case."""
+    run_id, run_dir, root = prepared.run_id, prepared.run_dir, prepared.root
+    mode, tier, template, files = prepared.mode, prepared.tier, list(prepared.template), list(prepared.files)
+    recorded, timeout_seconds = prepared.recorded, prepared.timeout_seconds
     junit_path = run_dir / store.JUNIT_FILE
     log_path = run_dir / store.LOG_FILE
     try:
@@ -232,7 +267,7 @@ def execute_run(
     except OSError as exc:
         raise RunRefused(f"cannot make a report directory for run {run_id}: {exc}", exits.EXIT_STORE_WRITE) from exc
     argv = [
-        part.replace(JUNIT_PLACEHOLDER, str(scratch.junit_path)).replace(BASE_PLACEHOLDER, base_sha or "")
+        part.replace(JUNIT_PLACEHOLDER, str(scratch.junit_path)).replace(BASE_PLACEHOLDER, prepared.base_sha or "")
         for part in template
     ] + files
     started = datetime.now(timezone.utc)
@@ -299,4 +334,46 @@ def execute_run(
     return RunOutcome(exit_code=code, summary=printed, failure_log_tail=tail)
 
 
-__all__ = ["RunOutcome", "RunRefused", "execute_run", "load_declared_tests"]
+def execute_run(
+    *,
+    mode: str,
+    paths: Sequence[str],
+    repo_root: str | Path,
+    base: str | None,
+    timeout_seconds: float | None,
+    env: Mapping[str, str] | None = None,
+    tier: str | None = None,
+    expect_repo: str | None = None,
+    expect_head: str | None = None,
+    on_start: Callable[[str, Mapping[str, Any]], None] | None = None,
+) -> RunOutcome:
+    """Run the declared tests for *mode* and record the run. Mode ``tier`` runs
+    the tier named by *tier*. *expect_repo* and *expect_head* refuse the run when the
+    tree is not that repository or commit. *on_start* is called with the run id and
+    its provenance once the run is recorded, just before the command starts. Raises
+    RunRefused before the run starts (usage, profile, expectation mismatch, store setup)
+    and also after it has started when its result cannot be recorded; the caller still
+    reports the run as finished in that case."""
+    prepared = prepare_run(
+        mode=mode,
+        paths=paths,
+        repo_root=repo_root,
+        base=base,
+        timeout_seconds=timeout_seconds,
+        env=env,
+        tier=tier,
+        expect_repo=expect_repo,
+        expect_head=expect_head,
+    )
+    return finish_run(prepared, on_start)
+
+
+__all__ = [
+    "PreparedRun",
+    "RunOutcome",
+    "RunRefused",
+    "execute_run",
+    "finish_run",
+    "load_declared_tests",
+    "prepare_run",
+]

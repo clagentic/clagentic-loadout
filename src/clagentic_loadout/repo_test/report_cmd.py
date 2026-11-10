@@ -1,8 +1,10 @@
 """repo_test.report_cmd — ``clagentic-loadout test report``.
 
-Read-only: picks one recorded run by id, by ``latest``, or by exact commit, and
-answers with its summary, its failing test ids, or a comparison with another
-run. It never writes, creates or deletes anything under the reports root.
+Picks one recorded run by id, by ``latest``, or by exact commit, and answers with
+its summary, its failing test ids, or a comparison with another run. It creates
+and deletes nothing under the reports root; the one record it can write is the
+``result.json`` of a detached run whose process is gone (state ``interrupted``,
+see ``repo_test.store``).
 
 Selecting a run:
 
@@ -138,6 +140,9 @@ def _load_runs(
         runs = store.list_runs(root)
     except StoreError as exc:
         raise ReportRefused(str(exc), exits.EXIT_NO_RUNS) from exc
+    # An interrupted run ended without a result, so it is never the answer to
+    # `latest` or `--sha`; it is read by its run id.
+    runs = [run for run in runs if run.state != store.STATE_INTERRUPTED]
     if repo is not None:
         runs = [run for run in runs if repo_matches(run.repo, repo)]
     elif runs:
@@ -285,7 +290,17 @@ def failing_ids_of(run: RunRecord) -> list[str]:
     return sorted(_failing_ids(run))
 
 
+def is_terminal(run: RunRecord) -> bool:
+    """Whether the run has ended, so reading it again will not change the answer."""
+    return run.state in store.TERMINAL_STATES
+
+
 def _require_complete(run: RunRecord, what: str) -> None:
+    if run.state == store.STATE_RUNNING:
+        raise ReportRefused(
+            f"run {run.run_id} is still running: it has no test results yet, so {what} is not available",
+            exits.EXIT_STILL_RUNNING,
+        )
     if run.state != store.STATE_COMPLETE:
         raise ReportRefused(
             f"run {run.run_id} is {run.state or 'unreadable'}: it has no test results, so {what} "
@@ -408,6 +423,7 @@ __all__ = [
     "ReportRefused",
     "diff_of",
     "failing_ids_of",
+    "is_terminal",
     "load_base_run",
     "select_run",
     "summary_of",

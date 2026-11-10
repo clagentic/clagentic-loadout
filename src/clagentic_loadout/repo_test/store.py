@@ -8,11 +8,15 @@ One run is one directory, named by its run id, under the reports root::
     <reports root>/<run id>/output.log        the runner's combined output
 
 ``result.json`` is written last, so a directory without one is a run that has not
-finished and is invisible to every reader. A run id is ``YYYYMMDDTHHMMSSZ-<pid>``;
+finished and is invisible to ``latest`` and ``--sha``. A detached run also records a
+``process`` object in ``provenance.json`` (see ``repo_test.detach``); an explicit
+run id then opens it as ``running`` while that process is alive, or as ``interrupted``
+when it is gone and left no result. The interrupted read is persisted once, as a
+``result.json`` written atomically, so every later read agrees. A run id is ``YYYYMMDDTHHMMSSZ-<pid>``;
 a reader never joins an id it was given onto a path before the id has matched that
 grammar, and it refuses a run directory that is a symlink or does not resolve
-directly under the reports root. The read functions here open nothing for write
-and create nothing.
+directly under the reports root. Apart from that one interrupted record, the read
+functions here open nothing for write and create nothing.
 
 The reports root is, in order: the ``CLAGENTIC_LOADOUT_TEST_REPORTS_DIR``
 environment variable, the user-level ``test.reports_dir`` setting, then
@@ -30,6 +34,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from clagentic_loadout.repo_test import liveness
+from clagentic_loadout.review.atomic_io import write_json_atomic
 from clagentic_loadout.transport.provider_config import (
     DEFAULT_USER_CONFIG_ROOT,
     load_user_config_section,
@@ -48,6 +54,13 @@ LOG_FILE = "output.log"
 
 STATE_COMPLETE = "complete"
 STATE_UNRUNNABLE = "unrunnable"
+STATE_RUNNING = "running"
+STATE_INTERRUPTED = "interrupted"
+# States after which a run never changes.
+TERMINAL_STATES = frozenset({STATE_COMPLETE, STATE_UNRUNNABLE, STATE_INTERRUPTED})
+
+PROCESS_KEY = "process"
+_RESULT_SCHEMA = 1
 
 _MAX_RECORD_BYTES = 8 * 1024 * 1024
 
@@ -179,9 +192,53 @@ def _read_json_object(path: Path, run_id: str) -> dict[str, Any]:
     return data
 
 
-def load_run(root: Path, run_id: str) -> RunRecord:
-    """The finished run named *run_id*. *run_id* is untrusted: it must match the
-    run id grammar before it touches a path."""
+def _unfinished_result(run_id: str, process: Mapping[str, Any], state: str, problem: str | None) -> dict[str, Any]:
+    """The result a run without a ``result.json`` reads as. ``counts`` is null: no
+    test result exists, so none is invented."""
+    return {
+        "schema": _RESULT_SCHEMA,
+        "run_id": run_id,
+        "mode": process.get("mode"),
+        "tier": process.get("tier"),
+        "state": state,
+        "problem": problem,
+        "command": process.get("command"),
+        "command_exit_code": None,
+        "report_verification": None,
+        "counts": None,
+        "failing_ids": [],
+        "started_at": process.get("started_at"),
+        "finished_at": datetime.now(timezone.utc).isoformat() if state != STATE_RUNNING else None,
+    }
+
+
+def _open_unfinished(
+    candidate: Path, run_id: str, provenance: dict[str, Any], process: Mapping[str, Any]
+) -> RunRecord:
+    """A detached run that has no ``result.json``: running while its process is
+    alive, otherwise interrupted, and that is persisted."""
+    if liveness.is_alive(process):
+        return RunRecord(run_id, _unfinished_result(run_id, process, STATE_RUNNING, None), provenance)
+    problem = f"the run process (pid {process.get('pid')}) is gone and left no result"
+    result = _unfinished_result(run_id, process, STATE_INTERRUPTED, problem)
+    result_path = candidate / RESULT_FILE
+    try:
+        # A record only the owner may add to; another user's directory is read, not written.
+        if candidate.stat().st_uid == os.getuid() and not result_path.exists():
+            write_json_atomic(result_path, result)
+    except OSError:
+        pass
+    if result_path.is_file():
+        # Another reader persisted the same fact first; agree with what is on disk.
+        return RunRecord(run_id, _read_json_object(result_path, run_id), provenance)
+    return RunRecord(run_id, result, provenance)
+
+
+def load_run(root: Path, run_id: str, *, include_unfinished: bool = True) -> RunRecord:
+    """The run named *run_id*. *run_id* is untrusted: it must match the run id
+    grammar before it touches a path. A detached run without a result opens as
+    running or interrupted unless *include_unfinished* is false; any other run
+    without a result has not finished and is refused."""
     if RUN_ID_RE.match(run_id) is None:
         raise StoreError(
             f"{run_id!r} is not a run id (expected YYYYMMDDTHHMMSSZ-<pid>, or 'latest')"
@@ -197,12 +254,17 @@ def load_run(root: Path, run_id: str) -> RunRecord:
                 f"run {run_id}: {str(candidate)!r} does not resolve under {str(root)!r}"
             )
         result_path = candidate / RESULT_FILE
+        provenance_path = candidate / PROVENANCE_FILE
         if not result_path.is_file():
+            if include_unfinished and provenance_path.is_file():
+                provenance = _read_json_object(provenance_path, run_id)
+                process = provenance.get(PROCESS_KEY)
+                if isinstance(process, dict):
+                    return _open_unfinished(candidate, run_id, provenance, process)
             raise StoreError(f"run {run_id} under {str(root)!r} has not finished (no {RESULT_FILE})")
     except OSError as exc:
         raise StoreError(f"run {run_id}: cannot inspect {str(candidate)!r}: {exc}") from exc
     result = _read_json_object(result_path, run_id)
-    provenance_path = candidate / PROVENANCE_FILE
     provenance = _read_json_object(provenance_path, run_id) if provenance_path.is_file() else {}
     return RunRecord(run_id=run_id, result=result, provenance=provenance)
 
@@ -223,7 +285,7 @@ def list_runs(root: Path) -> list[RunRecord]:
     runs: list[RunRecord] = []
     for name in names:
         try:
-            runs.append(load_run(root, name))
+            runs.append(load_run(root, name, include_unfinished=False))
         except StoreError:
             continue
     return runs
@@ -238,8 +300,12 @@ __all__ = [
     "REPORTS_DIR_ENV_VAR",
     "RESULT_FILE",
     "RUN_ID_RE",
+    "PROCESS_KEY",
     "STATE_COMPLETE",
+    "STATE_INTERRUPTED",
+    "STATE_RUNNING",
     "STATE_UNRUNNABLE",
+    "TERMINAL_STATES",
     "FUTURE_TOLERANCE",
     "RunRecord",
     "StoreError",
