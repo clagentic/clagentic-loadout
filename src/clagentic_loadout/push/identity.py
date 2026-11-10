@@ -167,6 +167,12 @@ def check_clean_work_tree(git_cwd: Path | None = None) -> None:
     )
 
 
+def remote_tracking_ref(remote_label: str, branch: str) -> str:
+    """The remote-tracking ref name of *branch* on the remote *remote_label*.
+    A ref name handed to git, never text a message formats."""
+    return "/".join(("refs", "remotes", remote_label, branch))
+
+
 def _merge_base_with_head(ref: str, git_cwd: Path | None) -> str | None:
     """`git merge-base <ref> HEAD`, or None if the ref doesn't resolve
     against HEAD (unrelated histories, or *ref* itself absent)."""
@@ -956,6 +962,7 @@ __all__ = [
     "get_head_author_email",
     "pin_commits_to_bot_identity",
     "reauthor_commits",
+    "remote_tracking_ref",
     "resolve_exclusion_ref",
     "verify_head_author",
 ]

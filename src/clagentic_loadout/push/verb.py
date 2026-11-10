@@ -2719,7 +2719,7 @@ def _run_create_pr(
             )
         except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
             _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
-        remote_branch_ref = f"refs/remotes/{remote_name}/{branch}"
+        remote_branch_ref = identity.remote_tracking_ref(remote_name, branch)
 
     try:
         history_rewritten = identity.pin_commits_to_bot_identity(
