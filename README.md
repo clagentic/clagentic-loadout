@@ -141,6 +141,10 @@ running from it and older releases are pruned. A failed build or verification le
 live venv untouched and exits 3. Re-running `install.sh` on an already-installed commit
 reuses its verified release and refreshes the symlinks rather than duplicating or erroring.
 
+Each venv-tier release also records the full source commit and whether the tree was dirty;
+`clagentic-loadout --source-commit` prints `commit=<sha|unknown>` and
+`dirty=<true|false|unknown>` (see `docs/verbs.md`).
+
 **First install after upgrading:** an install made before this layout has a real
 `<data-dir>/venv` directory, and a symlink cannot be renamed over a non-empty directory.
 That one install moves the old directory aside and links the new release in with two

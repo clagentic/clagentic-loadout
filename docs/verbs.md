@@ -3328,6 +3328,31 @@ clagentic-loadout update [--source <checkout>] [--dry-run]
 The installer's own exit codes are never passed through; they are remapped
 onto 3 and 4.
 
+#### Reading the installed source commit: `clagentic-loadout --source-commit`
+
+Every venv-tier release records the full 40-hex commit of the source checkout it
+was built from, and whether that checkout was dirty, in a file at the root of the
+release venv (`<data dir>/venvs/<release id>/clagentic-loadout-source-commit`).
+`clagentic-loadout --source-commit` prints it and always exits 0:
+
+```
+$ clagentic-loadout --source-commit
+commit=<40-hex sha>
+dirty=false
+```
+
+- `dirty=true` means the checkout had uncommitted or untracked changes: the sha is
+  the base commit, not exactly what was built.
+- `commit=unknown` / `dirty=unknown` means no commit is recorded: a source that
+  is not the top level of a git work tree (plain directory, git absent), an
+  editable install (it runs the live checkout, so a build-time commit would go
+  stale), an uninstalled checkout, or a release built before this record
+  existed. Nothing fails or blocks on it.
+- The record is written into the release venv only, never into the source
+  checkout. `--version` output is unchanged. The pipx, uv and pip tiers record
+  nothing and report unknown.
+- Python readers can call `clagentic_loadout._source_commit.get_source_commit()`.
+
 ### `loadout-doctor` — deployment-conformance check suite
 
 `clagentic_loadout.doctor.cli`. **Read-only**: never mutates config, never
