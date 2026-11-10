@@ -213,10 +213,15 @@ def _unfinished_result(run_id: str, process: Mapping[str, Any], state: str, prob
 
 
 def _open_unfinished(
-    candidate: Path, run_id: str, provenance: dict[str, Any], process: Mapping[str, Any]
+    candidate: Path,
+    run_id: str,
+    provenance: dict[str, Any],
+    process: Mapping[str, Any],
+    persist: bool = True,
 ) -> RunRecord:
     """A detached run that has no ``result.json``: running while its process is
-    alive, otherwise interrupted, and that is persisted."""
+    alive, otherwise interrupted, and that is persisted unless *persist* is false
+    (a listing reads the same state without writing)."""
     if liveness.is_alive(process):
         return RunRecord(run_id, _unfinished_result(run_id, process, STATE_RUNNING, None), provenance)
     problem = f"the run process (pid {process.get('pid')}) is gone and left no result"
@@ -224,7 +229,7 @@ def _open_unfinished(
     result_path = candidate / RESULT_FILE
     try:
         # A record only the owner may add to; another user's directory is read, not written.
-        if candidate.stat().st_uid == os.getuid() and not result_path.exists():
+        if persist and candidate.stat().st_uid == os.getuid() and not result_path.exists():
             write_json_atomic(result_path, result)
     except OSError:
         pass
@@ -234,11 +239,14 @@ def _open_unfinished(
     return RunRecord(run_id, result, provenance)
 
 
-def load_run(root: Path, run_id: str, *, include_unfinished: bool = True) -> RunRecord:
+def load_run(
+    root: Path, run_id: str, *, include_unfinished: bool = True, persist_interrupted: bool = True
+) -> RunRecord:
     """The run named *run_id*. *run_id* is untrusted: it must match the run id
     grammar before it touches a path. A detached run without a result opens as
     running or interrupted unless *include_unfinished* is false; any other run
-    without a result has not finished and is refused."""
+    without a result has not finished and is refused. An interrupted read is
+    written down once unless *persist_interrupted* is false."""
     if RUN_ID_RE.match(run_id) is None:
         raise StoreError(
             f"{run_id!r} is not a run id (expected YYYYMMDDTHHMMSSZ-<pid>, or 'latest')"
@@ -260,7 +268,7 @@ def load_run(root: Path, run_id: str, *, include_unfinished: bool = True) -> Run
                 provenance = _read_json_object(provenance_path, run_id)
                 process = provenance.get(PROCESS_KEY)
                 if isinstance(process, dict):
-                    return _open_unfinished(candidate, run_id, provenance, process)
+                    return _open_unfinished(candidate, run_id, provenance, process, persist_interrupted)
             raise StoreError(f"run {run_id} under {str(root)!r} has not finished (no {RESULT_FILE})")
     except OSError as exc:
         raise StoreError(f"run {run_id}: cannot inspect {str(candidate)!r}: {exc}") from exc
@@ -269,10 +277,12 @@ def load_run(root: Path, run_id: str, *, include_unfinished: bool = True) -> Run
     return RunRecord(run_id=run_id, result=result, provenance=provenance)
 
 
-def list_runs(root: Path) -> list[RunRecord]:
+def list_runs(root: Path, *, include_unfinished: bool = False) -> list[RunRecord]:
     """Every finished, readable run under *root*, oldest first. Entries that are
-    not run directories, are unfinished, or cannot be read are skipped. Raises
-    StoreError when *root* itself is missing or unreadable."""
+    not run directories, are unfinished, or cannot be read are skipped. With
+    *include_unfinished*, a detached run still running or interrupted is listed
+    too, and nothing is written for it. Raises StoreError when *root* itself is
+    missing or unreadable."""
     try:
         if not root.is_dir():
             raise StoreError(f"reports root {str(root)!r} does not exist (no test run has been recorded)")
@@ -285,7 +295,9 @@ def list_runs(root: Path) -> list[RunRecord]:
     runs: list[RunRecord] = []
     for name in names:
         try:
-            runs.append(load_run(root, name, include_unfinished=False))
+            runs.append(
+                load_run(root, name, include_unfinished=include_unfinished, persist_interrupted=False)
+            )
         except StoreError:
             continue
     return runs

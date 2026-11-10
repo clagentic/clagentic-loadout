@@ -89,7 +89,9 @@ The reports root is created mode `0700` by `run`. A run directory holds `provena
 `result.json` (written last: a directory without it is an unfinished run that `latest` and
 `--sha` never select; a detached run is still readable by its run id, see below),
 `junit.xml` and `output.log`. When a run is unrunnable, `run` prints the end of the command's
-output to stderr.
+output to stderr, and the same tail (the last 40 lines, redacted, at most 8192 characters) is
+recorded in `result.json` as the optional `failure_log_tail`, so a detached run can be diagnosed
+with `test report --summary`.
 
 Every run records: the repository (top-level path, name, remote URL with any credentials
 removed, or null if it cannot be parsed), the HEAD commit, whether the tree had uncommitted
@@ -161,7 +163,10 @@ below).
 - **`--summary`** (default): JSON with the run id, `state` (`complete`, `unrunnable`, or for a detached run `running` or `interrupted`), mode,
   `tier` (the tier name for a tier run, else null), counts, `id_scheme` (the failing-id scheme the run
   was recorded with; null for a run recorded before it existed, and `id_basis` is added when the record
-  has one), the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
+  has one), the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`. An `unrunnable`
+  run that left output also carries `failure_log_tail`. When a command ended by a signal its
+  `command_exit_code` is negative and `problem` names the signal, for example `the command was
+  killed by signal 13 (SIGPIPE)`; a signal number with no known name is given alone.
 - **`--failing-ids`**: the failing test ids, sorted, one per line. One line per failed test
   case, so an id that failed twice appears twice and the line count equals `counts.failed`.
 - **`--failures`**: a JSON list with one record per failed test case, in report order (two
@@ -205,6 +210,22 @@ below).
 The code `79` is also the installer helper's code for a settings file it could not read or write
 (see below). That helper is a separate process the installer calls, never a `test report`
 invocation, so a caller of this verb only ever sees the meaning above.
+
+## `test list`
+
+`clagentic-loadout test list [--repo R] [--limit N]` is read-only (it writes nothing, not even
+the record of an interrupted run) and prints one JSON object per line, newest run id first, at
+most `N` runs (default 20). Each object has `run_id`, `state`, `mode`, `tier`, `head_sha`,
+`dirty`, `started_at`, `finished_at`, `command_exit_code`, `counts` (null until a run is
+complete) and `date_mark`.
+
+Unlike `latest`, it lists every state: `complete`, `unrunnable`, and for a detached run
+`running` and `interrupted`. A run dated later than now, or whose date cannot be read, is not
+hidden: its `date_mark` is `future-dated` or `undatable` (else null), so a run that `latest`
+skips can still be found by id. Scoping follows `report`: `--repo` names a repository (path,
+name or remote URL); without it the list is scoped to the git repository of the current
+directory, and refused (exit `78`) when that is none and several repositories are on record.
+Exit `75` when there is no reports root or no matching run, `1` for a bad `--limit`.
 
 ## Detached runs
 

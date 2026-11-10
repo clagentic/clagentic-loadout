@@ -108,7 +108,10 @@ def _repo_key(run: RunRecord) -> str:
 
 
 def _scoped_runs(
-    runs: list[RunRecord], cwd: Path | None, note: Callable[[str], None] | None
+    runs: list[RunRecord],
+    cwd: Path | None,
+    note: Callable[[str], None] | None,
+    subject: str = "`latest`",
 ) -> tuple[list[RunRecord], str | None]:
     """Narrow *runs* when no ``--repo`` was given: to the repository holding *cwd*
     when it is inside a git work tree; otherwise refuse if the runs span more than
@@ -117,7 +120,7 @@ def _scoped_runs(
     if top is not None:
         scoped = [run for run in runs if run.repo.get("path") == top]
         if note is not None:
-            note(f"`latest` is scoped to the repository at {top!r}; pass --repo to name another")
+            note(f"{subject} is scoped to the repository at {top!r}; pass --repo to name another")
         if not scoped:
             raise ReportRefused(
                 f"no finished test run for the repository at {top!r} under the reports root; "
@@ -253,7 +256,64 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
     note = _failing_id_note(run)
     if note is not None:
         summary["failing_id_note"] = note
+    tail = result.get("failure_log_tail")
+    if run.state == store.STATE_UNRUNNABLE and isinstance(tail, str) and tail:
+        summary["failure_log_tail"] = tail
     return summary
+
+
+def date_mark(run: RunRecord, now: datetime | None = None) -> str | None:
+    """Why a run's date makes it unfit for `latest`, or None when it is fit."""
+    if store.is_undatable(run):
+        return "undatable"
+    if store.is_future_dated(run, now):
+        return "future-dated"
+    return None
+
+
+def list_of(
+    root: Path,
+    *,
+    repo: str | None,
+    limit: int,
+    cwd: Path | None = None,
+    note: Callable[[str], None] | None = None,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """One row per recorded run of the scoped repository, newest first by run id,
+    at most *limit*. Every state is listed, including those `latest` skips
+    (running, interrupted, unrunnable, future-dated, undatable); a run whose date
+    is unfit has ``date_mark`` set instead of being left out. Writes nothing."""
+    try:
+        runs = store.list_runs(root, include_unfinished=True)
+    except StoreError as exc:
+        raise ReportRefused(str(exc), exits.EXIT_NO_RUNS) from exc
+    if repo is not None:
+        runs = [run for run in runs if repo_matches(run.repo, repo)]
+    elif runs:
+        runs, _ = _scoped_runs(runs, cwd, note, subject="the run list")
+    if not runs:
+        scope = f" for repository {repo!r}" if repo is not None else ""
+        raise ReportRefused(f"no test run{scope} under reports root {str(root)!r}", exits.EXIT_NO_RUNS)
+    rows = []
+    for run in reversed(runs[-limit:]):
+        result = run.result
+        rows.append(
+            {
+                "run_id": run.run_id,
+                "state": run.state,
+                "mode": result.get("mode"),
+                "tier": _tier_name(run),
+                "head_sha": run.head_sha,
+                "dirty": run.dirty,
+                "started_at": result.get("started_at"),
+                "finished_at": result.get("finished_at"),
+                "command_exit_code": result.get("command_exit_code"),
+                "counts": result.get("counts"),
+                "date_mark": date_mark(run, now),
+            }
+        )
+    return rows
 
 
 def _tier_name(run: RunRecord) -> str | None:
@@ -448,10 +508,12 @@ __all__ = [
     "REPO_SAME",
     "REPO_UNVERIFIED",
     "ReportRefused",
+    "date_mark",
     "diff_of",
     "failing_ids_of",
     "failures_of",
     "is_terminal",
+    "list_of",
     "load_base_run",
     "select_run",
     "summary_of",

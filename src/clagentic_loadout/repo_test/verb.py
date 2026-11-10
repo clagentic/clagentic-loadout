@@ -6,10 +6,12 @@ and read the results by run id.
   clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout S] [--detach]
   clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
                                 [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
+  clagentic-loadout test list [--repo R] [--limit N]
 
 The exit codes are in ``repo_test.exits``; a test command's own exit code is
-recorded in the run and never returned. Both ``run`` and ``report`` print JSON
-(``--failing-ids`` prints one id per line); diagnostics go to stderr.
+recorded in the run and never returned. ``run`` and ``report`` print JSON
+(``--failing-ids`` prints one id per line, ``list`` one JSON object per line);
+diagnostics go to stderr.
 
 Each subcommand has its own parser so options and positionals may be given in any
 order (``run files --repo-root DIR a.py``), which a shared parser with
@@ -40,6 +42,8 @@ _PROG = "clagentic-loadout test"
 # How often `report --wait` re-reads the run.
 _WAIT_POLL_SECONDS = 0.5
 
+_DEFAULT_LIST_LIMIT = 20
+
 _EXIT_CODES_TEXT = (
     "Exit codes: 0 ok, 1 usage, 70 tests failed, 71 no valid profile, 72 profile does not "
     "declare the command (or base), 73 command could not run or left no JUnit report, "
@@ -57,11 +61,13 @@ Usage: {_PROG} run full|impacted [--repo-root DIR] [--base REV] [--timeout SECON
        {_PROG} run tier NAME [--repo-root DIR] [--timeout SECONDS] [--detach]
        {_PROG} report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
                                     [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
+       {_PROG} list [--repo R] [--limit N]
        {_PROG} --help | --version
 
 Commands:
   run     Run the profile's declared tests and record the run.
   report  Read a recorded run by id (read-only).
+  list    List a repository's recorded runs, newest first (read-only).
 
 Run `{_PROG} <command> --help` for a command's own arguments.
 {_EXIT_CODES_TEXT}"""
@@ -178,6 +184,39 @@ def _report_parser() -> argparse.ArgumentParser:
         "count, as JSON. Refuses runs from different repositories.",
     )
     return report
+
+
+def _list_parser() -> argparse.ArgumentParser:
+    listing = _new_parser(
+        "list",
+        "List the recorded runs of a repository, newest first, one JSON object per line: run id, "
+        "state, mode, tier, head SHA, dirty, start and finish, command exit code, counts and "
+        "date_mark. Every state is listed, including running, interrupted and unrunnable runs; a "
+        "run dated later than now, or whose date cannot be read, is marked in date_mark, not "
+        "hidden. Without --repo the list is scoped to the git repository of the current "
+        "directory, or refused when that is none and several repositories are on record. "
+        "Read-only.",
+    )
+    listing.add_argument(
+        "--repo", default=None, help="Narrow the list to a repository: path, name or remote URL."
+    )
+    listing.add_argument(
+        "--limit",
+        type=_positive_int,
+        default=_DEFAULT_LIST_LIMIT,
+        help=f"At most this many runs, newest first (default: {_DEFAULT_LIST_LIMIT}).",
+    )
+    return listing
+
+
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of one or more")
+    return value
 
 
 def _seconds(text: str) -> float:
@@ -327,6 +366,26 @@ def _report(args: argparse.Namespace) -> int:
     return exits.EXIT_OK
 
 
+def _list(args: argparse.Namespace) -> int:
+    def note(text: str) -> None:
+        print(f"{_PROG}: {text}", file=sys.stderr)
+
+    cwd: Path | None = None
+    if args.repo is None:
+        try:
+            cwd = Path.cwd()
+        except OSError:
+            cwd = None
+    try:
+        rows = report_cmd.list_of(store.reports_root(), repo=args.repo, limit=args.limit, cwd=cwd, note=note)
+    except ReportRefused as exc:
+        print(f"{_PROG}: {exc}", file=sys.stderr)
+        return exc.code
+    for row in rows:
+        print(json.dumps(row, sort_keys=True))
+    return exits.EXIT_OK
+
+
 def _parse(parser: argparse.ArgumentParser, argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
     """Parse *argv* with options and positionals in any order. Tokens after a
     literal ``--`` are returned separately, untouched, as positionals."""
@@ -349,7 +408,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{_PROG} {get_version()}")
         return exits.EXIT_OK
     command, rest = argv[0], argv[1:]
-    builders = {"run": _run_parser, "report": _report_parser}
+    builders = {"run": _run_parser, "report": _report_parser, "list": _list_parser}
     if command not in builders:
         print(
             f"{_PROG}: unknown command {command!r}. Known commands: {', '.join(builders)}. "
@@ -372,6 +431,8 @@ def main(argv: list[str] | None = None) -> int:
         return exits.EXIT_OK if exc.code in (0, None) else exits.EXIT_USAGE
     if command == "run":
         return _run(args)
+    if command == "list":
+        return _list(args)
     return _report(args)
 
 
