@@ -28,7 +28,7 @@ from clagentic_loadout.bounded_capture import (
     join_capture,
     start_tail_capture,
 )
-from clagentic_loadout.push.push_redaction import redact_push_secrets
+from clagentic_loadout.push.push_redaction import redact_then_bound
 from clagentic_loadout.push.verify_config import VerifyEntry
 from clagentic_loadout.verdict_record.record import utc_timestamp
 
@@ -129,10 +129,11 @@ def describe_command(argv: tuple[str, ...]) -> str:
 
 
 def _tail(buffer: TailBuffer) -> str:
-    text = redact_push_secrets(buffer.value().decode("utf-8", errors="replace")).strip()
-    if buffer.dropped or len(text) > OUTPUT_TAIL_CHARS:
-        return "...[truncated]\n" + text[-OUTPUT_TAIL_CHARS:]
-    return text
+    return redact_then_bound(
+        buffer.value().decode("utf-8", errors="replace"),
+        max_chars=OUTPUT_TAIL_CHARS,
+        start_cut=buffer.dropped,
+    )
 
 
 def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:

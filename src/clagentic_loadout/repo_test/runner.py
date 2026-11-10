@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from clagentic_loadout.push.push_redaction import redact_push_secrets
+from clagentic_loadout.push.push_redaction import TRUNCATION_MARKER, redact_then_bound
 from clagentic_loadout.repo_test.process_uids import UidWatcher
 
 
@@ -106,17 +106,30 @@ def run_command(
 
 TAIL_MAX_CHARS = 8 * 1024
 
+#: How much of the end of a log is read to build the tail.
+_LOG_WINDOW_BYTES = 64 * 1024
+
 
 def log_tail(log_path: Path, lines: int) -> str:
-    """The last *lines* lines of the run's output, for a failure message. The text
-    is redacted whole before it is cut (so a secret straddling the cut leaves no
-    recognisable prefix), then bounded to the last TAIL_MAX_CHARS characters."""
+    """The last *lines* lines of the run's output, for a failure message, never
+    longer than TAIL_MAX_CHARS characters. Only the last _LOG_WINDOW_BYTES of the
+    log are read; when that cut the log, its partial first line is dropped, and
+    the rest is redacted whole before it is cut to size (see
+    `redact_then_bound`), so a secret straddling either cut leaves no fragment."""
     try:
-        text = log_path.read_bytes()[-64 * 1024 :].decode("utf-8", errors="replace")
+        with open(log_path, "rb") as log:
+            size = log.seek(0, os.SEEK_END)
+            start = max(0, size - _LOG_WINDOW_BYTES)
+            log.seek(start)
+            text = log.read().decode("utf-8", errors="replace")
     except OSError:
         return ""
-    tail = "\n".join(redact_push_secrets(text).splitlines()[-lines:])
-    return tail[-TAIL_MAX_CHARS:]
+    return redact_then_bound(
+        text,
+        max_chars=TAIL_MAX_CHARS - len(TRUNCATION_MARKER),
+        max_lines=lines,
+        start_cut=start > 0,
+    )
 
 
 def describe_exit(code: int) -> str:

@@ -9,7 +9,15 @@ import time
 
 import pytest
 
-from clagentic_loadout.push.push_redaction import redact_push_secrets
+from clagentic_loadout.bounded_capture import TailBuffer
+from clagentic_loadout.push.push_redaction import (
+    TRUNCATION_MARKER,
+    redact_push_secrets,
+    redact_remote_locations,
+    redact_then_bound,
+)
+from clagentic_loadout.push.verify_run import _tail
+from clagentic_loadout.repo_test.runner import TAIL_MAX_CHARS, log_tail
 
 _MB5 = 5 * 1024 * 1024
 # Generous: the measured times are far below this; the bound only has to
@@ -119,3 +127,111 @@ def test_ordinary_traceback_is_linear():
     text = block * (_MB5 // len(block))
     elapsed = _timed(text)
     assert elapsed < _BOUND_SECONDS, f"measured {elapsed:.3f}s"
+
+
+# --- redact, then bound ----------------------------------------------------
+
+#: (text, bound kwargs, fragments that must not survive). Every row puts a cut
+#: inside a secret.
+_BOUND_ROWS = [
+    pytest.param(
+        "see https://user:SECRETPWVALUE@host.example.test/x ok",
+        {"max_chars": 30},
+        ["SECRETPW", "RETPWVALUE", "PWVALUE", "VALUE"],
+        id="userinfo-url-split-by-the-char-cut",
+    ),
+    pytest.param(
+        "x" * 40 + " token=SECRETTOKEN12345 end",
+        {"max_chars": 30},
+        ["SECRETTOKEN", "TOKEN12345", "12345"],
+        id="token-value-split-by-the-char-cut",
+    ),
+    pytest.param(
+        "a" * 5 + "\n" + "see https://user:SECRETPWVALUE@host.example.test/x\n" * 3,
+        {"max_chars": 40, "max_lines": 2},
+        ["SECRETPW", "PWVALUE"],
+        id="userinfo-url-split-by-the-line-and-char-cut",
+    ),
+    pytest.param(
+        "TPWVALUE@host.example.test/x\nlast line\n",
+        {"max_chars": 100, "start_cut": True},
+        ["PWVALUE"],
+        id="userinfo-url-split-by-the-start-cut",
+    ),
+    pytest.param(
+        "oken=SECRETTOKEN12345 trailing\nlast line\n",
+        {"max_chars": 100, "start_cut": True},
+        ["SECRETTOKEN", "TOKEN12345"],
+        id="token-value-split-by-the-start-cut",
+    ),
+]
+
+
+@pytest.mark.parametrize(("text", "bounds", "fragments"), _BOUND_ROWS)
+def test_redact_then_bound_leaves_no_secret_fragment(text, bounds, fragments):
+    out = redact_then_bound(text, **bounds)
+    for fragment in fragments:
+        assert fragment not in out
+
+
+def test_redact_then_bound_no_secret_is_unchanged_apart_from_the_marker():
+    assert redact_then_bound("alpha\nbeta\ngamma\n", max_chars=100, max_lines=10) == "alpha\nbeta\ngamma"
+    assert redact_then_bound("alpha\nbeta\ngamma\n", max_chars=100, max_lines=2) == (
+        TRUNCATION_MARKER + "beta\ngamma"
+    )
+    assert redact_then_bound("abcdefghij", max_chars=4) == TRUNCATION_MARKER + "ghij"
+
+
+def test_a_start_cut_capture_with_no_line_break_or_whitespace_loses_its_leading_run():
+    assert redact_then_bound("PWVALUE@host.example.test", max_chars=100, start_cut=True) == TRUNCATION_MARKER
+    unbroken = "PWVALUE@" + "x" * 300
+    assert redact_then_bound(unbroken, max_chars=1000, start_cut=True) == TRUNCATION_MARKER + "x" * 52
+
+
+def test_verify_tail_cut_inside_a_token_value_leaves_no_fragment():
+    buffer = TailBuffer(20)
+    buffer.append(b"padding&token=ABCDEFGH12345678\nlast line\n")
+    assert buffer.value() == b"H12345678\nlast line\n" and buffer.dropped
+    tail = _tail(buffer)
+    assert "12345678" not in tail
+    assert tail == TRUNCATION_MARKER + "last line"
+
+
+def test_verify_tail_with_no_secret_is_unchanged_apart_from_the_marker():
+    buffer = TailBuffer(100)
+    buffer.append(b"all good\n")
+    assert _tail(buffer) == "all good"
+
+
+def test_log_tail_window_cut_inside_a_password_leaves_no_fragment(tmp_path):
+    line = "https://user:SECRETPWVALUE@h.example.test/x\n"
+    # The 64 KiB window then begins five characters into the password.
+    filler = "w" * (65554 - len(line) - 1) + "\n"
+    log = tmp_path / "run.log"
+    log.write_text(line + filler)
+    tail = log_tail(log, 5)
+    assert "PWVALUE" not in tail
+    assert tail.startswith(TRUNCATION_MARKER)
+    assert len(tail) <= TAIL_MAX_CHARS
+
+
+def test_log_tail_with_no_secret_is_unchanged(tmp_path):
+    log = tmp_path / "run.log"
+    log.write_text("alpha\nbeta\ngamma\n")
+    assert log_tail(log, 10) == "alpha\nbeta\ngamma"
+
+
+def test_a_remote_location_with_a_credential_is_withheld_but_its_host_kept():
+    url = "https://git.example.test/FAKEPATHCRED7f3a9c/owner/repo.git?sig=FAKEQUERYCRED5d2e1b"
+    out = redact_remote_locations(
+        f"To {url}\nhook echo: FAKEPATHCRED7f3a9c and FAKEQUERYCRED5d2e1b\n", [url]
+    )
+    assert "FAKEPATHCRED7f3a9c" not in out and "FAKEQUERYCRED5d2e1b" not in out
+    assert "https://git.example.test/[REDACTED remote location]" in out
+
+
+def test_text_without_a_remote_location_is_unchanged():
+    assert redact_remote_locations("Everything up-to-date\n", ["https://git.example.test/o/r.git"]) == (
+        "Everything up-to-date\n"
+    )
+    assert redact_remote_locations("anything\n", []) == "anything\n"

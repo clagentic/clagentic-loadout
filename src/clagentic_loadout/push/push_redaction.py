@@ -54,6 +54,8 @@ WHAT THIS REDACTS:
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 _REDACTED = "[REDACTED]"
 
@@ -187,4 +189,108 @@ def redact_push_secrets(text: str, *, known_secrets: tuple[str, ...] = ()) -> st
     return redacted
 
 
-__all__ = ["redact_push_secrets"]
+#: Prepended to a bounded tail when anything was cut. Category-only: it says
+#: output was dropped, never what or how much.
+TRUNCATION_MARKER = "...[truncated]\n"
+
+#: Stands in for a remote location withheld from a transcript.
+_REMOTE_LOCATION_MARKER = "[REDACTED remote location]"
+
+_LINE_BREAK_RE = re.compile(r"[\r\n]")
+_WHITESPACE_RE = re.compile(r"\s")
+
+#: Characters dropped from a start-cut capture that has no line break or
+#: whitespace to cut at.
+_UNBROKEN_PREFIX_CHARS = 256
+
+#: Shortest path segment or query value masked on its own wherever it appears;
+#: shorter pieces are common words and are only masked inside the whole location.
+_MIN_STANDALONE_PIECE = 8
+
+
+def _drop_partial_start(text: str) -> str:
+    """*text* without its first, possibly partial, line.
+
+    A capture whose start was cut can begin inside a secret (`ser:pw@host`,
+    `oken=abc`, `ization: abc`), which no pattern recognises. The partial line
+    is dropped before redaction so no such fragment survives. A capture with no
+    line break falls back to dropping through the first whitespace; one with
+    neither drops its first _UNBROKEN_PREFIX_CHARS characters, the longest
+    credential a single unbroken run is assumed to start inside."""
+    cut = _LINE_BREAK_RE.search(text) or _WHITESPACE_RE.search(text)
+    return text[cut.end():] if cut else text[_UNBROKEN_PREFIX_CHARS:]
+
+
+def redact_then_bound(
+    text: str,
+    *,
+    max_chars: int,
+    max_lines: int | None = None,
+    start_cut: bool = False,
+    known_secrets: tuple[str, ...] = (),
+) -> str:
+    """The tail of *text* with every secret pattern masked, cut AFTER masking.
+
+    Redacting before the cut means a secret straddling the cut leaves no
+    recognisable prefix. *start_cut* says *text* is itself the end of a longer
+    stream (its beginning was already discarded), so its first partial line is
+    dropped (see `_drop_partial_start`). At most the last *max_lines* lines and
+    the last *max_chars* characters of the redacted text are kept; the
+    truncation marker is added when anything was dropped and is not counted in
+    *max_chars*. The result is stripped of surrounding whitespace."""
+    if start_cut:
+        text = _drop_partial_start(text)
+    redacted = redact_push_secrets(text, known_secrets=known_secrets)
+    dropped = start_cut
+    if max_lines is not None:
+        lines = redacted.splitlines()
+        if len(lines) > max_lines:
+            dropped = True
+            lines = lines[-max_lines:]
+        redacted = "\n".join(lines)
+    redacted = redacted.strip()
+    if len(redacted) > max_chars:
+        dropped = True
+        redacted = redacted[-max_chars:] if max_chars > 0 else ""
+    return TRUNCATION_MARKER + redacted if dropped else redacted
+
+
+def redact_remote_locations(text: str, locations: Sequence[str]) -> str:
+    """*text* with each remote location in *locations* withheld.
+
+    A credential can ride in a remote location outside userinfo -- in a path
+    segment or in a query parameter of any name -- and no pattern can tell it
+    from an ordinary path. So every verbatim occurrence of a location loses its
+    userinfo, path, query and fragment (a URL keeps only its scheme and host; a
+    plain local path is withheld whole), and each long path segment and query
+    value is also masked wherever it appears on its own, for output that echoes
+    only a piece."""
+    pieces: set[str] = set()
+    masked_by_location: dict[str, str] = {}
+    for location in locations:
+        if not location:
+            continue
+        parts = urlsplit(location)
+        masked = _REMOTE_LOCATION_MARKER
+        if parts.scheme and parts.netloc:
+            host = parts.netloc.rpartition("@")[2]
+            masked = f"{parts.scheme}://{host}/{_REMOTE_LOCATION_MARKER}"
+        masked_by_location[location] = masked
+        for segment in parts.path.split("/"):
+            pieces.add(unquote(segment))
+        for _name, value in parse_qsl(parts.query, keep_blank_values=False):
+            pieces.add(value)
+    for location in sorted(masked_by_location, key=len, reverse=True):
+        text = text.replace(location, masked_by_location[location])
+    for piece in sorted(pieces, key=len, reverse=True):
+        if len(piece) >= _MIN_STANDALONE_PIECE:
+            text = text.replace(piece, _REMOTE_LOCATION_MARKER)
+    return text
+
+
+__all__ = [
+    "TRUNCATION_MARKER",
+    "redact_push_secrets",
+    "redact_remote_locations",
+    "redact_then_bound",
+]
