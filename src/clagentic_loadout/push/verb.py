@@ -312,7 +312,7 @@ from clagentic_loadout.push.remote_readback import (
     read_remote_head,
     verify_remote_authorship,
 )
-from clagentic_loadout.push import profile_report
+from clagentic_loadout.push import interface_report, profile_report
 from clagentic_loadout.review.profile_posture import CompletenessItem
 from clagentic_loadout.push.ratio_notice import notice_line, ratio_for_push
 from clagentic_loadout.push.verify_config import (
@@ -1414,11 +1414,13 @@ def _run_verification(
     tested_sha: str | None = None,
     results_out: list[VerifyResult] | None = None,
     profile_items_out: list[CompletenessItem] | None = None,
+    base_refs: Sequence[str] = (),
 ) -> str | None:
     """Body-only view of `_run_verification_outcome`."""
     return _run_verification_outcome(
         project_root, body=body, skip=skip, tested_sha=tested_sha,
         results_out=results_out, profile_items_out=profile_items_out,
+        base_refs=base_refs,
     )[0]
 
 
@@ -1430,6 +1432,7 @@ def _run_verification_outcome(
     tested_sha: str | None = None,
     results_out: list[VerifyResult] | None = None,
     profile_items_out: list[CompletenessItem] | None = None,
+    base_refs: Sequence[str] = (),
 ) -> tuple[str | None, str, str | None]:
     """Run the repo's declared `push.verify` commands (push.verify_run) in
     *project_root* and return (body, outcome, tested sha): *body* with a
@@ -1453,6 +1456,10 @@ def _run_verification_outcome(
     *profile_items_out*, when given, receives the profile completeness items
     this step printed, so the records point at the very read that was reported
     rather than at a second read the checks or the push could have outrun.
+    *base_refs* are the refs the branch's base may be found under, first
+    resolvable first; with any, a breaking change to the repository's declared
+    interface is reported with its consumers (push.interface_report), before
+    anything is skipped or run, and never changes the outcome.
 
     Raises push.verify_config.InvalidVerifyConfigError for malformed config
     and push.verify_run.VerificationFailedError on the first failing check;
@@ -1463,6 +1470,8 @@ def _run_verification_outcome(
     profile_report.print_items(profile_items)
     if profile_items_out is not None:
         profile_items_out.extend(profile_items)
+    if base_refs:
+        interface_report.print_notice(project_root, base_refs)
     if not entries:
         return body, VERIFICATION_NONE, None
     if skip:
@@ -2437,6 +2446,7 @@ def _run_update_pr(
                     project_root, body=body, skip=args.skip_verify,
                     tested_sha=tested_head, results_out=verify_results,
                     profile_items_out=verify_profile_items,
+                    base_refs=(args.base,),
                 )
             except VerificationFailedError:
                 # The checkout is the PR head, so a failing run is a measurement
@@ -2849,6 +2859,7 @@ def _run_create_pr(
         body = _run_verification(
             project_root, body=body, skip=args.skip_verify, results_out=verify_results,
             profile_items_out=verify_profile_items,
+            base_refs=(identity.remote_tracking_ref(remote_name, args.base), args.base),
         )
 
     # The push never forces (no --force, no --force-with-lease): a branch that

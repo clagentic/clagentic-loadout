@@ -517,6 +517,7 @@ from clagentic_loadout.merge import (
     verdict,
 )
 from clagentic_loadout.merge.attestation import build_attestation_body
+from clagentic_loadout.merge.interface_notice import collect_interface_notices
 from clagentic_loadout.merge.authority import (
     AuthorityProvider,
     StaticRoleAuthorityProvider,
@@ -1050,6 +1051,19 @@ def _gate_policy_reader(backend, *, owner: str, repo: str, repo_path: str | None
     if repo_path:
         return GitPolicyReader(repo_path)
     return HostPolicyReader(backend.policy_file_backend(), owner=owner, repo=repo)
+
+
+def _interface_readers(
+    backend, *, owner: str, repo: str, repo_path: str | None
+) -> list[PolicyReader]:
+    """Where the interface file is read at the PR's base and head: the local
+    repository first when the caller names one, then the host API, since a local
+    tree need not hold the PR head."""
+    readers: list[PolicyReader] = []
+    if repo_path:
+        readers.append(GitPolicyReader(repo_path))
+    readers.append(HostPolicyReader(backend.policy_file_backend(), owner=owner, repo=repo))
+    return readers
 
 
 def _resolve_backend(
@@ -1701,6 +1715,9 @@ def _run(
     # Records read from fences the checks below accepted at the exact head, for a
     # verdict posted before verdict records existed (verdict_record.reader).
     fence_records: dict[str, list[VerdictRecord]] = {}
+    # The sealed specs the passing fences say their reviews ran against, kept for
+    # the interface notice below; they decide nothing.
+    fence_spec_hashes: list[str] = []
     if required_reviewers:
         if not current_head_sha:
             _fail(
@@ -1937,6 +1954,9 @@ def _run(
                 _fail(f"{lead}{exc}{hint}", code=EXIT_GATE_RESULT_BLOCKED)
             comment_times ={c.get("id"): c.get("created_at") for c in comments}
             for verdict_obj in head_fences:
+                fence_spec = verdict_obj.state.spec_hash
+                if fence_spec and fence_spec not in fence_spec_hashes:
+                    fence_spec_hashes.append(fence_spec)
                 print(
                     f"merge: {reviewer_name!r} verdict PASSED -- "
                     f"review_status={verdict_obj.review_status!r}, "
@@ -1980,6 +2000,26 @@ def _run(
         )
     except DiffScopeExceededError as exc:
         _fail(str(exc), code=EXIT_GATE_RESULT_BLOCKED)
+
+    # Report-only: a breaking change to the declared interface whose consumers
+    # the PR's spec leaves without a disposition is named here and in the
+    # attestation. It reads files and runs nothing against any consumer, and no
+    # gate reads its result.
+    interface_notices = collect_interface_notices(
+        changed_files=changed_files,
+        make_readers=lambda: _interface_readers(
+            backend, owner=owner, repo=repo, repo_path=args.repo_path
+        ),
+        base_sha=(pr_info.get("base") or {}).get("sha") if isinstance(pr_info, dict) else None,
+        head_sha=current_head_sha,
+        producer=repo,
+        fence_spec_hashes=fence_spec_hashes,
+        repo_path=args.repo_path,
+    )
+    for interface_line in interface_notices.lines:
+        print(f"merge: NOTICE -- {interface_line}", file=sys.stderr)
+    for interface_note in interface_notices.notes:
+        print(f"merge: NOTE -- {interface_note}", file=sys.stderr)
 
     # 7. PR-title gate.
     if args.skip_title_check:
@@ -2440,6 +2480,7 @@ def _run(
         docs_only_waivers=[
             e.docs_only_waiver for e in gate_evaluations if e.docs_only_waiver is not None
         ],
+        interface_notices=list(interface_notices.lines),
         identity_provider=provider_fields(attested_identity)["provider"],
         self_declared=provider_fields(attested_identity)["self_declared"],
     )
@@ -2484,6 +2525,11 @@ def _run(
             else {}
         ),
         **({"repo_gate_ignored": list(repo_gate.reviewer_roles)} if args.ignore_repo_gate else {}),
+        **(
+            {"undisposed_consumers": [u.to_dict() for u in interface_notices.undisposed]}
+            if interface_notices.undisposed
+            else {}
+        ),
         **provider_fields(attested_identity),
     }))
 

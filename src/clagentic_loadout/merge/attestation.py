@@ -136,6 +136,7 @@ def build_attestation_body(
     version: str | None = None,
     verdict_evaluations: "list[str] | tuple[str, ...]" = (),
     docs_only_waivers: "list[str] | tuple[str, ...]" = (),
+    interface_notices: "list[str] | tuple[str, ...]" = (),
     identity_provider: str | None = None,
     self_declared: bool | None = None,
 ) -> str:
@@ -192,6 +193,10 @@ def build_attestation_body(
         docs-only justification, from merge.fence_state.docs_only_waiver_line.
         Rendered as a `Docs-only waivers` row, the audited record that a
         lighter review was accepted; omitted when empty.
+      - `interface_notices`: one line per consumer of a breaking interface
+        change that the spec leaves without a disposition, from
+        merge.interface_notice. Rendered as an `Interface notices` row; report
+        only, it changes no gate. Omitted when empty.
       - `identity_provider`, `self_declared`: which identity provider vouched for
         the merging actor (`legacy` when no provider is configured) and whether
         nothing outside the process vouched for it. Rendered as `Identity
@@ -233,6 +238,10 @@ def build_attestation_body(
     if docs_only_waivers:
         rows.append(
             ("Docs-only waivers", "<br>".join(_escape_table_cell(line) for line in docs_only_waivers))
+        )
+    if interface_notices:
+        rows.append(
+            ("Interface notices", "<br>".join(_escape_table_cell(line) for line in interface_notices))
         )
     rows.append(("CI status", _escape_table_cell(ci_disposition)))
     if identity_provider is not None:

@@ -39,6 +39,7 @@ from clagentic_loadout.doctor.checks import (
     check_pre_checks_sandbox,
     check_repo_loadout_schema,
 )
+from clagentic_loadout.doctor.consumers_check import check_consumers_map
 from clagentic_loadout.doctor.identity_check import check_identity_provider
 from clagentic_loadout.doctor.roles_groups_check import check_roles_and_groups
 
@@ -177,6 +178,7 @@ def main(argv: list[str] | None = None) -> int:
             Path(repo_root) if repo_root is not None else None, config_root=config_root
         )
     )
+    results.append(check_consumers_map(config_root=config_root))
     if repo_root is not None:
         results.append(check_repo_loadout_schema(Path(repo_root)))
         results.append(

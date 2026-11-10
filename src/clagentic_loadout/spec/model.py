@@ -15,11 +15,12 @@ describes. It exists in two forms:
 The role is an opaque key. This module records the string and checks its shape;
 it knows no role, and no section depends on which role authored the spec.
 
-Sections with no automatic source yet (consumers) are present and empty in a new
-draft, each carrying a ``source`` of null and a note saying so. The sections the
-repo profile can fill (class rules, the declared test commands) are filled by
-`apply_brief`, the profile completeness items by `apply_completeness`, and the
-group rules by `apply_group_rules`.
+Sections with no source in play are present and empty in a new draft, each
+carrying a ``source`` of null and a note saying so. The sections the repo profile
+can fill (class rules, the declared test commands) are filled by `apply_brief`,
+the profile completeness items by `apply_completeness`, the group rules by
+`apply_group_rules`, and the consumers, when the consumer map is available and
+the paths or elements under change are named, by `apply_consumers`.
 """
 
 from __future__ import annotations
@@ -175,6 +176,30 @@ def apply_group_rules(
     return out
 
 
+def apply_consumers(
+    draft: dict[str, Any],
+    items: Sequence[dict[str, str]],
+    *,
+    source: str | None,
+    note: str | None,
+) -> dict[str, Any]:
+    """*draft* with *items* (consumer and disposition pairs, see
+    interface.notice.draft_items) added to its consumers section, from *source*.
+    Items the draft already holds are kept as authored, and an item for a
+    consumer the draft already lists is not added again. With nothing in the
+    section afterwards, *note* says why."""
+    out = copy.deepcopy(draft)
+    held = list(out["consumers"].get("items") or [])
+    listed = {item["consumer"] for item in held}
+    merged = held + [dict(item) for item in items if item["consumer"] not in listed]
+    out["consumers"] = {
+        "source": source,
+        "note": None if merged else (note or NO_SOURCE_NOTE),
+        "items": merged,
+    }
+    return out
+
+
 def draft_from_sealed(sealed: dict[str, Any], sealed_hash: str) -> dict[str, Any]:
     """A draft that starts from the sealed spec *sealed* (whose hash is
     *sealed_hash*) and names it in ``supersedes``. The only way to change a
@@ -253,6 +278,7 @@ __all__ = [
     "SpecFormatError",
     "apply_brief",
     "apply_completeness",
+    "apply_consumers",
     "apply_group_rules",
     "canonical_bytes",
     "draft_from_sealed",

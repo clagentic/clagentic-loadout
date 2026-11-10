@@ -101,6 +101,31 @@ class GroupsLocation:
     origin: str
 
 
+def resolve_rules_file_location(
+    flag: str | None,
+    env: Mapping[str, str] | None,
+    *,
+    env_var: str,
+    config_key: str,
+    config_root: str | Path | None = None,
+) -> GroupsLocation:
+    """Where an operator-owned file under the ``rules`` settings lives: the flag,
+    then the environment variable *env_var*, then the user-level
+    ``rules.<config_key>`` setting. Shared by every such file, so each resolves
+    the same way."""
+    if flag and flag.strip():
+        return GroupsLocation(flag.strip(), FROM_FLAG)
+    environ = os.environ if env is None else env
+    from_env = environ.get(env_var, "").strip()
+    if from_env:
+        return GroupsLocation(from_env, FROM_ENV)
+    section = load_user_config_section(CONFIG_SECTION_RULES, config_root=config_root)
+    value = section.get(config_key)
+    if isinstance(value, str) and value.strip():
+        return GroupsLocation(value.strip(), FROM_CONFIG)
+    return GroupsLocation(None, FROM_NONE)
+
+
 def resolve_groups_location(
     flag: str | None = None,
     env: Mapping[str, str] | None = None,
@@ -109,17 +134,13 @@ def resolve_groups_location(
 ) -> GroupsLocation:
     """The groups file location: flag, then environment, then the user-level
     ``rules.groups_file`` setting."""
-    if flag and flag.strip():
-        return GroupsLocation(flag.strip(), FROM_FLAG)
-    environ = os.environ if env is None else env
-    from_env = environ.get(GROUPS_FILE_ENV_VAR, "").strip()
-    if from_env:
-        return GroupsLocation(from_env, FROM_ENV)
-    section = load_user_config_section(CONFIG_SECTION_RULES, config_root=config_root)
-    value = section.get(CONFIG_KEY_GROUPS_FILE)
-    if isinstance(value, str) and value.strip():
-        return GroupsLocation(value.strip(), FROM_CONFIG)
-    return GroupsLocation(None, FROM_NONE)
+    return resolve_rules_file_location(
+        flag,
+        env,
+        env_var=GROUPS_FILE_ENV_VAR,
+        config_key=CONFIG_KEY_GROUPS_FILE,
+        config_root=config_root,
+    )
 
 
 def _text(value: Any, where: str, path: str, *, required: bool = True) -> str:
@@ -264,10 +285,15 @@ __all__ = [
     "GroupsFile",
     "GroupsFileError",
     "GroupsLocation",
+    "FROM_CONFIG",
+    "FROM_ENV",
+    "FROM_FLAG",
+    "FROM_NONE",
     "bare_repo_name",
     "groups_for",
     "load_groups_file",
     "parse_groups_document",
     "resolve_groups_location",
+    "resolve_rules_file_location",
     "schema_admits",
 ]

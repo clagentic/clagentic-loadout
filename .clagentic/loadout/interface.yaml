@@ -1,0 +1,113 @@
+# The interface this repository declares to its consumers: what other tools may
+# rely on. Removing or renaming an element, or changing an exit code's number, is
+# a breaking change; adding one is not. The shape is documented in docs/interface.md
+# and tests/test_interface_self.py fails when this file and the code disagree.
+schema_version: 1
+
+verbs:
+  - name: clagentic-loadout
+    exit_codes: {umbrella_usage: 64}
+  - name: loadout-acquire
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, fetch_failed: 5, scratch_write_failed: 6, caller_invoker_mismatch: 7}
+  - name: loadout-changeset
+    exit_codes: {ok: 0, usage: 1, io_failed: 62}
+  - name: loadout-close-pr
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, namespace_denied: 20, authority_denied: 21, close_failed: 26, close_readback_failed: 27, caller_invoker_mismatch: 28}
+  - name: loadout-doctor
+    exit_codes: {ok: 0, usage: 1, checks_failed: 2}
+  - name: loadout-git-host-api
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, verify_failed: 3, stale_pr: 4, owner_repo_not_found: 6, body_stdin_empty: 8, verify_comment_required: 9, curl_failed: 10, verdict_block_usage: 11, verdict_block_mismatch: 12, caller_tracking_id_usage: 13, body_ingestion_usage: 14, body_env_unreadable: 15, delete_own_comment_refused: 16, absolute_url_host_mismatch: 17, cross_platform_url_shape_mismatch: 18, caller_invoker_mismatch: 19, host_denied: 20, host_config_invalid: 21, pagination_failed: 22}
+  - name: loadout-identity
+    exit_codes: {ok: 0, usage: 1}
+  - name: loadout-interface
+    exit_codes: {ok: 0, usage: 1, unreadable: 90, interface_invalid: 91}
+  - name: loadout-merge
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, namespace_denied: 20, authority_denied: 21, stale_head_sha: 23, gate_result_blocked: 24, pr_title_invalid: 25, merge_failed: 26, gate_fact_unavailable: 27, ci_status_failed: 29, commit_subject_invalid: 30, merge_shape_mismatch: 31, merge_readback_failed: 32, caller_invoker_mismatch: 33, task_id_guard_violation: 36, pre_checks_failed: 37, pre_merge_canary_failed: 38}
+  - name: loadout-poll-wait
+  - name: loadout-post-merge
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, namespace_denied: 20, authority_denied: 21, gate_fact_unavailable: 27, pr_not_merged: 31, caller_invoker_mismatch: 32}
+  - name: loadout-profile
+    exit_codes: {ok: 0, usage: 1, profile_missing: 60, profile_invalid: 61, io_failed: 62, exists: 63}
+  - name: loadout-provision-allowlist
+    exit_codes: {ok: 0, usage: 1, role_config_invalid: 2, settings_path_invalid: 3, settings_write_failed: 4}
+  - name: loadout-push
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, push_failed: 3, pr_failed: 4, remote_error: 7, body_empty: 10, namespace_denied: 20, author_mismatch: 21, missing_issue_link: 24, pr_title_invalid: 25, scratch_litter_found: 26, body_file_unreadable: 27, body_env_unavailable: 28, stray_merge_commit: 29, host_denied: 31, hermeticity_failed: 32, caller_invoker_mismatch: 33, working_tree_contention: 34, task_id_guard_violation: 35, dirty_work_tree: 36, host_config_invalid: 37, verify_failed: 38, verify_config_invalid: 39}
+  - name: loadout-record
+    exit_codes: {ok: 0, usage: 1, store_unusable: 3, not_found: 40, record_invalid: 41}
+  - name: loadout-release-detect
+  - name: loadout-release-dispatch
+    exit_codes: {ok: 0, usage: 1, secret_failed: 2, hook_failed: 3}
+  - name: loadout-review
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, profile_invalid: 3, wrong_platform: 4, acquire_failed: 5, caller_invoker_mismatch: 7, resume: 10, post_failed: 30, stale_head: 31, findings_invalid: 32, spec_unavailable: 33}
+  - name: loadout-review-post
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, verify_failed: 5, post_failed: 6, body_stdin_empty: 7, verdict_block_usage: 8, verdict_block_mismatch: 9, body_env_unreadable: 10, delete_own_comment_refused: 11, caller_invoker_mismatch: 12, verdict_route_intent_mismatch: 13}
+  - name: loadout-reviewer-login
+    exit_codes: {ok: 0, usage: 1, reviewer_not_configured: 8}
+  - name: loadout-ruling
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, config_invalid: 3, wrong_platform: 4, caller_invoker_mismatch: 7, authority_denied: 21, host_unavailable: 27, fence_invalid: 32, floor_refused: 50, finding_not_found: 51, registry_untrusted: 52, registry_not_configured: 53, duplicate: 54, registry_failed: 55}
+  - name: loadout-rules
+    exit_codes: {ok: 0, usage: 1, groups_file: 80, profile_invalid: 81}
+  - name: loadout-scoped-test-wait
+  - name: loadout-spec
+    exit_codes: {ok: 0, usage: 1, store_unusable: 3, not_found: 50, stored_invalid: 51, draft_invalid: 52, refused: 53, profile_invalid: 54, io_failed: 55}
+  - name: loadout-stage-body
+    exit_codes: {ok: 0, usage: 1, body_stdin_empty: 2, body_file_unreadable: 3, stage_verify_failed: 4, caller_invoker_mismatch: 5}
+
+schemas:
+  - common.json
+  - envelope-in.json
+  - envelope-out.json
+  - loadout-note.schema.json
+  - review-facts.json
+  - review-result.schema.json
+  - scanner-input.schema.json
+  - spec.schema.json
+  - telemetry-agent-run.json
+  - telemetry-dispatch-heartbeat.json
+  - telemetry-dispatch-record.json
+  - telemetry-dispatch-resume-ack.json
+  - telemetry-followup-event.json
+  - telemetry-trace-event.json
+  - verdict-record.schema.json
+
+env:
+  - CLAGENTIC_LOADOUT_ALLOWED_NAMESPACES
+  - CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_ENV
+  - CLAGENTIC_LOADOUT_ATTESTED_IDENTITY_SIDECAR_PATH
+  - CLAGENTIC_LOADOUT_BIN_DIR
+  - CLAGENTIC_LOADOUT_CANARY_HEAD_SHA
+  - CLAGENTIC_LOADOUT_CANARY_PLATFORM
+  - CLAGENTIC_LOADOUT_CANARY_PR
+  - CLAGENTIC_LOADOUT_CANARY_REPO
+  - CLAGENTIC_LOADOUT_CLAUDE_SETTINGS
+  - CLAGENTIC_LOADOUT_CONSUMERS_FILE
+  - CLAGENTIC_LOADOUT_GITHUB_APP_SLUG
+  - CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL
+  - CLAGENTIC_LOADOUT_GIT_HOST_BASE_URL_COMPAT_ALIAS
+  - CLAGENTIC_LOADOUT_GIT_HOST_TOKEN
+  - CLAGENTIC_LOADOUT_GROUPS_FILE
+  - CLAGENTIC_LOADOUT_HOME
+  - CLAGENTIC_LOADOUT_MERGE_TREE
+  - CLAGENTIC_LOADOUT_MERGE_TREES_DIR
+  - CLAGENTIC_LOADOUT_POST_MERGE_ENV_HOME
+  - CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS
+  - CLAGENTIC_LOADOUT_PUSH_GIT_TRACE
+  - CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS
+  - CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT
+  - CLAGENTIC_LOADOUT_RULINGS_FILE
+  - CLAGENTIC_LOADOUT_SETTINGS_FILE
+  - CLAGENTIC_LOADOUT_SPECS_DIR
+  - CLAGENTIC_LOADOUT_TELEMETRY_DIR
+  - CLAGENTIC_LOADOUT_TELEMETRY_SINK
+  - CLAGENTIC_LOADOUT_TELEMETRY_WEBHOOK_TIMEOUT
+  - CLAGENTIC_LOADOUT_TELEMETRY_WEBHOOK_TOKEN
+  - CLAGENTIC_LOADOUT_TELEMETRY_WEBHOOK_URL
+  - CLAGENTIC_LOADOUT_TEST_REPORTS_DIR
+  - CLAGENTIC_LOADOUT_TOKEN_COMMAND_EMITS_JSON_FORGEJO
+  - CLAGENTIC_LOADOUT_TOKEN_COMMAND_EMITS_JSON_GITHUB
+  - CLAGENTIC_LOADOUT_TOKEN_COMMAND_FORGEJO
+  - CLAGENTIC_LOADOUT_TOKEN_COMMAND_GITHUB
+  - CLAGENTIC_LOADOUT_TOKEN_PROVIDER
+  - CLAGENTIC_LOADOUT_TOKEN_PROVIDER_FORGEJO
+  - CLAGENTIC_LOADOUT_TOKEN_PROVIDER_GITHUB
+  - CLAGENTIC_LOADOUT_VERDICT_RECORDS_DIR
