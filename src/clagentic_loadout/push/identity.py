@@ -167,6 +167,12 @@ def check_clean_work_tree(git_cwd: Path | None = None) -> None:
     )
 
 
+def remote_tracking_ref(remote_label: str, branch: str) -> str:
+    """The remote-tracking ref name of *branch* on the remote *remote_label*.
+    A ref name handed to git, never text a message formats."""
+    return "/".join(("refs", "remotes", remote_label, branch))
+
+
 def _merge_base_with_head(ref: str, git_cwd: Path | None) -> str | None:
     """`git merge-base <ref> HEAD`, or None if the ref doesn't resolve
     against HEAD (unrelated histories, or *ref* itself absent)."""
@@ -264,8 +270,8 @@ def resolve_exclusion_ref(
     REACHABILITY: this verb's push-time call site does not fetch
     `origin/<base_branch>` immediately before re-authoring runs (see
     push.verb._run_create_pr, where pin_commits_to_bot_identity is called
-    before the branch-commit-check's own fetch and before resolve_lease's
-    conditional pre-lease fetch) — an upstream force-push on the base
+    before the branch-commit-check's own fetch; only the pushed branch's own
+    ref is refreshed first) — an upstream force-push on the base
     branch landing between a caller's last fetch and this push, combined
     with independent local history advancing via a merge, is realistic
     operational geometry here, not purely theoretical.
@@ -685,10 +691,17 @@ def reauthor_commits(
     bot_name: str,
     bot_email: str,
     git_cwd: Path | None = None,
+    *,
+    remote_branch_ref: str | None = None,
 ) -> tuple[bool, str]:
     """Rewrite every commit on the current branch (not reachable from the
-    resolved exclusion ref) to *bot_name*/*bot_email* as both author and
-    committer.
+    resolved exclusion ref, nor from *remote_branch_ref*) to
+    *bot_name*/*bot_email* as both author and committer.
+
+    *remote_branch_ref*: the remote-tracking ref of the branch being pushed
+    (e.g. `refs/remotes/origin/<branch>`). Commits already reachable from it
+    are published and keep their SHAs, so an ordinary push stays a
+    fast-forward. Ignored when the ref does not resolve (a first push).
 
     Returns (True, "") on success (including the no-op case where there is
     nothing to rewrite). Returns (False, cause) on any failure — callers
@@ -759,18 +772,25 @@ def reauthor_commits(
         )
     head_ref_name = branch_ref.stdout.strip()
 
+    exclusions = [f"^{exclusion_ref}"]
+    if remote_branch_ref and _run(
+        ["git", "rev-parse", "--verify", "--quiet", f"{remote_branch_ref}^{{commit}}"],
+        cwd=git_cwd,
+    ).returncode == 0:
+        exclusions.append(f"^{remote_branch_ref}")
+
     head_before = _run(["git", "rev-parse", "HEAD"], cwd=git_cwd)
     if head_before.returncode != 0 or not head_before.stdout.strip():
         return False, "could not resolve HEAD to a commit SHA"
     original_head_sha = head_before.stdout.strip()
 
     rewrite_set = _run(
-        ["git", "rev-list", "--reverse", "--topo-order", "HEAD", f"^{exclusion_ref}"],
+        ["git", "rev-list", "--reverse", "--topo-order", "HEAD", *exclusions],
         cwd=git_cwd,
     )
     if rewrite_set.returncode != 0:
         return False, (
-            f"could not enumerate the rewrite range (HEAD ^{exclusion_ref})"
+            f"could not enumerate the rewrite range (HEAD {' '.join(exclusions)})"
         )
     original_shas = [line for line in rewrite_set.stdout.splitlines() if line.strip()]
     if not original_shas:
@@ -793,7 +813,7 @@ def reauthor_commits(
     # rewrite below honors precisely (see _rebuild_commit's own docstring
     # for the byte-exact handling the real message content gets).
     subjects = subprocess.run(
-        ["git", "log", "--format=%H %s", "HEAD", f"^{exclusion_ref}"],
+        ["git", "log", "--format=%H %s", "HEAD", *exclusions],
         capture_output=True,
         text=False,
         cwd=str(git_cwd) if git_cwd is not None else None,
@@ -863,9 +883,11 @@ def pin_commits_to_bot_identity(
     git_cwd: Path | None = None,
     *,
     fail_closed_on_missing: bool = False,
+    remote_branch_ref: str | None = None,
 ) -> bool:
     """Re-author branch commits to (*bot_name*, *bot_email*), then verify
-    HEAD carries that identity.
+    HEAD carries that identity. *remote_branch_ref* is passed to
+    reauthor_commits (commits already on it are never rebuilt).
 
     Identity resolution is the CALLER's responsibility — this function takes
     the resolved name/email directly, never reads a config file itself. When
@@ -876,8 +898,10 @@ def pin_commits_to_bot_identity(
       - fail_closed_on_missing=False: return False (re-authoring skipped;
         the caller decides whether that is acceptable for its deployment).
 
-    Returns True when re-authoring was performed (the caller must then pass
-    force_with_lease=True to the subsequent push, since history changed).
+    Returns True only when re-authoring moved the branch ref (HEAD changed).
+    A run that rebuilt nothing, because every commit already carries the bot
+    identity or is already on the remote, returns False. Nothing is ever
+    forced on that account: the subsequent push is always a plain push.
 
     Raises AuthorMismatchError when re-authoring fails, or when HEAD's
     author does not match the expected identity afterward — a
@@ -905,7 +929,10 @@ def pin_commits_to_bot_identity(
             )
         return False
 
-    ok, cause = reauthor_commits(base_branch, bot_name, bot_email, git_cwd)
+    head_before = _run(["git", "rev-parse", "HEAD"], cwd=git_cwd)
+    ok, cause = reauthor_commits(
+        base_branch, bot_name, bot_email, git_cwd, remote_branch_ref=remote_branch_ref
+    )
     if not ok:
         raise AuthorMismatchError(
             f"commit re-authoring failed — cannot pin commits to bot identity "
@@ -921,7 +948,12 @@ def pin_commits_to_bot_identity(
             f"attributed push is unrecoverable; refusing to push."
         )
 
-    return True
+    head_after = _run(["git", "rev-parse", "HEAD"], cwd=git_cwd)
+    return (
+        head_before.returncode == 0
+        and head_after.returncode == 0
+        and head_before.stdout.strip() != head_after.stdout.strip()
+    )
 
 
 __all__ = [
@@ -930,6 +962,7 @@ __all__ = [
     "get_head_author_email",
     "pin_commits_to_bot_identity",
     "reauthor_commits",
+    "remote_tracking_ref",
     "resolve_exclusion_ref",
     "verify_head_author",
 ]

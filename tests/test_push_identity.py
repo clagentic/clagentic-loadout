@@ -136,6 +136,59 @@ class TestPinCommitsToBotIdentity:
         _git(["commit", "-m", "initial commit"], repo)
 
         rewritten = pin_commits_to_bot_identity("Bot Name", "bot@example.com", "main", repo)
+        assert rewritten is False
+        assert get_head_author_email(repo) == "bot@example.com"
+
+    def test_all_commits_already_bot_authored_report_no_rewrite(self, tmp_path):
+        """Rewritten means the branch ref moved: a second pass over a branch
+        whose commits already carry the bot identity rebuilds identical
+        objects and moves nothing."""
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        assert pin_commits_to_bot_identity("Bot Name", "bot@example.com", "main", repo) is True
+        before = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        assert pin_commits_to_bot_identity("Bot Name", "bot@example.com", "main", repo) is False
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == before
+
+    def test_commits_on_the_remote_branch_are_never_rebuilt(self, tmp_path):
+        """A human-authored commit already pushed keeps its SHA; only the
+        commit added on top is re-authored."""
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        _git(["push", "origin", "feature"], repo)
+        published = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+        (repo / "more.txt").write_text("more\n")
+        _git(["add", "more.txt"], repo)
+        _git(["commit", "-m", "second commit"], repo)
+
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+            remote_branch_ref="refs/remotes/origin/feature",
+        )
+
+        assert rewritten is True
+        assert _git(["rev-parse", "HEAD^"], repo).stdout.strip() == published
+        assert get_head_author_email(repo) == "bot@example.com"
+
+    def test_everything_already_on_the_remote_branch_is_not_rewritten(self, tmp_path):
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        _git(["push", "origin", "feature"], repo)
+        published = _git(["rev-parse", "HEAD"], repo).stdout.strip()
+
+        # HEAD is human-authored and published, so there is nothing to
+        # rebuild and the author check refuses rather than rewriting history.
+        with pytest.raises(AuthorMismatchError):
+            pin_commits_to_bot_identity(
+                "Bot Name", "bot@example.com", "main", repo,
+                remote_branch_ref="refs/remotes/origin/feature",
+            )
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == published
+
+    def test_an_unresolvable_remote_branch_ref_is_ignored(self, tmp_path):
+        repo = _init_repo_with_base_and_branch(tmp_path, author_email="original@example.com")
+        rewritten = pin_commits_to_bot_identity(
+            "Bot Name", "bot@example.com", "main", repo,
+            remote_branch_ref="refs/remotes/origin/not-pushed-yet",
+        )
         assert rewritten is True
         assert get_head_author_email(repo) == "bot@example.com"
 

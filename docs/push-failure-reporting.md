@@ -34,7 +34,7 @@ in this package's own suite fails if a new label is added without a covering fix
 |---|---|
 | `pre-receive-rejected` | The remote sent lines back (`remote: `-prefixed sideband) — a server-side hook/policy rejection, or a server-side ref-lock race that surfaced over sideband. |
 | `local-hook-rejected` | A **local** `.git/hooks/pre-push` script aborted the push before any network negotiation. |
-| `non-fast-forward` | A client-side conflict against remote state the local repo does not yet have — covers git's `non-fast-forward`, `fetch first`, **and** `stale info` (a `--force-with-lease` rejection against a stale local remote-tracking ref) literals; all three are the same coarse shape from an operator's perspective. |
+| `non-fast-forward` | A client-side conflict against remote state the local repo does not yet have — covers git's `non-fast-forward`, `fetch first`, **and** `stale info` literals; all three are the same coarse shape from an operator's perspective. `loadout-push` never forces, so the message adds the remedy: open a superseding branch from the current base and push that instead. |
 | `bad-refspec` | The local refspec itself does not resolve to a real ref (`error: src refspec ... does not match any`) — a usage/argument-shape defect, never a remote or local-hook rejection. |
 | `transport` | A connection-level failure — the push never reached a remote to negotiate with at all. |
 | `other-reject-reason` | The parser found a per-ref reject-reason parenthetical this taxonomy does not (yet) name a bucket for — the raw reason string is still carried verbatim on `GitPushError.reject_reason`. |
@@ -73,9 +73,6 @@ failure mode; the reject-reason parser replaces the construction itself.
   information; this field is what actually answers "did the push get far enough to talk
   to a remote at all").
 - `remote` / `refspec` — the resolved remote name and refspec this push attempted.
-- `lease_forced` / `lease_origin` — whether `--force-with-lease` was in effect for this
-  push and where that decision came from (see `loadout-push`'s own `--force-with-lease`/
-  `--no-force-with-lease` reference in [verbs.md](verbs.md)) — never silently inferred.
 
 ## The redaction guarantee
 
@@ -116,14 +113,14 @@ page already goes through, called at the identical two sites (`GitPushError.__in
 failing push, and `git_push.git_push_with_token`'s own dry-run branch for a successful one)
 rather than a new, divergently-implemented redaction pass for this one surface.
 
-**The pre-lease fetch is credentialed, not ambient.** `push.lease_control.resolve_lease`
-fetches the target branch's remote-tracking ref (see below) via
+**The pre-reauthor fetch is credentialed, not ambient.** `loadout-push` fetches the target
+branch's remote-tracking ref before re-authoring commits, via
 `push.git_push.git_fetch_with_token` — the SAME `GIT_ASKPASS` + isolated-`HOME` envelope
 `git_push_with_token` itself uses (`push.git_push._credentialed_git_env`, a single shared
 primitive both functions build their subprocess call on top of) — never a bare ambient
 `git fetch` that would authenticate via whatever credential helper happens to be configured
 on the host. A fetch failure's message is redacted before it is ever raised
-(`GitFetchError`), so the caller (`resolve_lease`) folds it directly into a printed warning
+(`GitFetchError`), so the caller folds it directly into a printed warning
 with no second redaction step.
 
 ## The CLI failure envelope
@@ -171,8 +168,8 @@ sibling defect class this belongs to).
   available" — the transcript is always there; `unknown` states only that the classifier
   could not name a bucket.
 - See [verbs.md](verbs.md#loadout-push--bot-attributed-commit-push--pr-openupdate) for the
-  `--force-with-lease`/`--no-force-with-lease` CLI control and the printed
-  resolved-lease-state contract, and the troubleshooting note on `(stale info)` below.
+  never-force contract and the `--no-force-with-lease` no-op, and the troubleshooting note
+  on `(stale info)` below.
 - When a failure's classified message still isn't enough: re-run with `--dry-run` (a
   read-only push attempt through the same minted credential path, no ref updated on the
   remote) and/or `--verbose`/`--trace` (git's own verbose output plus a GIT_TRACE
@@ -182,14 +179,9 @@ sibling defect class this belongs to).
 
 ## Troubleshooting: `(stale info)`
 
-A `--force-with-lease` push rejected with `! [rejected] <ref> (stale info)` means the
-lease was evaluated against a **local remote-tracking ref that is out of date** relative
-to the actual remote — the remote has moved since this process last saw it. **Git itself
-prints no `hint:` block for this case** (unlike a plain `fetch first` rejection, which gets
-five explanatory `hint:` lines) — from the raw git output alone, this is the single
-least-explained rejection shape git produces. Classified as `non-fast-forward` (see the
-label table above); `loadout-push` fetches the remote-tracking ref before evaluating a
-forced lease by default (see `push.lease_control`), so this should now be rare — if it
-still occurs, it means the remote moved again in the narrow window between that fetch and
-the push itself, or lease-forcing was requested via `--force-with-lease` on a repo state
-this process never refreshed. Re-run after a fresh `git fetch` of the target branch.
+`loadout-push` no longer sends `--force-with-lease`, so it does not produce this
+rejection itself. A `! [rejected] <ref> (stale info)` line can only come from a leased
+force issued outside this verb. It is still classified `non-fast-forward` (see the label
+table above). For a `non-fast-forward` or `fetch first` rejection from `loadout-push`,
+the remote branch has commits the local branch lacks and the push is never forced: open a
+superseding branch from the current base and push that.

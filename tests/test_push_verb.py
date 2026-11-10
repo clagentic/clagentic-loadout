@@ -1550,15 +1550,12 @@ class TestBotIdentity:
         assert "feature" not in r.stdout
 
 
-class TestLeaseControl:
-    """lr-f57f13, D5 DECIDED: push.verb no longer silently derives
-    force_with_lease from "did bot-identity re-authoring rewrite this
-    branch's history" alone -- an explicit --force-with-lease/
-    --no-force-with-lease CLI flag always wins, and the resolved value plus
-    its origin is always printed to stderr before the push runs (never
-    inferred silently)."""
+class TestNeverForces:
+    """loadout-push never forces: no --force/--force-with-lease is sent,
+    --force-with-lease no longer exists, --no-force-with-lease is a no-op,
+    and re-authoring skips commits already on the remote branch."""
 
-    def test_no_bot_identity_no_flags_resolves_lease_off_by_default(self, repo_with_remote, monkeypatch, capsys):
+    def test_plain_push_states_it_does_not_force(self, repo_with_remote, monkeypatch, capsys):
         repo, _remote = repo_with_remote
         provider = _RecordingTokenProvider()
         opener = _forgejo_create_opener()
@@ -1571,11 +1568,11 @@ class TestLeaseControl:
         )
         assert code == verb.EXIT_OK
         stderr = capsys.readouterr().err
-        assert "force-with-lease=False" in stderr
-        assert "default-false" in stderr
+        assert "push: does not force" in stderr
+        assert "history rewritten=False" in stderr
 
-    def test_bot_identity_reauthoring_auto_derives_lease_on(self, repo_with_remote, monkeypatch, capsys):
-        repo, _remote = repo_with_remote
+    def test_first_push_with_human_commits_is_reauthored_and_plain(self, repo_with_remote, monkeypatch, capsys):
+        repo, remote = repo_with_remote
         provider = _RecordingTokenProvider()
         opener = _forgejo_create_opener()
         code = _run_main(
@@ -1591,12 +1588,15 @@ class TestLeaseControl:
         )
         assert code == verb.EXIT_OK
         stderr = capsys.readouterr().err
-        assert "force-with-lease=True" in stderr
-        assert "history-rewritten" in stderr
+        assert "push: does not force" in stderr
+        assert "history rewritten=True" in stderr
+        remote_author = subprocess.run(
+            ["git", "log", "-1", "--format=%ae", "feature"],
+            cwd=str(remote), capture_output=True, text=True, check=True,
+        ).stdout.strip()
+        assert remote_author == "bot@example.com"
 
-    def test_explicit_no_force_with_lease_overrides_auto_derivation(self, repo_with_remote, monkeypatch, capsys):
-        """An explicit --no-force-with-lease wins even when bot-identity
-        re-authoring would otherwise auto-derive force-on."""
+    def test_no_force_with_lease_is_an_accepted_no_op(self, repo_with_remote, monkeypatch, capsys):
         repo, _remote = repo_with_remote
         provider = _RecordingTokenProvider()
         opener = _forgejo_create_opener()
@@ -1614,40 +1614,14 @@ class TestLeaseControl:
         )
         assert code == verb.EXIT_OK
         stderr = capsys.readouterr().err
-        assert "force-with-lease=False" in stderr
-        assert "cli-flag(--no-force-with-lease)" in stderr
+        assert "push: does not force" in stderr
 
-    def test_explicit_force_with_lease_wins_with_no_reauthoring(self, repo_with_remote, monkeypatch, capsys):
+    def test_force_with_lease_flag_no_longer_exists(self, repo_with_remote, monkeypatch):
         repo, _remote = repo_with_remote
-        provider = _RecordingTokenProvider()
-        opener = _forgejo_create_opener()
         code = _run_main(
             [
                 "--repo-path", str(repo), "--platform", "forgejo",
                 "--title", "feat: t", "--body-stdin", "--force-with-lease",
-            ],
-            token_provider=provider,
-            opener=opener,
-            stdin_text=json.dumps({"body": "some body"}),
-            monkeypatch=monkeypatch,
-        )
-        assert code == verb.EXIT_OK
-        stderr = capsys.readouterr().err
-        assert "force-with-lease=True" in stderr
-        assert "cli-flag(--force-with-lease)" in stderr
-
-    def test_force_with_lease_and_no_force_with_lease_together_is_usage_error(self, repo_with_remote, monkeypatch):
-        """--force-with-lease/--no-force-with-lease is an argparse
-        mutually-exclusive group -- argparse itself refuses this
-        combination (SystemExit(2)) before this verb's own _run ever
-        executes, exactly like the pre-existing --replace-body/
-        --append-body group above."""
-        repo, _remote = repo_with_remote
-        code = _run_main(
-            [
-                "--repo-path", str(repo), "--platform", "forgejo",
-                "--title", "feat: t", "--body-stdin",
-                "--force-with-lease", "--no-force-with-lease",
             ],
             token_provider=_RefusingTokenProvider(),
             stdin_text=json.dumps({"body": "some body"}),
@@ -1655,41 +1629,111 @@ class TestLeaseControl:
         )
         assert code == 2
 
-    def test_forced_lease_fetches_remote_tracking_ref_before_push(self, repo_with_remote, monkeypatch, capsys):
-        """resolve_lease's pre-lease fetch (push.lease_control) must
-        actually run when the resolved decision is to force -- proven by
-        asserting the printed 'pre-lease fetch attempted=True' marker."""
-        repo, _remote = repo_with_remote
-        provider = _RecordingTokenProvider()
-        opener = _forgejo_create_opener()
-        code = _run_main(
-            [
-                "--repo-path", str(repo), "--platform", "forgejo",
-                "--title", "feat: t", "--body-stdin", "--force-with-lease",
-            ],
-            token_provider=provider,
-            opener=opener,
-            stdin_text=json.dumps({"body": "some body"}),
-            monkeypatch=monkeypatch,
-        )
+    def test_help_lists_no_force_with_lease_as_a_no_op_only(self, monkeypatch, capsys):
+        code = _run_main(["--help"], token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch)
         assert code == verb.EXIT_OK
-        stderr = capsys.readouterr().err
-        assert "pre-lease fetch attempted=True" in stderr
+        out = capsys.readouterr().out
+        assert "--no-force-with-lease" in out
+        assert "[--force-with-lease]" not in out
+        assert "\n  --force-with-lease" not in out
+        assert "No-op, kept for compatibility" in " ".join(out.split())
 
-    def test_no_force_never_attempts_a_pre_lease_fetch(self, repo_with_remote, monkeypatch, capsys):
-        repo, _remote = repo_with_remote
-        provider = _RecordingTokenProvider()
-        opener = _forgejo_create_opener()
+    def test_already_pushed_commits_keep_their_shas_and_push_fast_forwards(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        """A human-authored commit pushed earlier is on the remote; a later
+        bot-identity push re-authors only the new commit, so the push is a
+        fast-forward and the published SHA never changes."""
+        repo, remote = repo_with_remote
+        base_args = [
+            "--repo-path", str(repo), "--platform", "forgejo",
+            "--title", "feat: t", "--body-stdin",
+        ]
         code = _run_main(
-            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-stdin"],
-            token_provider=provider,
-            opener=opener,
+            base_args,
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_create_opener(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        published = _git(["rev-parse", "feature"], repo).stdout.strip()
+
+        (repo / "second.txt").write_text("more\n")
+        _git(["add", "second.txt"], repo)
+        _git(["commit", "-m", "feat: add second"], repo)
+        capsys.readouterr()
+
+        code = _run_main(
+            [*base_args, "--bot-name", "Bot Name", "--bot-email", "bot@example.com"],
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_create_opener(),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_OK
         stderr = capsys.readouterr().err
-        assert "pre-lease fetch attempted=False" in stderr
+        assert "re-authoring 1 commit(s)" in stderr
+        assert "history rewritten=True" in stderr
+        remote_head = _git(["rev-parse", "feature"], remote).stdout.strip()
+        assert _git(["rev-parse", "feature^"], remote).stdout.strip() == published
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == remote_head
+
+    def test_everything_already_pushed_reports_no_rewrite(self, repo_with_remote, monkeypatch, capsys):
+        repo, remote = repo_with_remote
+        args = [
+            "--repo-path", str(repo), "--platform", "forgejo",
+            "--title", "feat: t", "--body-stdin",
+            "--bot-name", "Bot Name", "--bot-email", "bot@example.com",
+        ]
+        for _ in range(2):
+            capsys.readouterr()
+            code = _run_main(
+                args,
+                token_provider=_RecordingTokenProvider(),
+                opener=_forgejo_create_opener(),
+                stdin_text=json.dumps({"body": "some body"}),
+                monkeypatch=monkeypatch,
+            )
+            assert code == verb.EXIT_OK
+        stderr = capsys.readouterr().err
+        assert "history rewritten=False" in stderr
+        assert _git(["rev-parse", "HEAD"], repo).stdout.strip() == _git(
+            ["rev-parse", "feature"], remote
+        ).stdout.strip()
+
+    def test_diverged_remote_is_rejected_by_git_with_the_superseding_branch_hint(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, remote = repo_with_remote
+        base_args = [
+            "--repo-path", str(repo), "--platform", "forgejo",
+            "--title", "feat: t", "--body-stdin",
+        ]
+        code = _run_main(
+            base_args,
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_create_opener(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        published = _git(["rev-parse", "feature"], remote).stdout.strip()
+
+        _git(["commit", "--amend", "-m", "feat: add feature work, reworded"], repo)
+        capsys.readouterr()
+        code = _run_main(
+            base_args,
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_create_opener(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PUSH_FAILED
+        stderr = capsys.readouterr().err
+        assert "non-fast-forward" in stderr
+        assert "superseding branch" in stderr
+        assert _git(["rev-parse", "feature"], remote).stdout.strip() == published
 
 
 class TestCreatePrForgejo:

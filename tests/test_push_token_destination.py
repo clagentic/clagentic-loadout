@@ -12,7 +12,7 @@ token (the refusal came before the mint) and the listener saw nothing.
   V2  GitHub, `branch.<name>.remote` names an alias whose url is the listener
   V3  Forgejo, `branch.<name>.remote` holds the listener URL (fails closed already)
   V4  Forgejo, an alias whose url is the anchored host and whose pushurl is the listener
-  V5  V1 with --force-with-lease (the pre-lease fetch is another token-bearing call)
+  V5  V1 with a bot identity (the pre-reauthor fetch is another token-bearing call)
   V6  GitHub, push destination is local but the fetch url is the listener
 """
 
@@ -198,7 +198,7 @@ def test_v4_forgejo_second_pushurl_is_checked_too(repo_with_remote, listener, mo
     assert code == verb.EXIT_REMOTE_ERROR
 
 
-def test_v5_forced_lease_pre_fetch_cannot_reach_an_off_host_remote(
+def test_v5_pre_reauthor_fetch_cannot_reach_an_off_host_remote(
     repo_with_remote, listener, monkeypatch, capsys
 ):
     repo, _remote = repo_with_remote
@@ -206,20 +206,21 @@ def test_v5_forced_lease_pre_fetch_cannot_reach_an_off_host_remote(
     provider = RecordingTokenProvider(token=TOKEN)
 
     code = _run(
-        _github_args(repo, "--force-with-lease"), monkeypatch, provider=provider, opener=_github_opener
+        _github_args(repo, "--bot-name", "Bot", "--bot-email", "bot@example.com"),
+        monkeypatch, provider=provider, opener=_github_opener,
     )
 
     _assert_refused_before_mint(code, provider, listener, capsys)
     assert code == verb.EXIT_REMOTE_ERROR
 
 
-@pytest.mark.parametrize("extra", [(), ("--force-with-lease",)])
+@pytest.mark.parametrize("extra", [(), ("--no-force-with-lease",)])
 def test_v6_off_host_fetch_url_is_refused_before_the_mint(
     extra, repo_with_remote, listener, monkeypatch, capsys
 ):
-    """The push goes to a local bare repo, but the pre-lease fetch and the
+    """The push goes to a local bare repo, but the pre-reauthor fetch and the
     readback present the token to the fetch url, so it is judged like the push
-    destination: refused before the mint, with the lease safety intact."""
+    destination: refused before the mint."""
     repo, _remote = repo_with_remote
     git(["remote", "set-url", "origin", listener.url], repo)
     provider = RecordingTokenProvider(token=TOKEN)
@@ -307,7 +308,7 @@ def _install_env_recording_hook(remote, record):
     hook.chmod(0o755)
 
 
-@pytest.mark.parametrize("extra", [(), ("--force-with-lease",)])
+@pytest.mark.parametrize("extra", [(), ("--no-force-with-lease",)])
 def test_a_local_destination_hook_sees_no_credential(
     extra, repo_with_remote, monkeypatch, capsys, tmp_path
 ):

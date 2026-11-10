@@ -425,7 +425,8 @@ review:
 
 - **`builder_identity`** (`clagentic_loadout.push.identity_config`) — the
   `name`/`email` pair `push.identity.pin_commits_to_bot_identity` re-authors
-  commits to before push. Identity-bearing, so deployment-tier only — this
+  commits to before push (commits already on the pushed branch's remote copy
+  are never re-authored, and the push is never forced). Identity-bearing, so deployment-tier only — this
   module has no `repo_root` parameter anywhere in its API, mirroring
   `transport.github_app_config`'s own no-repo-local-tier choice. Absent
   means commit re-authoring is not configured; the caller's own

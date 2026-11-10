@@ -64,19 +64,11 @@ push.push_failure_labels) from the parsed reason plus the pre-existing
 remote-line/local-hook-line/transport-substring signals, but the reason
 text itself is always parsed structurally first.
 
-LEASE CONTROL — REMOVED FROM verb.py'S OWN DERIVATION (lr-f57f13, D5
-DECIDED): `git_push_with_token`'s `force_with_lease` parameter is UNCHANGED
-in shape, but callers (see push.verb) no longer derive it from "did we
-rewrite commit authorship" -- that derivation was a non-sequitur (re-
-authoring is loadout's own act and says nothing about remote state) and,
-combined with loadout never fetching before pushing, silently forced a
-lease evaluation against a STALE local remote-tracking ref on essentially
-every push, converting a genuine conflict into the one rejection shape git
-explains least. See push.verb's own `--force-with-lease`/`--no-force-with-
-lease` flags (push.lease_control.resolve_lease performs the pre-lease
-remote fetch automatically whenever the resolved decision is to force) for
-the explicit CLI control and printed resolved-lease-state contract this
-task requires.
+NEVER FORCES (lr-d9683c): `git_push_with_token` has no force or lease
+parameter and its argv never carries `--force`/`--force-with-lease`. An
+automatic lease on a re-authored branch could overwrite a published branch,
+so the capability is gone rather than gated; a genuine non-fast-forward is
+git's own rejection, reported with NON_FAST_FORWARD_HINT.
 
 Push-failure observability (ported for parity from the reference push
 transport's lr-a1fd4d / lr-8460a4 fixes, refined by lr-f57f13): a bare
@@ -125,8 +117,7 @@ REPORTING RESOLVED FACTS, NOT GUESSES (CLAUDE.md hard rule 4; lr-f57f13
 REJECTED an alternative that would have violated it): even when
 classification lands on "unknown," this module reports what it OBSERVED --
 exit code, stderr byte count, whether a "To <url>" line was present (the
-real did-we-reach-transport signal), the resolved refspec, and the
-lease flag with its derivation -- never a narrative claim like "the push
+real did-we-reach-transport signal), the resolved refspec -- never a narrative claim like "the push
 either never reached the server-side hook or was refused before it," which
 would be flatly false for a locally-detected non-fast-forward/lease failure
 (absence of remote sideband is EXPECTED and carries zero information in
@@ -142,11 +133,11 @@ so the guarantee holds regardless of which module constructs a
 `GitPushError` in the future, not merely because this module's own call
 site happens to redact first.
 
-CREDENTIALED PRE-LEASE FETCH (lr-f57f13, pre-merge security review
-finding, fixed here): `push.lease_control.resolve_lease` needs to fetch the
-target branch's remote-tracking ref before a forced lease is evaluated (see
-that module's own docstring for why). The FIRST shipped version of that
-fetch ran a bare ambient `git fetch` with no credential envelope at all —
+CREDENTIALED PRE-PUSH FETCH (lr-f57f13, pre-merge security review
+finding, fixed here): `push.verb` fetches the target branch's remote-tracking
+ref before bot-identity re-authoring so already-pushed commits are never
+rebuilt. The FIRST shipped version of a pre-push fetch
+ran a bare ambient `git fetch` with no credential envelope at all —
 outside the minted-token path this module exists to enforce, and on
 failure folded raw, unredacted stderr into a printed warning.
 `_credentialed_git_env` below is the SHARED environment-construction
@@ -154,7 +145,7 @@ primitive (GIT_ASKPASS + isolated HOME + opt-in GIT_TRACE) both
 `git_push_with_token` and the new `git_fetch_with_token` build their
 subprocess call on top of — a single tested implementation of "how this
 package talks to a remote with a minted token," rather than a second,
-divergent copy for the pre-lease fetch to reinvent (and potentially get
+divergent copy for the pre-push fetch to reinvent (and potentially get
 wrong) on its own.
 
 HERMETIC AGAINST AMBIENT CREDENTIAL MACHINERY, NOT MERELY HOME-ISOLATED
@@ -207,6 +198,7 @@ from clagentic_loadout.push.git_hermeticity import (
     neutralize_ambient_git_env,
 )
 from clagentic_loadout.push.push_failure_labels import (
+    NON_FAST_FORWARD_HINT,
     SUB_CAUSE_AUTH_FAILED,
     SUB_CAUSE_BAD_REFSPEC,
     SUB_CAUSE_LOCAL_HOOK_REJECTED,
@@ -795,7 +787,7 @@ class GitFetchError(Exception):
     `git_fetch_with_token`) exits non-zero. Carries the ALREADY-REDACTED
     stderr (see `push.push_redaction.redact_push_secrets`, applied here
     with the same `known_secrets=(token,)` the push path uses) — a caller
-    (push.lease_control.resolve_lease) folds `str(exc)` directly into a
+    (push.verb's pre-reauthor fetch) folds `str(exc)` directly into a
     printed warning with no further redaction step required."""
 
 
@@ -811,9 +803,8 @@ def git_fetch_with_token(
     `_credentialed_git_env`) — never an ambient credential.
 
     lr-f57f13 (pre-merge security review finding, fixed here): this exists
-    because `push.lease_control.resolve_lease` needs to refresh the
-    remote-tracking ref before evaluating a forced `--force-with-lease`
-    push, and the first shipped version of that refresh ran a bare
+    because `push.verb` needs to refresh the remote-tracking ref before
+    re-authoring commits, and the first shipped version of that refresh ran a bare
     `subprocess.run(["git", "fetch", ...])` with no credential envelope at
     all — authenticating via whatever ambient credential helper happened to
     be configured for the remote, entirely outside the minted-token path
@@ -901,8 +892,6 @@ def git_push_with_token(
     token: str,
     git_cwd: Path | None = None,
     *,
-    force_with_lease: bool = False,
-    lease_origin: str = "",
     platform: str | None = None,
     other_platform_label: str | None = None,
     dry_run: bool = False,
@@ -920,19 +909,10 @@ def git_push_with_token(
     'github'), never a value this module invents. Omit either to skip the
     hint.
 
-    *force_with_lease*: pass True to push with `--force-with-lease`. lr-f57f13
-    REMOVAL: this module no longer derives the value from "did we rewrite
-    history" -- see push.verb for the CLI-exposed control
-    (`--force-with-lease`/`--no-force-with-lease`) and the pre-lease remote
-    fetch (`git_fetch_with_token`, via the SAME credentialed envelope) that
-    makes forcing safe to evaluate against a CURRENT remote-tracking ref
-    rather than a stale one (module docstring, LEASE CONTROL).
-
-    *lease_origin*: a caller-supplied label describing WHERE the
-    *force_with_lease* value came from (e.g. "cli-flag", "history-rewritten
-    + fetched", "default-false") -- folded into the raised message so a
-    lease-related failure never requires re-deriving why forcing was (or
-    was not) in effect; see push.verb's own resolve-and-print contract.
+    This function NEVER forces: the argv carries neither `--force` nor
+    `--force-with-lease`, so a branch that is not a fast-forward of the
+    remote's copy is rejected by git itself and reported with
+    NON_FAST_FORWARD_HINT.
 
     *dry_run* (lr-68039e): pass True to append `--dry-run` to the SAME argv
     this function always builds, through the SAME call site and hermeticity
@@ -981,8 +961,6 @@ def git_push_with_token(
     ) as env:
         refspec = f"{branch}:{branch}"
         push_cmd = ["git", *_HERMETIC_ARGV_PREFIX, "push", remote, refspec, "--set-upstream"]
-        if force_with_lease:
-            push_cmd.append("--force-with-lease")
         if dry_run:
             push_cmd.append("--dry-run")
         if verbose:
@@ -1057,7 +1035,7 @@ def git_push_with_token(
             # CLAUDE.md hard rule 4): every field here is something this
             # call OBSERVED -- exit code, byte count, the parsed reason (or
             # its absence), whether transport was reached, the resolved
-            # refspec, and the lease flag with its origin. The remote is
+            # refspec. The remote is
             # deliberately not among them: it can be a URL carrying a
             # credential. Never a
             # narrative claim about why a signal is absent. stderr_bytes is
@@ -1069,8 +1047,10 @@ def git_push_with_token(
             facts_note = (
                 f" [exit={result.returncode} stderr_bytes={len(result.stderr)}"
                 f" reached_transport={reached_transport}"
-                f" refspec={refspec!r} force_with_lease={force_with_lease}"
-                f" lease_origin={lease_origin!r}{reason_note}]"
+                f" refspec={refspec!r}{reason_note}]"
+            )
+            remedy_note = (
+                f" {NON_FAST_FORWARD_HINT}" if sub_cause == SUB_CAUSE_NON_FAST_FORWARD else ""
             )
 
             # git's own push diagnostics ("To <url>", "fatal: unable to access
@@ -1079,7 +1059,7 @@ def git_push_with_token(
             message = (
                 f"git push failed (exit {result.returncode}, {sub_cause}); git's own "
                 f"output is withheld because it can quote the remote URL."
-                f"{withheld_note}{mismatch_hint}{facts_note}"
+                f"{withheld_note}{mismatch_hint}{remedy_note}{facts_note}"
             )
 
             raise GitPushError(
@@ -1093,8 +1073,6 @@ def git_push_with_token(
                 reached_transport=reached_transport,
                 remote=remote,
                 refspec=refspec,
-                lease_forced=force_with_lease,
-                lease_origin=lease_origin,
                 known_secrets=(token,),
             )
 

@@ -115,7 +115,7 @@ def test_every_pushurl_is_checked_not_just_the_first(tree):
 def test_the_fetch_destination_is_checked_even_when_the_push_destination_is_fine(
     tree, fetch_url, push_urls, category
 ):
-    """The pre-lease fetch and the readback present the token to the fetch url,
+    """The pre-reauthor fetch and the readback present the token to the fetch url,
     so an off-host fetch url refuses the push before the mint."""
     _remote(tree, fetch_url, push_urls=push_urls)
 

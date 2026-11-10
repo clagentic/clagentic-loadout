@@ -8,14 +8,14 @@ URL as the value of `branch.<name>.remote`, and a configured remote may carry
 a `pushurl` that differs from the `url` the verb parses its coordinates from.
 Neither value was anchored to the platform host, so a repo-local config value
 could route the token to an arbitrary http(s) peer. The same destination is
-used by the pre-lease fetch and the post-push readback, both of which also
+used by the pre-reauthor fetch and the post-push readback, both of which also
 present the token.
 
 THE RULE (all checks run before any credential is minted):
   - the tracking remote must be a CONFIGURED remote (`git remote` lists it);
     a URL, or any value that is not a remote name, is refused;
   - every push destination (`git remote get-url --push --all`) and every fetch
-    destination (`git remote get-url --all`; the pre-lease fetch and the
+    destination (`git remote get-url --all`; the pre-reauthor fetch and the
     post-push readback present the token to it) must be either
     an http(s) URL whose host and port equal the anchored platform authority,
     or a destination that cannot reach a network peer: a plain local path or a
@@ -242,7 +242,7 @@ def check_push_destination(
 ) -> None:
     """Refuse (DestinationDeniedError) unless every push destination AND every
     fetch destination of *tracking_remote_name* may receive the token. The
-    fetch urls are checked too because the pre-lease fetch and the post-push
+    fetch urls are checked too because the pre-reauthor fetch and the post-push
     readback present the token to them. *anchor_url* is the platform URL whose
     host and port an http(s) destination must equal."""
     anchor = _anchor_authority(anchor_url)

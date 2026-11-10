@@ -284,7 +284,11 @@ from clagentic_loadout.push.git_hermeticity import (
     GitVersionTooOldError,
     RepoLocalConfigHazardError,
 )
-from clagentic_loadout.push.git_push import git_push_with_token
+from clagentic_loadout.push.git_push import (
+    GitFetchError,
+    git_fetch_with_token,
+    git_push_with_token,
+)
 from clagentic_loadout.push.host_guard import (
     check_host_allowed,
     resolve_host_ceiling,
@@ -298,7 +302,6 @@ from clagentic_loadout.push.issue_link import (
     normalize_closes_trailer,
     normalize_task_trailer,
 )
-from clagentic_loadout.push.lease_control import resolve_lease
 from clagentic_loadout.push.namespace_guard import (
     check_namespace_allowed,
     resolve_allowed_namespaces,
@@ -534,10 +537,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Conventional Commits grammar; a non-conformant subject (e.g. a "
             "stray merge commit from another PR) fails closed, exit "
             f"{EXIT_STRAY_MERGE_COMMIT} -- see --skip-branch-commit-check. "
-            "--force-with-lease/--no-force-with-lease explicitly control "
-            "whether the push forces with a lease; the resolved value and "
-            "its origin are always printed to stderr before the push runs "
-            "-- see those flags' own help. --dry-run performs a read-only "
+            "The push never forces (no --force, no --force-with-lease): "
+            "bot-identity re-authoring skips commits already on the remote "
+            "branch, and a genuine non-fast-forward is rejected by git with "
+            "a hint to open a superseding branch. "
+            "--no-force-with-lease is accepted as a no-op. --dry-run performs a read-only "
             "push attempt through the same minted credential path, "
             "surfacing the full transcript with no ref updated on the "
             "remote. --verbose/--trace enables git's own verbose push "
@@ -811,31 +815,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"exits {EXIT_WORKING_TREE_CONTENTION} "
         f"({EXIT_WORKING_TREE_CONTENTION}=EXIT_WORKING_TREE_CONTENTION).",
     )
-    lease_group = parser.add_mutually_exclusive_group()
-    lease_group.add_argument(
-        "--force-with-lease",
-        action="store_true",
-        default=None,
-        dest="cli_force_with_lease",
-        help="Force the push with `git push --force-with-lease`, and "
-        "refresh the remote-tracking ref via `git fetch` immediately "
-        "before the lease is evaluated (push.lease_control). ALWAYS wins "
-        "over the auto-derived default (whether bot-identity re-authoring "
-        "rewrote this branch's commits) -- the resolved value and its "
-        "origin are always printed to stderr before the push runs, never "
-        "inferred silently. Mutually exclusive with --no-force-with-lease.",
-    )
-    lease_group.add_argument(
+    parser.add_argument(
         "--no-force-with-lease",
-        action="store_false",
-        default=None,
-        dest="cli_force_with_lease",
-        help="Push WITHOUT --force-with-lease, overriding the auto-derived "
-        "default. Mutually exclusive with --force-with-lease. Omitting "
-        "both flags falls back to the auto-derived default: forced only "
-        "when bot-identity re-authoring rewrote this branch's commits "
-        "(the ordinary case for a re-authored push against its own "
-        "previously-pushed history).",
+        action="store_true",
+        default=False,
+        dest="no_force_with_lease",
+        help="No-op, kept for compatibility with callers that pass it. "
+        "The push never forces, with or without this flag.",
     )
     parser.add_argument(
         "--dry-run",
@@ -2594,7 +2580,7 @@ def _run_create_pr(
             _fail(str(exc), code=EXIT_HOST_DENIED)
 
     # Token destination anchoring: the minted token is presented to whatever the
-    # push (and the lease pre-fetch and readback) reaches, so the tracking
+    # push (and the pre-reauthor fetch and readback) reaches, so the tracking
     # remote must be a configured remote whose push destinations are the
     # platform host or cannot reach a peer, for both its push and its fetch
     # urls. Runs before the mint.
@@ -2715,10 +2701,31 @@ def _run_create_pr(
         except DirtyWorkTreeError as exc:
             _fail(str(exc), code=EXIT_DIRTY_WORK_TREE)
 
+    # Refresh the pushed branch's remote-tracking ref first, so re-authoring
+    # excludes every commit already on the remote and the push stays a
+    # fast-forward. Same credentialed envelope as the push. A failed fetch (or
+    # a branch the remote does not have yet) only warns: a stale ref can at
+    # worst yield a non-fast-forward, which git rejects -- it never forces.
+    remote_branch_ref: str | None = None
+    if effective_bot_name and effective_bot_email:
+        try:
+            git_fetch_with_token(remote_name, branch, token, project_root)
+        except GitFetchError as exc:
+            print(
+                f"push: WARNING -- could not refresh the remote copy of {branch!r} "
+                f"before re-authoring ({exc}); the branch may not exist on the "
+                f"remote yet, or the ref may be stale.",
+                file=sys.stderr,
+            )
+        except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
+            _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
+        remote_branch_ref = identity.remote_tracking_ref(remote_name, branch)
+
     try:
         history_rewritten = identity.pin_commits_to_bot_identity(
             effective_bot_name, effective_bot_email, args.base, project_root,
             fail_closed_on_missing=args.require_bot_identity,
+            remote_branch_ref=remote_branch_ref,
         )
     except AuthorMismatchError as exc:
         _fail(str(exc), code=EXIT_AUTHOR_MISMATCH)
@@ -2728,7 +2735,7 @@ def _run_create_pr(
     # The guard fetches share the push's credentialed hermetic primitive and the
     # minted token: the destination was anchored above, so the token goes only
     # to the platform host, and a private repo is still checked. A hermeticity
-    # refusal is fail-closed, the same as at the lease fetch and the push.
+    # refusal is fail-closed, the same as at the pre-reauthor fetch and the push.
     try:
         _run_branch_commit_check(
             project_root,
@@ -2759,51 +2766,15 @@ def _run_create_pr(
             profile_items_out=verify_profile_items,
         )
 
-    # LEASE CONTROL (lr-f57f13, D5 DECIDED): never derive force_with_lease
-    # silently from history_rewritten alone -- resolve_lease applies the
-    # explicit CLI override first, refreshes the remote-tracking ref before
-    # trusting a forced lease evaluation, and returns the origin label this
-    # call prints below BEFORE the push runs (see push.lease_control's own
-    # module docstring for the full defect this closes: loadout re-authoring
-    # commits on essentially every push silently forced a lease evaluation
-    # against a STALE remote-tracking ref, converting an ordinary conflict
-    # into git's least-explained rejection shape, "(stale info)"). `token`
-    # is passed through so the pre-lease fetch runs via the SAME
-    # credentialed envelope as the push itself (pre-merge security review
-    # finding: the first shipped version fetched via an ambient credential
-    # helper instead of the minted token) -- see push.lease_control's own
-    # docstring, "CREDENTIALED FETCH, NOT AN AMBIENT ONE".
-    # HERMETICITY PRE-FLIGHT (lr-a868d2): resolve_lease's own pre-lease fetch
-    # (when a lease is being forced) runs through the SAME credentialed,
-    # hermetic envelope git_push_with_token itself uses -- a
-    # GitVersionTooOldError/RepoLocalConfigHazardError raised there is a
-    # fail-closed hermeticity refusal, NOT an ordinary fetch failure (which
-    # resolve_lease already degrades to a printed warning on its own, via a
-    # narrower `except GitFetchError` that does not catch either of these) --
-    # so it must terminate this invocation rather than silently letting the
-    # push proceed. The push call below performs the SAME pre-flight
-    # independently (it does not skip this check just because resolve_lease
-    # already ran it -- see git_push_with_token's own docstring), so a
-    # no-lease-forced invocation (which never calls resolve_lease's fetch at
-    # all) is still covered.
-    try:
-        lease = resolve_lease(
-            cli_force_with_lease=args.cli_force_with_lease,
-            history_rewritten=history_rewritten,
-            remote=remote_name,
-            branch=branch,
-            project_root=project_root,
-            token=token,
-        )
-    except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
-        _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
+    # The push never forces (no --force, no --force-with-lease): a branch that
+    # is not a fast-forward of the remote's copy is rejected by git and
+    # reported with the superseding-branch remedy. State that on every push so
+    # a caller never has to infer it.
     print(
-        f"push: force-with-lease={lease.force_with_lease} "
-        f"(origin={lease.origin!r}, pre-lease fetch attempted={lease.fetch_attempted})",
+        f"push: does not force (plain push; history rewritten={history_rewritten}) -- "
+        f"a non-fast-forward is rejected by git, never overwritten",
         file=sys.stderr,
     )
-    if lease.fetch_warning:
-        print(f"push: WARNING -- {lease.fetch_warning}", file=sys.stderr)
 
     other_platform_label = PLATFORM_FORGEJO if args.platform == PLATFORM_GITHUB else PLATFORM_GITHUB
     # The push is the first remote write: spend the staged pair here and on
@@ -2813,8 +2784,6 @@ def _run_create_pr(
     try:
         git_push_with_token(
             remote_name, branch, token, project_root,
-            force_with_lease=lease.force_with_lease,
-            lease_origin=lease.origin,
             platform=args.platform,
             other_platform_label=other_platform_label,
             dry_run=args.dry_run,

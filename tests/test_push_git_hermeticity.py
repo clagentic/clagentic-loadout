@@ -28,15 +28,13 @@ answer a git-smart-http credential/auth exchange -- proving the plumbing
 actually reaches libcurl's credential-resolution path, the same one a real
 ambient credential would be consulted from, before the connection
 necessarily fails for an unrelated reason (this stub server does not speak
-the full git-smart-http protocol; see push.lease_control's own existing
-test for the same technique and the same honest limit).
+the full git-smart-http protocol).
 
 NOTE ON RIGOR (task's own honesty requirement): there is no published
 standard hermetic-push test harness. This suite's pattern (a stub local
 HTTP server, a genuinely hostile ambient config/env value, a sentinel side
 effect proving consultation) is well-grounded in real git/libcurl
-semantics and in the isolated-HOME regression test push.lease_control
-already carries, but is novel as a suite -- it is not itself an
+semantics, but is novel as a suite -- it is not itself an
 established, widely-used test methodology.
 """
 
