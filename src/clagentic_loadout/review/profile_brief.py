@@ -47,6 +47,8 @@ def declared_tests(tests: DeclaredTests | None) -> dict[str, Any] | None:
         for key in ("full", "impacted", "files")
         if getattr(tests, key)
     }
+    if tests.prepare:
+        out["prepare"] = list(tests.prepare)
     if tests.base:
         out["base"] = tests.base
     if tests.paths:

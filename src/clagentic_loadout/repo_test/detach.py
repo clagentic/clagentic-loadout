@@ -41,6 +41,7 @@ def _job_of(prepared: PreparedRun) -> str:
             "tier": prepared.tier,
             "template": list(prepared.template),
             "files": list(prepared.files),
+            "prepare": list(prepared.prepare) if prepared.prepare else None,
             "base_sha": prepared.base_sha,
             "timeout_seconds": prepared.timeout_seconds,
         }
@@ -57,6 +58,7 @@ def _prepared_of(job: str) -> PreparedRun:
         tier=data["tier"],
         template=tuple(data["template"]),
         files=tuple(data["files"]),
+        prepare=tuple(data["prepare"]) if data.get("prepare") else None,
         base_sha=data["base_sha"],
         timeout_seconds=data["timeout_seconds"],
         # The supervisor prints no summary, so it has no use for the provenance.

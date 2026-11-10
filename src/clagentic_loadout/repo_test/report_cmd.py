@@ -256,6 +256,9 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
     note = _failing_id_note(run)
     if note is not None:
         summary["failing_id_note"] = note
+    prepare = result.get("prepare")
+    if isinstance(prepare, dict):
+        summary["prepare"] = prepare
     tail = result.get("failure_log_tail")
     if run.state == store.STATE_UNRUNNABLE and isinstance(tail, str) and tail:
         summary["failure_log_tail"] = tail
