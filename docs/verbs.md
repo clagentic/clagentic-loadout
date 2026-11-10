@@ -1525,7 +1525,9 @@ name part) and prints, as one JSON object, each group rule with its `group`, its
 
 **Where the groups file is.** In order: `--groups-file`; the `CLAGENTIC_LOADOUT_GROUPS_FILE`
 environment variable; the `rules.groups_file` setting of the user-level config file
-(`~/.config/clagentic/loadout/config.yaml`). Nothing is read from the repository under work. With
+(`~/.config/clagentic/loadout/config.yaml`), which `scripts/install.sh --groups-file PATH` seeds
+(an existing value is replaced only when the option is given; a path that does not exist yet is
+written with a notice, and `--no-seed-config` skips it). Nothing is read from the repository under work. With
 none of them set, or no file at the configured path, the result is
 `{"result": "empty", "groups": [], "reason": ...}` with exit `0`: the reason says which. A file that
 exists and cannot be parsed exits `80` and names the resolved path.

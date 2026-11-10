@@ -1225,3 +1225,124 @@ def test_install_sh_default_still_seeds_config(tmp_path: Path, shared_venv_data_
     assert result.returncode == 0, result.stderr
     assert (home / ".config" / "clagentic" / "loadout" / "config.yaml").is_file()
     assert "skipping git-host config seeding" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Groups-file config seeding: --groups-file writes rules.groups_file into the
+# same user config.yaml the git-host seeding writes.
+# ---------------------------------------------------------------------------
+
+
+def _fresh_home(tmp_path: Path) -> Path:
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    return fake_home
+
+
+def test_install_sh_groups_file_seeds_value_and_resolver_reads_it(
+    tmp_path: Path, shared_venv_data_dir: Path
+) -> None:
+    from clagentic_loadout.rules.groups import FROM_CONFIG, resolve_groups_location
+
+    fake_home = _fresh_home(tmp_path)
+    groups = tmp_path / "x" / "groups.yaml"
+
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--groups-file", str(groups))
+    assert result.returncode == 0, result.stderr
+
+    config_path = _config_yaml_path(fake_home)
+    assert oct(config_path.stat().st_mode)[-3:] == "600"
+    location = resolve_groups_location(None, {}, config_root=config_path.parent)
+    assert location.path == str(groups)
+    assert location.origin == FROM_CONFIG
+
+
+def test_install_sh_without_groups_file_leaves_existing_values(
+    tmp_path: Path, shared_venv_data_dir: Path
+) -> None:
+    fake_home = _fresh_home(tmp_path)
+    config_dir = _config_yaml_path(fake_home).parent
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "forgejo:\n  base_url: 'https://git.example.com'\nrules:\n  groups_file: '/tmp/a/groups.yaml'\n"
+    )
+
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
+    assert result.returncode == 0, result.stderr
+
+    content = _config_yaml_path(fake_home).read_text()
+    assert "base_url: 'https://git.example.com'" in content
+    assert "groups_file: '/tmp/a/groups.yaml'" in content
+
+
+def test_install_sh_without_groups_file_writes_no_rules_section(
+    tmp_path: Path, shared_venv_data_dir: Path
+) -> None:
+    fake_home = _fresh_home(tmp_path)
+
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home)
+    assert result.returncode == 0, result.stderr
+    assert "rules:" not in _config_yaml_path(fake_home).read_text()
+
+
+def test_install_sh_groups_file_replaces_prior_value_and_keeps_other_keys(
+    tmp_path: Path, shared_venv_data_dir: Path
+) -> None:
+    fake_home = _fresh_home(tmp_path)
+    config_dir = _config_yaml_path(fake_home).parent
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "credentials:\n  token_provider_forgejo: command\n"
+        "rules:\n  groups_file: '/tmp/a/groups.yaml'\n  other_key: keep\n"
+        "forgejo:\n  base_url: 'https://git.example.com'\n"
+    )
+
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--groups-file", "/tmp/b/groups.yaml")
+    assert result.returncode == 0, result.stderr
+
+    content = _config_yaml_path(fake_home).read_text()
+    assert content.count("groups_file:") == 1
+    assert "groups_file: '/tmp/b/groups.yaml'" in content
+    assert "/tmp/a/groups.yaml" not in content
+    assert "other_key: keep" in content
+    assert "token_provider_forgejo: command" in content
+    assert "base_url: 'https://git.example.com'" in content
+
+
+def test_install_sh_groups_file_missing_path_notices_and_exits_zero(
+    tmp_path: Path, shared_venv_data_dir: Path
+) -> None:
+    fake_home = _fresh_home(tmp_path)
+    missing = tmp_path / "nowhere" / "groups.yaml"
+
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--groups-file", str(missing))
+    assert result.returncode == 0, result.stderr
+
+    assert f"groups_file: '{missing}'" in _config_yaml_path(fake_home).read_text()
+    notices = [line for line in result.stderr.splitlines() if str(missing) in line and "notice" in line]
+    assert len(notices) == 1
+
+
+def test_install_sh_groups_file_skipped_by_no_seed_config(
+    tmp_path: Path, shared_venv_data_dir: Path
+) -> None:
+    fake_home = _fresh_home(tmp_path)
+
+    result = _run_venv_install(
+        shared_venv_data_dir, tmp_path, fake_home, "--groups-file", "/tmp/x/groups.yaml", "--no-seed-config"
+    )
+    assert result.returncode == 0, result.stderr
+    assert not _config_yaml_path(fake_home).exists()
+
+
+def test_install_sh_dry_run_reports_groups_file_without_writing(tmp_path: Path) -> None:
+    fake_home = _fresh_home(tmp_path)
+    env = {**os.environ, "HOME": str(fake_home)}
+
+    result = _run(
+        "--dry-run", "--installer", "pip", "--source", str(CHECKOUT),
+        "--groups-file", "/tmp/x/groups.yaml", env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "rules.groups_file=/tmp/x/groups.yaml" in result.stderr
+    assert not _config_yaml_path(fake_home).exists()
