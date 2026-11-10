@@ -63,6 +63,16 @@ test:
   `{junit}` and may not use `{base}`; errors name the key path (`test.tiers.<name>`). A tier run
   executes only that tier's command. An undeclared tier exits `72` naming `test.tiers.<name>`;
   a malformed name is a usage error (`1`).
+- `prepare` is an optional argv list, run once in the repository root, without a shell and with
+  no stdin, before the command of every mode and tier (foreground and `--detach`). Use it to
+  bring the checkout to the state its tests expect, for example `prepare: [./bin/prepare]`.
+  It carries no `{junit}` placeholder. Its output goes to `prepare.log` in the run directory.
+  When it exits non-zero, is killed by a signal, cannot start, or exceeds `--timeout`, the tests
+  are not run: the run is `unrunnable` (exit `73`), `problem` names the prepare step and how it
+  ended, and `failure_log_tail` is the redacted end of `prepare.log`. A run whose profile
+  declares it records `prepare` (`command`, `exit_code`) in the result, and `test report
+  --summary` shows it. Without the key a run is recorded exactly as before. Loadout ships no
+  default prepare command.
 - Every key is optional. Asking for a mode whose key is absent exits `72` and names the key
   (`test.files`); a missing, invalid or absent-`test` profile is refused cleanly too. The block
   is validated strictly like the rest of the profile, and `loadout-profile check` reports an

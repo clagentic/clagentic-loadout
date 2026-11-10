@@ -24,7 +24,7 @@ from clagentic_loadout.repo_test.report_scratch import (
     create_scratch,
     remove_scratch,
 )
-from clagentic_loadout.repo_test.runner import describe_exit, log_tail, run_command
+from clagentic_loadout.repo_test.runner import CommandOutcome, describe_exit, log_tail, run_command
 from clagentic_loadout.repo_test.spec import (
     BASE_PLACEHOLDER,
     JUNIT_PLACEHOLDER,
@@ -161,6 +161,7 @@ class PreparedRun:
     base_sha: str | None
     timeout_seconds: float | None
     recorded: Mapping[str, Any]
+    prepare: tuple[str, ...] | None = None
 
 
 def prepare_run(
@@ -246,7 +247,20 @@ def prepare_run(
         base_sha=base_sha,
         timeout_seconds=timeout_seconds,
         recorded=recorded,
+        prepare=declared.prepare,
     )
+
+
+def _prepare_problem(prepare: Sequence[str], outcome: CommandOutcome) -> str | None:
+    """Why the prepare step failed, naming it, or None when it exited 0."""
+    if outcome.problem is not None:
+        return f"the prepare step failed, the tests were not run: {outcome.problem}"
+    if outcome.exit_code != 0:
+        return (
+            f"the prepare step {prepare[0]!r} {describe_exit(outcome.exit_code or 0)}; "
+            "the tests were not run"
+        )
+    return None
 
 
 def finish_run(
@@ -276,10 +290,20 @@ def finish_run(
     junit: JunitSummary | None = None
     report_verification: dict[str, Any] | None = None
     cleanup_problem: str | None = None
+    prepare_record: dict[str, Any] | None = None
+    prepare_failed = False
+    outcome = CommandOutcome(None, None)
     try:
-        outcome = run_command(argv, root, log_path, timeout_seconds)
-        problem = outcome.problem
-        if problem is None:
+        problem = None
+        if prepared.prepare:
+            prepare_outcome = run_command(list(prepared.prepare), root, run_dir / store.PREPARE_LOG_FILE, timeout_seconds)
+            prepare_record = {"command": list(prepared.prepare), "exit_code": prepare_outcome.exit_code}
+            problem = _prepare_problem(prepared.prepare, prepare_outcome)
+            prepare_failed = problem is not None
+        if not prepare_failed:
+            outcome = run_command(argv, root, log_path, timeout_seconds)
+            problem = outcome.problem
+        if not prepare_failed and problem is None:
             # The caller's own ids are always the command's: a command that keeps
             # them never switched user.
             allowed = outcome.process_uids | {os.getuid(), os.geteuid()}
@@ -306,7 +330,8 @@ def finish_run(
             exited = f"the command {describe_exit(outcome.exit_code)} with no failing test in its report"
             problem = f"{exited}; {cleanup_problem}" if cleanup_problem else exited
 
-    tail = log_tail(log_path, _FAILURE_LOG_LINES) if state == store.STATE_UNRUNNABLE else ""
+    tail_source = run_dir / store.PREPARE_LOG_FILE if prepare_failed else log_path
+    tail = log_tail(tail_source, _FAILURE_LOG_LINES) if state == store.STATE_UNRUNNABLE else ""
     record: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "run_id": run_id,
@@ -323,6 +348,10 @@ def finish_run(
         "started_at": started.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    if prepare_record is not None:
+        # Optional: only a repository that declares a prepare step has one, so a
+        # record without it reads exactly as before.
+        record["prepare"] = prepare_record
     if tail:
         # Optional: only an unrunnable run that left output has one, so a reader
         # that predates it sees an unchanged record.

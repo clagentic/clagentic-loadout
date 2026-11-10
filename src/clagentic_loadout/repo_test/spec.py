@@ -6,12 +6,18 @@ Schema (strict: an unknown key makes the whole profile invalid)::
       full: [python3, -m, pytest, "--junitxml={junit}"]
       impacted: [./run-tests, --junit, "{junit}", --since, "{base}"]
       files: [python3, -m, pytest, "--junitxml={junit}"]   # file paths are appended
+      prepare: [./bin/prepare]                             # runs before any of the above
       base: origin/main                                    # default for --base
       paths: ["spec/**"]                                   # extra test-file globs
       ratio_warn: 2                                        # changeset ratio budget
       ratio_floor_lines: 100                               # changeset ratio floor
       tiers:                                               # named runs, one argv each
         integration: [python3, -m, pytest, "-m", integration, "--junitxml={junit}"]
+
+``prepare`` is an optional argv, run once in the repository root before the
+command of any run mode or tier. It is an argv like the others but carries no
+``{junit}`` placeholder: it writes no report. A prepare that fails ends the run
+as unrunnable without running the tests.
 
 ``paths`` lists globs of files that count as tests in addition to the built-in
 rule (review.test_files); it extends that rule and never replaces it.
@@ -55,7 +61,16 @@ KEY_TIERS = "tiers"
 KEY_PATHS = "paths"
 KEY_RATIO_WARN = "ratio_warn"
 KEY_RATIO_FLOOR_LINES = "ratio_floor_lines"
-_ALLOWED_KEYS = (*MODES, KEY_BASE, KEY_TIERS, KEY_PATHS, KEY_RATIO_WARN, KEY_RATIO_FLOOR_LINES)
+KEY_PREPARE = "prepare"
+_ALLOWED_KEYS = (
+    *MODES,
+    KEY_PREPARE,
+    KEY_BASE,
+    KEY_TIERS,
+    KEY_PATHS,
+    KEY_RATIO_WARN,
+    KEY_RATIO_FLOOR_LINES,
+)
 _MAX_PATH_GLOBS = 100
 
 TIER_NAME_RE = re.compile(r"\A[a-z][a-z0-9_-]{0,31}\Z")
@@ -83,6 +98,7 @@ class DeclaredTests:
     full: tuple[str, ...] | None = None
     impacted: tuple[str, ...] | None = None
     files: tuple[str, ...] | None = None
+    prepare: tuple[str, ...] | None = None
     base: str | None = None
     tiers: tuple[tuple[str, tuple[str, ...]], ...] = ()
     paths: tuple[str, ...] = ()
@@ -102,7 +118,7 @@ class DeclaredTests:
         return [key for key in _ALLOWED_KEYS if getattr(self, key) not in (None, (), "")]
 
 
-def _argv(value: Any, where: str, *, allow_base: bool) -> tuple[str, ...]:
+def _argv_items(value: Any, where: str) -> tuple[str, ...]:
     if not isinstance(value, list) or not value:
         raise TestBlockError(f"{where} must be a non-empty list of strings (an argv)")
     if len(value) > _MAX_ARGV:
@@ -116,6 +132,11 @@ def _argv(value: Any, where: str, *, allow_base: bool) -> tuple[str, ...]:
                 f"{where}[{position}] must be one line of at most {_MAX_ARG_CHARS} characters"
             )
         out.append(item)
+    return tuple(out)
+
+
+def _argv(value: Any, where: str, *, allow_base: bool) -> tuple[str, ...]:
+    out = _argv_items(value, where)
     if not any(JUNIT_PLACEHOLDER in item for item in out):
         raise TestBlockError(
             f"{where} must carry the {JUNIT_PLACEHOLDER} placeholder, the path the command "
@@ -123,7 +144,7 @@ def _argv(value: Any, where: str, *, allow_base: bool) -> tuple[str, ...]:
         )
     if not allow_base and any(BASE_PLACEHOLDER in item for item in out):
         raise TestBlockError(f"{where} may not use {BASE_PLACEHOLDER}; only impacted can")
-    return tuple(out)
+    return out
 
 
 def _tiers(value: Any, where: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -187,7 +208,9 @@ def parse_test_block(block: Any, where: str = "test") -> DeclaredTests:
         if not isinstance(base, str) or not base.strip() or base.startswith("-"):
             raise TestBlockError(f"{where}.{KEY_BASE} must be a revision name, not an option")
         base = base.strip()
+    prepare = block.get(KEY_PREPARE)
     return DeclaredTests(
+        prepare=_argv_items(prepare, f"{where}.{KEY_PREPARE}") if prepare is not None else None,
         base=base,
         tiers=_tiers(block.get(KEY_TIERS), f"{where}.{KEY_TIERS}"),
         paths=_paths(block.get(KEY_PATHS), f"{where}.{KEY_PATHS}"),
@@ -202,6 +225,7 @@ __all__ = [
     "JUNIT_PLACEHOLDER",
     "KEY_BASE",
     "KEY_PATHS",
+    "KEY_PREPARE",
     "KEY_RATIO_FLOOR_LINES",
     "KEY_RATIO_WARN",
     "KEY_TIERS",
