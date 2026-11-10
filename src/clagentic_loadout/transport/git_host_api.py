@@ -619,11 +619,16 @@ GIT_HOST_CONFIG_KEY_BASE_URL = "base_url"
 class GitHostApiError(Exception):
     """Raised for any git_host_api failure that should terminate the process
     with a specific exit code. Carries the intended exit code as `.code` so
-    both the CLI (`main`) and library callers can translate it uniformly."""
+    both the CLI (`main`) and library callers can translate it uniformly.
 
-    def __init__(self, message: str, code: int) -> None:
+    `http_status` is the raw HTTP status when the failure was a non-2xx
+    response to a write method (None for every other failure), so a caller can
+    branch on the status without parsing it back out of the message."""
+
+    def __init__(self, message: str, code: int, *, http_status: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.http_status = http_status
 
 
 def _fail(message: str, code: int) -> None:
@@ -917,10 +922,11 @@ def request(
                 code=EXIT_CURL_FAILED,
             )
         if method in _WRITE_METHODS:
-            _fail(
+            raise GitHostApiError(
                 f"git-host API {method} {path} returned HTTP {exc.code}: "
                 f"{raw.decode('utf-8', errors='replace')[:500]}",
-                code=EXIT_CURL_FAILED,
+                EXIT_CURL_FAILED,
+                http_status=exc.code,
             )
         return exc.code, raw
     except (urllib.error.URLError, TimeoutError, OSError) as exc:

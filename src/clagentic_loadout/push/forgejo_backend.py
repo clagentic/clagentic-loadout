@@ -50,12 +50,14 @@ def create_pr(
     except git_host_api.GitHostApiError as exc:
         # git_host_api.request() raises before returning a status on a
         # write-method non-2xx (see that module's own docstring) -- the
-        # status is embedded in exc.code (the GitHostApiError's own exit
-        # code, EXIT_CURL_FAILED), never the raw HTTP status, so there is no
-        # HTTP status_code to attach here. Distinct from the GitHub path
-        # above, which returns (status, body) even on a non-2xx and so CAN
-        # attach one.
-        raise PrOpenError(f"Forgejo PR creation failed for {owner}/{repo}: {exc}") from exc
+        # exc.code is the error's own exit code (EXIT_CURL_FAILED), never the
+        # HTTP status; the raw status rides on exc.http_status (None for a
+        # network-level failure), which the caller needs to tell a redundant
+        # create (409/422) from a genuine failure.
+        raise PrOpenError(
+            f"Forgejo PR creation failed for {owner}/{repo}: {exc}",
+            status_code=exc.http_status,
+        ) from exc
 
     resp = git_host_api.parse_json_body(raw)
     pr_number = resp.get("number")
@@ -65,6 +67,85 @@ def create_pr(
             status_code=status,
         )
     return int(pr_number)
+
+
+#: Page size and page ceiling for the open-PR scan. Forgejo's pulls list has
+#: no head/base filter, so the scan filters client-side; a repository with
+#: more open PRs than the ceiling cannot be confirmed and fails closed.
+_LOOKUP_PAGE_SIZE = 50
+_LOOKUP_MAX_PAGES = 20
+
+
+def find_open_prs(
+    api_base: str,
+    owner: str,
+    repo: str,
+    *,
+    token: str,
+    head: str,
+    base: str,
+    opener=None,
+) -> list[int]:
+    """Return the numbers of open Forgejo PRs whose head branch is *head* and
+    whose base branch is *base* (read-only).
+
+    Raises PrOpenError on any non-2xx response, an unexpected response shape,
+    a network failure, or when the open-PR list is longer than the scan
+    ceiling (the answer could not be confirmed).
+    """
+    matches: list[int] = []
+    for page in range(1, _LOOKUP_MAX_PAGES + 1):
+        try:
+            status, raw = git_host_api.request(
+                api_base,
+                "GET",
+                f"/api/v1/repos/{owner}/{repo}/pulls?state=open"
+                f"&limit={_LOOKUP_PAGE_SIZE}&page={page}",
+                token,
+                opener=opener,
+            )
+        except git_host_api.GitHostApiError as exc:
+            raise PrOpenError(
+                f"Forgejo open-PR lookup failed for {owner}/{repo}: {exc}"
+            ) from exc
+        if status < 200 or status >= 300:
+            raise PrOpenError(
+                f"Forgejo open-PR lookup returned HTTP {status} for {owner}/{repo}",
+                status_code=status,
+            )
+        try:
+            items = json.loads(raw.decode("utf-8")) if raw else []
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise PrOpenError(
+                f"Forgejo open-PR lookup returned unparseable JSON for {owner}/{repo}"
+            ) from exc
+        if not isinstance(items, list):
+            raise PrOpenError(
+                f"Forgejo open-PR lookup returned a non-list body for {owner}/{repo}"
+            )
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            item_head = item.get("head") if isinstance(item.get("head"), dict) else {}
+            item_base = item.get("base") if isinstance(item.get("base"), dict) else {}
+            number = item.get("number")
+            # A fork PR can carry the same branch name and base; only a PR whose
+            # head lives in this repository holds the pushed commits. A missing
+            # or unreadable head repo is not a match.
+            head_repo = item_head.get("repo") if isinstance(item_head.get("repo"), dict) else {}
+            if (
+                item_head.get("ref") == head
+                and item_base.get("ref") == base
+                and head_repo.get("full_name") == f"{owner}/{repo}"
+                and number
+            ):
+                matches.append(int(number))
+        if len(items) < _LOOKUP_PAGE_SIZE:
+            return matches
+    raise PrOpenError(
+        f"Forgejo open-PR lookup for {owner}/{repo} exceeded {_LOOKUP_MAX_PAGES} "
+        f"pages of open PRs; could not confirm"
+    )
 
 
 def get_pr_body(
@@ -195,4 +276,4 @@ def update_pr(
         ) from exc
 
 
-__all__ = ["create_pr", "get_pr_body", "get_pr_head_sha", "update_pr"]
+__all__ = ["create_pr", "find_open_prs", "get_pr_body", "get_pr_head_sha", "update_pr"]

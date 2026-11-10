@@ -53,6 +53,7 @@ from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root 
     RecordingTokenProvider as _RecordingTokenProvider,
     RefusingTokenProvider as _RefusingTokenProvider,
     forgejo_create_opener as _forgejo_create_opener,
+    forgejo_open_prs_opener as _forgejo_open_prs_opener,
     git as _git,
     isolate_user_config_root,
     json_resp as _json_resp,
@@ -73,10 +74,13 @@ def _github_create_opener(*, pr_number=42):
 
 class TestArgumentValidation:
     def test_missing_title_on_create_is_usage_error(self, repo_with_remote, monkeypatch):
+        # With no --title the verb is the fold form, whose open-PR lookup runs
+        # after the token mint; a branch with no open PR is still a usage error.
         repo, _remote = repo_with_remote
         code = _run_main(
             ["--repo-path", str(repo), "--platform", "forgejo"],
-            token_provider=_RefusingTokenProvider(),
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_open_prs_opener([]),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_USAGE
@@ -3813,6 +3817,8 @@ class TestKnownTrapPrCreate409:
                     req.full_url, 409, "Conflict",
                     {}, io.BytesIO(b'{"message": "pull request already exists"}'),
                 )
+            if req.get_method() == "GET" and "/pulls?" in req.full_url:
+                return _json_resp(200, [])
             raise AssertionError(f"unexpected: {req.get_method()} {req.full_url}")
 
         code = _run_main(
@@ -3847,6 +3853,8 @@ class TestKnownTrapPrCreate409:
                     req.full_url, 422, "Unprocessable",
                     {}, io.BytesIO(b'{"message": "pull request already exists"}'),
                 )
+            if req.get_method() == "GET" and "/pulls?" in req.full_url:
+                return _json_resp(200, [])
             raise AssertionError(f"unexpected: {req.get_method()} {req.full_url}")
 
         return opener

@@ -272,6 +272,7 @@ from clagentic_loadout.push.errors import (
     RemoteResolutionError,
 )
 from clagentic_loadout.push.forgejo_backend import create_pr as forgejo_create_pr
+from clagentic_loadout.push.forgejo_backend import find_open_prs as forgejo_find_open_prs
 from clagentic_loadout.push.forgejo_backend import get_pr_body as forgejo_get_pr_body
 from clagentic_loadout.push.forgejo_backend import get_pr_head_sha as forgejo_get_pr_head_sha
 from clagentic_loadout.push.forgejo_backend import update_pr as forgejo_update_pr
@@ -519,6 +520,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         description=(
             "push -- bot-attributed commit push + PR open (or update) on "
             "either Forgejo or GitHub. Never merges, never pushes to main. "
+            "Fold form: with no --title, a branch that already has an open "
+            "PR to --base is pushed and that PR is reported (exit 0, "
+            "pre_existing: true); a create whose PR-create call returns "
+            "409/422 is reported the same way when exactly one open PR from "
+            "this branch to --base is found. The title/body are not applied "
+            "to an existing PR -- use --update-pr --pr <n> for edits. "
             "Body input: --body-env (a bare switch; reads a body a caller's "
             "harness already staged via `loadout-stage-body --create-branch "
             "<branch>` -- no JSON escaping, no caller-supplied filesystem "
@@ -573,6 +580,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "  echo '{\"body\":\"...\"}' | push --caller builder --title "
             "'feat: add x' --body-stdin\n"
             "  push --caller builder --update-pr --pr 42 --title 'new title'\n"
+            "  push --caller builder   # fold: push new commits to the branch's open PR\n"
         ),
     )
     parser.add_argument(
@@ -596,7 +604,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--title",
         default=None,
-        help="PR title. Required to create a PR. Validated against the "
+        help="PR title. Required to create a PR. Omit it to FOLD: from a "
+        "branch that already has an open PR to --base, a push without "
+        "--title pushes the new commits, makes no create call, reports that "
+        "PR (pre_existing: true) and exits 0; with no open PR it exits "
+        f"{EXIT_USAGE} before pushing. Validated against the "
         "Conventional Commits grammar (merge.title_gate, the same check "
         "the merge gate applies) before any push or PR call — see "
         "--skip-title-check.",
@@ -2017,8 +2029,9 @@ def _run(
                 "no default body mode. State whether this edit REPLACES the "
                 "PR's existing body or APPENDS to it; guessing is refused."
             )
-    elif args.title is None:
-        raise PushUsageError("--title is required to create a PR.")
+    # No --title is not rejected here: with no --title the verb is the fold
+    # form, which needs the open-PR lookup (after the token mint, before any
+    # ref moves) to know whether it is valid. See _run_create_pr.
 
     if bool(args.bot_name) != bool(args.bot_email):
         raise PushUsageError("--bot-name and --bot-email must be supplied together.")
@@ -2108,7 +2121,7 @@ def _run(
             )
     elif args.body_stdin:
         body = _read_body_stdin()
-    elif not args.update_pr:
+    elif not args.update_pr and args.title is not None:
         raise BodyEmptyError(
             f"PR body is required to create a PR. Pass --body-env (stage "
             f"first via loadout-stage-body, RECOMMENDED) or --body-stdin "
@@ -2509,10 +2522,74 @@ def _run_update_pr(
     return EXIT_OK
 
 
+def _pr_url(args: argparse.Namespace, owner: str, repo: str, api_base: str, number: int) -> str:
+    if args.platform == PLATFORM_GITHUB:
+        return f"https://github.com/{owner}/{repo}/pull/{number}"
+    return f"{api_base}/{owner}/{repo}/pulls/{number}"
+
+
+def _open_pr_numbers(
+    args: argparse.Namespace,
+    owner: str,
+    repo: str,
+    api_base: str,
+    branch: str,
+    *,
+    token: str,
+    opener,
+) -> list[int]:
+    """Read-only lookup of the open PRs from *branch* to --base. Raises
+    PrOpenError when the platform cannot answer."""
+    if args.platform == PLATFORM_GITHUB:
+        return github_backend.find_open_prs(
+            owner, repo, token=token, head=branch, base=args.base, opener=opener
+        )
+    return forgejo_find_open_prs(
+        api_base, owner, repo, token=token, head=branch, base=args.base, opener=opener
+    )
+
+
+def _fold_target_or_usage_error(
+    args: argparse.Namespace,
+    owner: str,
+    repo: str,
+    api_base: str,
+    branch: str,
+    *,
+    token: str,
+    opener,
+) -> int:
+    """Fold form (no --title): the number of the one open PR this branch
+    already has to --base. Anything else is a usage error raised before any
+    ref moves, naming both forms."""
+    forms = (
+        "Pass --title (with a body) to create a PR, or run from a branch that "
+        "already has an open PR to --base to push to it (the fold form: no "
+        "--title)."
+    )
+    try:
+        numbers = _open_pr_numbers(
+            args, owner, repo, api_base, branch, token=token, opener=opener
+        )
+    except PrOpenError as exc:
+        raise PushUsageError(
+            f"no --title was given, and the open-PR lookup for branch "
+            f"{branch!r} -> {args.base!r} failed ({exc}), so the fold form "
+            f"cannot be confirmed. Nothing was pushed. {forms}"
+        ) from exc
+    if len(numbers) != 1:
+        found = "no open PR" if not numbers else f"{len(numbers)} open PRs"
+        raise PushUsageError(
+            f"no --title was given, and branch {branch!r} has {found} to "
+            f"{args.base!r} to fold into. Nothing was pushed. {forms}"
+        )
+    return numbers[0]
+
+
 def _run_create_pr(
     args: argparse.Namespace,
     *,
-    body: str,
+    body: str | None,
     caller: str,
     project_root: Path,
     allowed_namespaces: frozenset[str],
@@ -2636,6 +2713,14 @@ def _run_create_pr(
     except CredentialProviderError as exc:
         _fail(f"token resolution FAILED -- {exc}", code=EXIT_TOKEN_FETCH_FAILED)
     token = resolved.token
+
+    # Fold form (no --title): confirm the branch already has an open PR now,
+    # after the mint and before re-authoring or any push moves a ref.
+    fold_pr_number: int | None = None
+    if args.title is None:
+        fold_pr_number = _fold_target_or_usage_error(
+            args, owner, repo, api_base, branch, token=token, opener=opener,
+        )
 
     # Provider-verified OVERRIDE (lr-43c8d7), applied AFTER the identity gate
     # above already succeeded: when the resolved provider supplied a
@@ -2863,56 +2948,41 @@ def _run_create_pr(
                 file=sys.stderr,
             )
 
+    pre_existing = fold_pr_number is not None
+    pr_number = fold_pr_number
     try:
-        if args.platform == PLATFORM_GITHUB:
+        if pre_existing:
+            pass  # fold form: the PR already exists, so no create call is made
+        elif args.platform == PLATFORM_GITHUB:
             pr_number = github_backend.create_pr(
                 owner, repo, token=token, head=branch, base=args.base,
                 title=args.title, body=body, opener=opener,
             )
-            pr_url = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
         else:
             pr_number = forgejo_create_pr(
                 api_base, owner, repo, token=token, head=branch, base=args.base,
                 title=args.title, body=body, opener=opener,
             )
-            pr_url = f"{api_base}/{owner}/{repo}/pulls/{pr_number}"
     except PrOpenError as exc:
-        # KNOWN TRAP (task requirement 5): a redundant PR-create call can
-        # 409/422 ("PR already exists for this head/base pair") even though
-        # the git push immediately above ALREADY LANDED SUCCESSFULLY -- the
-        # documented, observed failure mode (exit 4) that taught callers to
-        # distrust this verb's exit code and reach for their own local
-        # reads instead. ADDITIVE-ONLY (task scope): this still exits
-        # EXIT_PR_FAILED -- fixing the exit code itself is an enforcement-
-        # shaped behavior change (silently returning EXIT_OK for a call that
-        # did not open/return a PR would be its own new failure mode for any
-        # caller relying on the current contract) -- but the message is
-        # unambiguous about WHICH part failed, and reports the confirmed
-        # remote_head_sha the readback above already obtained, so a caller
-        # is never left re-deriving "did the push actually land" from exit
-        # code 4 alone.
-        remote_sha_note = (
-            f" The push itself already landed -- remote_head_sha "
-            f"{remote_readback_envelope.get('remote_head_sha')!r} was "
-            f"confirmed via a fresh {remote_readback_envelope.get('remote_head_sha_source')!r} "
-            f"readback before this PR-open call was attempted."
-            if remote_readback_envelope.get("remote_head_sha")
-            else (
-                " git push itself exited 0 before this PR-open call, so the "
-                "push landed; only the post-push remote readback could not "
-                "confirm the remote head (see the readback warning above) -- "
-                "do not treat this exit as a failed push."
-            )
-        )
-        likely_redundant = (
-            f" HTTP {exc.status_code} may mean a PR for this head/base pair "
-            f"already exists (a REDUNDANT create, not a failed push) -- check "
-            f"the target repo for an existing open PR from this branch before "
-            f"retrying create."
-            if exc.status_code in (409, 422)
-            else ""
-        )
-        _fail(f"{exc}{remote_sha_note}{likely_redundant}", code=EXIT_PR_FAILED)
+        # A 409/422 can mean a PR for this head/base pair already exists. That
+        # is the success this call reports, but only when a read-only lookup
+        # positively finds exactly one open PR: the status alone is not proof.
+        # Any other outcome (no match, several, a lookup error, any other
+        # status) falls through to the failure below.
+        if exc.status_code in (409, 422):
+            try:
+                existing = _open_pr_numbers(
+                    args, owner, repo, api_base, branch, token=token, opener=opener,
+                )
+            except PrOpenError:
+                existing = []
+            if len(existing) == 1:
+                pr_number = existing[0]
+                pre_existing = True
+        if not pre_existing:
+            _fail_create_pr(exc, remote_readback_envelope)
+
+    pr_url = _pr_url(args, owner, repo, api_base, pr_number)
 
     # NO bare local head_sha (lr-361de3, FALSE-REPORT FIX): prior to this
     # fix, the envelope carried BOTH a bare `head_sha` (this verb's own local
@@ -2934,6 +3004,8 @@ def _run_create_pr(
         "pr_number": pr_number, "pr_url": pr_url, "owner": owner, "repo": repo,
     }
     envelope.update(remote_readback_envelope)
+    if pre_existing:
+        envelope["pre_existing"] = True
     if verification_record_ids:
         envelope["verdict_records"] = verification_record_ids
     envelope.update(identity_fields or {})
@@ -2941,10 +3013,51 @@ def _run_create_pr(
     envelope["ratio"] = ratio
     print(notice_line(ratio), file=sys.stderr)
 
-    print(f"push: PR #{pr_number} opened: {pr_url}")
+    if pre_existing:
+        print(
+            f"push: the push landed; PR #{pr_number} already exists for "
+            f"{branch!r} -> {args.base!r}: {pr_url}. No PR was created, and "
+            f"any --title/--body was not applied -- use --update-pr --pr "
+            f"{pr_number} to edit the title or body."
+        )
+    else:
+        print(f"push: PR #{pr_number} opened: {pr_url}")
     print(json.dumps(envelope))
     return EXIT_OK
 
+
+def _fail_create_pr(exc: PrOpenError, remote_readback_envelope: dict) -> None:
+    """Exit EXIT_PR_FAILED for a genuine PR-create failure, with the message
+    that says whether the push itself landed.
+
+    KNOWN TRAP: a redundant PR-create call can 409/422 ("PR already exists
+    for this head/base pair") even though the git push before it already
+    landed. A confirmed single existing PR is handled by the caller as a
+    success; what reaches here is a failure the lookup could not resolve, so
+    the message is unambiguous about WHICH part failed and reports the
+    confirmed remote_head_sha the readback already obtained."""
+    remote_sha_note = (
+        f" The push itself already landed -- remote_head_sha "
+        f"{remote_readback_envelope.get('remote_head_sha')!r} was "
+        f"confirmed via a fresh {remote_readback_envelope.get('remote_head_sha_source')!r} "
+        f"readback before this PR-open call was attempted."
+        if remote_readback_envelope.get("remote_head_sha")
+        else (
+            " git push itself exited 0 before this PR-open call, so the "
+            "push landed; only the post-push remote readback could not "
+            "confirm the remote head (see the readback warning above) -- "
+            "do not treat this exit as a failed push."
+        )
+    )
+    likely_redundant = (
+        f" HTTP {exc.status_code} may mean a PR for this head/base pair "
+        f"already exists (a REDUNDANT create, not a failed push) -- check "
+        f"the target repo for an existing open PR from this branch before "
+        f"retrying create."
+        if exc.status_code in (409, 422)
+        else ""
+    )
+    _fail(f"{exc}{remote_sha_note}{likely_redundant}", code=EXIT_PR_FAILED)
 
 if __name__ == "__main__":
     sys.exit(main())
