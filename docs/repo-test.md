@@ -15,7 +15,7 @@ clagentic-loadout test run full|impacted [--repo-root DIR] [--base REV] [--timeo
 clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout SECONDS] [--detach]
 clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout SECONDS] [--detach]
 clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
-                              [--summary | --failing-ids | --diff BASE_RUN_ID]
+                              [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
 ```
 
 ## Declaring the commands
@@ -159,9 +159,23 @@ below).
   recorded no commit ("commit unknown"), is never selected. `--sha` cannot be combined with
   an explicit run id.
 - **`--summary`** (default): JSON with the run id, `state` (`complete`, `unrunnable`, or for a detached run `running` or `interrupted`), mode,
-  `tier` (the tier name for a tier run, else null), counts, the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
+  `tier` (the tier name for a tier run, else null), counts, `id_scheme` (the failing-id scheme the run
+  was recorded with; null for a run recorded before it existed, and `id_basis` is added when the record
+  has one), the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`.
 - **`--failing-ids`**: the failing test ids, sorted, one per line. One line per failed test
   case, so an id that failed twice appears twice and the line count equals `counts.failed`.
+- **`--failures`**: a JSON list with one record per failed test case, in report order (two
+  failed cases that share an id each get a record). A record has `id`, `kind` (`failure` or
+  `error`), `message` (the report's `message` attribute) and `excerpt` (the element text).
+  Each value is redacted whole (URL userinfo, `Authorization` values, bearer and `token=`
+  literals, terminal escapes and control characters) and only then cut: at most 1000
+  characters of message, 4000 of excerpt per case and 40000 of text in total. A cut value ends
+  with `...[truncated: N characters dropped]`. A value of more than 8 MiB (8388608 characters)
+  is never read: its text is replaced by `[omitted: value of N characters exceeds the 8 MiB
+  redaction ceiling]`. When the total cap is reached the list ends with one record that has no
+  `id`, only `omitted_cases` and `note`. A run with no failed case prints `[]`. An `unrunnable`
+  or `interrupted` run, or one whose recorded report cannot be read, is refused (exit `78`); a
+  `running` run exits `79`.
 - **`--diff BASE_RUN_ID`**: JSON with `head_only`, `base_only` and `shared_count` of failing
   ids, and `repo_check`. Ids are compared as a multiset: an id that failed more often at head
   than at base is in `head_only` once per extra failure. A run recorded before per-case ids
@@ -174,7 +188,7 @@ below).
 - `--diff` compares like with like: it refuses (exit `78`) when exactly one of the two runs is
   a tier run, or when both are tier runs of different tiers. Two runs of the same tier, and two
   non-tier runs, compare as before.
-- An `unrunnable` run has no results, so `--failing-ids` and `--diff` refuse it (exit `78`)
+- An `unrunnable` run has no results, so `--failing-ids`, `--failures` and `--diff` refuse it (exit `78`)
   rather than report an empty set.
 
 | Code | Meaning |
@@ -185,7 +199,7 @@ below).
 | `76` | The run id is malformed or no such run exists; the message names the id. |
 | `77` | No clean run matches `--sha` (or the prefix is ambiguous). |
 | `78` | Refused: `--diff` across repositories or unlike tiers, a run without results, `RUN_ID --repo` naming another repository, or `latest` outside git with several repositories on record. |
-| `79` | The run is still running: `--wait` timed out, or `--failing-ids` / `--diff` was asked of a running run. |
+| `79` | The run is still running: `--wait` timed out, or `--failing-ids` / `--failures` / `--diff` was asked of a running run. |
 
 The code `79` is also the installer helper's code for a settings file it could not read or write
 (see below). That helper is a separate process the installer calls, never a `test report`
@@ -234,8 +248,8 @@ same answer, including its `finished_at`. It is written only into a run director
 reader. `interrupted` is terminal. The command a killed supervisor started may still be running
 in its own session; loadout does not stop it.
 
-`--summary` of a running or interrupted run prints that state and exits `0`. `--failing-ids` and
-`--diff` of a running run exit `79` and name the state; of an interrupted run they exit `78`,
+`--summary` of a running or interrupted run prints that state and exits `0`. `--failing-ids`,
+`--failures` and `--diff` of a running run exit `79` and name the state; of an interrupted run they exit `78`,
 like an unrunnable run. `latest` and `--sha` are unchanged: they select finished runs, and an
 interrupted run, which has no result, is never selected by them, so what they pick does not
 depend on whether anyone has read the interrupted run yet. Read it by its run id.
