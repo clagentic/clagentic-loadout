@@ -112,7 +112,7 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["source", "note", "items"],
-      "description": "The consumers of what the change touches and how each is dispositioned. No source exists yet; the section is authored or left empty.",
+      "description": "The consumers of what the change touches and how each is dispositioned. Filled from the consumer map when it is available and the paths or elements under change are named; otherwise authored or left empty.",
       "properties": {
         "source": {"type": ["string", "null"], "description": "Where the items came from; null while there is no source."},
         "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},

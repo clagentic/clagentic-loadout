@@ -1,6 +1,7 @@
 """spec.verb -- `loadout-spec`: create, seal and read the standard spec.
 
   loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
+                    [--consumers-file FILE] [--path GLOB]... [--element NAME]...
                     [--supersedes HASH] [--out FILE]
   loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
   loadout-spec show HASH [--chain]
@@ -9,8 +10,10 @@
 rules, the declared test commands and the profile completeness items) are filled
 from it, the group rules from the groups file (for every role; see rules.applying),
 and every other section is present and empty. A groups problem leaves the group
-rules empty with a note and never changes the exit code. The draft is an ordinary file for the author to
-edit. With --supersedes it starts from a sealed spec instead, which is the only
+rules empty with a note and never changes the exit code. When --path or --element names what the change touches, the
+consumers are filled from the consumer map (interface.consumers), each with a placeholder disposition for the author
+to replace; an unavailable map leaves the section empty with a note, again without changing the exit code. The draft
+is an ordinary file for the author to edit. With --supersedes it starts from a sealed spec instead, which is the only
 way to change one.
 
 `seal` validates a finished draft, binds it to a branch head (--head, or the head
@@ -56,6 +59,9 @@ from pathlib import Path
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.artifact_store import RootUnreadableError, StoreError
+from clagentic_loadout.git_origin import OriginBindingError, read_origin_target
+from clagentic_loadout.interface.consumers import consumers_of, locate_consumers
+from clagentic_loadout.interface.notice import draft_items
 from clagentic_loadout.review.policy_source import PROFILE_INVALID, PROFILE_MISSING, PROFILE_PATH
 from clagentic_loadout.review.profile_brief import (
     ProfileReadError,
@@ -65,6 +71,7 @@ from clagentic_loadout.review.profile_brief import (
 )
 from clagentic_loadout.review.repo_profile import RepoProfile
 from clagentic_loadout.rules.applying import applying_group_rules, format_rule_item, source_label
+from clagentic_loadout.rules import groups as gr
 from clagentic_loadout.rules.groups import GroupsFileError
 from clagentic_loadout.spec import model
 from clagentic_loadout.spec import store as spec_store
@@ -151,6 +158,28 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--groups-file",
         default=None,
         help="The groups file for group rules; see `loadout-rules --help` for the other sources.",
+    )
+    new.add_argument(
+        "--consumers-file",
+        default=None,
+        help="The consumer map for the consumers section; see `loadout-interface --help` for "
+        "the other sources.",
+    )
+    new.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        metavar="GLOB",
+        help="A glob over the files the change touches; the consumers section is filled from the "
+        "consumer map for it. May be repeated.",
+    )
+    new.add_argument(
+        "--element",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="An interface element the change touches, such as a verb; the consumers section is "
+        "filled from the consumer map for it. May be repeated.",
     )
     new.add_argument(
         "--supersedes",
@@ -270,6 +299,39 @@ def _with_group_rules(
     return model.apply_group_rules(draft, items, source=source, note=note)
 
 
+def _with_consumers(
+    draft: dict[str, object], args: argparse.Namespace, config_root: str | Path | None
+) -> dict[str, object]:
+    """*draft* with its consumers filled from the consumer map for the paths and
+    elements the author named. Without any named, the section is left as it is.
+    A map that is unavailable, or a producer that cannot be named, leaves the
+    section as it is with a note saying why; the draft is never stopped."""
+    if not (args.path or args.element):
+        return draft
+    producer = gr.bare_repo_name(args.repo) if args.repo else ""
+    if not producer:
+        try:
+            producer = read_origin_target(args.repo_path).name
+        except OriginBindingError:
+            return model.apply_consumers(
+                draft, [], source=None,
+                note="consumers not filled: no --repo and no readable origin to name the producer",
+            )
+    status = locate_consumers(args.consumers_file, config_root=config_root)
+    if status.consumers is None:
+        return model.apply_consumers(
+            draft, [], source=None, note=f"consumers not filled: {status.unavailable}"
+        )
+    hits = consumers_of(status.consumers, producer, names=args.element, paths=args.path)
+    source = f"{status.consumers.path} ({status.location.origin})"
+    return model.apply_consumers(
+        draft,
+        draft_items(hits),
+        source=source,
+        note=f"no consumers: {source} lists none of the named elements or paths for {producer!r}",
+    )
+
+
 def _new(
     args: argparse.Namespace,
     root: Path,
@@ -310,6 +372,7 @@ def _new(
     items = completeness_of(snapshot, now=now)
     draft = model.apply_completeness(draft, [item.render() for item in items])
     draft = _with_group_rules(draft, args, snapshot.profile, config_root)
+    draft = _with_consumers(draft, args, config_root)
     text = json.dumps(draft, indent=2) + "\n"
     if args.out is None:
         sys.stdout.write(text)

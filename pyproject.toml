@@ -70,6 +70,7 @@ loadout-provision-allowlist = "clagentic_loadout.provisioning.cli:main"
 loadout-doctor = "clagentic_loadout.doctor.cli:main"
 loadout-record = "clagentic_loadout.verdict_record.verb:main"
 loadout-spec = "clagentic_loadout.spec.verb:main"
+loadout-interface = "clagentic_loadout.interface.verb:main"
 loadout-identity = "clagentic_loadout.identity.verb:main"
 
 [build-system]

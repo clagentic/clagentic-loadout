@@ -159,6 +159,12 @@ def _spec_main(argv: list[str]) -> int:
     return spec_main(argv)
 
 
+def _interface_main(argv: list[str]) -> int:
+    from clagentic_loadout.interface.verb import main as interface_main
+
+    return interface_main(argv)
+
+
 def _identity_main(argv: list[str]) -> int:
     from clagentic_loadout.identity.verb import main as identity_main
 
@@ -224,6 +230,10 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     ),
     "record": ("Read the verdict records gates left for a commit (show, list).", _record_main),
     "spec": ("Create, seal and read the standard spec (new, seal, show).", _spec_main),
+    "interface": (
+        "Diff a repo's declared interface (diff); list who consumes its elements (consumers).",
+        _interface_main,
+    ),
     "update": (
         "Install a release built from a source checkout via the verified venv switch.",
         _update_main,

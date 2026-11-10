@@ -1570,6 +1570,23 @@ Exit codes: `0` ok (including the empty result), `1` usage, `80` groups file unr
 malformed, `81` the repo profile at `--repo-path` is invalid. The verb is read-only, binds no
 caller and mints no credential.
 
+### `loadout-interface` — a repo's declared interface and its consumers
+
+```
+loadout-interface diff      --base REV --head REV [--repo-path DIR]
+loadout-interface consumers [--repo NAME] [--repo-path DIR] [--consumers-file FILE]
+                            [--element NAME]... [--path GLOB]... [--base REV --head REV]
+```
+
+`diff` reads `.clagentic/loadout/interface.yaml` at two revisions and prints whether the change
+is breaking, with the removed, changed and added elements. `consumers` prints who consumes the
+named elements, from the consumer map, whose location resolves like the groups file's
+(`--consumers-file`, `CLAGENTIC_LOADOUT_CONSUMERS_FILE`, then `rules.consumers_file`). Both only
+report: a breaking change and an unavailable map exit `0`. Exit codes: `0` ok, `1` usage, `90` a
+revision or the repository could not be read, `91` an interface file is not valid. The file
+schema, the consumer map schema and the report-only notices at push, merge and in
+`loadout-doctor` are in [interface.md](interface.md).
+
 ### Roles and classes
 
 `clagentic_loadout.role_vocabulary` holds the role words loadout knows and the class each belongs
@@ -3474,6 +3491,10 @@ define, always reporting RESOLVED values rather than a guess:
    `--repo-root`, a repository whose profile class differs from the class the groups
    file assigns it, or whose assigned class the profile schema does not admit, is reported
    as an advisory in the same line and never fails the check.
+7. **Consumer map** (user-level config, always runs) — reports where the consumer map (`loadout-interface consumers`) is, how
+   many confirmations it holds and the oldest and newest `confirmed_at` with their age. Always
+   `OK`: an old, missing, unconfigured or unreadable map is an advisory only. See
+   [interface.md](interface.md).
 
 Exits `2` (`EXIT_CHECKS_FAILED`) if any check's outcome is a failure, `0`
 if every check passes. `--repo-root` opts into the schema check and the
@@ -3487,6 +3508,7 @@ with or without `--repo-root`.
 
 ```
 loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
+                  [--consumers-file FILE] [--path GLOB]... [--element NAME]...
                   [--supersedes HASH] [--out FILE]
 loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
 loadout-spec show HASH [--chain]
@@ -3544,9 +3566,12 @@ and the `rules.groups_file` setting. `source` is `<path> (<origin>)`, where orig
 ` [source: <source>]` when the rule has a source. The section is filled for every role. A groups
 problem never stops the draft or changes the exit code: with no groups file configured, an
 unreadable or malformed file, an unnameable repository, or no group selecting the repository, the
-section is empty (`items: []`) and `note` gives the reason. `consumers` has no automatic source yet:
-it is present and empty with `source: null` and the note `no source yet`, for the author to fill or
-leave. No field of a spec carries a posture value, and the schema refuses any key it does not name.
+section is empty (`items: []`) and `note` gives the reason. `consumers` is filled only when
+`--path` or `--element` names what the change touches and the consumer map is available (see
+[interface.md](interface.md)): one item per consumer and element, `source` set to
+`<path> (<origin>)`, each with a placeholder disposition for the author to replace. Otherwise it is
+present and empty with `source: null` and the note `no source yet` (or, with something named and no
+map, the reason), for the author to fill or leave. No field of a spec carries a posture value, and the schema refuses any key it does not name.
 
 ### The three verbs
 

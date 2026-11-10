@@ -313,6 +313,9 @@ class FindingsState:
     #: _normalize_resolved. Read only by unresolved_prior_findings, for the
     #: earlier-fence notice; the merge gate never reads it.
     resolved: tuple[dict[str, Any], ...] = ()
+    #: The sealed spec the review ran against, when the fence says so. Read only
+    #: to find the spec for a notice; the gate never reads it.
+    spec_hash: str | None = None
 
     @property
     def evaluated(self) -> bool:
@@ -996,6 +999,11 @@ def state_from_fence(data: Mapping[str, Any]) -> FindingsState:
         ),
         resolved=tuple(
             entry for entry in data.get(KEY_RESOLVED) or () if isinstance(entry, dict)
+        ),
+        spec_hash=(
+            data[KEY_SPEC_HASH]
+            if isinstance(data.get(KEY_SPEC_HASH), str) and _SPEC_HASH_RE.match(data[KEY_SPEC_HASH])
+            else None
         ),
     )
 
