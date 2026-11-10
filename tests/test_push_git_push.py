@@ -58,6 +58,7 @@ from clagentic_loadout.push.git_push import (
     GitFetchError,
     _classify_push_failure,
     git_fetch_with_token,
+    git_ls_remote_with_token,
     git_push_with_token,
 )
 from clagentic_loadout.push.push_failure_labels import (
@@ -298,6 +299,30 @@ class TestGitPushWithToken:
         assert "dry-run exit=0" in transcript
         for surface in (transcript, captured.err, captured.out):
             assert fake_credential not in surface
+
+    @pytest.mark.parametrize(
+        "location, fake_credential",
+        [
+            ("FAKEPATHCRED7f3a9c/remote.git", "FAKEPATHCRED7f3a9c"),
+            ("remote.git?sig=FAKEQUERYCRED5d2e1b", "FAKEQUERYCRED5d2e1b"),
+        ],
+        ids=["path-segment", "query-param"],
+    )
+    def test_ls_remote_failure_withholds_a_credential_in_the_remote_location(
+        self, tmp_path, location, fake_credential
+    ):
+        """git quotes a missing remote's location in its stderr; the returned
+        process must not carry a credential from its path or query."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "feature"], repo)
+        missing = str(tmp_path / location)
+
+        result = git_ls_remote_with_token(missing, "feature", "unused-token-value", repo)
+
+        assert result.returncode != 0
+        assert fake_credential not in result.stderr
+        assert fake_credential not in result.stdout
 
     def test_platform_mismatch_hint_included_on_auth_shaped_failure(self, tmp_path, monkeypatch):
         """A synthetic auth-shaped git stderr (via a wrapper 'git' that
