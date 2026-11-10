@@ -239,6 +239,26 @@ def test_a_value_over_the_ceiling_emits_only_the_counted_marker() -> None:
     assert record == {"id": expected, "kind": "failure", "message": expected, "excerpt": expected}
 
 
+def test_an_over_ceiling_marker_never_exceeds_the_total_cap() -> None:
+    over = "y" * (failures.REDACTION_CEILING_CHARS + 1)
+    # Nine records of exactly 4000 characters, then one leaving a budget of 10,
+    # so the over-ceiling message that follows is cut to what remains.
+    cases = [FailedCase("a", "failure", "m", "x" * (failures.EXCERPT_CAP_CHARS - 2)) for _ in range(9)]
+    cases.append(FailedCase("a", "failure", "m", "x" * (failures.EXCERPT_CAP_CHARS - 12)))
+    cases.append(FailedCase("b", "failure", over, "e"))
+
+    records = failures.bound_failures(cases)
+
+    counted = sum(
+        len(record[key].split("...[truncated")[0])
+        for record in records
+        if "id" in record
+        for key in ("id", "message", "excerpt")
+    )
+    assert counted <= failures.TOTAL_CAP_CHARS
+    assert records[-1]["message"] == "[omitted:"
+
+
 def test_a_value_exactly_at_the_ceiling_is_still_redacted_and_cut() -> None:
     text = "x" * failures.REDACTION_CEILING_CHARS
 
@@ -350,6 +370,20 @@ def test_summary_carries_the_id_scheme_and_null_for_an_old_run(
     assert json.loads(old_out)["id_scheme"] is None
     assert "id_basis" not in json.loads(old_out)
     assert json.loads(new_out)["id_scheme"] == ID_SCHEME
+
+
+def test_a_boolean_id_scheme_in_a_hand_edited_record_shows_null(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    run_dir = write_run(reports, RUN, id_scheme=ID_SCHEME)
+    result_path = run_dir / store.RESULT_FILE
+    result = json.loads(result_path.read_text())
+    result["id_scheme"] = True
+    result_path.write_text(json.dumps(result))
+
+    _, out, _ = _report(capsys, RUN)
+
+    assert json.loads(out)["id_scheme"] is None
 
 
 def test_summary_carries_id_basis_when_the_record_has_one(

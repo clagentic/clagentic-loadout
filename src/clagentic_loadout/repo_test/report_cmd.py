@@ -225,6 +225,8 @@ def select_run(
 
 def summary_of(run: RunRecord) -> dict[str, Any]:
     result = run.result
+    # bool is an int subclass; a hand-edited true must not read as scheme 1.
+    id_scheme = result.get("id_scheme")
     summary: dict[str, Any] = {
         "run_id": run.run_id,
         "state": run.state,
@@ -234,7 +236,7 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
         "command": result.get("command"),
         "command_exit_code": result.get("command_exit_code"),
         "counts": result.get("counts"),
-        "id_scheme": result.get("id_scheme") if isinstance(result.get("id_scheme"), int) else None,
+        "id_scheme": id_scheme if isinstance(id_scheme, int) and not isinstance(id_scheme, bool) else None,
         "report_verification": result.get("report_verification"),
         "failing_id_count": len(_failing_ids(run)),
         "started_at": result.get("started_at"),

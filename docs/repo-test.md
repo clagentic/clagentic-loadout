@@ -169,8 +169,9 @@ below).
   `error`), `message` (the report's `message` attribute) and `excerpt` (the element text).
   Each value is redacted whole (URL userinfo, `Authorization` values, bearer and `token=`
   literals, terminal escapes and control characters) and only then cut: at most 1000
-  characters of message, 4000 of excerpt per case and 40000 of text in total. A cut value ends
-  with `...[truncated: N characters dropped]`. A value of more than 8 MiB (8388608 characters)
+  characters of message, 4000 of excerpt per case and 40000 of text in total. The `id` is cut
+  the same way, to at most 1000 characters. A cut value (id, message or excerpt) ends with
+  `...[truncated: N characters dropped]`. A value of more than 8 MiB (8388608 characters)
   is never read: its text is replaced by `[omitted: value of N characters exceeds the 8 MiB
   redaction ceiling]`. When the total cap is reached the list ends with one record that has no
   `id`, only `omitted_cases` and `note`. A run with no failed case prints `[]`. An `unrunnable`

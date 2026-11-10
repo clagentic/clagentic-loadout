@@ -31,14 +31,13 @@ REDACTION_CEILING_CHARS = 8 * 1024 * 1024
 def _bounded(text: str, cap: int) -> tuple[str, int]:
     """*text* redacted whole and then cut to at most *cap* characters, with the
     number of characters dropped (counted after redaction). Over the ceiling,
-    the marker alone and no text."""
-    if len(text) > REDACTION_CEILING_CHARS:
-        return (
-            f"[omitted: value of {len(text)} characters exceeds the 8 MiB redaction ceiling]",
-            0,
-        )
-    redacted = redact_push_secrets(text)
+    the marker alone and no text, cut to *cap* like any other value so the total
+    cap holds."""
     cap = max(0, cap)
+    if len(text) > REDACTION_CEILING_CHARS:
+        marker = f"[omitted: value of {len(text)} characters exceeds the 8 MiB redaction ceiling]"
+        return marker[:cap], 0
+    redacted = redact_push_secrets(text)
     return redacted[:cap], max(0, len(redacted) - cap)
 
 
