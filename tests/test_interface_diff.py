@@ -103,16 +103,27 @@ class TestDiff:
 
         assert diff.breaking and [c.element for c in diff.breaking_changes()] == [element]
 
-    def test_a_missing_file_at_either_side_is_reported_and_not_breaking(self):
+    def test_a_first_declaration_or_no_file_at_all_is_reported_and_not_breaking(self):
         no_base = _diff(None, BASE_INTERFACE)
-        no_head = _diff(BASE_INTERFACE, None)
         neither = _diff(None, None)
 
         assert (no_base.base_state, no_base.head_state) == (STATE_MISSING, STATE_PRESENT)
+        assert not (no_base.breaking or neither.breaking)
+        assert no_base.notes and neither.notes
+        assert no_base.changes == neither.changes == ()
+
+    def test_a_declared_interface_with_no_file_at_the_head_is_breaking_removing_everything(self):
+        no_head = _diff(BASE_INTERFACE, None)
+
         assert (no_head.base_state, no_head.head_state) == (STATE_PRESENT, STATE_MISSING)
-        assert not (no_base.breaking or no_head.breaking or neither.breaking)
-        assert all(d.notes for d in (no_base, no_head, neither))
-        assert no_base.changes == no_head.changes == ()
+        assert no_head.breaking and no_head.notes
+        assert {c.change for c in no_head.changes} == {CHANGE_REMOVED}
+        assert [c.element for c in no_head.changes] == [
+            "verb tool-one",
+            "verb tool-two",
+            "schema thing.schema.json",
+            "env TOOL_HOME",
+        ]
 
 
 def _run(capsys, *argv):

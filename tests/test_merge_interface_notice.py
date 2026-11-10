@@ -116,11 +116,16 @@ class TestCollect:
 
         assert (result.lines, result.notes, result.undisposed) == ((), (), ())
 
-    @pytest.mark.parametrize("base,head", [(None, BASE_INTERFACE), (BASE_INTERFACE, None), (None, None)])
-    def test_a_missing_interface_file_prints_nothing(self, tmp_path, base, head):
+    @pytest.mark.parametrize("base,head", [(None, BASE_INTERFACE), (None, None)])
+    def test_no_interface_file_at_the_base_prints_nothing(self, tmp_path, base, head):
         result, _ = _collect(_reader(base, head), tmp_path)
 
         assert (result.lines, result.notes) == ((), ())
+
+    def test_an_interface_file_removed_at_the_head_names_its_consumers(self, tmp_path):
+        result, _ = _collect(_reader(BASE_INTERFACE, None), tmp_path)
+
+        assert {u.consumer for u in result.undisposed} == {"app-one", "app-two"}
 
     def test_every_consumer_disposed_prints_nothing(self, tmp_path):
         spec = _seal_spec(
@@ -319,6 +324,23 @@ class TestMergeVerb:
         assert code == verb.EXIT_OK
         assert "NOTICE -- BREAKING" not in err and "NOTE --" not in err
         assert "undisposed_consumers" not in out and "Interface notices" not in posted[0]
+
+    def test_a_notice_computation_that_raises_still_merges_with_a_note(
+        self, tmp_path, capsys, with_map, monkeypatch
+    ):
+        def explode(**_kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(verb, "collect_interface_notices", explode)
+
+        code, out, err, posted = _merge(
+            capsys, tmp_path, head_interface=RENAMED_INTERFACE, spec_items=[]
+        )
+
+        assert code == verb.EXIT_OK
+        assert "merge: NOTE -- interface notice not computed: RuntimeError: boom" in err
+        assert "undisposed_consumers" not in out
+        assert len(posted) == 1 and "Interface notices" not in posted[0]
 
     def test_a_pr_that_does_not_touch_the_file_asks_the_host_for_nothing_new(
         self, tmp_path, capsys, with_map

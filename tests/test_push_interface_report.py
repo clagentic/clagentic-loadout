@@ -67,6 +67,19 @@ def test_an_unavailable_map_is_one_line_saying_so(tmp_path):
     assert len(lines) == 1 and "consumer map is unavailable" in lines[0]
 
 
+def test_an_unreadable_origin_says_the_producer_is_unknown_and_never_all_clear(
+    tmp_path, monkeypatch
+):
+    repo, base, _head = interface_repo(tmp_path, BASE_INTERFACE, RENAMED_INTERFACE)
+    monkeypatch.setenv(CONSUMERS_FILE_ENV_VAR, str(write_consumers(tmp_path)))
+
+    lines = interface_report.notice_lines(repo, [base])
+
+    assert len(lines) == 1
+    assert "producer could not be determined" in lines[0] and "verb tool-one" in lines[0]
+    assert "lists no consumer" not in lines[0]
+
+
 def test_a_base_that_does_not_resolve_prints_nothing(tmp_path, monkeypatch):
     repo, _base = _repo(tmp_path, RENAMED_INTERFACE)
     monkeypatch.setenv(CONSUMERS_FILE_ENV_VAR, str(write_consumers(tmp_path)))

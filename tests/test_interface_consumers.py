@@ -29,6 +29,7 @@ from clagentic_loadout.interface.notice import (
     mentions_repo,
     undisposed_consumers,
 )
+from clagentic_loadout.spec import model
 from clagentic_loadout.spec import verb as spec_verb
 from tests._support.interface_fixtures import (
     BASE_INTERFACE,
@@ -298,6 +299,25 @@ class TestSpecNew:
         assert code == 0
         assert draft["consumers"]["items"] == [] and draft["consumers"]["source"] is None
         assert "consumers not filled: no consumer map is configured" in draft["consumers"]["note"]
+
+    def test_an_unavailable_map_keeps_held_items_their_source_and_keeps_the_note(self):
+        draft = {
+            "consumers": {
+                "source": "authored by hand",
+                "note": None,
+                "items": [{"consumer": "app-one", "disposition": "task-1"}],
+            }
+        }
+
+        out = model.apply_consumers(
+            draft, [], source=None, note="consumers not filled: no consumer map is configured"
+        )
+
+        assert out["consumers"] == {
+            "source": "authored by hand",
+            "note": "consumers not filled: no consumer map is configured",
+            "items": [{"consumer": "app-one", "disposition": "task-1"}],
+        }
 
     def test_naming_nothing_leaves_the_section_exactly_as_before(self, tmp_path, capsys):
         repo = profile_repo(tmp_path, name="some-repo")

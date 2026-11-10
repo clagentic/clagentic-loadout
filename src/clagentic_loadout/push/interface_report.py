@@ -22,11 +22,13 @@ from clagentic_loadout.interface.report import breaking_report
 from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReadError
 
 
-def _producer(project_root: Path) -> str:
+def _producer(project_root: Path) -> str | None:
+    """The producer repository named by the origin, or None when the origin is
+    unreadable: a directory name is not a repository name, so it is not guessed."""
     try:
         return read_origin_target(project_root).name
     except OriginBindingError:
-        return project_root.resolve().name
+        return None
 
 
 def _merge_base(reader: GitPolicyReader, base_refs: Sequence[str]) -> str | None:
@@ -51,7 +53,8 @@ def notice_lines(project_root: Path, base_refs: Sequence[str]) -> list[str]:
         head = reader.resolve_commit("HEAD")
         if INTERFACE_PATH not in {path for path, _modes in reader.changed_paths(base, head)}:
             return []
-        report = breaking_report([reader], base, head, _producer(project_root))
+        producer = _producer(project_root)
+        report = breaking_report([reader], base, head, producer or "")
     except PolicyReadError:
         return []
     except InterfaceError as exc:
@@ -59,6 +62,11 @@ def notice_lines(project_root: Path, base_refs: Sequence[str]) -> list[str]:
     if not report.breaking:
         return []
     elements = ", ".join(report.changed_elements())
+    if producer is None:
+        return [
+            f"push: BREAKING INTERFACE CHANGE ({elements}); the producer could not be "
+            "determined from the origin, so its consumers are not listed"
+        ]
     status = report.map_status
     if status is None or status.consumers is None:
         reason = status.unavailable if status is not None else "no map was read"

@@ -187,14 +187,17 @@ def apply_consumers(
     interface.notice.draft_items) added to its consumers section, from *source*.
     Items the draft already holds are kept as authored, and an item for a
     consumer the draft already lists is not added again. With nothing in the
-    section afterwards, *note* says why."""
+    section afterwards, *note* says why. With no *source* (the map was
+    unavailable) the section is left as it is: held items keep their source and
+    *note* is kept to say why nothing was filled."""
     out = copy.deepcopy(draft)
     held = list(out["consumers"].get("items") or [])
     listed = {item["consumer"] for item in held}
     merged = held + [dict(item) for item in items if item["consumer"] not in listed]
+    unavailable = source is None
     out["consumers"] = {
-        "source": source,
-        "note": None if merged else (note or NO_SOURCE_NOTE),
+        "source": out["consumers"].get("source") if unavailable else source,
+        "note": (note or NO_SOURCE_NOTE) if unavailable or not merged else None,
         "items": merged,
     }
     return out

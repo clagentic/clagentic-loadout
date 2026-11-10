@@ -5,9 +5,11 @@ maps to, is breaking. Adding an element is not. A rename is seen as the removal
 of the old name together with the addition of the new one: nothing here guesses
 that two names are the same element.
 
-A revision with no interface file is reported, never an error: with either side
-missing there is nothing to compare, so no change is listed and the result is
-not breaking. The state of each side says which case it was.
+A revision with no interface file is reported, never an error. A base with no
+file and a head with one is a first declaration: nothing is listed and the result
+is not breaking. A base that declares an interface and a head with no file
+withdrew all of it: every base element is listed removed and the result is
+breaking. The state of each side says which case it was.
 """
 
 from __future__ import annotations
@@ -131,25 +133,27 @@ def diff_documents(base: InterfaceDoc | None, head: InterfaceDoc | None) -> Inte
     no interface file."""
     base_state = STATE_PRESENT if base is not None else STATE_MISSING
     head_state = STATE_PRESENT if head is not None else STATE_MISSING
+    head_notes: tuple[str, ...] = ()
     if base is None or head is None:
         if base is None and head is None:
-            notes: tuple[str, ...] = (f"no {INTERFACE_PATH} at either revision",)
-        elif base is None:
-            notes = (f"no {INTERFACE_PATH} at the base revision, so nothing to compare",)
-        else:
-            notes = (f"no {INTERFACE_PATH} at the head revision, so nothing to compare",)
-        return InterfaceDiff(base_state, head_state, (), notes)
+            return InterfaceDiff(
+                base_state, head_state, (), (f"no {INTERFACE_PATH} at either revision",)
+            )
+        if base is None:
+            return InterfaceDiff(
+                base_state, head_state, (),
+                (f"no {INTERFACE_PATH} at the base revision, so nothing to compare",),
+            )
+        # A declared interface that is gone at the head withdrew everything it
+        # declared, so each base element is reported removed.
+        head = InterfaceDoc(where=f"no {INTERFACE_PATH} at the head revision")
+        head_notes = (
+            f"no {INTERFACE_PATH} at the head revision, so every element declared at the base is removed",
+        )
 
     changes: list[Change] = []
     base_verbs, head_verbs = _by_name(base.verbs), _by_name(head.verbs)
-    for name in sorted(set(base_verbs) - set(head_verbs)):
-        changes.append(
-            Change(KIND_VERB, f"{KIND_VERB} {name}", name, CHANGE_REMOVED, f"verb {name} is no longer declared")
-        )
-    for name in sorted(set(head_verbs) - set(base_verbs)):
-        changes.append(
-            Change(KIND_VERB, f"{KIND_VERB} {name}", name, CHANGE_ADDED, f"verb {name} is newly declared")
-        )
+    changes.extend(_name_changes(KIND_VERB, list(base_verbs), list(head_verbs)))
     for name in sorted(set(base_verbs) & set(head_verbs)):
         old, new = base_verbs[name], head_verbs[name]
         for sub in sorted(set(old.subcommands) - set(new.subcommands)):
@@ -193,7 +197,7 @@ def diff_documents(base: InterfaceDoc | None, head: InterfaceDoc | None) -> Inte
     changes.extend(_name_changes(KIND_SCHEMA, base.schemas, head.schemas))
     changes.extend(_name_changes(KIND_HOOK, base.hooks, head.hooks))
     changes.extend(_name_changes(KIND_ENV, base.env, head.env))
-    return InterfaceDiff(base_state, head_state, tuple(changes), ())
+    return InterfaceDiff(base_state, head_state, tuple(changes), head_notes)
 
 
 __all__ = [

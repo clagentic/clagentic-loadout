@@ -49,8 +49,9 @@ another constant is not a code of its own.
 
 A rename is the removal of the old name together with the addition of the new one; nothing
 guesses that two names are the same element. A revision with no interface file is reported
-(`base` / `head` are `present` or `missing`) and nothing is compared, so the result is not
-breaking.
+(`base` / `head` are `present` or `missing`). A base with no file and a head with one is a
+first declaration and is not breaking. A base that declares an interface and a head with no
+file is breaking, with every base element listed as removed.
 
 ## `loadout-interface`
 
@@ -113,13 +114,15 @@ superseded draft already holds are kept as authored.
 A consumer is **disposed** when its spec item names it (the repository name, as a whole
 word, before the first `: `) and its disposition is text other than `none` alone or the
 placeholder. Loadout assumes no tracker, so any such text is read as a work item reference.
+A disposition is per consumer repository and covers every element that consumer consumes.
 
 ## At push
 
 When the branch being pushed changes the interface file in a breaking way against its merge
 base with the base branch, the push verification step prints `push: BREAKING INTERFACE
-CHANGE (...)` and one line per consumer, or one line saying the map is unavailable. A base
-that does not resolve prints nothing. It never changes the push.
+CHANGE (...)` and one line per consumer, or one line saying the map is unavailable or that
+the producer could not be determined from the origin. A base that does not resolve prints
+nothing. It never changes the push.
 
 ## At merge
 

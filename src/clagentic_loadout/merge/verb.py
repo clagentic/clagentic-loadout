@@ -517,7 +517,7 @@ from clagentic_loadout.merge import (
     verdict,
 )
 from clagentic_loadout.merge.attestation import build_attestation_body
-from clagentic_loadout.merge.interface_notice import collect_interface_notices
+from clagentic_loadout.merge.interface_notice import InterfaceNotices, collect_interface_notices
 from clagentic_loadout.merge.authority import (
     AuthorityProvider,
     StaticRoleAuthorityProvider,
@@ -2005,17 +2005,24 @@ def _run(
     # the PR's spec leaves without a disposition is named here and in the
     # attestation. It reads files and runs nothing against any consumer, and no
     # gate reads its result.
-    interface_notices = collect_interface_notices(
-        changed_files=changed_files,
-        make_readers=lambda: _interface_readers(
-            backend, owner=owner, repo=repo, repo_path=args.repo_path
-        ),
-        base_sha=(pr_info.get("base") or {}).get("sha") if isinstance(pr_info, dict) else None,
-        head_sha=current_head_sha,
-        producer=repo,
-        fence_spec_hashes=fence_spec_hashes,
-        repo_path=args.repo_path,
-    )
+    # Any failure of the computation is itself only reported: it must never
+    # change the gate outcome or stop the merge.
+    try:
+        interface_notices = collect_interface_notices(
+            changed_files=changed_files,
+            make_readers=lambda: _interface_readers(
+                backend, owner=owner, repo=repo, repo_path=args.repo_path
+            ),
+            base_sha=(pr_info.get("base") or {}).get("sha") if isinstance(pr_info, dict) else None,
+            head_sha=current_head_sha,
+            producer=repo,
+            fence_spec_hashes=fence_spec_hashes,
+            repo_path=args.repo_path,
+        )
+    except Exception as exc:  # report-only step: no failure here may stop the merge
+        interface_notices = InterfaceNotices(
+            notes=(f"interface notice not computed: {type(exc).__name__}: {exc}",)
+        )
     for interface_line in interface_notices.lines:
         print(f"merge: NOTICE -- {interface_line}", file=sys.stderr)
     for interface_note in interface_notices.notes:
