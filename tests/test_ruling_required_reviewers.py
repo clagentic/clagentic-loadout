@@ -21,6 +21,7 @@ from clagentic_loadout.merge.required_reviewers import (
 )
 from clagentic_loadout.merge.verdict import build_verdict_block
 from clagentic_loadout.review import ruling_provider as rp
+from clagentic_loadout.review.evaluation import finding_state_id
 from clagentic_loadout.review import ruling_verb as ruling
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.transport.attestation import SOURCE_CONFIGURED, Identity
@@ -40,6 +41,7 @@ from tests._support.merge_verb import (
 
 OTHER_ROLE = "another-reviewer"
 EARLIER_HEAD = "a" * 40
+MIDDLE_HEAD = "c" * 40
 
 
 @pytest.fixture(autouse=True)
@@ -373,6 +375,59 @@ class TestEarlierHeadFencesStayANotice:
 
         assert code == merge_verb.EXIT_OK, err
         assert "NOTICE" in err and "F1" in err
+
+    @staticmethod
+    def _resolved(file="src/a.py", line=10, rule="R1"):
+        return {
+            "resolved": [
+                {"file": file, "line": line, "rule_id": rule, "message": "fixed", "by": "reviewer"}
+            ]
+        }
+
+    def _earlier_blocked(self):
+        state_id = finding_state_id("src/a.py", 10, "R1")
+        opened = {"findings_open": [{"id": state_id, "rule_id": "R1", "head": EARLIER_HEAD}]}
+        return state_id, {"id": 1, **self._fence_at("blocking", EARLIER_HEAD, opened)}
+
+    def test_a_later_clean_fence_listing_it_as_resolved_drops_the_notice(self, capsys):
+        state_id, blocked = self._earlier_blocked()
+        comments = [blocked, {"id": 2, **self._fence_at("clean", HEAD, self._resolved())}]
+
+        code, err = self._merge(comments, capsys)
+
+        assert code == merge_verb.EXIT_OK, err
+        assert state_id not in err
+
+    def test_a_middle_fence_resolving_it_drops_the_notice_at_a_later_clean_fence(self, capsys):
+        state_id, blocked = self._earlier_blocked()
+        comments = [
+            blocked,
+            {"id": 2, **self._fence_at("clean", MIDDLE_HEAD, self._resolved())},
+            {"id": 3, **self._fence_at("clean", HEAD)},
+        ]
+
+        code, err = self._merge(comments, capsys)
+
+        assert code == merge_verb.EXIT_OK, err
+        assert state_id not in err
+
+    def test_a_clean_fence_listing_nothing_still_names_it(self, capsys):
+        state_id, blocked = self._earlier_blocked()
+        comments = [blocked, {"id": 2, **self._fence_at("clean", HEAD)}]
+
+        code, err = self._merge(comments, capsys)
+
+        assert code == merge_verb.EXIT_OK, err
+        assert "NOTICE" in err and state_id in err
+
+    def test_a_resolved_entry_for_another_finding_still_names_it(self, capsys):
+        state_id, blocked = self._earlier_blocked()
+        comments = [blocked, {"id": 2, **self._fence_at("clean", HEAD, self._resolved(line=11))}]
+
+        code, err = self._merge(comments, capsys)
+
+        assert code == merge_verb.EXIT_OK, err
+        assert state_id in err
 
     def test_a_same_head_blocked_fence_still_refuses_a_later_clean_one(self, capsys):
         comments = [
