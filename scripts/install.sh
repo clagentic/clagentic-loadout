@@ -125,6 +125,9 @@
 #                                           # CLAGENTIC_LOADOUT_CLAUDE_SETTINGS)
 #   scripts/install.sh --dry-run           # print the resolved plan, install
 #                                           # nothing
+#   scripts/install.sh --print-plan        # venv tier: print data_dir, bin_dir,
+#                                           # release_id, current_release as
+#                                           # key=value lines, write nothing
 #   scripts/install.sh --help
 #
 # Exit codes:
@@ -230,6 +233,7 @@ SOURCE_PATH=""
 INSTALLER_OVERRIDE=""
 EDITABLE=0
 DRY_RUN=0
+PRINT_PLAN=0
 # Additional bin dirs the caller wants checked/reported for PATH visibility,
 # on top of whatever the chosen installer's own default target is. Space-
 # separated accumulation (POSIX sh has no arrays); repeatable --path-dir.
@@ -329,6 +333,10 @@ Options:
                         override via CLAGENTIC_LOADOUT_CLAUDE_SETTINGS).
   --dry-run              Print the resolved installer + command, install
                         nothing.
+  --print-plan           Venv tier only: print the resolved data_dir, bin_dir,
+                        release_id and current_release as key=value lines on
+                        stdout and exit without writing anything. Used by
+                        `clagentic-loadout update`.
   -h, --help            Show this help and exit.
   --version              Show this script's own version marker and exit.
 EOF
@@ -395,6 +403,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --dry-run)
             DRY_RUN=1
+            shift
+            ;;
+        --print-plan)
+            PRINT_PLAN=1
             shift
             ;;
         -h|--help)
@@ -950,6 +962,21 @@ if [ -n "$GROUPS_FILE" ]; then
     else
         echo "$PROG: would write rules.groups_file=$GROUPS_FILE into the user config.yaml." >&2
     fi
+fi
+
+if [ "$PRINT_PLAN" -eq 1 ]; then
+    if [ "$INSTALLER" != "venv" ]; then
+        echo "$PROG: --print-plan needs the venv tier (--installer venv); resolved installer: $INSTALLER" >&2
+        exit "$EXIT_USAGE"
+    fi
+    _plan_current=""
+    if [ -L "$VENV_DIR" ]; then
+        _plan_current="$(readlink "$VENV_DIR" 2>/dev/null || true)"
+        _plan_current="${_plan_current#venvs/}"
+    fi
+    printf 'data_dir=%s\nbin_dir=%s\nrelease_id=%s\ncurrent_release=%s\n' \
+        "$DATA_DIR" "$DEFAULT_BIN_DIR" "$RELEASE_ID" "$_plan_current"
+    exit "$EXIT_OK"
 fi
 
 if [ "$DRY_RUN" -eq 1 ]; then
