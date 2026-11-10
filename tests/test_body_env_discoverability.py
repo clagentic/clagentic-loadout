@@ -118,7 +118,7 @@ class TestThreeFailureShapesReaffirmed:
         with pytest.raises(body_env.BodyEnvError) as exc_info:
             body_env.read_caller_body_bytes(caller="builder", expect_target_pr=27, env=env)
         message = str(exc_info.value)
-        assert "no identity stamp staged" in message
+        assert "no staged pair" in message
         assert "builder" in message
         assert "loadout-stage-body" in message
         assert "--target-pr 27" in message
@@ -154,7 +154,7 @@ class TestThreeFailureShapesReaffirmed:
         with pytest.raises(body_env.BodyEnvError) as exc_info:
             body_env.read_caller_body_bytes(caller="builder", expect_target_pr=27, env=env)
         message = str(exc_info.value)
-        assert "no identity stamp staged" in message
+        assert "no staged pair" in message
         assert "builder" in message
         assert "other-caller" not in message
         assert "loadout-stage-body" in message

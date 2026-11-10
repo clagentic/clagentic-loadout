@@ -1022,8 +1022,11 @@ def _read_and_validate_stamp(
     caller: str,
     expect_target_pr: int | None = None,
     expect_create_branch: str | None = None,
+    raw_bytes: bytes | None = None,
 ) -> _StagedStamp:
-    """Read and parse *stamp_path*, failing closed (BodyEnvError) on any
+    """Read and parse *stamp_path* (or, when *raw_bytes* is given, parse
+    exactly those already-read bytes so the caller can keep what was
+    validated), failing closed (BodyEnvError) on any
     shape the reader cannot trust: missing, unreadable, malformed JSON, or
     missing the mandatory `target_pr` field. Never partially trusts a
     stamp it cannot fully parse -- a malformed stamp is exactly as
@@ -1046,7 +1049,10 @@ def _read_and_validate_stamp(
             f"cannot be provenance-checked -- stage both via: {recovery}"
         )
     try:
-        raw = stamp_path.read_text(encoding="utf-8")
+        if raw_bytes is None:
+            raw = stamp_path.read_text(encoding="utf-8")
+        else:
+            raw = raw_bytes.decode("utf-8")
         parsed = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BodyEnvError(
@@ -1253,7 +1259,8 @@ def read_caller_body_bytes(
     *consume* (default True, behavior unchanged): pass False to run every
     check above and return the bytes while leaving both staged files in
     place. A caller that needs validate-now, delete-later semantics should
-    use `claim_caller_body`, which owns the pair it validated.
+    use `peek_caller_body` to validate now and `claim_caller_body` to take
+    the pair later.
 
     ABANDONED-PAIR SWEEP (lr-4c1646): before doing anything else, this
     function opportunistically sweeps stale siblings out of the staging
@@ -1293,7 +1300,7 @@ def read_caller_body_bytes(
     path = resolve_caller_body_path(caller=caller, env=env)
     stamp_path = _resolve_caller_stamp_path(caller=caller, env=env)
 
-    body_bytes = _validated_staged_bytes(
+    body_bytes, _stamp_bytes = _validated_staged_pair(
         caller=caller,
         path=path,
         stamp_path=stamp_path,
@@ -1317,7 +1324,7 @@ def read_caller_body_bytes(
     return body_bytes
 
 
-def _validated_staged_bytes(
+def _validated_staged_pair(
     *,
     caller: str,
     path: Path,
@@ -1327,11 +1334,13 @@ def _validated_staged_bytes(
     expect_head_sha: str | None,
     expect_verdict_route: bool | None,
     expect_actor: str | None = None,
-) -> bytes:
+) -> tuple[bytes, bytes]:
     """Run every stamp/provenance check against the pair at *path* /
-    *stamp_path* and return the body bytes, deleting nothing. Shared by the
-    plain read and by `claim_caller_body`, which validates a pair it has
-    already renamed to a private name."""
+    *stamp_path* and return (body bytes, stamp bytes), deleting nothing. The
+    stamp is read exactly once and the returned stamp bytes are the very
+    bytes that were validated, so `peek_caller_body` never re-reads a stamp
+    that may have been re-staged since. Shared by the plain read and by
+    `peek_caller_body`."""
     # The recovery command below always names THIS invocation's OWN correct
     # binding (lr-e1e2fb follow-up, error-message consistency review
     # finding) -- a caller hitting any of the mismatch errors below must be
@@ -1340,16 +1349,35 @@ def _validated_staged_bytes(
         caller=caller, target_pr=expect_target_pr, create_branch=expect_create_branch
     )
 
+    if not path.exists() and not stamp_path.exists():
+        raise BodyEnvError(
+            f"--body-env: no staged pair under {str(path.parent)!r} for caller "
+            f"{caller!r} (neither the body nor its identity stamp is there; it "
+            f"was consumed, expired past the {_ABANDONED_PAIR_TTL_SECONDS}s "
+            f"sweep window, or staged under a different staging root). Stage "
+            f"via: {recovery}"
+        )
+
     # Stamp is checked BEFORE the body is even opened: a mismatch must
     # never consume anything (the mismatched files may belong to a
     # different, still-pending invocation), and a missing stamp is exactly
     # as untrustworthy as a missing body -- both fail closed identically.
+    try:
+        stamp_bytes: bytes | None = stamp_path.read_bytes()
+    except OSError:
+        # Missing or unreadable: the validator below owns the refusal text.
+        stamp_bytes = None
     stamp = _read_and_validate_stamp(
         stamp_path,
         caller=caller,
         expect_target_pr=expect_target_pr,
         expect_create_branch=expect_create_branch,
+        raw_bytes=stamp_bytes,
     )
+    if stamp_bytes is None:
+        raise BodyEnvError(
+            f"--body-env: could not read the identity stamp at {str(stamp_path)!r}."
+        )
     if expect_actor is not None:
         staged_actor = (stamp.identity or {}).get("actor")
         if staged_actor != expect_actor:
@@ -1457,57 +1485,25 @@ def _validated_staged_bytes(
             f"genuinely intended."
         )
 
-    return _read_staged_bytes(path)
+    return _read_staged_bytes(path), stamp_bytes
 
 
-@dataclass
-class ClaimedBody:
-    """A staged body+stamp pair this invocation owns exclusively, renamed to
-    a private per-invocation name so the public staged path is free for a
-    re-stage while this invocation validates and (maybe) posts. *data* is
-    the validated body bytes: post exactly these, never re-read the public
-    path."""
+@dataclass(frozen=True)
+class StagedPair:
+    """A staged body+stamp pair read WITHOUT claiming it: nothing on disk was
+    renamed or deleted to produce this. *data* / *stamp_data* are the exact
+    bytes validated; `claim_caller_body` requires the pair it later claims to
+    match them byte for byte. *staging_root* is the resolved staging
+    directory and *expires_at* the epoch time the abandoned-pair sweep may
+    reap the pair, so a refusal can state what is actually true about it."""
 
     data: bytes
-    _body: Path
-    _stamp: Path
-    _public_body: Path
-    _public_stamp: Path
-    _done: bool = False
-
-    def consume(self) -> None:
-        """Delete the claimed pair. Call immediately before the first remote
-        write. Only ever touches this invocation's private names, so a pair
-        staged since the claim is never affected."""
-        self._done = True
-        self._body.unlink(missing_ok=True)
-        self._stamp.unlink(missing_ok=True)
-
-    def release(self) -> str:
-        """Give the pair back after a refusal that happened before any remote
-        write. Returns `restored` when the public path was empty and the
-        pair is back for a retry, or `discarded` when a newer stage already
-        occupies it (the newer stage wins; this older pair is deleted).
-        No-op returning `consumed` after `consume`. Never overwrites."""
-        if self._done:
-            return "consumed"
-        self._done = True
-        try:
-            os.link(self._body, self._public_body)
-        except FileExistsError:
-            self._body.unlink(missing_ok=True)
-            self._stamp.unlink(missing_ok=True)
-            return "discarded"
-        self._body.unlink(missing_ok=True)
-        try:
-            os.link(self._stamp, self._public_stamp)
-        except (FileExistsError, FileNotFoundError):
-            pass
-        self._stamp.unlink(missing_ok=True)
-        return "restored"
+    stamp_data: bytes
+    staging_root: Path
+    expires_at: float
 
 
-def claim_caller_body(
+def peek_caller_body(
     *,
     caller: str,
     expect_target_pr: int | None = None,
@@ -1516,77 +1512,115 @@ def claim_caller_body(
     expect_verdict_route: bool | None = None,
     env: dict[str, str] | None = None,
     expect_actor: str | None = None,
-) -> ClaimedBody:
-    """Atomically claim the PER-CALLER staged pair by renaming it to a
-    private per-invocation name in the same directory, then validate THAT
-    pair with every check `read_caller_body_bytes` applies.
-
-    The body rename is the arbiter: of two concurrent invocations exactly
-    one rename succeeds; the loser raises `BodyEnvError` and touches
-    nothing. A validation failure releases the pair back (see
-    `ClaimedBody.release`) before raising, so a corrected retry needs no
-    re-stage. One residual: `stage_caller_body` writes body then stamp as
-    two atomic replaces, so a claim landing between them can pair an old
-    body with a newer stamp; the stamp binding checks still apply.
-    """
+) -> StagedPair:
+    """Validate the PER-CALLER staged pair with every check
+    `read_caller_body_bytes` applies and return it, renaming and deleting
+    nothing (the sweep every read runs is the only side effect)."""
     sweep_abandoned_pairs(env=env)
 
     if bool(expect_target_pr) == bool(expect_create_branch):
         raise BodyEnvError(
-            "--body-env: claim_caller_body requires EXACTLY ONE of "
+            "--body-env: peek_caller_body requires EXACTLY ONE of "
             f"expect_target_pr / expect_create_branch (got "
             f"expect_target_pr={expect_target_pr!r}, "
             f"expect_create_branch={expect_create_branch!r})."
         )
 
+    body_path = resolve_caller_body_path(caller=caller, env=env)
+    stamp_path = _resolve_caller_stamp_path(caller=caller, env=env)
+    data, stamp_data = _validated_staged_pair(
+        caller=caller,
+        path=body_path,
+        stamp_path=stamp_path,
+        expect_target_pr=expect_target_pr,
+        expect_create_branch=expect_create_branch,
+        expect_head_sha=expect_head_sha,
+        expect_verdict_route=expect_verdict_route,
+        expect_actor=expect_actor,
+    )
+    try:
+        oldest_mtime = min(body_path.stat().st_mtime, stamp_path.stat().st_mtime)
+    except OSError as exc:
+        raise BodyEnvError(
+            f"--body-env: the staged pair under {str(body_path.parent)!r} changed "
+            f"while it was being read: {exc}. Re-stage via loadout-stage-body."
+        ) from exc
+    return StagedPair(
+        data=data,
+        stamp_data=stamp_data,
+        staging_root=body_path.parent,
+        expires_at=oldest_mtime + _ABANDONED_PAIR_TTL_SECONDS,
+    )
+
+
+@dataclass
+class ClaimedBody:
+    """A staged body+stamp pair this invocation owns exclusively, renamed to
+    a private per-invocation name. *data* is the claimed body bytes."""
+
+    data: bytes
+    _body: Path
+    _stamp: Path
+
+    def consume(self) -> None:
+        """Delete the claimed pair. Only ever touches this invocation's
+        private names, so a pair staged since the claim is never affected."""
+        self._body.unlink(missing_ok=True)
+        self._stamp.unlink(missing_ok=True)
+
+
+def claim_caller_body(
+    *,
+    caller: str,
+    expected: StagedPair,
+    env: dict[str, str] | None = None,
+) -> ClaimedBody:
+    """Atomically claim the PER-CALLER staged pair by renaming it to a
+    private per-invocation name, then require the claimed body and stamp bytes
+    to equal *expected* (the pair `peek_caller_body` validated earlier).
+
+    The body rename is the arbiter: of two concurrent invocations exactly one
+    rename succeeds; the loser raises `BodyEnvError` and touches nothing. A
+    pair that no longer matches *expected* was re-staged after the peek: the
+    claimed copy is deleted (it was never validated by this invocation) and
+    `BodyEnvError` says the stage changed. One residual: `stage_caller_body`
+    writes body then stamp as two atomic replaces, so a claim landing between
+    them sees a mismatch and refuses.
+    """
     public_body = resolve_caller_body_path(caller=caller, env=env)
     public_stamp = _resolve_caller_stamp_path(caller=caller, env=env)
+    root = public_body.parent
     token = uuid.uuid4().hex
     claimed_body = public_body.with_name(f"body.{caller}.claim-{token}.json")
     claimed_stamp = public_body.with_name(f"body.{caller}.claim-{token}{_BODY_ENV_STAMP_SUFFIX}")
-    checks = {
-        "expect_target_pr": expect_target_pr,
-        "expect_create_branch": expect_create_branch,
-        "expect_head_sha": expect_head_sha,
-        "expect_verdict_route": expect_verdict_route,
-        "expect_actor": expect_actor,
-    }
 
-    def _explain_miss() -> BodyEnvError:
-        # Re-run the ordinary validation against the public paths so a
-        # missing or mismatched stage keeps its established message; if that
-        # unexpectedly passes, another invocation took the pair.
-        try:
-            _validated_staged_bytes(
-                caller=caller, path=public_body, stamp_path=public_stamp, **checks
-            )
-        except BodyEnvError as exc:
-            return exc
-        return BodyEnvError(
-            f"--body-env: the staged body for caller {caller!r} was claimed "
-            f"by another invocation -- a staged body is single-use. "
-            f"Re-stage via loadout-stage-body before retrying."
-        )
-
+    changed = BodyEnvError(
+        f"--body-env: the staged pair under {str(root)!r} changed since this "
+        f"push started (it was re-staged or claimed by another invocation); "
+        f"nothing was posted. Re-stage via loadout-stage-body and retry."
+    )
     try:
         os.rename(public_body, claimed_body)
     except FileNotFoundError:
-        raise _explain_miss() from None
+        if not public_stamp.exists():
+            raise BodyEnvError(
+                f"--body-env: no staged pair under {str(root)!r} for caller "
+                f"{caller!r}: it was consumed, expired or never staged. "
+                f"Re-stage via loadout-stage-body."
+            ) from None
+        raise changed from None
+    claim = ClaimedBody(b"", claimed_body, claimed_stamp)
     try:
         os.rename(public_stamp, claimed_stamp)
-    except FileNotFoundError:
-        claim = ClaimedBody(b"", claimed_body, claimed_stamp, public_body, public_stamp)
-        claim.release()
-        raise _explain_miss() from None
-
-    claim = ClaimedBody(b"", claimed_body, claimed_stamp, public_body, public_stamp)
-    try:
-        claim.data = _validated_staged_bytes(
-            caller=caller, path=claimed_body, stamp_path=claimed_stamp, **checks
-        )
-    except BodyEnvError:
-        claim.release()
-        raise
+        claimed_data = claimed_body.read_bytes()
+        claimed_stamp_data = claimed_stamp.read_bytes()
+    except OSError:
+        claim.consume()
+        raise changed from None
+    if claimed_data != expected.data or claimed_stamp_data != expected.stamp_data:
+        claim.consume()
+        raise changed
+    claim.data = claimed_data
     return claim
 
 
@@ -1595,9 +1629,11 @@ __all__ = [
     "BODY_STDIN_CONTRACT_GUIDANCE",
     "BodyEnvError",
     "ClaimedBody",
+    "StagedPair",
     "VerdictIntentMismatchError",
     "augment_body_contract_error",
     "claim_caller_body",
+    "peek_caller_body",
     "read_body_bytes",
     "read_caller_body_bytes",
     "resolve_body_path",

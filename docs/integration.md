@@ -1170,6 +1170,19 @@ is CONSUME-ON-READ (`transport.body_env.read_caller_body_bytes`): a
 successful read deletes the staged body and its stamp sidecar, so a stale
 body from a prior invocation can never be silently re-read by a later one.
 
+`loadout-push --body-env` reads and validates the staged pair at the start
+without renaming or deleting anything, and claims it (rename, then delete)
+only at its first remote write: the PR update request on `--update-pr`, the
+git push on create. A refusal before that point leaves the pair exactly as
+staged, so a corrected retry needs no re-stage, and prints the resolved
+staging root and the time the pair becomes eligible for the abandoned-pair
+sweep (the older file's mtime plus the sweep window); past that time, or
+under a different staging root, the retry exits 28 with "no staged pair" and
+names the root it looked in. If the pair on disk differs from the one read at
+the start when the claim happens, the push exits 28 ("changed since this push
+started") and posts nothing; the changed pair is deleted, so re-stage and
+retry. `--dry-run` leaves the pair in place.
+
 **The staged content is always the `{"body": "..."}` JSON envelope, and
 every reader UNWRAPS it.** `loadout-stage-body` stages the caller's stdin
 bytes verbatim — the same `{"body": "<text>"}` shape `--body-stdin`
