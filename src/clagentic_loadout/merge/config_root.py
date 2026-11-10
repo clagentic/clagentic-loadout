@@ -6,11 +6,14 @@ siblings, the fallback gate keys, merge_requirements, the working-tree
 declaration, the timeout and flag resolvers, the pre_checks readers) resolves
 its file through `resolve_merge_config_path` / `resolve_merge_config_root`
 here, which apply `repo_config.resolve_bound_config_root` with this verb's
-vocabulary. Rules in that function: a config at the git tree wins; a config in
-the directory holding the git tree counts only when it declares
-``merge.git_working_tree`` as the one segment naming that tree; any other
-config above the tree that holds post_merge_steps, gate keys or
-merge_requirements is refused, never read as empty.
+vocabulary. Rules in that function: a config at the git tree wins when its merge
+section holds post_merge_steps, gate keys, merge_requirements or the working-tree
+declaration (or cannot be read); a config there that is silent on those falls through
+to the parent search. A config in the directory holding the git tree counts only when
+it declares ``merge.git_working_tree`` as the one segment naming that tree; any other
+config above the tree that holds those keys is refused, never read as empty, unless
+the config at the tree was silent, in which case the tree itself is the root and
+nothing is refused.
 
 The vocabulary is imported at call time because the modules that own it import
 this one.

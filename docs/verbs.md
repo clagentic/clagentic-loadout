@@ -3048,13 +3048,17 @@ and `post_merge_steps` presence, the fallback gate keys, `merge_requirements`,
 `merge.git_working_tree`, `sync_tree_after_merge`, the step timeout, the enforcement flags and
 the `pre_checks` readers) resolves the file through one resolver:
 
-1. A config file at `--repo-path` or at T wins. Nothing above T is consulted for it.
+1. A config file at `--repo-path` or at T wins when its `merge` section holds `post_merge_steps`,
+   `merge_requirements`, a gate key or `git_working_tree`, or when it cannot be read as YAML.
+   Nothing above T is consulted for it. A file there that is silent on those keys (for example a
+   repo-level config holding only a `wait:` section) does not win: resolution falls through to
+   rule 2, and never refuses; with no accepted parent the root stays `--repo-path`'s tree.
 2. A config file in T's **direct parent** X is used only when its `merge` section declares
    `git_working_tree: <segment>`, a single path segment (no `/`, `.` or `..`) naming a directory
    of X that is not a symlink and resolves to exactly T. This is the wrapper layout: the config
    sits next to the checkout, `--repo-path` is the checkout, steps and requirements load from X,
    and the tree sync runs in T.
-3. Any other config file above T that holds `post_merge_steps`, `merge_requirements`, a gate key
+3. When no config file exists at `--repo-path` or T, any other config file above T that holds `post_merge_steps`, `merge_requirements`, a gate key
    or the declaration is **refused**, never read as empty: an ancestor that is not the direct
    parent, a direct parent that does not declare T (or declares a symlink, a multi-segment path
    or another directory), or a file above T that cannot be read. The refusal names the resolved
