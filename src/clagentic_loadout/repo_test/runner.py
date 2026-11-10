@@ -16,6 +16,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.push.push_redaction import redact_push_secrets
 from clagentic_loadout.repo_test.process_uids import UidWatcher
 
 
@@ -103,13 +104,31 @@ def run_command(
     return CommandOutcome(code, None, uids)
 
 
+TAIL_MAX_CHARS = 8 * 1024
+
+
 def log_tail(log_path: Path, lines: int) -> str:
-    """The last *lines* lines of the run's output, for a failure message."""
+    """The last *lines* lines of the run's output, for a failure message. The text
+    is redacted whole before it is cut (so a secret straddling the cut leaves no
+    recognisable prefix), then bounded to the last TAIL_MAX_CHARS characters."""
     try:
         text = log_path.read_bytes()[-64 * 1024 :].decode("utf-8", errors="replace")
     except OSError:
         return ""
-    return "\n".join(text.splitlines()[-lines:])
+    tail = "\n".join(redact_push_secrets(text).splitlines()[-lines:])
+    return tail[-TAIL_MAX_CHARS:]
 
 
-__all__ = ["CommandOutcome", "log_tail", "run_command"]
+def describe_exit(code: int) -> str:
+    """How a command's exit reads in a problem text. A negative code is the
+    signal that killed it (subprocess reports -N for signal N); the number stands
+    alone when the platform has no name for it."""
+    if code >= 0:
+        return f"exited {code}"
+    try:
+        return f"was killed by signal {-code} ({signal.Signals(-code).name})"
+    except ValueError:
+        return f"was killed by signal {-code}"
+
+
+__all__ = ["CommandOutcome", "TAIL_MAX_CHARS", "describe_exit", "log_tail", "run_command"]

@@ -24,7 +24,7 @@ from clagentic_loadout.repo_test.report_scratch import (
     create_scratch,
     remove_scratch,
 )
-from clagentic_loadout.repo_test.runner import log_tail, run_command
+from clagentic_loadout.repo_test.runner import describe_exit, log_tail, run_command
 from clagentic_loadout.repo_test.spec import (
     BASE_PLACEHOLDER,
     JUNIT_PLACEHOLDER,
@@ -288,9 +288,9 @@ def finish_run(
                 junit = parse_junit(junit_path)
             except ReportUntrusted as exc:
                 report_verification = {"status": REFUSED, "reason": str(exc)}
-                problem = f"{exc} (the command exited {outcome.exit_code})"
+                problem = f"{exc} (the command {describe_exit(outcome.exit_code)})"
             except JunitError as exc:
-                problem = f"{exc} (the command exited {outcome.exit_code})"
+                problem = f"{exc} (the command {describe_exit(outcome.exit_code)})"
     finally:
         cleanup_problem = remove_scratch(scratch)
     if cleanup_problem is not None:
@@ -303,9 +303,10 @@ def finish_run(
         failed = bool(junit.failing_ids) or outcome.exit_code != 0
         code = exits.EXIT_TESTS_FAILED if failed else exits.EXIT_OK
         if outcome.exit_code != 0 and not junit.failing_ids:
-            exited = f"the command exited {outcome.exit_code} with no failing test in its report"
+            exited = f"the command {describe_exit(outcome.exit_code)} with no failing test in its report"
             problem = f"{exited}; {cleanup_problem}" if cleanup_problem else exited
 
+    tail = log_tail(log_path, _FAILURE_LOG_LINES) if state == store.STATE_UNRUNNABLE else ""
     record: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "run_id": run_id,
@@ -322,15 +323,19 @@ def finish_run(
         "started_at": started.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    if tail:
+        # Optional: only an unrunnable run that left output has one, so a reader
+        # that predates it sees an unchanged record.
+        record["failure_log_tail"] = tail
     try:
         write_json_atomic(run_dir / store.RESULT_FILE, record)
     except OSError as exc:
         raise RunRefused(f"cannot record the result of run {run_id}: {exc}", exits.EXIT_STORE_WRITE) from exc
 
-    printed = {key: value for key, value in record.items() if key != "failing_ids"}
+    # The tail is printed to stderr by the foreground verb, not in the JSON summary.
+    printed = {key: value for key, value in record.items() if key not in ("failing_ids", "failure_log_tail")}
     printed.update(repo=recorded.get("repo"), head_sha=recorded.get("head_sha"), dirty=recorded.get("dirty"))
     printed["failing_id_count"] = len(record["failing_ids"])
-    tail = log_tail(log_path, _FAILURE_LOG_LINES) if state == store.STATE_UNRUNNABLE else ""
     return RunOutcome(exit_code=code, summary=printed, failure_log_tail=tail)
 
 
