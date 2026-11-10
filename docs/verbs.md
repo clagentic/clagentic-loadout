@@ -2481,6 +2481,10 @@ At the gate, the reviewer's earlier fences are walked in order: a finding an
 earlier fence held open that the current verdict neither clears at its own
 head (with evidence) nor re-raises does not refuse the merge: the role's fences at
 this head decide, and the merge prints a NOTICE naming each such finding id.
+A finding the role's own fence, at or after the one that held it open (the
+current fence included), lists under `resolved` is not named; the match is on
+the finding's file, line and rule. A later CLEAN fence that lists nothing does
+not clear it. The notice is output only: the gate's decision never reads it.
 A required role's verdict at the PR head is the union of every fence the role
 posted at that head: each runs the full chain and each must pass, whatever
 order they were posted in, so a CLEAN fence never overrides a BLOCKED one at

@@ -14,6 +14,7 @@ from clagentic_loadout.merge.fence_state import (
     unresolved_prior_findings,
 )
 from clagentic_loadout.merge.verdict import build_verdict_block, parse_verdict_block
+from clagentic_loadout.review.evaluation import finding_state_id
 
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
@@ -169,6 +170,25 @@ def _state(open_ids=(), cleared=()):
     )
 
 
+FILE = "src/a.py"
+OPEN_ID = finding_state_id(FILE, 10, "R1")
+
+
+def _located_open():
+    return FindingsState(
+        fence_schema_version=2,
+        findings_open=({"id": OPEN_ID, "rule_id": "R1", "head": HEAD_A},),
+    )
+
+
+def _resolved_entry(file, line, rule):
+    return {"file": file, "line": line, "rule_id": rule, "message": "fixed", "by": "reviewer"}
+
+
+def _resolved_state(file, line, rule):
+    return FindingsState(fence_schema_version=2, resolved=(_resolved_entry(file, line, rule),))
+
+
 class TestUnresolvedPriorFindings:
     def test_no_history_means_nothing_unresolved(self):
         assert unresolved_prior_findings([], FindingsState(), HEAD_B) == []
@@ -201,6 +221,34 @@ class TestUnresolvedPriorFindings:
         history = [(HEAD_A, _state(open_ids=["F1", "F2"]))]
         out = unresolved_prior_findings(history, _state(cleared=["F1"]), HEAD_B)
         assert [f["id"] for f in out] == ["F2"]
+
+    def test_a_resolved_entry_in_the_current_fence_clears_the_notice(self):
+        current = _resolved_state(FILE, 10, "R1")
+        assert unresolved_prior_findings([(HEAD_A, _located_open())], current, HEAD_B) == []
+
+    def test_a_resolved_entry_in_a_middle_fence_clears_it_for_good(self):
+        history = [(HEAD_A, _located_open()), (HEAD_C, _resolved_state(FILE, 10, "R1"))]
+        assert unresolved_prior_findings(history, FindingsState(), HEAD_B) == []
+
+    def test_a_clean_fence_that_lists_nothing_does_not_clear(self):
+        current = FindingsState(fence_schema_version=2)
+        out = unresolved_prior_findings([(HEAD_A, _located_open())], current, HEAD_B)
+        assert [f["id"] for f in out] == [OPEN_ID]
+
+    @pytest.mark.parametrize(
+        ("file", "line", "rule"), [("other.py", 10, "R1"), (FILE, 11, "R1"), (FILE, 10, "R2")]
+    )
+    def test_a_resolved_entry_for_a_different_location_or_rule_clears_nothing(
+        self, file, line, rule
+    ):
+        current = _resolved_state(file, line, rule)
+        out = unresolved_prior_findings([(HEAD_A, _located_open())], current, HEAD_B)
+        assert [f["id"] for f in out] == [OPEN_ID]
+
+    def test_state_from_fence_carries_the_resolved_entries(self):
+        entry = _resolved_entry(FILE, 10, "R1")
+        assert state_from_fence({"resolved": [entry]}).resolved == (entry,)
+        assert state_from_fence({}).resolved == ()
 
     def test_supersedes_alone_resolves_nothing(self):
         current = FindingsState(fence_schema_version=2, supersedes=5)

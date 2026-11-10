@@ -309,6 +309,10 @@ class FindingsState:
     #: Evidence, not state; read only to answer a finding the same reviewer held
     #: open at the same head (merge.fence_clearance).
     dropped: tuple[dict[str, Any], ...] = ()
+    #: The findings the reviewer lists as resolved, already validated by
+    #: _normalize_resolved. Read only by unresolved_prior_findings, for the
+    #: earlier-fence notice; the merge gate never reads it.
+    resolved: tuple[dict[str, Any], ...] = ()
 
     @property
     def evaluated(self) -> bool:
@@ -990,7 +994,21 @@ def state_from_fence(data: Mapping[str, Any]) -> FindingsState:
         dropped=tuple(
             entry for entry in data.get(KEY_DROPPED) or () if isinstance(entry, dict)
         ),
+        resolved=tuple(
+            entry for entry in data.get(KEY_RESOLVED) or () if isinstance(entry, dict)
+        ),
     )
+
+
+def _resolved_ids(state: FindingsState) -> set[str]:
+    # Imported here because review.evaluation imports this module at load time.
+    from clagentic_loadout.review.evaluation import finding_state_id
+
+    return {
+        finding_state_id(entry["file"], entry["line"], entry["rule_id"])
+        for entry in state.resolved
+        if {"file", "line", "rule_id"} <= entry.keys()
+    }
 
 
 def unresolved_prior_findings(
@@ -1003,8 +1021,9 @@ def unresolved_prior_findings(
     *earlier* is the reviewer's earlier fences in chronological order, each as
     (head the fence was for, its state). A finding is open from the fence that
     lists it until a LATER-OR-SAME fence clears it at that fence's own head. It
-    is resolved at the current fence when the current fence clears it at the
-    current head, or re-raises it (the verdict status then decides, not this
+    is also closed by a ``resolved`` entry (matched on the exact finding id) in
+    any such fence. It is resolved at the current fence when the current fence
+    clears it at the current head, lists it as resolved, or re-raises it (the verdict status then decides, not this
     function). What is returned is exactly what the current fence leaves
     unaccounted for.
     """
@@ -1015,7 +1034,10 @@ def unresolved_prior_findings(
         for claim in state.cleared_claims:
             if claim.get("head") == fence_head:
                 still_open.pop(claim["id"], None)
+        for resolved_id in _resolved_ids(state):
+            still_open.pop(resolved_id, None)
     cleared_now = {c["id"] for c in current.cleared_claims if c.get("head") == current_head}
+    cleared_now |= _resolved_ids(current)
     raised_now = {f["id"] for f in current.findings_open}
     return [f for fid, f in still_open.items() if fid not in cleared_now and fid not in raised_now]
 
