@@ -1309,6 +1309,27 @@ def test_install_sh_groups_file_replaces_prior_value_and_keeps_other_keys(
     assert "base_url: 'https://git.example.com'" in content
 
 
+def test_install_sh_groups_file_keeps_nested_key_and_sets_direct_child(
+    tmp_path: Path, shared_venv_data_dir: Path
+) -> None:
+    fake_home = _fresh_home(tmp_path)
+    config_dir = _config_yaml_path(fake_home).parent
+    config_dir.mkdir(parents=True)
+    (config_dir / "config.yaml").write_text(
+        "rules:\n  groups_file: '/tmp/a/groups.yaml'\n  nested:\n    groups_file: keep\n"
+        "forgejo:\n  base_url: 'https://git.example.com'\n"
+    )
+
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--groups-file", "/tmp/b/groups.yaml")
+    assert result.returncode == 0, result.stderr
+
+    content = _config_yaml_path(fake_home).read_text()
+    assert "\n    groups_file: keep\n" in content
+    assert content.count("\n  groups_file: '/tmp/b/groups.yaml'\n") == 1
+    assert "/tmp/a/groups.yaml" not in content
+    assert "base_url: 'https://git.example.com'" in content
+
+
 def test_install_sh_groups_file_missing_path_notices_and_exits_zero(
     tmp_path: Path, shared_venv_data_dir: Path
 ) -> None:

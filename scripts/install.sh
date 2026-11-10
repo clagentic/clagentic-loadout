@@ -1435,19 +1435,40 @@ _seed_groups_file_config() {
     rm -f "$_groups_tmp"
     : > "$_groups_tmp"
     chmod 600 "$_groups_tmp"
-    _groups_line="  groups_file: '$(_yaml_single_quote "$GROUPS_FILE")'"
+    _groups_line="groups_file: '$(_yaml_single_quote "$GROUPS_FILE")'"
     if [ -f "$_CONFIG_FILE" ]; then
         _groups_src="$_CONFIG_FILE"
     else
         _groups_src="/dev/null"
     fi
+    # Only the direct child of the top-level rules mapping is replaced: the
+    # first indented line under rules: fixes the child indent, and a
+    # groups_file key at any deeper level is left alone. The rules body is
+    # buffered so the new key is written at that detected indent.
     GROUPS_LINE="$_groups_line" awk '
-        BEGIN { line = ENVIRON["GROUPS_LINE"] }
-        /^rules:[ \t]*$/ { in_rules = 1; seen = 1; print; print line; next }
-        /^[A-Za-z_][A-Za-z0-9_]*:/ { in_rules = 0 }
-        in_rules && /^[ \t]+groups_file:/ { next }
+        function flush(   i, pad) {
+            pad = (indent == "") ? "  " : indent
+            print pad line
+            for (i = 1; i <= n; i++) print buf[i]
+            n = 0
+        }
+        BEGIN { line = ENVIRON["GROUPS_LINE"]; indent = ""; n = 0 }
+        /^rules:[ \t]*$/ { if (in_rules) flush(); in_rules = 1; seen = 1; indent = ""; print; next }
+        /^[A-Za-z_][A-Za-z0-9_]*:/ { if (in_rules) flush(); in_rules = 0 }
+        in_rules {
+            if (indent == "" && $0 ~ /^[ \t]+[^ \t#]/) {
+                match($0, /^[ \t]+/)
+                indent = substr($0, 1, RLENGTH)
+            }
+            if (indent != "" && index($0, indent "groups_file:") == 1) next
+            buf[++n] = $0
+            next
+        }
         { print }
-        END { if (!seen) { print "rules:"; print line } }
+        END {
+            if (in_rules) flush()
+            else if (!seen) { print "rules:"; print "  " line }
+        }
     ' "$_groups_src" >> "$_groups_tmp"
     rm -f "$_CONFIG_FILE"
     mv "$_groups_tmp" "$_CONFIG_FILE"
