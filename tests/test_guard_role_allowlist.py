@@ -181,6 +181,20 @@ class TestCheckBuilderCommandBaseGrants:
         ok, reason = check_builder_command("python3 -m pytest tests/ -v")
         assert ok is True, reason
 
+    def test_loadout_test_run_admitted_by_default(self):
+        # Covers the shared default set: the builder role consults the same
+        # DEFAULT_SCOPED_TEST_PATTERNS the wait wrapper does.
+        for cmd in (
+            "clagentic-loadout test run full",
+            "clagentic-loadout test run files tests/test_x.py",
+        ):
+            ok, reason = check_builder_command(cmd)
+            assert ok is True, reason
+
+    def test_other_loadout_subcommands_not_admitted_by_test_run_entry(self):
+        ok, _ = check_builder_command("clagentic-loadout update")
+        assert ok is False
+
     def test_go_build_admitted_by_default(self):
         ok, reason = check_builder_command("go build ./...")
         assert ok is True, reason
