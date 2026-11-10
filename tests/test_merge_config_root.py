@@ -265,6 +265,52 @@ def test_gate_keys_and_requirements_above_the_tree_are_refused_like_steps(tmp_pa
         gate_config.load_merge_requirements(repo.path)
 
 
+# --- a repo-level config silent on the merge section does not void the wrapper ------
+
+
+def _write_wait_only_config(tree):
+    path = tree / DEFAULT_CONFIG_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("wait:\n  timeout: 5\n", encoding="utf-8")
+
+
+def test_a_repo_config_silent_on_merge_keys_falls_through_to_the_declared_wrapper(tmp_path):
+    wrapper, repo = _wrapper_layout(tmp_path, {**STEPS, "git_working_tree": "tree"})
+    _write_wait_only_config(repo.path)
+
+    assert config_root.resolve_merge_config_root(repo.path) == wrapper.resolve()
+    assert post_merge_config.load_post_merge_steps(repo.path) == STEPS["post_merge_steps"]
+
+
+def test_a_repo_config_holding_merge_steps_still_wins_over_the_wrapper(tmp_path):
+    wrapper, repo = _wrapper_layout(tmp_path, {**STEPS, "git_working_tree": "tree"})
+    write_deployment_config(repo.path, {"post_merge_steps": [{"cmd": "false"}]})
+
+    assert config_root.resolve_merge_config_root(repo.path) == repo.path.resolve()
+
+
+def test_a_silent_repo_config_with_an_undeclared_parent_returns_the_repo_without_raising(tmp_path):
+    _, repo = _wrapper_layout(tmp_path, STEPS)
+    _write_wait_only_config(repo.path)
+
+    assert config_root.resolve_merge_config_root(repo.path) == repo.path.resolve()
+
+
+def test_no_repo_config_with_an_undeclared_parent_is_still_refused(tmp_path):
+    _, repo = _wrapper_layout(tmp_path, STEPS)
+
+    with pytest.raises(MergeConfigRootRefusedError):
+        config_root.resolve_merge_config_root(repo.path)
+
+
+def test_an_unreadable_repo_config_still_wins_over_the_wrapper(tmp_path):
+    _, repo = _wrapper_layout(tmp_path, {**STEPS, "git_working_tree": "tree"})
+    (repo.path / DEFAULT_CONFIG_RELATIVE_PATH).parent.mkdir(parents=True, exist_ok=True)
+    (repo.path / DEFAULT_CONFIG_RELATIVE_PATH).write_text("merge: [unclosed", encoding="utf-8")
+
+    assert config_root.resolve_merge_config_root(repo.path) == repo.path.resolve()
+
+
 # --- the merge verb end to end ------------------------------------------------------
 
 

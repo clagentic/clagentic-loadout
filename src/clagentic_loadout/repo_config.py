@@ -455,17 +455,24 @@ def resolve_bound_config_root(
 
     T is the git top-level of *repo_root*. In order:
 
-      1. A config file at *repo_root* or at T wins; nothing above T is consulted
-         for it. A *repo_root* in no git tree is returned unchanged.
+      1. A config file at *repo_root* or at T wins, and nothing above T is
+         consulted for it, when its *section* holds one of *guarded_keys* or the
+         declaration, or when it cannot be read (so the readers report the parse
+         problem as they always have). A file there that is silent on the section
+         does not win: resolution falls through to rule 2 in lenient mode. A
+         *repo_root* in no git tree is returned unchanged.
       2. A config file in T's direct parent X is accepted only when its
          *section* declares *declaration_key* as a single path segment W naming
          a real directory (not a symlink) that resolves to exactly T.
-      3. Any config file anywhere above T whose *section* holds one of
-         *guarded_keys* or the declaration, and which rule 2 does not accept, is
-         refused with ConfigRootRefusedError naming T, its directory and T's
-         parsed origin host and owner/name. A file above T that cannot be read is refused the same way,
-         because what it would have declared cannot be known. Files above T that
-         hold none of those keys are ignored.
+      3. When no config file exists at *repo_root* or T, any config file anywhere
+         above T whose *section* holds one of *guarded_keys* or the declaration,
+         and which rule 2 does not accept, is refused with ConfigRootRefusedError
+         naming T, its directory and T's parsed origin host and owner/name. A file
+         above T that cannot be read is refused the same way, because what it
+         would have declared cannot be known. Files above T that hold none of
+         those keys are ignored. When rule 1 was skipped because the file at
+         *repo_root* or T is silent, nothing is refused: a file the parent search
+         would refuse is ignored.
       4. Otherwise *repo_root* (resolved), as when no config exists.
 
     This is the single resolver for the merge verbs' config readers; verbs that
@@ -483,15 +490,33 @@ def resolve_bound_config_root(
                 return directory / name
         return None
 
-    if _file_in(root) is not None:
-        return root
+    watched = (*guarded_keys, declaration_key)
+
+    def _holds_section_keys(config_file: Path) -> bool:
+        # An unreadable file counts as holding them: the readers report the parse
+        # problem themselves, so this adds no new failure path.
+        try:
+            held_section = _section_of(config_file, section)
+        except ValueError:
+            return True
+        return any(key in held_section for key in watched)
+
+    silent_local = False
+    root_file = _file_in(root)
+    if root_file is not None:
+        if _holds_section_keys(root_file):
+            return root
+        silent_local = True
     tree = find_git_top_level(root)
     if tree is None:
         return root
-    if tree != root and _file_in(tree) is not None:
-        return tree
+    if tree != root:
+        tree_file = _file_in(tree)
+        if tree_file is not None:
+            if _holds_section_keys(tree_file):
+                return tree
+            silent_local = True
 
-    watched = (*guarded_keys, declaration_key)
     accepted: Path | None = None
     for directory in tree.parents:
         config_file = _file_in(directory)
@@ -501,11 +526,15 @@ def resolve_bound_config_root(
         try:
             held_section = _section_of(config_file, section)
         except ValueError as exc:
+            if silent_local:
+                continue
             raise _refusal(config_file, directory, tree, str(exc), section, declaration_key) from exc
         held = [key for key in watched if key in held_section]
         if not held:
             continue
         if directory != tree.parent:
+            if silent_local:
+                continue
             raise _refusal(
                 config_file,
                 directory,
@@ -518,6 +547,8 @@ def resolve_bound_config_root(
             held_section.get(declaration_key), directory, tree, section, declaration_key
         )
         if problem:
+            if silent_local:
+                continue
             raise _refusal(
                 config_file, directory, tree, f"it declares {held} and {problem}", section, declaration_key
             )
