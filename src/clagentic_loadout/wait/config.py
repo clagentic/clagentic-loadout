@@ -97,6 +97,10 @@ DEFAULT_SCOPED_TEST_PATTERNS: list[str] = [
     # Shell test harness: the canonical relative-path smoke-suite entrypoint
     # for an enrolled repo. Allows optional trailing arguments (e.g. --quick).
     r"^sh scripts/smoke\.sh(\s|$)",
+    # This package's own test-run verb (`full`, `files <paths>`, and its flags).
+    # Only `test run` is admitted: other subcommands (`test report`, `update`,
+    # ...) are not test execution and stay outside the set.
+    r"^clagentic-loadout\s+test\s+run(\s|$)",
 ]
 
 

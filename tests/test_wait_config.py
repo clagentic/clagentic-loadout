@@ -59,6 +59,9 @@ class TestDefaultPatternSetAdmits:
             "npm ci",
             "sh scripts/smoke.sh",
             "sh scripts/smoke.sh --quick",
+            "clagentic-loadout test run full",
+            "clagentic-loadout test run files tests/test_x.py",
+            "clagentic-loadout test run impacted --base origin/main",
         ],
     )
     def test_admitted(self, cmd):
@@ -79,6 +82,10 @@ class TestDefaultPatternSetRejects:
             "make deploy",
             "npm install",
             "npm publish",
+            "clagentic-loadout test report latest",
+            "clagentic-loadout test runner",
+            "clagentic-loadout update",
+            "clagentic-loadout",
         ],
     )
     def test_rejected(self, cmd):
