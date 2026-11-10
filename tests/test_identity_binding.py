@@ -376,7 +376,7 @@ def test_a_staged_body_is_read_by_its_own_actor_and_by_no_other(monkeypatch, tmp
     own = _stage_and_read(monkeypatch, tmp_path, issuer, cfg, "alpha", "alpha")
     assert json.loads(own) == {"body": "hello"}
     other = _stage_and_read(monkeypatch, tmp_path, issuer, cfg, "beta", "gamma")
-    assert other.startswith("refused: --body-env: no identity stamp staged") and "gamma" in other
+    assert other.startswith("refused: --body-env: no staged pair under") and "gamma" in other
 
 
 def test_a_body_staged_by_another_actor_in_the_same_directory_is_refused(tmp_path) -> None:
@@ -402,8 +402,8 @@ def test_an_unstamped_body_is_refused_when_an_actor_is_expected(tmp_path) -> Non
     env = {"TMPDIR": str(tmp_path)}
     body_env.stage_caller_body(caller="builder", body_bytes=b'{"body": "x"}', target_pr=3, env=env)
     with pytest.raises(body_env.BodyEnvError, match="staged by None"):
-        body_env.claim_caller_body(caller="builder", expect_target_pr=3, env=env, expect_actor="agent:alpha")
-    # The refusal released the pair: it is still readable by a caller that expects no actor.
+        body_env.peek_caller_body(caller="builder", expect_target_pr=3, env=env, expect_actor="agent:alpha")
+    # The refusal touched nothing: the pair is still readable by a caller that expects no actor.
     assert body_env.read_caller_body_bytes(caller="builder", expect_target_pr=3, env=env)
 
 

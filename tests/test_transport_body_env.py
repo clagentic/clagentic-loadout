@@ -310,7 +310,7 @@ class TestOwnerMismatchFailsClosed:
 
         with pytest.raises(body_env.BodyEnvError) as exc_info:
             body_env.read_caller_body_bytes(caller="reviewer-a", expect_target_pr=1, env=env)
-        assert "no identity stamp staged" in str(exc_info.value)
+        assert "no staged pair" in str(exc_info.value)
         # The error names reviewer-a's own expected path, never
         # reviewer-b's -- confirms this is a fail-closed refusal, not a
         # silent fallback that happened not to fire in this scenario.
@@ -369,7 +369,7 @@ class TestReadAndConsumeRegression:
         # a second, unrelated invocation's identity.
         with pytest.raises(body_env.BodyEnvError) as exc_info:
             body_env.read_caller_body_bytes(caller="reviewer", expect_target_pr=1, env=env)
-        assert "no identity stamp staged" in str(exc_info.value)
+        assert "no staged pair" in str(exc_info.value)
 
     def test_consume_removes_both_body_and_stamp_files(self, tmp_path):
         env = {"TMPDIR": str(tmp_path)}
@@ -755,7 +755,7 @@ class TestCreateModeStaging:
         )
         body_env.read_caller_body_bytes(caller="builder", expect_create_branch="feat/a", env=env)
 
-        with pytest.raises(body_env.BodyEnvError, match="no identity stamp staged"):
+        with pytest.raises(body_env.BodyEnvError, match="no staged pair"):
             body_env.read_caller_body_bytes(
                 caller="builder", expect_create_branch="feat/a", env=env
             )
@@ -949,7 +949,7 @@ class TestSweepAbandonedPairs:
         old_time = orphan.stat().st_mtime - (body_env._ABANDONED_PAIR_TTL_SECONDS + 60)
         os.utime(orphan, (old_time, old_time))
 
-        with pytest.raises(body_env.BodyEnvError, match="no identity stamp staged"):
+        with pytest.raises(body_env.BodyEnvError, match="no staged pair"):
             body_env.read_caller_body_bytes(caller="builder", expect_target_pr=1, env=env)
 
         assert not orphan.exists()

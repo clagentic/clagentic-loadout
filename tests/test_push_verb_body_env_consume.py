@@ -5,6 +5,7 @@ refusal that never reached the remote leaves the pair in place for a retry."""
 from __future__ import annotations
 
 import json
+import os
 import sys
 import urllib.error
 
@@ -107,7 +108,7 @@ class TestPreRemoteRefusalKeepsStagedBody:
         code = _run_main(argv, token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch)
         assert code == verb.EXIT_REMOTE_ERROR
         assert _still_staged(create_branch=branch)
-        assert "nothing was consumed" in capsys.readouterr().err
+        assert "no remote write happened" in capsys.readouterr().err
 
         sent: list = []
 
@@ -142,7 +143,7 @@ class TestPreRemoteRefusalKeepsStagedBody:
         )
         assert code == verb.EXIT_TASK_ID_GUARD_VIOLATION
         assert _still_staged(create_branch=branch)
-        assert "nothing was consumed" in capsys.readouterr().err
+        assert "no remote write happened" in capsys.readouterr().err
 
         sent: list = []
         code = _run_main(
@@ -153,6 +154,88 @@ class TestPreRemoteRefusalKeepsStagedBody:
         )
         assert code == verb.EXIT_OK
         assert sent[0]["body"] == _BODY
+
+    def test_title_gate_refusal_then_corrected_retry_needs_no_restage(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        branch = verb.git_coords.current_branch(repo)
+        _stage_create(repo)
+        base = ["--repo-path", str(repo), "--platform", "forgejo", "--body-env"]
+
+        code = _run_main(
+            [*base, "--title", "not a conventional title"],
+            token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PR_TITLE_INVALID
+        assert _still_staged(create_branch=branch)
+        err = capsys.readouterr().err
+        assert "no remote write happened" in err
+        assert str(body_env.resolve_caller_body_path(caller=_CALLER).parent) in err
+        assert "until" in err
+
+        sent: list = []
+        code = _run_main(
+            [*base, "--title", "feat: t"],
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_opener(sent),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert sent[0]["body"] == _BODY
+        assert not _still_staged(create_branch=branch)
+
+    def test_refusal_leaves_the_pair_byte_identical_and_unrenamed(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        _stage_create(repo)
+        body_path = body_env.resolve_caller_body_path(caller=_CALLER)
+        before = sorted(
+            (p.name, p.read_bytes(), p.stat().st_mtime_ns) for p in body_path.parent.iterdir()
+        )
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--body-env",
+             "--title", "not a conventional title"],
+            token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PR_TITLE_INVALID
+        after = sorted(
+            (p.name, p.read_bytes(), p.stat().st_mtime_ns) for p in body_path.parent.iterdir()
+        )
+        assert after == before
+
+    def test_refusal_then_ttl_aged_pair_gets_the_accurate_exit_28_message(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _stage_create(repo)
+        argv = ["--repo-path", str(repo), "--platform", "forgejo", "--body-env"]
+        code = _run_main(
+            [*argv, "--title", "not a conventional title"],
+            token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PR_TITLE_INVALID
+        capsys.readouterr()
+
+        staged_dir = body_env.resolve_caller_body_path(caller=_CALLER).parent
+        aged = staged_dir.stat().st_mtime - (body_env._ABANDONED_PAIR_TTL_SECONDS + 60)
+        for path in staged_dir.iterdir():
+            os.utime(path, (aged, aged))
+
+        sent: list = []
+        code = _run_main(
+            [*argv, "--title", "feat: t"],
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_opener(sent),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_BODY_ENV_UNAVAILABLE
+        assert sent == []
+        err = capsys.readouterr().err
+        assert "no staged pair" in err
+        assert str(staged_dir) in err
+        assert "no identity stamp staged" not in err
 
     def test_create_verification_failure_keeps_staged_body(
         self, repo_with_remote, monkeypatch
@@ -245,7 +328,7 @@ class TestConsumedOnceARemoteWriteIsAttempted:
         )
         assert code == verb.EXIT_OK
         assert _still_staged(create_branch=branch)
-        assert "nothing was consumed" not in capsys.readouterr().err
+        assert "no remote write happened" not in capsys.readouterr().err
 
     def test_update_skipped_not_pr_head_posts_staged_body_and_consumes(
         self, repo_with_remote, monkeypatch, capsys
@@ -290,19 +373,17 @@ class TestConsumedOnceARemoteWriteIsAttempted:
     def test_second_invocation_cannot_claim_a_pair_already_claimed(
         self, repo_with_remote, monkeypatch
     ):
-        """While this invocation holds the claim, a second invocation finds
-        nothing to claim (exit 28 in the verb) and writes nothing."""
+        """Another invocation claims the pair after this one read it: this
+        one reaches its first remote write, finds the pair gone, exits 28
+        and writes nothing."""
         repo, _remote = repo_with_remote
         _stage_create(repo)
-        loser_errors: list = []
         branch = verb.git_coords.current_branch(repo)
 
         class RacingProvider(_RecordingTokenProvider):
             def resolve_token(self, role):
-                try:
-                    body_env.claim_caller_body(caller=_CALLER, expect_create_branch=branch)
-                except body_env.BodyEnvError as exc:
-                    loser_errors.append(exc)
+                pair = body_env.peek_caller_body(caller=_CALLER, expect_create_branch=branch)
+                body_env.claim_caller_body(caller=_CALLER, expected=pair).consume()
                 return super().resolve_token(role)
 
         sent: list = []
@@ -312,9 +393,8 @@ class TestConsumedOnceARemoteWriteIsAttempted:
             opener=_capturing_opener(sent),
             monkeypatch=monkeypatch,
         )
-        assert code == verb.EXIT_OK
-        assert len(loser_errors) == 1
-        assert [s["body"] for s in sent] == [_BODY]
+        assert code == verb.EXIT_BODY_ENV_UNAVAILABLE
+        assert sent == []
 
     def test_second_verb_invocation_without_a_stage_exits_28_and_pushes_nothing(
         self, repo_with_remote, monkeypatch
@@ -335,8 +415,8 @@ class TestConsumedOnceARemoteWriteIsAttempted:
 
 
 class TestRestageDuringAnInvocation:
-    def test_restage_in_the_window_is_not_deleted_and_claimed_bytes_are_posted(
-        self, repo_with_remote, monkeypatch
+    def test_restage_between_the_read_and_the_claim_exits_28_and_posts_nothing(
+        self, repo_with_remote, monkeypatch, capsys
     ):
         repo, _remote = repo_with_remote
         branch = verb.git_coords.current_branch(repo)
@@ -358,102 +438,69 @@ class TestRestageDuringAnInvocation:
             opener=_capturing_opener(sent),
             monkeypatch=monkeypatch,
         )
-        assert code == verb.EXIT_OK
-        assert sent[0]["body"] == _BODY
-        assert _still_staged(create_branch=branch)
-
-        sent2: list = []
-        code = _run_main(
-            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-env"],
-            token_provider=_RecordingTokenProvider(),
-            opener=_capturing_opener(sent2),
-            monkeypatch=monkeypatch,
-        )
-        assert code == verb.EXIT_OK
-        assert sent2[0]["body"] == "the newer body"
-
-    def test_refusal_with_a_newer_stage_discards_the_claim_and_keeps_the_newer_stage(
-        self, repo_with_remote, monkeypatch, capsys
-    ):
-        repo, _remote = repo_with_remote
-        branch = verb.git_coords.current_branch(repo)
-        _stage_create(repo)
-
-        def restage_then_refuse(*_args, **_kwargs):
-            body_env.stage_caller_body(
-                caller=_CALLER,
-                body_bytes=json.dumps({"body": "the newer body"}).encode("utf-8"),
-                create_branch=branch,
-            )
-            raise verb.TitleInvalidError("synthetic refusal")
-
-        monkeypatch.setattr(verb, "_check_title_gate", restage_then_refuse)
-        code = _run_main(
-            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-env"],
-            token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch,
-        )
-        assert code == verb.EXIT_PR_TITLE_INVALID
-        assert "newer --body-env stage" in capsys.readouterr().err
-        claimed = body_env.read_caller_body_bytes(
-            caller=_CALLER, expect_create_branch=branch, consume=False
-        )
-        assert b"the newer body" in claimed
+        assert code == verb.EXIT_BODY_ENV_UNAVAILABLE
+        assert sent == []
+        assert "changed since this push started" in capsys.readouterr().err
 
 
-class TestClaimCallerBody:
-    def test_claim_frees_the_public_path_and_validates_the_claimed_pair(self):
+class TestPeekAndClaimCallerBody:
+    def test_peek_renames_and_deletes_nothing(self):
         body_env.stage_caller_body(caller="builder", body_bytes=b"x", target_pr=1)
-        claim = body_env.claim_caller_body(caller="builder", expect_target_pr=1)
-        assert claim.data == b"x"
-        assert not body_env.resolve_caller_body_path(caller="builder").exists()
+        staging_dir = body_env.resolve_caller_body_path(caller="builder").parent
+        before = sorted(p.name for p in staging_dir.iterdir())
+        pair = body_env.peek_caller_body(caller="builder", expect_target_pr=1)
+        assert pair.data == b"x"
+        assert pair.staging_root == staging_dir
+        assert sorted(p.name for p in staging_dir.iterdir()) == before
 
-    def test_claimed_bytes_survive_a_replaced_public_file(self):
-        body_env.stage_caller_body(caller="builder", body_bytes=b"old", target_pr=1)
-        claim = body_env.claim_caller_body(caller="builder", expect_target_pr=1)
-        body_env.stage_caller_body(caller="builder", body_bytes=b"new", target_pr=1)
-        assert claim.data == b"old"
-        claim.consume()
-        assert body_env.read_caller_body_bytes(caller="builder", expect_target_pr=1) == b"new"
-
-    def test_release_restores_when_public_path_is_empty(self):
-        body_env.stage_caller_body(caller="builder", body_bytes=b"x", target_pr=1)
-        claim = body_env.claim_caller_body(caller="builder", expect_target_pr=1)
-        assert claim.release() == "restored"
-        assert body_env.read_caller_body_bytes(caller="builder", expect_target_pr=1) == b"x"
-
-    def test_release_discards_when_a_newer_stage_exists(self):
-        body_env.stage_caller_body(caller="builder", body_bytes=b"old", target_pr=1)
-        claim = body_env.claim_caller_body(caller="builder", expect_target_pr=1)
-        body_env.stage_caller_body(caller="builder", body_bytes=b"new", target_pr=1)
-        assert claim.release() == "discarded"
-        assert body_env.read_caller_body_bytes(caller="builder", expect_target_pr=1) == b"new"
-        leftovers = [p.name for p in body_env.resolve_caller_body_path(caller="builder").parent.iterdir()]
-        assert not [name for name in leftovers if ".claim-" in name]
-
-    def test_release_after_consume_is_a_noop(self):
-        body_env.stage_caller_body(caller="builder", body_bytes=b"x", target_pr=1)
-        claim = body_env.claim_caller_body(caller="builder", expect_target_pr=1)
-        claim.consume()
-        assert claim.release() == "consumed"
-        assert not body_env.resolve_caller_body_path(caller="builder").exists()
-
-    def test_wrong_binding_releases_the_pair_back(self):
+    def test_peek_still_rejects_wrong_binding_and_leaves_the_pair(self):
         body_env.stage_caller_body(caller="builder", body_bytes=b"x", target_pr=1)
         with pytest.raises(body_env.BodyEnvError):
-            body_env.claim_caller_body(caller="builder", expect_target_pr=2)
+            body_env.peek_caller_body(caller="builder", expect_target_pr=2)
         assert body_env.read_caller_body_bytes(caller="builder", expect_target_pr=1) == b"x"
+
+    def test_claim_frees_the_public_path(self):
+        body_env.stage_caller_body(caller="builder", body_bytes=b"x", target_pr=1)
+        pair = body_env.peek_caller_body(caller="builder", expect_target_pr=1)
+        claim = body_env.claim_caller_body(caller="builder", expected=pair)
+        assert claim.data == b"x"
+        assert not body_env.resolve_caller_body_path(caller="builder").exists()
+        claim.consume()
+
+    def test_restage_after_the_peek_is_refused_and_the_claimed_pair_deleted(self):
+        body_env.stage_caller_body(caller="builder", body_bytes=b"old", target_pr=1)
+        pair = body_env.peek_caller_body(caller="builder", expect_target_pr=1)
+        body_env.stage_caller_body(caller="builder", body_bytes=b"new", target_pr=1)
+        with pytest.raises(body_env.BodyEnvError, match="changed since this push started"):
+            body_env.claim_caller_body(caller="builder", expected=pair)
+        staging_dir = body_env.resolve_caller_body_path(caller="builder").parent
+        assert not [p.name for p in staging_dir.iterdir() if ".claim-" in p.name]
+
+    def test_claim_of_a_missing_pair_says_no_staged_pair_and_names_the_root(self):
+        body_env.stage_caller_body(caller="builder", body_bytes=b"x", target_pr=1)
+        pair = body_env.peek_caller_body(caller="builder", expect_target_pr=1)
+        body_env.claim_caller_body(caller="builder", expected=pair).consume()
+        with pytest.raises(body_env.BodyEnvError, match="no staged pair") as exc_info:
+            body_env.claim_caller_body(caller="builder", expected=pair)
+        assert str(pair.staging_root) in str(exc_info.value)
+
+    def test_peek_with_nothing_staged_says_no_staged_pair_and_names_the_root(self):
+        with pytest.raises(body_env.BodyEnvError, match="no staged pair") as exc_info:
+            body_env.peek_caller_body(caller="builder", expect_target_pr=1)
+        assert str(body_env.resolve_caller_body_path(caller="builder").parent) in str(exc_info.value)
 
     def test_concurrent_claims_have_exactly_one_winner(self):
         import threading
 
         body_env.stage_caller_body(caller="builder", body_bytes=b"x", target_pr=1)
+        pair = body_env.peek_caller_body(caller="builder", expect_target_pr=1)
         barrier = threading.Barrier(8)
         results: list = []
 
         def attempt():
             barrier.wait()
             try:
-                results.append(body_env.claim_caller_body(caller="builder", expect_target_pr=1))
+                results.append(body_env.claim_caller_body(caller="builder", expected=pair))
             except body_env.BodyEnvError as exc:
                 results.append(exc)
 

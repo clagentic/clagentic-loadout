@@ -220,6 +220,7 @@ import argparse
 import json
 import re
 import sys
+from datetime import datetime, timezone
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -332,8 +333,9 @@ from clagentic_loadout.transport.attestation import (
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
     BodyEnvError,
-    ClaimedBody,
+    StagedPair,
     claim_caller_body,
+    peek_caller_body,
 )
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
@@ -1038,43 +1040,56 @@ def _read_body_env(
     either way).
     """
     try:
-        claim = claim_caller_body(
+        pair = peek_caller_body(
             caller=caller, expect_create_branch=create_branch, expect_target_pr=target_pr,
             **(stage_kwargs or {}),
         )
     except BodyEnvError as exc:
         _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
-    staged.claim = claim
-    return _unwrap_body_json(claim.data, source_label="--body-env")
+    staged.pair = pair
+    staged.caller = caller
+    return _unwrap_body_json(pair.data, source_label="--body-env")
 
 
 class _StagedBody:
-    """Holds the --body-env pair this invocation claimed (renamed to a
-    private name, so a re-stage at the public path is never touched). The
-    claimed pair is deleted exactly once, immediately before the first
-    remote-mutating operation; a refusal earlier than that releases it back
-    to the public path (only if still empty) so a corrected retry needs no
-    re-stage."""
+    """Holds the --body-env pair this invocation read WITHOUT claiming it: a
+    refusal before the first remote write leaves the pair on disk exactly as
+    staged. `consume` is the single claim point, called only at the two
+    first-remote-write sites; it requires the pair on disk to still equal the
+    one read at the start, then deletes it."""
 
     def __init__(self) -> None:
-        self.claim: ClaimedBody | None = None
+        self.pair: StagedPair | None = None
+        self.caller: str | None = None
 
     @property
     def pending(self) -> bool:
-        return self.claim is not None
+        return self.pair is not None
 
     def consume(self) -> None:
-        """No-op when nothing is claimed (--body-stdin, no body, or already
-        consumed)."""
-        claim, self.claim = self.claim, None
-        if claim is not None:
-            claim.consume()
+        """No-op when nothing was read (--body-stdin, no body, or already
+        consumed). Exits 28 when the pair changed since it was read."""
+        pair, self.pair = self.pair, None
+        if pair is None:
+            return
+        try:
+            claim_caller_body(caller=self.caller, expected=pair).consume()
+        except BodyEnvError as exc:
+            _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
 
-    def release(self) -> str | None:
-        """Give back an unconsumed claim; returns `restored`/`discarded`, or
-        None when nothing was claimed."""
-        claim, self.claim = self.claim, None
-        return claim.release() if claim is not None else None
+    def refusal_note(self) -> str | None:
+        """What is true about the still-staged pair after a refusal that
+        happened before any remote write; None when there is no pair."""
+        if self.pair is None:
+            return None
+        expires = datetime.fromtimestamp(self.pair.expires_at, tz=timezone.utc)
+        return (
+            f"push: no remote write happened and the staged --body-env pair "
+            f"under {str(self.pair.staging_root)!r} was left as staged; it "
+            f"stays usable for a corrected retry until "
+            f"{expires.strftime('%Y-%m-%dT%H:%M:%SZ')} (stamp age limit), "
+            f"and only while the staging root resolves to the same directory."
+        )
 
 
 def _check_title_gate(
@@ -1965,29 +1980,12 @@ def main(
         print(f"push: {exc}", file=sys.stderr)
         return EXIT_VERIFY_CONFIG_INVALID
     finally:
-        # A claim still held here means no remote write was attempted (a
-        # successful --dry-run included): give the pair back.
-        try:
-            outcome = staged.release()
-        except OSError as exc:
-            outcome = None
-            print(f"push: could not return the staged --body-env content: {exc}", file=sys.stderr)
-        if outcome is not None and not completed:
-            if outcome == "restored":
-                print(
-                    "push: nothing was consumed -- the staged --body-env content "
-                    "is untouched and does not need to be re-staged; correct the "
-                    "invocation and retry.",
-                    file=sys.stderr,
-                )
-            else:
-                print(
-                    "push: nothing was consumed -- a newer --body-env stage "
-                    "already exists and was left untouched; the older content "
-                    "this invocation had claimed was discarded. Correct the "
-                    "invocation and retry with the newer stage.",
-                    file=sys.stderr,
-                )
+        # A pair still held here was never claimed: no remote write was
+        # attempted. Say what is actually true about it, but only on a
+        # refusal -- never on a successful --dry-run.
+        note = None if completed else staged.refusal_note()
+        if note is not None:
+            print(note, file=sys.stderr)
 
 
 def _run(
