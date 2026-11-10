@@ -101,6 +101,7 @@ def write_run(
     tier: str | None = None,
     id_scheme: int | None = None,
     failed: int | None = None,
+    junit_body: str | None = None,
 ) -> Path:
     """A finished run directory written directly, for the read side's tests."""
     run_dir = reports / run_id
@@ -137,6 +138,8 @@ def write_run(
             # A record written before tiers existed has no tier key at all.
             result["tier"] = tier
         (run_dir / store.RESULT_FILE).write_text(json.dumps(result))
+    if junit_body is not None:
+        (run_dir / store.JUNIT_FILE).write_text(f"<testsuites><testsuite>{junit_body}</testsuite></testsuites>")
     return run_dir
 
 
