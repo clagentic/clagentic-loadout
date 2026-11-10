@@ -1,12 +1,15 @@
 """spec.verb -- `loadout-spec`: create, seal and read the standard spec.
 
-  loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--supersedes HASH] [--out FILE]
+  loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
+                    [--supersedes HASH] [--out FILE]
   loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
   loadout-spec show HASH [--chain]
 
 `new` writes a draft for ROLE: the sections the repo profile can fill (the class
 rules, the declared test commands and the profile completeness items) are filled
-from it, and every other section is present and empty. The draft is an ordinary file for the author to
+from it, the group rules from the groups file (for every role; see rules.applying),
+and every other section is present and empty. A groups problem leaves the group
+rules empty with a note and never changes the exit code. The draft is an ordinary file for the author to
 edit. With --supersedes it starts from a sealed spec instead, which is the only
 way to change one.
 
@@ -60,6 +63,9 @@ from clagentic_loadout.review.profile_brief import (
     profile_brief,
     read_snapshot,
 )
+from clagentic_loadout.review.repo_profile import RepoProfile
+from clagentic_loadout.rules.applying import applying_group_rules, format_rule_item, source_label
+from clagentic_loadout.rules.groups import GroupsFileError
 from clagentic_loadout.spec import model
 from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.verdict_record.record import is_full_sha, utc_timestamp
@@ -122,8 +128,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "new",
         help="Write a draft spec for a role.",
         description="Write a draft spec as JSON. The class rules, the declared test "
-        "commands and the profile completeness items are filled from the repo profile; "
-        "every other section is present and empty.",
+        "commands and the profile completeness items are filled from the repo profile, and "
+        "the group rules from the groups file; every other section is present and empty. A "
+        "problem with the groups file leaves the group rules empty with a note and never "
+        "stops the draft.",
     )
     new.add_argument("--role", required=True, help="The role authoring the spec, an opaque key.")
     new.add_argument(
@@ -133,6 +141,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--ref",
         default=None,
         help="Read the repo profile at this revision instead of the working tree.",
+    )
+    new.add_argument(
+        "--repo",
+        default=None,
+        help="Repository name for group rules (default: the name of the origin of --repo-path).",
+    )
+    new.add_argument(
+        "--groups-file",
+        default=None,
+        help="The groups file for group rules; see `loadout-rules --help` for the other sources.",
     )
     new.add_argument(
         "--supersedes",
@@ -225,7 +243,39 @@ def _load(root: Path, spec_hash: str, untrusted: tuple[Path, ...]) -> spec_store
         raise SpecVerbError(str(exc), _store_error_code(exc)) from exc
 
 
-def _new(args: argparse.Namespace, root: Path, now: dt.datetime | None = None) -> int:
+def _with_group_rules(
+    draft: dict[str, object],
+    args: argparse.Namespace,
+    profile: RepoProfile | None,
+    config_root: str | Path | None,
+) -> dict[str, object]:
+    """*draft* with its group rules filled for the repository, for every role. A
+    groups problem never stops the draft: the section stays empty and its note
+    says why."""
+    try:
+        found = applying_group_rules(
+            args.repo,
+            args.repo_path,
+            args.groups_file,
+            config_root,
+            known_class=profile.repo_class if profile is not None else None,
+        )
+    except GroupsFileError as exc:
+        return model.apply_group_rules(draft, [], source=None, note=f"group rules not read: {exc}")
+    items = [format_rule_item(rule) for rule in found.rules]
+    source = source_label(found.location) if found.location is not None else None
+    note = found.note
+    if not items and note is None and found.location is not None:
+        note = f"no group rules: no group in {found.location.path!r} applies to this repository"
+    return model.apply_group_rules(draft, items, source=source, note=note)
+
+
+def _new(
+    args: argparse.Namespace,
+    root: Path,
+    now: dt.datetime | None = None,
+    config_root: str | Path | None = None,
+) -> int:
     try:
         draft = model.new_draft(args.role)
     except model.SpecFormatError as exc:
@@ -259,6 +309,7 @@ def _new(args: argparse.Namespace, root: Path, now: dt.datetime | None = None) -
         )
     items = completeness_of(snapshot, now=now)
     draft = model.apply_completeness(draft, [item.render() for item in items])
+    draft = _with_group_rules(draft, args, snapshot.profile, config_root)
     text = json.dumps(draft, indent=2) + "\n"
     if args.out is None:
         sys.stdout.write(text)
@@ -379,7 +430,7 @@ def main(
     root = spec_store.specs_root(config_root=config_root)
     try:
         if args.command == "new":
-            return _new(args, root, now)
+            return _new(args, root, now, config_root)
         if args.command == "seal":
             return _seal(args, root)
         return _show(args, root)

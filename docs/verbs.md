@@ -3401,7 +3401,8 @@ with or without `--repo-root`.
 ## `loadout-spec`: the standard spec
 
 ```
-loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--supersedes HASH] [--out FILE]
+loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
+                  [--supersedes HASH] [--out FILE]
 loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
 loadout-spec show HASH [--chain]
 ```
@@ -3429,7 +3430,7 @@ The published contract is `schemas/spec.schema.json`
 | `scope` | `in` and `out`, lists of strings. | authored |
 | `acceptance_criteria` | At least one `{id, given, when, then}`; ids are unique in the spec. | authored |
 | `class_rules` | `{source, note, class, rules, paths}`: the repository class, the rule statements of each class in effect, and the per-path overrides. | the repo profile |
-| `group_rules` | `{source, note, items}` | no source yet |
+| `group_rules` | `{source, note, items}`: the group rules that apply to the repository, items as strings. | the groups file |
 | `consumers` | `{source, note, items}`, each item `{consumer, disposition}` | no source yet |
 | `test_plan` | `{source, note, declared, plan}`: the commands the profile's `test` block declares, and the author's plan. | profile + authored |
 | `verification_evidence_owed` | `{gate, note}` entries naming the verdict records that must exist. | authored |
@@ -3448,9 +3449,19 @@ check` reports (see [repo-profile.md](repo-profile.md#completeness)): the postur
 are missing, unrecognised or unconfirmed, and a retired `stakes.yaml`. Each item names a key
 and how to fix it, never the value the profile holds; an empty list says the profile is
 complete. This is reporting from the working tree (or `--ref`), not a gate input.
-`group_rules` and `consumers` have no automatic source yet: they are present and empty with
-`source: null` and the note `no source yet`, for the author to fill or leave. No field of a
-spec carries a posture value, and the schema refuses any key it does not name.
+`new` fills `group_rules` from the groups file, through the same resolution as
+`loadout-profile brief --role` (one function, `rules.applying.applying_group_rules`; see
+[`loadout-rules`](#loadout-rules--the-group-rules-for-a-repository) for the file and its sources).
+`--repo NAME` names the repository (default: the name of the origin of `--repo-path`, also when
+`--ref` is given), and `--groups-file FILE` names the groups file ahead of the environment variable
+and the `rules.groups_file` setting. `source` is `<path> (<origin>)`, where origin is `flag`, `env` or
+`config`. Each item is a string, `<group id>/<rule id>: <statement>`, followed by
+` [source: <source>]` when the rule has a source. The section is filled for every role. A groups
+problem never stops the draft or changes the exit code: with no groups file configured, an
+unreadable or malformed file, an unnameable repository, or no group selecting the repository, the
+section is empty (`items: []`) and `note` gives the reason. `consumers` has no automatic source yet:
+it is present and empty with `source: null` and the note `no source yet`, for the author to fill or
+leave. No field of a spec carries a posture value, and the schema refuses any key it does not name.
 
 ### The three verbs
 

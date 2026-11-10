@@ -101,9 +101,9 @@
       "type": "object",
       "additionalProperties": false,
       "required": ["source", "note", "items"],
-      "description": "Rules that apply to a group of repositories. No source exists yet; the section is authored or left empty.",
+      "description": "Rules that apply to a group of repositories, filled from the groups file when the draft is created. Each item reads '<group id>/<rule id>: <statement>', followed by ' [source: <source>]' when the rule has one.",
       "properties": {
-        "source": {"type": ["string", "null"], "description": "Where the items came from; null while there is no source."},
+        "source": {"type": ["string", "null"], "description": "The groups file the items came from and the setting that named it, as '<path> (<origin>)'; null when no groups file was read."},
         "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},
         "items": {"type": "array", "items": {"type": "string", "minLength": 1}}
       }
