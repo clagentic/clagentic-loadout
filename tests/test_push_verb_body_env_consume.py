@@ -414,6 +414,49 @@ class TestConsumedOnceARemoteWriteIsAttempted:
         assert listing.strip() == ""
 
 
+class TestRefusalNoteNamesRootAndExpiry:
+    def test_pre_remote_refusal_names_the_resolved_root_and_the_expiry_time(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        from datetime import datetime, timezone
+
+        repo, _remote = repo_with_remote
+        _stage_create(repo)
+        body_path = body_env.resolve_caller_body_path(caller=_CALLER)
+        stamp_path = body_env._resolve_caller_stamp_path(caller=_CALLER)
+        oldest = min(body_path.stat().st_mtime, stamp_path.stat().st_mtime)
+        expected_expiry = datetime.fromtimestamp(
+            oldest + body_env._ABANDONED_PAIR_TTL_SECONDS, tz=timezone.utc
+        ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "not a conventional title",
+             "--body-env"],
+            token_provider=_RefusingTokenProvider(), monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_PR_TITLE_INVALID
+        err = capsys.readouterr().err
+        assert repr(str(body_path.parent)) in err
+        assert f"until {expected_expiry}" in err
+
+    def test_successful_dry_run_prints_no_refusal_note(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _stage_create(repo)
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t",
+             "--body-env", "--dry-run"],
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_opener([]),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        err = capsys.readouterr().err
+        assert "stamp age limit" not in err
+        assert "was left as staged" not in err
+
+
 class TestRestageDuringAnInvocation:
     def test_restage_between_the_read_and_the_claim_exits_28_and_posts_nothing(
         self, repo_with_remote, monkeypatch, capsys
@@ -475,6 +518,44 @@ class TestPeekAndClaimCallerBody:
             body_env.claim_caller_body(caller="builder", expected=pair)
         staging_dir = body_env.resolve_caller_body_path(caller="builder").parent
         assert not [p.name for p in staging_dir.iterdir() if ".claim-" in p.name]
+
+    def test_restage_between_the_stamp_validation_and_the_snapshot_is_refused(self, monkeypatch):
+        """A re-stage that lands after the stamp was read and validated: the
+        peek keeps the validated stamp bytes, so the claim sees the newer
+        stamp as a mismatch and refuses."""
+        body_env.stage_caller_body(caller="builder", body_bytes=b"old", target_pr=1)
+        real_read = body_env._read_staged_bytes
+
+        def restaging_read(path):
+            body_env.stage_caller_body(caller="builder", body_bytes=b"new", target_pr=1)
+            return real_read(path)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(body_env, "_read_staged_bytes", restaging_read)
+            pair = body_env.peek_caller_body(caller="builder", expect_target_pr=1)
+        with pytest.raises(body_env.BodyEnvError, match="changed since this push started"):
+            body_env.claim_caller_body(caller="builder", expected=pair)
+        staging_dir = body_env.resolve_caller_body_path(caller="builder").parent
+        assert not [p.name for p in staging_dir.iterdir() if ".claim-" in p.name]
+
+    def test_restage_between_the_stamp_read_and_its_validation_is_refused(self, monkeypatch):
+        """A re-stage that lands between the stamp read and its validation:
+        the stored stamp bytes are the ones that were read, not a re-read."""
+        body_env.stage_caller_body(caller="builder", body_bytes=b"old", target_pr=1)
+        real_validate = body_env._read_and_validate_stamp
+
+        def restaging_validate(*args, **kwargs):
+            body_env.stage_caller_body(caller="builder", body_bytes=b"new", target_pr=1)
+            return real_validate(*args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(body_env, "_read_and_validate_stamp", restaging_validate)
+            pair = body_env.peek_caller_body(caller="builder", expect_target_pr=1)
+        with pytest.raises(body_env.BodyEnvError, match="changed since this push started"):
+            body_env.claim_caller_body(caller="builder", expected=pair)
+        public = body_env.resolve_caller_body_path(caller="builder")
+        assert not public.exists()
+        assert not [p.name for p in public.parent.iterdir() if ".claim-" in p.name]
 
     def test_claim_of_a_missing_pair_says_no_staged_pair_and_names_the_root(self):
         body_env.stage_caller_body(caller="builder", body_bytes=b"x", target_pr=1)

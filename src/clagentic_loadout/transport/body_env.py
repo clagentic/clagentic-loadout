@@ -1022,8 +1022,11 @@ def _read_and_validate_stamp(
     caller: str,
     expect_target_pr: int | None = None,
     expect_create_branch: str | None = None,
+    raw_bytes: bytes | None = None,
 ) -> _StagedStamp:
-    """Read and parse *stamp_path*, failing closed (BodyEnvError) on any
+    """Read and parse *stamp_path* (or, when *raw_bytes* is given, parse
+    exactly those already-read bytes so the caller can keep what was
+    validated), failing closed (BodyEnvError) on any
     shape the reader cannot trust: missing, unreadable, malformed JSON, or
     missing the mandatory `target_pr` field. Never partially trusts a
     stamp it cannot fully parse -- a malformed stamp is exactly as
@@ -1046,7 +1049,10 @@ def _read_and_validate_stamp(
             f"cannot be provenance-checked -- stage both via: {recovery}"
         )
     try:
-        raw = stamp_path.read_text(encoding="utf-8")
+        if raw_bytes is None:
+            raw = stamp_path.read_text(encoding="utf-8")
+        else:
+            raw = raw_bytes.decode("utf-8")
         parsed = json.loads(raw)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise BodyEnvError(
@@ -1294,7 +1300,7 @@ def read_caller_body_bytes(
     path = resolve_caller_body_path(caller=caller, env=env)
     stamp_path = _resolve_caller_stamp_path(caller=caller, env=env)
 
-    body_bytes = _validated_staged_bytes(
+    body_bytes, _stamp_bytes = _validated_staged_pair(
         caller=caller,
         path=path,
         stamp_path=stamp_path,
@@ -1318,7 +1324,7 @@ def read_caller_body_bytes(
     return body_bytes
 
 
-def _validated_staged_bytes(
+def _validated_staged_pair(
     *,
     caller: str,
     path: Path,
@@ -1328,10 +1334,13 @@ def _validated_staged_bytes(
     expect_head_sha: str | None,
     expect_verdict_route: bool | None,
     expect_actor: str | None = None,
-) -> bytes:
+) -> tuple[bytes, bytes]:
     """Run every stamp/provenance check against the pair at *path* /
-    *stamp_path* and return the body bytes, deleting nothing. Shared by the
-    plain read and by `peek_caller_body`."""
+    *stamp_path* and return (body bytes, stamp bytes), deleting nothing. The
+    stamp is read exactly once and the returned stamp bytes are the very
+    bytes that were validated, so `peek_caller_body` never re-reads a stamp
+    that may have been re-staged since. Shared by the plain read and by
+    `peek_caller_body`."""
     # The recovery command below always names THIS invocation's OWN correct
     # binding (lr-e1e2fb follow-up, error-message consistency review
     # finding) -- a caller hitting any of the mismatch errors below must be
@@ -1353,12 +1362,22 @@ def _validated_staged_bytes(
     # never consume anything (the mismatched files may belong to a
     # different, still-pending invocation), and a missing stamp is exactly
     # as untrustworthy as a missing body -- both fail closed identically.
+    try:
+        stamp_bytes: bytes | None = stamp_path.read_bytes()
+    except OSError:
+        # Missing or unreadable: the validator below owns the refusal text.
+        stamp_bytes = None
     stamp = _read_and_validate_stamp(
         stamp_path,
         caller=caller,
         expect_target_pr=expect_target_pr,
         expect_create_branch=expect_create_branch,
+        raw_bytes=stamp_bytes,
     )
+    if stamp_bytes is None:
+        raise BodyEnvError(
+            f"--body-env: could not read the identity stamp at {str(stamp_path)!r}."
+        )
     if expect_actor is not None:
         staged_actor = (stamp.identity or {}).get("actor")
         if staged_actor != expect_actor:
@@ -1466,7 +1485,7 @@ def _validated_staged_bytes(
             f"genuinely intended."
         )
 
-    return _read_staged_bytes(path)
+    return _read_staged_bytes(path), stamp_bytes
 
 
 @dataclass(frozen=True)
@@ -1509,7 +1528,7 @@ def peek_caller_body(
 
     body_path = resolve_caller_body_path(caller=caller, env=env)
     stamp_path = _resolve_caller_stamp_path(caller=caller, env=env)
-    data = _validated_staged_bytes(
+    data, stamp_data = _validated_staged_pair(
         caller=caller,
         path=body_path,
         stamp_path=stamp_path,
@@ -1520,7 +1539,6 @@ def peek_caller_body(
         expect_actor=expect_actor,
     )
     try:
-        stamp_data = stamp_path.read_bytes()
         oldest_mtime = min(body_path.stat().st_mtime, stamp_path.stat().st_mtime)
     except OSError as exc:
         raise BodyEnvError(
