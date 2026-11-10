@@ -217,8 +217,11 @@ def _drop_partial_start(text: str) -> str:
     line break falls back to dropping through the first whitespace; one with
     neither drops its first _UNBROKEN_PREFIX_CHARS characters, the longest
     credential a single unbroken run is assumed to start inside."""
-    cut = _LINE_BREAK_RE.search(text) or _WHITESPACE_RE.search(text)
-    return text[cut.end():] if cut else text[_UNBROKEN_PREFIX_CHARS:]
+    # Trailing whitespace is not a place to cut: a window that is one partial
+    # line ending in a newline has no complete line to keep.
+    body = text.rstrip()
+    cut = _LINE_BREAK_RE.search(body) or _WHITESPACE_RE.search(body)
+    return body[cut.end():] if cut else body[_UNBROKEN_PREFIX_CHARS:]
 
 
 def redact_then_bound(

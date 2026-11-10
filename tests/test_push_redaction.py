@@ -186,6 +186,8 @@ def test_a_start_cut_capture_with_no_line_break_or_whitespace_loses_its_leading_
     assert redact_then_bound("PWVALUE@host.example.test", max_chars=100, start_cut=True) == TRUNCATION_MARKER
     unbroken = "PWVALUE@" + "x" * 300
     assert redact_then_bound(unbroken, max_chars=1000, start_cut=True) == TRUNCATION_MARKER + "x" * 52
+    # A lone partial line ending in a newline is not a complete line to keep.
+    assert redact_then_bound(unbroken + "\n", max_chars=1000, start_cut=True) == TRUNCATION_MARKER + "x" * 52
 
 
 def test_verify_tail_cut_inside_a_token_value_leaves_no_fragment():
