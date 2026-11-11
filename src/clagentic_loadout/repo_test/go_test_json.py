@@ -174,8 +174,12 @@ class _Tracker:
         self.state: dict[tuple[str, str], int] = {}
         self.passed = 0
         self.skipped = 0
-        # (kind, id, package, test, failed_build) per failed case, in the order each failed.
-        self.failed: list[tuple[str, str, str, str, str]] = []
+        # Which run of a (package, test) is current: 1 for the first, one more per
+        # later run, so -count=N output can be told apart per run.
+        self.instance: dict[tuple[str, str], int] = {}
+        # (kind, id, package, test, failed_build, instance) per failed case, in the
+        # order each failed.
+        self.failed: list[tuple[str, str, str, str, str, int]] = []
 
     def _fail(self, kind: str, case_id: str, package: str, test: str, failed_build: str = "") -> None:
         if len(self.failed) >= MAX_FAILING_IDS:
@@ -183,7 +187,7 @@ class _Tracker:
                 f"the go test event stream reports more than {MAX_FAILING_IDS} failed cases, "
                 "over the limit this reader keeps"
             )
-        self.failed.append((kind, case_id, package, test, failed_build))
+        self.failed.append((kind, case_id, package, test, failed_build, self.instance.get((package, test), 0)))
 
     def feed(self, event: dict[str, Any]) -> None:
         action = event["Action"]
@@ -218,6 +222,7 @@ class _Tracker:
 
     def _track(self, key: tuple[str, str]) -> None:
         self.state[key] = _OPEN
+        self.instance[key] = self.instance.get(key, 0) + 1
         if len(self.state) > MAX_TRACKED_TESTS:
             self._too_many()
 
@@ -277,11 +282,15 @@ def parse_failed_cases(path: Path) -> list[FailedCase]:
     redacted nor bounded to the caps of ``repo_test.failures``; it is cut at
     CASE_TEXT_CAP_CHARS per case and TOTAL_TEXT_CAP_CHARS in all."""
     tracker, _ = _run(path)
-    wanted_tests = {(package, test) for _, _, package, test, _ in tracker.failed if test}
-    wanted_packages = {package for _, _, package, test, _ in tracker.failed if not test}
-    wanted_builds = {build for *_, build in tracker.failed if build}
-    chunks: dict[tuple[str, str], list[str]] = {}
-    used: dict[tuple[str, str], int] = {}
+    # Output is kept per run of a test, so under -count=N a failed case carries
+    # only its own run's output. A second tracker replays the stream to say which
+    # run each Output event belongs to.
+    wanted_tests = {(package, test, run) for _, _, package, test, _, run in tracker.failed if test}
+    wanted_packages = {package for _, _, package, test, _, _ in tracker.failed if not test}
+    wanted_builds = {build for _, _, _, _, build, _ in tracker.failed if build}
+    replay = _Tracker()
+    chunks: dict[tuple[str, str, int], list[str]] = {}
+    used: dict[tuple[str, str, int], int] = {}
     builds: dict[str, list[str]] = {}
     build_used: dict[str, int] = {}
     cut: set[Any] = set()
@@ -302,6 +311,7 @@ def parse_failed_cases(path: Path) -> list[FailedCase]:
         budget -= len(piece)
 
     for event in EventReader(path):
+        replay.feed(event)
         action = event["Action"]
         if action == "build-output":
             build = _text(event, "ImportPath")
@@ -311,18 +321,20 @@ def parse_failed_cases(path: Path) -> list[FailedCase]:
         if action != "output":
             continue
         package, test = _text(event, "Package"), _text(event, "Test")
-        if test and (package, test) in wanted_tests:
-            keep(chunks, used, (package, test), _text(event, "Output"))
-        elif not test and package in wanted_packages:
-            keep(chunks, used, (package, ""), _text(event, "Output"))
+        if test:
+            run = replay.instance.get((package, test), 0)
+            if (package, test, run) in wanted_tests:
+                keep(chunks, used, (package, test, run), _text(event, "Output"))
+        elif package in wanted_packages:
+            keep(chunks, used, (package, "", 0), _text(event, "Output"))
 
     cases: list[FailedCase] = []
-    for kind, failed_id, package, test, failed_build in tracker.failed:
-        parts = list(chunks.get((package, test), ()))
+    for kind, failed_id, package, test, failed_build, run in tracker.failed:
+        parts = list(chunks.get((package, test, run), ()))
         if failed_build:
             parts = list(builds.get(failed_build, ())) + parts
         text = "".join(parts)
-        if (package, test) in cut or (failed_build and failed_build in cut):
+        if (package, test, run) in cut or (failed_build and failed_build in cut):
             text += "\n[output cut while the stream was read]"
         cases.append(
             FailedCase(

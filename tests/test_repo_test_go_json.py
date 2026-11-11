@@ -140,6 +140,24 @@ def test_a_streams_failure_text_is_its_output_events(tmp_path: Path) -> None:
     assert by_id[NO_PACKAGE_ID].kind == "error" and "FAIL\tcommand-line-arguments" in by_id[NO_PACKAGE_ID].text
 
 
+def test_a_counted_test_failure_text_is_only_its_own_runs_output(tmp_path: Path) -> None:
+    text = _events(
+        _ev("run", "X"),
+        _ev("output", "X", Output="first run ok\n"),
+        _ev("pass", "X"),
+        _ev("run", "X"),
+        _ev("output", "X", Output="second run broke\n"),
+        _ev("fail", "X"),
+    )
+    stream = _stream(tmp_path, text)
+
+    (case,) = parse_failed_cases(stream)
+
+    assert case.test_id == "p::X"
+    assert case.text == "second run broke\n"
+    assert parse_go_stream(stream).failed == 1
+
+
 def test_a_build_failure_carries_the_build_output(tmp_path: Path) -> None:
     text = _events(
         _ev("build-output", Output="x.go:1: bad\n", ImportPath="p", Package=""), _ev("fail", FailedBuild="p")
