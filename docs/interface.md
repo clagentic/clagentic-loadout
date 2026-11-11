@@ -101,6 +101,11 @@ is the same resolution the groups file uses, and nothing is read from the reposi
 work. With none of them set, with no file at the configured path, or with a file that
 cannot be read, the verbs report that the map is unavailable and exit `0`.
 
+`scripts/install.sh --consumers-file PATH` seeds `rules.consumers_file` in that config file,
+exactly as `--groups-file` seeds `rules.groups_file`: it replaces any prior value, leaves
+every other key alone, and is skipped by `--no-seed-config`. A `PATH` that does not exist yet
+is still written, with one notice on stderr; the install never refuses over it.
+
 ## In the spec
 
 `loadout-spec new` takes `--path GLOB`, `--element NAME` and `--consumers-file FILE`. When

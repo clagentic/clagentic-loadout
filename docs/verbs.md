@@ -1591,7 +1591,9 @@ loadout-interface consumers [--repo NAME] [--repo-path DIR] [--consumers-file FI
 `diff` reads `.clagentic/loadout/interface.yaml` at two revisions and prints whether the change
 is breaking, with the removed, changed and added elements. `consumers` prints who consumes the
 named elements, from the consumer map, whose location resolves like the groups file's
-(`--consumers-file`, `CLAGENTIC_LOADOUT_CONSUMERS_FILE`, then `rules.consumers_file`). Both only
+(`--consumers-file`, `CLAGENTIC_LOADOUT_CONSUMERS_FILE`, then `rules.consumers_file`, which
+`scripts/install.sh --consumers-file PATH` seeds; a `PATH` not yet present is written with a
+notice, not refused). Both only
 report: a breaking change and an unavailable map exit `0`. Exit codes: `0` ok, `1` usage, `90` a
 revision or the repository could not be read, `91` an interface file is not valid. The file
 schema, the consumer map schema and the report-only notices at push, merge and in
