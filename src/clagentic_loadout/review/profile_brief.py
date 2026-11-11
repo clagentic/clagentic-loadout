@@ -49,6 +49,8 @@ def declared_tests(tests: DeclaredTests | None) -> dict[str, Any] | None:
     }
     if tests.prepare:
         out["prepare"] = list(tests.prepare)
+    if tests.report_format:
+        out["report_format"] = tests.report_format
     if tests.base:
         out["base"] = tests.base
     if tests.paths:
