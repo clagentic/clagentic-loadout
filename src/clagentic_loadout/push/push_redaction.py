@@ -55,7 +55,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlsplit
 
 _REDACTED = "[REDACTED]"
 
@@ -197,11 +197,6 @@ TRUNCATION_MARKER = "...[truncated]\n"
 _REMOTE_LOCATION_MARKER = "[REDACTED remote location]"
 
 _LINE_BREAK_RE = re.compile(r"[\r\n]")
-_WHITESPACE_RE = re.compile(r"\s")
-
-#: Characters dropped from a start-cut capture that has no line break or
-#: whitespace to cut at.
-_UNBROKEN_PREFIX_CHARS = 256
 
 #: Shortest path segment or query value masked on its own wherever it appears;
 #: shorter pieces are common words and are only masked inside the whole location.
@@ -212,16 +207,14 @@ def _drop_partial_start(text: str) -> str:
     """*text* without its first, possibly partial, line.
 
     A capture whose start was cut can begin inside a secret (`ser:pw@host`,
-    `oken=abc`, `ization: abc`), which no pattern recognises. The partial line
-    is dropped before redaction so no such fragment survives. A capture with no
-    line break falls back to dropping through the first whitespace; one with
-    neither drops its first _UNBROKEN_PREFIX_CHARS characters, the longest
-    credential a single unbroken run is assumed to start inside."""
+    `oken=abc`, `ization: abc`), which no pattern recognises. The first line is
+    partial, so it is dropped whole before redaction. A capture with no line
+    break is one partial line: nothing of it is kept."""
     # Trailing whitespace is not a place to cut: a window that is one partial
     # line ending in a newline has no complete line to keep.
     body = text.rstrip()
-    cut = _LINE_BREAK_RE.search(body) or _WHITESPACE_RE.search(body)
-    return body[cut.end():] if cut else body[_UNBROKEN_PREFIX_CHARS:]
+    cut = _LINE_BREAK_RE.search(body)
+    return body[cut.end():] if cut else ""
 
 
 def redact_then_bound(
@@ -275,12 +268,19 @@ def redact_remote_locations(text: str, locations: Sequence[str]) -> str:
             continue
         parts = urlsplit(location)
         masked = _REMOTE_LOCATION_MARKER
+        masked_by_location[location] = masked
         if parts.scheme and parts.netloc:
             host = parts.netloc.rpartition("@")[2]
             masked = f"{parts.scheme}://{host}/{_REMOTE_LOCATION_MARKER}"
-        masked_by_location[location] = masked
+            masked_by_location[location] = masked
+            if host != parts.netloc:
+                # git prints a location without its userinfo.
+                masked_by_location[location.replace(parts.netloc, host, 1)] = masked
         for segment in parts.path.split("/"):
-            pieces.add(unquote(segment))
+            pieces.update((segment, unquote(segment)))
+        for pair in parts.query.split("&"):
+            raw = pair.partition("=")[2]
+            pieces.update((raw, unquote(raw), unquote_plus(raw)))
         for _name, value in parse_qsl(parts.query, keep_blank_values=False):
             pieces.add(value)
     for location in sorted(masked_by_location, key=len, reverse=True):

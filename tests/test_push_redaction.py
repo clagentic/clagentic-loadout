@@ -164,6 +164,24 @@ _BOUND_ROWS = [
         ["SECRETTOKEN", "TOKEN12345"],
         id="token-value-split-by-the-start-cut",
     ),
+    pytest.param(
+        "arer SECRETBEARERVALUE12345",
+        {"max_chars": 100, "start_cut": True},
+        ["SECRETBEARER", "VALUE12345"],
+        id="bearer-cut-mid-keyword-with-no-line-break",
+    ),
+    pytest.param(
+        "ssword: SECRETPASSVALUE12345",
+        {"max_chars": 100, "start_cut": True},
+        ["SECRETPASS", "VALUE12345"],
+        id="password-cut-mid-keyword-with-no-line-break",
+    ),
+    pytest.param(
+        "ization: SECRETAUTHVALUE12345",
+        {"max_chars": 100, "start_cut": True},
+        ["SECRETAUTH", "VALUE12345"],
+        id="authorization-cut-mid-keyword-with-no-line-break",
+    ),
 ]
 
 
@@ -182,12 +200,11 @@ def test_redact_then_bound_no_secret_is_unchanged_apart_from_the_marker():
     assert redact_then_bound("abcdefghij", max_chars=4) == TRUNCATION_MARKER + "ghij"
 
 
-def test_a_start_cut_capture_with_no_line_break_or_whitespace_loses_its_leading_run():
+def test_a_start_cut_capture_with_no_line_break_is_one_partial_line_and_is_dropped():
     assert redact_then_bound("PWVALUE@host.example.test", max_chars=100, start_cut=True) == TRUNCATION_MARKER
-    unbroken = "PWVALUE@" + "x" * 300
-    assert redact_then_bound(unbroken, max_chars=1000, start_cut=True) == TRUNCATION_MARKER + "x" * 52
+    assert redact_then_bound("PWVALUE@ " + "x" * 300, max_chars=1000, start_cut=True) == TRUNCATION_MARKER
     # A lone partial line ending in a newline is not a complete line to keep.
-    assert redact_then_bound(unbroken + "\n", max_chars=1000, start_cut=True) == TRUNCATION_MARKER + "x" * 52
+    assert redact_then_bound("PWVALUE@" + "x" * 300 + "\n", max_chars=1000, start_cut=True) == TRUNCATION_MARKER
 
 
 def test_verify_tail_cut_inside_a_token_value_leaves_no_fragment():
@@ -230,6 +247,19 @@ def test_a_remote_location_with_a_credential_is_withheld_but_its_host_kept():
     )
     assert "FAKEPATHCRED7f3a9c" not in out and "FAKEQUERYCRED5d2e1b" not in out
     assert "https://git.example.test/[REDACTED remote location]" in out
+
+
+def test_a_userinfo_remote_with_percent_encoded_credentials_leaks_neither_form():
+    url = "https://user:pw@git.example.test/abc%2Fdef%2BSECRET/repo.git?sig=a%2Bb%2Bsecretval"
+    text = (
+        f"To {url}\n"
+        "To https://git.example.test/abc%2Fdef%2BSECRET/repo.git?sig=a%2Bb%2Bsecretval\n"
+        "hook: abc%2Fdef%2BSECRET abc/def+SECRET a%2Bb%2Bsecretval a+b+secretval\n"
+    )
+    out = redact_remote_locations(text, [url])
+    for value in ("abc%2Fdef%2BSECRET", "abc/def+SECRET", "a%2Bb%2Bsecretval", "a+b+secretval", "user:pw", "SECRET"):
+        assert value not in out
+    assert out.count("https://git.example.test/[REDACTED remote location]") == 2
 
 
 def test_text_without_a_remote_location_is_unchanged():
