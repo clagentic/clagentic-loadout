@@ -206,6 +206,27 @@ class TestFetchFailures:
             fetch_pr_content(_GIT_HOST_BASE, "tok", _OWNER, _REPO, _PR, opener=opener)
 
 
+@pytest.mark.parametrize(
+    ("pr_info", "expected_base"),
+    [
+        # Merged or base-advanced: base.sha is the live tip, merge_base the PR's own.
+        ({"base": {"sha": "c" * 40}, "merge_base": "e" * 40}, "e" * 40),
+        # Open PR on a host that reports merge_base equal to the base.
+        ({"base": {"sha": "c" * 40}, "merge_base": "c" * 40}, "c" * 40),
+        # No merge_base field, an empty one, or a non-string one: base.sha, no refusal.
+        ({"base": {"sha": "c" * 40}}, "c" * 40),
+        ({"base": {"sha": "c" * 40}, "merge_base": ""}, "c" * 40),
+        ({"base": {"sha": "c" * 40}, "merge_base": None}, "c" * 40),
+    ],
+)
+def test_acquired_base_is_merge_base_when_stated(pr_info, expected_base):
+    body = json.dumps({**pr_info, "head": {"sha": "d" * 40}}).encode("utf-8")
+    opener = _make_opener(pr_info_body=body)
+    acquired = fetch_pr_content(_GIT_HOST_BASE, "tok", _OWNER, _REPO, _PR, opener=opener)
+    assert acquired.base_sha == expected_base
+    assert acquired.head_sha == "d" * 40
+
+
 class TestForgejoAcquireBackend:
     def test_delegates_to_module_level_function(self):
         opener = _make_opener()

@@ -560,7 +560,10 @@ host API at fetch time — never a caller-supplied guess, never a
 locally-resolved git ref — which is what makes wrapper-cwd and
 stale-local-`main` non-issues **by construction**, not by convention: there is
 no code path here that could reach a local git ref even if one happened to be
-present and stale.
+present and stale. On Forgejo the host's `base.sha` is the live tip of the base
+branch, so for a merged PR (or one whose base has advanced) it is not the PR's
+own starting point; the acquired `base_sha` is the PR's `merge_base` when the
+host reports one, else `base.sha`. GitHub acquisition is unchanged.
 
 Without `--stage-scratch`, the JSON result on stdout carries `base_sha`,
 `head_sha`, `changed_files` (a plain filename list — the same shape

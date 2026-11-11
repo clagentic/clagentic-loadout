@@ -10,7 +10,9 @@ Endpoint shapes (Gitea/Forgejo REST API, verified against Gitea's route
 table — Forgejo forked this behavior and has not diverged for these
 endpoints):
   - GET  /api/v1/repos/{owner}/{repo}/pulls/{index}
-        -> {"base": {"sha": ...}, "head": {"sha": ...}, ...}
+        -> {"base": {"sha": ...}, "head": {"sha": ...}, "merge_base": ..., ...}
+           base.sha is the live tip of the base branch; the acquired base is
+           merge_base when the host states it, else base.sha.
   - GET  /api/v1/repos/{owner}/{repo}/pulls/{index}/files
         -> [{"filename", "status", ...}, ...] — NO per-file `patch` field
            (unlike GitHub's equivalent endpoint); per-file patch text is not
@@ -442,7 +444,14 @@ def fetch_pr_content(
     pr_info = _get_pr_info(git_host_base, token, owner, repo, pr_number, opener=opener)
     base = pr_info.get("base", {}) if isinstance(pr_info.get("base"), dict) else {}
     head = pr_info.get("head", {}) if isinstance(pr_info.get("head"), dict) else {}
-    base_sha = base.get("sha", "") or ""
+    # base.sha is the live tip of the base branch once the PR is merged or the
+    # branch has advanced; merge_base is the PR's own starting point. Older
+    # hosts omit the field, and then base.sha is all there is.
+    merge_base = pr_info.get("merge_base")
+    if isinstance(merge_base, str) and merge_base:
+        base_sha = merge_base
+    else:
+        base_sha = base.get("sha", "") or ""
     head_sha = head.get("sha", "") or ""
 
     diff_text = _get_diff_text(git_host_base, token, owner, repo, pr_number, opener=opener)
