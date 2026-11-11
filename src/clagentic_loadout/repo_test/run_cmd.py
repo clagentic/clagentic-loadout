@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.repo_test import exits, provenance, store
+from clagentic_loadout.repo_test.go_test_json import GoStreamError, parse_go_stream
 from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, JunitSummary, parse_junit
 from clagentic_loadout.repo_test.repo_match import SHA_ARG_RE, repo_label, repo_matches
 from clagentic_loadout.repo_test.report_scratch import (
@@ -31,6 +32,8 @@ from clagentic_loadout.repo_test.spec import (
     MODE_FILES,
     MODE_IMPACTED,
     MODE_TIER,
+    REPORT_GO_TEST_JSON,
+    REPORT_JUNIT,
     TIER_NAME_RE,
     DeclaredTests,
 )
@@ -162,6 +165,7 @@ class PreparedRun:
     timeout_seconds: float | None
     recorded: Mapping[str, Any]
     prepare: tuple[str, ...] | None = None
+    report_format: str = REPORT_JUNIT
 
 
 def prepare_run(
@@ -248,6 +252,7 @@ def prepare_run(
         timeout_seconds=timeout_seconds,
         recorded=recorded,
         prepare=declared.prepare,
+        report_format=declared.format,
     )
 
 
@@ -276,6 +281,8 @@ def finish_run(
     recorded, timeout_seconds = prepared.recorded, prepared.timeout_seconds
     junit_path = run_dir / store.JUNIT_FILE
     log_path = run_dir / store.LOG_FILE
+    go_stream = prepared.report_format == REPORT_GO_TEST_JSON
+    stream_path = run_dir / store.STREAM_FILE
     try:
         scratch = create_scratch()
     except OSError as exc:
@@ -301,9 +308,18 @@ def finish_run(
             problem = _prepare_problem(prepared.prepare, prepare_outcome)
             prepare_failed = problem is not None
         if not prepare_failed:
-            outcome = run_command(argv, root, log_path, timeout_seconds)
+            outcome = run_command(
+                argv, root, log_path, timeout_seconds, stdout_path=stream_path if go_stream else None
+            )
             problem = outcome.problem
-        if not prepare_failed and problem is None:
+        if not prepare_failed and problem is None and go_stream:
+            # The stream is the runner's own capture of the command's standard
+            # output, so there is no report file whose owner has to be verified.
+            try:
+                junit = parse_go_stream(stream_path)
+            except GoStreamError as exc:
+                problem = f"{exc} (the command {describe_exit(outcome.exit_code)})"
+        elif not prepare_failed and problem is None:
             # The caller's own ids are always the command's: a command that keeps
             # them never switched user.
             allowed = outcome.process_uids | {os.getuid(), os.geteuid()}
@@ -332,6 +348,9 @@ def finish_run(
 
     tail_source = run_dir / store.PREPARE_LOG_FILE if prepare_failed else log_path
     tail = log_tail(tail_source, _FAILURE_LOG_LINES) if state == store.STATE_UNRUNNABLE else ""
+    if go_stream and not tail and state == store.STATE_UNRUNNABLE and not prepare_failed:
+        # A command that wrote no event may have written its complaint to standard output.
+        tail = log_tail(stream_path, _FAILURE_LOG_LINES)
     record: dict[str, Any] = {
         "schema": SCHEMA_VERSION,
         "run_id": run_id,
@@ -348,6 +367,9 @@ def finish_run(
         "started_at": started.isoformat(),
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
+    if go_stream:
+        # Optional: absent means junit, so a junit record reads exactly as before.
+        record["report_format"] = prepared.report_format
     if prepare_record is not None:
         # Optional: only a repository that declares a prepare step has one, so a
         # record without it reads exactly as before.

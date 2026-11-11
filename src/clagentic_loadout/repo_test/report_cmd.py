@@ -38,10 +38,12 @@ from typing import Any
 
 from clagentic_loadout.repo_test import exits, store
 from clagentic_loadout.repo_test.failures import bound_failures
+from clagentic_loadout.repo_test.go_test_json import GoStreamError
+from clagentic_loadout.repo_test.go_test_json import parse_failed_cases as parse_go_failed_cases
 from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, parse_failed_cases
 from clagentic_loadout.repo_test.provenance import toplevel
 from clagentic_loadout.repo_test.repo_match import SHA_ARG_RE, repo_label, repo_matches
-from clagentic_loadout.repo_test.spec import MODE_TIER
+from clagentic_loadout.repo_test.spec import MODE_TIER, REPORT_FORMATS, REPORT_GO_TEST_JSON, REPORT_JUNIT
 from clagentic_loadout.repo_test.store import RunRecord, StoreError
 
 LATEST = "latest"
@@ -253,6 +255,8 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
     id_basis = result.get("id_basis")
     if isinstance(id_basis, str) and id_basis:
         summary["id_basis"] = id_basis
+    if report_format_of(run) != REPORT_JUNIT:
+        summary["report_format"] = report_format_of(run)
     note = _failing_id_note(run)
     if note is not None:
         summary["failing_id_note"] = note
@@ -366,18 +370,26 @@ def failures_of(root: Path, run: RunRecord) -> list[dict[str, Any]]:
     the junit report recorded with it. A running run exits 79, an interrupted or
     unrunnable one is refused, and so is one whose report cannot be read."""
     _require_complete(run, "its failures")
-    junit_path = root / run.run_id / store.JUNIT_FILE
-    if junit_path.is_symlink():
+    go_stream = report_format_of(run) == REPORT_GO_TEST_JSON
+    report_path = root / run.run_id / (store.STREAM_FILE if go_stream else store.JUNIT_FILE)
+    if report_path.is_symlink():
         raise ReportRefused(
-            f"run {run.run_id}: {str(junit_path)!r} is a symlink, refusing it", exits.EXIT_DIFF_REFUSED
+            f"run {run.run_id}: {str(report_path)!r} is a symlink, refusing it", exits.EXIT_DIFF_REFUSED
         )
     try:
-        cases = parse_failed_cases(junit_path)
-    except JunitError as exc:
+        cases = parse_go_failed_cases(report_path) if go_stream else parse_failed_cases(report_path)
+    except (JunitError, GoStreamError) as exc:
+        what = "go test event stream" if go_stream else "JUnit report"
         raise ReportRefused(
-            f"run {run.run_id}: its recorded JUnit report cannot be read: {exc}", exits.EXIT_DIFF_REFUSED
+            f"run {run.run_id}: its recorded {what} cannot be read: {exc}", exits.EXIT_DIFF_REFUSED
         ) from exc
     return bound_failures(cases)
+
+
+def report_format_of(run: RunRecord) -> str:
+    """The report format a run was recorded with; a record without the key is junit."""
+    value = run.result.get("report_format")
+    return value if value in REPORT_FORMATS else REPORT_JUNIT
 
 
 def is_terminal(run: RunRecord) -> bool:
@@ -460,6 +472,14 @@ def diff_of(head: RunRecord, base: RunRecord) -> dict[str, Any]:
         "shared_count": sum((head_ids & base_ids).values()),
         "repo_check": repo_check,
     }
+    head_format, base_format = report_format_of(head), report_format_of(base)
+    if head_format != base_format:
+        # Ids of unlike formats are built differently, so a shared id is not
+        # evidence of the same test; the diff is still printed.
+        diff["report_format_note"] = (
+            f"run {head.run_id} is {head_format} and run {base.run_id} is {base_format}: "
+            "ids are not comparable across report formats"
+        )
     if collapsed:
         diff["id_basis"] = ID_BASIS_COLLAPSED
         diff["id_basis_reason"] = (
