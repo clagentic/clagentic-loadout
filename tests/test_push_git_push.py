@@ -259,46 +259,6 @@ class TestGitPushWithToken:
         assert secret_token not in captured.err
         assert secret_token not in captured.out
 
-    @pytest.mark.parametrize(
-        "location, fake_credential",
-        [
-            ("FAKEPATHCRED7f3a9c/remote.git", "FAKEPATHCRED7f3a9c"),
-            ("remote.git?sig=FAKEQUERYCRED5d2e1b", "FAKEQUERYCRED5d2e1b"),
-            ("remote.git?x-opaque-key=FAKEQUERYCRED9a8b7c&n=1", "FAKEQUERYCRED9a8b7c"),
-        ],
-        ids=["path-segment", "query-param", "unrecognised-param-name"],
-    )
-    def test_dry_run_transcript_withholds_a_credential_in_the_remote_location(
-        self, tmp_path, capsys, location, fake_credential
-    ):
-        """A credential carried in the remote location outside userinfo (a
-        path segment, or a query parameter of any name) must not reach the
-        --dry-run transcript, whether git prints the location itself or a
-        pre-push hook echoes the remote argument it was handed."""
-        remote = tmp_path / location
-        remote.mkdir(parents=True)
-        _git(["init", "--bare", "-b", "main"], remote)
-        repo = tmp_path / "repo"
-        repo.mkdir()
-        _git(["init", "-b", "feature"], repo)
-        _git(["config", "user.email", "author@example.com"], repo)
-        _git(["config", "user.name", "Author"], repo)
-        (repo / "f.txt").write_text("content\n")
-        _git(["add", "f.txt"], repo)
-        _git(["commit", "-m", "work"], repo)
-        _git(["remote", "add", "origin", str(remote)], repo)
-        hook = repo / ".git" / "hooks" / "pre-push"
-        hook.write_text('#!/bin/sh\necho "hook saw remote: $2"\necho "hook saw remote: $2" >&2\nexit 0\n')
-        hook.chmod(0o755)
-
-        transcript = git_push_with_token("origin", "feature", "unused-token-value", repo, dry_run=True)
-
-        captured = capsys.readouterr()
-        assert transcript is not None
-        assert "dry-run exit=0" in transcript
-        for surface in (transcript, captured.err, captured.out):
-            assert fake_credential not in surface
-
     def test_platform_mismatch_hint_included_on_auth_shaped_failure(self, tmp_path, monkeypatch):
         """A synthetic auth-shaped git stderr (via a wrapper 'git' that
         fails with an auth-marker message) should carry the platform-

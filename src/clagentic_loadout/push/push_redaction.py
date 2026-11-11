@@ -54,8 +54,6 @@ WHAT THIS REDACTS:
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from urllib.parse import parse_qsl, unquote, unquote_plus, urlsplit
 
 _REDACTED = "[REDACTED]"
 
@@ -193,14 +191,7 @@ def redact_push_secrets(text: str, *, known_secrets: tuple[str, ...] = ()) -> st
 #: output was dropped, never what or how much.
 TRUNCATION_MARKER = "...[truncated]\n"
 
-#: Stands in for a remote location withheld from a transcript.
-_REMOTE_LOCATION_MARKER = "[REDACTED remote location]"
-
 _LINE_BREAK_RE = re.compile(r"[\r\n]")
-
-#: Shortest path segment or query value masked on its own wherever it appears;
-#: shorter pieces are common words and are only masked inside the whole location.
-_MIN_STANDALONE_PIECE = 8
 
 
 def _drop_partial_start(text: str) -> str:
@@ -251,49 +242,8 @@ def redact_then_bound(
     return TRUNCATION_MARKER + redacted if dropped else redacted
 
 
-def redact_remote_locations(text: str, locations: Sequence[str]) -> str:
-    """*text* with each remote location in *locations* withheld.
-
-    A credential can ride in a remote location outside userinfo -- in a path
-    segment or in a query parameter of any name -- and no pattern can tell it
-    from an ordinary path. So every verbatim occurrence of a location loses its
-    userinfo, path, query and fragment (a URL keeps only its scheme and host; a
-    plain local path is withheld whole), and each long path segment and query
-    value is also masked wherever it appears on its own, for output that echoes
-    only a piece."""
-    pieces: set[str] = set()
-    masked_by_location: dict[str, str] = {}
-    for location in locations:
-        if not location:
-            continue
-        parts = urlsplit(location)
-        masked = _REMOTE_LOCATION_MARKER
-        masked_by_location[location] = masked
-        if parts.scheme and parts.netloc:
-            host = parts.netloc.rpartition("@")[2]
-            masked = f"{parts.scheme}://{host}/{_REMOTE_LOCATION_MARKER}"
-            masked_by_location[location] = masked
-            if host != parts.netloc:
-                # git prints a location without its userinfo.
-                masked_by_location[location.replace(parts.netloc, host, 1)] = masked
-        for segment in parts.path.split("/"):
-            pieces.update((segment, unquote(segment)))
-        for pair in parts.query.split("&"):
-            raw = pair.partition("=")[2]
-            pieces.update((raw, unquote(raw), unquote_plus(raw)))
-        for _name, value in parse_qsl(parts.query, keep_blank_values=False):
-            pieces.add(value)
-    for location in sorted(masked_by_location, key=len, reverse=True):
-        text = text.replace(location, masked_by_location[location])
-    for piece in sorted(pieces, key=len, reverse=True):
-        if len(piece) >= _MIN_STANDALONE_PIECE:
-            text = text.replace(piece, _REMOTE_LOCATION_MARKER)
-    return text
-
-
 __all__ = [
     "TRUNCATION_MARKER",
     "redact_push_secrets",
-    "redact_remote_locations",
     "redact_then_bound",
 ]

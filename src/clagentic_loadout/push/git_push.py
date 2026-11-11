@@ -186,10 +186,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Sequence
 from pathlib import Path
 
-from clagentic_loadout.push.destination_guard import destinations_are_local, push_locations
+from clagentic_loadout.push.destination_guard import destinations_are_local
 from clagentic_loadout.push.errors import GitPushError
 from clagentic_loadout.push.git_hermeticity import (
     GitVersionTooOldError,
@@ -210,7 +209,7 @@ from clagentic_loadout.push.push_failure_labels import (
     SUB_CAUSE_TRANSPORT,
     SUB_CAUSE_UNKNOWN,
 )
-from clagentic_loadout.push.push_redaction import redact_push_secrets, redact_remote_locations
+from clagentic_loadout.push.push_redaction import redact_push_secrets
 
 #: git-transport auth failure substrings that plausibly indicate a
 #: platform/credential mismatch rather than a dead credential.
@@ -877,21 +876,14 @@ def git_ls_remote_with_token(
     )
 
 
-def _redacted_transcript(
-    result: subprocess.CompletedProcess, token: str, locations: Sequence[str] = ()
-) -> str:
+def _redacted_transcript(result: subprocess.CompletedProcess, token: str) -> str:
     """The raw push transcript, redacted: the one place git's push output is
-    formatted into text, reached only from the opt-in --dry-run path.
-    *locations* are the remote locations the push targeted; git prints them
-    and a pre-push hook is handed them, and a credential in a path segment or
-    query parameter matches no secret pattern, so they are withheld by value
-    first (see `redact_remote_locations`)."""
-    transcript = redact_remote_locations(
+    formatted into text, reached only from the opt-in --dry-run path."""
+    return redact_push_secrets(
         f"[dry-run exit={result.returncode}] stdout: {result.stdout}"
         f" stderr: {result.stderr}",
-        locations,
+        known_secrets=(token,),
     )
-    return redact_push_secrets(transcript, known_secrets=(token,))
 
 
 def git_push_with_token(
@@ -990,9 +982,7 @@ def git_push_with_token(
             # itself would have accepted the push. Redacted through the
             # SAME choke point every other field in this module uses
             # (push.push_redaction), never a second implementation.
-            dry_run_transcript = _redacted_transcript(
-                result, token, push_locations(remote, git_cwd)
-            )
+            dry_run_transcript = _redacted_transcript(result, token)
             print(f"push: --dry-run transcript -- {dry_run_transcript}", file=sys.stderr)
 
         if result.returncode != 0:

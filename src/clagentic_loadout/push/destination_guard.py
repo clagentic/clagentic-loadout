@@ -217,20 +217,6 @@ def _resolved_urls(name: str, *, push: bool, git_cwd: Path | None) -> list[str]:
     return urls
 
 
-def push_locations(remote: str, git_cwd: Path | None = None) -> list[str]:
-    """Every location a push to *remote* can print or hand to a hook: the push
-    URLs of a configured remote name, otherwise *remote* itself (git accepts a
-    URL or a path there). A configured name that does not resolve yields no
-    location: the name itself is not one."""
-    configured = _git_lines(["remote"], git_cwd)
-    if configured is None or remote not in configured:
-        return [remote]
-    try:
-        return _resolved_urls(remote, push=True, git_cwd=git_cwd)
-    except DestinationDeniedError:
-        return []
-
-
 def _refuse_mixed(urls: list[str]) -> None:
     if len({_is_local(url) for url in urls}) > 1:
         raise DestinationDeniedError(CATEGORY_MIXED_TRANSPORT)

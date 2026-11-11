@@ -13,7 +13,6 @@ from clagentic_loadout.bounded_capture import TailBuffer
 from clagentic_loadout.push.push_redaction import (
     TRUNCATION_MARKER,
     redact_push_secrets,
-    redact_remote_locations,
     redact_then_bound,
 )
 from clagentic_loadout.push.verify_run import _tail
@@ -238,32 +237,3 @@ def test_log_tail_with_no_secret_is_unchanged(tmp_path):
     log = tmp_path / "run.log"
     log.write_text("alpha\nbeta\ngamma\n")
     assert log_tail(log, 10) == "alpha\nbeta\ngamma"
-
-
-def test_a_remote_location_with_a_credential_is_withheld_but_its_host_kept():
-    url = "https://git.example.test/FAKEPATHCRED7f3a9c/owner/repo.git?sig=FAKEQUERYCRED5d2e1b"
-    out = redact_remote_locations(
-        f"To {url}\nhook echo: FAKEPATHCRED7f3a9c and FAKEQUERYCRED5d2e1b\n", [url]
-    )
-    assert "FAKEPATHCRED7f3a9c" not in out and "FAKEQUERYCRED5d2e1b" not in out
-    assert "https://git.example.test/[REDACTED remote location]" in out
-
-
-def test_a_userinfo_remote_with_percent_encoded_credentials_leaks_neither_form():
-    url = "https://user:pw@git.example.test/abc%2Fdef%2BSECRET/repo.git?sig=a%2Bb%2Bsecretval"
-    text = (
-        f"To {url}\n"
-        "To https://git.example.test/abc%2Fdef%2BSECRET/repo.git?sig=a%2Bb%2Bsecretval\n"
-        "hook: abc%2Fdef%2BSECRET abc/def+SECRET a%2Bb%2Bsecretval a+b+secretval\n"
-    )
-    out = redact_remote_locations(text, [url])
-    for value in ("abc%2Fdef%2BSECRET", "abc/def+SECRET", "a%2Bb%2Bsecretval", "a+b+secretval", "user:pw", "SECRET"):
-        assert value not in out
-    assert out.count("https://git.example.test/[REDACTED remote location]") == 2
-
-
-def test_text_without_a_remote_location_is_unchanged():
-    assert redact_remote_locations("Everything up-to-date\n", ["https://git.example.test/o/r.git"]) == (
-        "Everything up-to-date\n"
-    )
-    assert redact_remote_locations("anything\n", []) == "anything\n"
