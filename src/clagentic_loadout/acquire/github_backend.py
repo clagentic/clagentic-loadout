@@ -372,6 +372,7 @@ def fetch_pr_content(
         repo=repo,
         pr_number=pr_number,
         base_sha=base_sha,
+        policy_base_sha=base_sha,
         head_sha=head_sha,
         diff_text=diff_text,
         changed_files=tuple(changed_files),

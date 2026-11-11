@@ -97,6 +97,7 @@ class TestFetchPrContentSuccess:
         opener = _make_opener(pr_info_body=_pr_info_body(base_sha="c" * 40, head_sha="d" * 40))
         acquired = fetch_pr_content(_OWNER, _REPO, _PR, "tok", opener=opener)
         assert acquired.base_sha == "c" * 40
+        assert acquired.policy_base_sha == "c" * 40
         assert acquired.head_sha == "d" * 40
 
     def test_diff_text_via_diff_media_type(self):
