@@ -102,6 +102,7 @@ def write_run(
     id_scheme: int | None = None,
     failed: int | None = None,
     junit_body: str | None = None,
+    report_format: str | None = None,
 ) -> Path:
     """A finished run directory written directly, for the read side's tests."""
     run_dir = reports / run_id
@@ -134,6 +135,9 @@ def write_run(
         if id_scheme is not None:
             # A record written before ids were made distinct has no such key.
             result["id_scheme"] = id_scheme
+        if report_format is not None:
+            # A junit record carries no such key.
+            result["report_format"] = report_format
         if tier is not None:
             # A record written before tiers existed has no tier key at all.
             result["tier"] = tier

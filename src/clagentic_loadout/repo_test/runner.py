@@ -13,6 +13,7 @@ import signal
 import subprocess
 import time
 from collections.abc import Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,16 +68,25 @@ def _await_exit(proc: subprocess.Popen[bytes], timeout_seconds: float | None) ->
 
 
 def run_command(
-    argv: Sequence[str], cwd: Path, log_path: Path, timeout_seconds: float | None
+    argv: Sequence[str],
+    cwd: Path,
+    log_path: Path,
+    timeout_seconds: float | None,
+    stdout_path: Path | None = None,
 ) -> CommandOutcome:
+    """Run *argv*. Its combined output goes to *log_path*; when *stdout_path* is
+    given, its standard output goes there instead and only its standard error is
+    left in the log."""
     try:
-        with open(log_path, "wb") as log:
+        with open(log_path, "wb") as log, (
+            open(stdout_path, "wb") if stdout_path is not None else nullcontext(None)
+        ) as stdout_file:
             proc = subprocess.Popen(
                 list(argv),
                 cwd=cwd,
                 stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
+                stdout=log if stdout_file is None else stdout_file,
+                stderr=subprocess.STDOUT if stdout_file is None else log,
                 start_new_session=True,
             )
             watcher = UidWatcher(proc.pid)

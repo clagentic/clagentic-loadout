@@ -7,6 +7,7 @@ Schema (strict: an unknown key makes the whole profile invalid)::
       impacted: [./run-tests, --junit, "{junit}", --since, "{base}"]
       files: [python3, -m, pytest, "--junitxml={junit}"]   # file paths are appended
       prepare: [./bin/prepare]                             # runs before any of the above
+      report_format: junit                                 # junit (default) | go-test-json
       base: origin/main                                    # default for --base
       paths: ["spec/**"]                                   # extra test-file globs
       ratio_warn: 2                                        # changeset ratio budget
@@ -27,16 +28,23 @@ change (review.changeset_ratio). Both are kept as written and judged where they
 are used: a value that is not a positive integer falls back to its default with
 a warning naming the key, so a typo never invalidates the rest of the profile.
 
+``report_format`` names how the commands of the block report their results, for
+every run mode and tier. ``junit`` (the default, and what a block without the key
+means) is the report described next. ``go-test-json`` is an event stream, one JSON
+object per line, written to the command's standard output (the stream ``go test
+-json`` writes); its standard error stays in ``output.log``. Under it no command
+carries ``{junit}``: there is no report file to name.
+
 Each of ``full``, ``impacted`` and ``files`` is an argv list, run without a
-shell, with the repository root as the working directory. Every command must
-carry the ``{junit}`` placeholder: loadout substitutes the path of the JUnit XML
-file the command has to write, and reads the pass / fail / skip counts and the
-failing test ids from it. ``{base}`` is available to ``impacted`` only and is
+shell, with the repository root as the working directory. Under ``junit`` every
+command must carry the ``{junit}`` placeholder: loadout substitutes the path of
+the JUnit XML file the command has to write, and reads the pass / fail / skip
+counts and the failing test ids from it. ``{base}`` is available to ``impacted`` only and is
 replaced by the full commit SHA the base revision resolves to. Every key is
 optional; a run mode whose key is absent is refused by the verb, naming the key.
 
 ``tiers`` maps a tier name to an argv list under the same rules as ``full`` (it
-carries ``{junit}`` and may not use ``{base}``). ``clagentic-loadout test run tier
+carries ``{junit}`` under ``junit`` and may not use ``{base}``). ``clagentic-loadout test run tier
 <name>`` runs one. Names are the repository's own; nothing here knows any.
 """
 
@@ -48,6 +56,10 @@ from typing import Any
 
 JUNIT_PLACEHOLDER = "{junit}"
 BASE_PLACEHOLDER = "{base}"
+
+REPORT_JUNIT = "junit"
+REPORT_GO_TEST_JSON = "go-test-json"
+REPORT_FORMATS = (REPORT_JUNIT, REPORT_GO_TEST_JSON)
 
 MODE_FULL = "full"
 MODE_IMPACTED = "impacted"
@@ -62,9 +74,11 @@ KEY_PATHS = "paths"
 KEY_RATIO_WARN = "ratio_warn"
 KEY_RATIO_FLOOR_LINES = "ratio_floor_lines"
 KEY_PREPARE = "prepare"
+KEY_REPORT_FORMAT = "report_format"
 _ALLOWED_KEYS = (
     *MODES,
     KEY_PREPARE,
+    KEY_REPORT_FORMAT,
     KEY_BASE,
     KEY_TIERS,
     KEY_PATHS,
@@ -104,6 +118,13 @@ class DeclaredTests:
     paths: tuple[str, ...] = ()
     ratio_warn: Any = None
     ratio_floor_lines: Any = None
+    # None is the default format, junit; a value is one of REPORT_FORMATS.
+    report_format: str | None = None
+
+    @property
+    def format(self) -> str:
+        """The report format every command of the block uses."""
+        return self.report_format or REPORT_JUNIT
 
     def argv_for(self, mode: str) -> tuple[str, ...] | None:
         """The declared argv template for *mode*, or None when not declared."""
@@ -135,9 +156,17 @@ def _argv_items(value: Any, where: str) -> tuple[str, ...]:
     return tuple(out)
 
 
-def _argv(value: Any, where: str, *, allow_base: bool) -> tuple[str, ...]:
+def _report_format(value: Any, where: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in REPORT_FORMATS:
+        raise TestBlockError(f"{where} must be one of: {', '.join(REPORT_FORMATS)}")
+    return value
+
+
+def _argv(value: Any, where: str, *, allow_base: bool, report_format: str = REPORT_JUNIT) -> tuple[str, ...]:
     out = _argv_items(value, where)
-    if not any(JUNIT_PLACEHOLDER in item for item in out):
+    if report_format == REPORT_JUNIT and not any(JUNIT_PLACEHOLDER in item for item in out):
         raise TestBlockError(
             f"{where} must carry the {JUNIT_PLACEHOLDER} placeholder, the path the command "
             "writes its JUnit XML report to"
@@ -147,7 +176,7 @@ def _argv(value: Any, where: str, *, allow_base: bool) -> tuple[str, ...]:
     return out
 
 
-def _tiers(value: Any, where: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
+def _tiers(value: Any, where: str, report_format: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
     if value is None:
         return ()
     if not isinstance(value, dict):
@@ -161,7 +190,7 @@ def _tiers(value: Any, where: str) -> tuple[tuple[str, tuple[str, ...]], ...]:
                 f"{where}.{name} is not a valid tier name: use a lowercase letter, then lowercase "
                 "letters, digits, '-' or '_', at most 32 characters"
             )
-        out.append((name, _argv(argv, f"{where}.{name}", allow_base=False)))
+        out.append((name, _argv(argv, f"{where}.{name}", allow_base=False, report_format=report_format)))
     return tuple(out)
 
 
@@ -195,11 +224,17 @@ def parse_test_block(block: Any, where: str = "test") -> DeclaredTests:
         raise TestBlockError(
             "unknown or misplaced key: " + ", ".join(f"{where}.{key}" for key in unknown)
         )
+    report_format = _report_format(block.get(KEY_REPORT_FORMAT), f"{where}.{KEY_REPORT_FORMAT}")
     commands: dict[str, tuple[str, ...] | None] = {}
     for mode in MODES:
         value = block.get(mode)
         commands[mode] = (
-            _argv(value, f"{where}.{mode}", allow_base=mode == MODE_IMPACTED)
+            _argv(
+                value,
+                f"{where}.{mode}",
+                allow_base=mode == MODE_IMPACTED,
+                report_format=report_format or REPORT_JUNIT,
+            )
             if value is not None
             else None
         )
@@ -212,7 +247,8 @@ def parse_test_block(block: Any, where: str = "test") -> DeclaredTests:
     return DeclaredTests(
         prepare=_argv_items(prepare, f"{where}.{KEY_PREPARE}") if prepare is not None else None,
         base=base,
-        tiers=_tiers(block.get(KEY_TIERS), f"{where}.{KEY_TIERS}"),
+        tiers=_tiers(block.get(KEY_TIERS), f"{where}.{KEY_TIERS}", report_format or REPORT_JUNIT),
+        report_format=report_format,
         paths=_paths(block.get(KEY_PATHS), f"{where}.{KEY_PATHS}"),
         ratio_warn=block.get(KEY_RATIO_WARN),
         ratio_floor_lines=block.get(KEY_RATIO_FLOOR_LINES),
@@ -228,12 +264,16 @@ __all__ = [
     "KEY_PREPARE",
     "KEY_RATIO_FLOOR_LINES",
     "KEY_RATIO_WARN",
+    "KEY_REPORT_FORMAT",
     "KEY_TIERS",
     "MODES",
     "MODE_FILES",
     "MODE_FULL",
     "MODE_IMPACTED",
     "MODE_TIER",
+    "REPORT_FORMATS",
+    "REPORT_GO_TEST_JSON",
+    "REPORT_JUNIT",
     "RUN_MODES",
     "TIER_NAME_RE",
     "DeclaredTests",

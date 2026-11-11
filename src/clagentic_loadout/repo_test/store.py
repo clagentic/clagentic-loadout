@@ -6,6 +6,7 @@ One run is one directory, named by its run id, under the reports root::
     <reports root>/<run id>/result.json       state, counts and failing test ids
     <reports root>/<run id>/junit.xml         the runner's own report
     <reports root>/<run id>/output.log        the runner's combined output
+    <reports root>/<run id>/go-test.jsonl     the command's standard output, under report_format go-test-json
     <reports root>/<run id>/prepare.log       the prepare step's output, when one is declared
 
 ``result.json`` is written last, so a directory without one is a run that has not
@@ -52,6 +53,7 @@ PROVENANCE_FILE = "provenance.json"
 RESULT_FILE = "result.json"
 JUNIT_FILE = "junit.xml"
 LOG_FILE = "output.log"
+STREAM_FILE = "go-test.jsonl"
 PREPARE_LOG_FILE = "prepare.log"
 
 STATE_COMPLETE = "complete"
@@ -314,6 +316,7 @@ __all__ = [
     "PROVENANCE_FILE",
     "REPORTS_DIR_ENV_VAR",
     "RESULT_FILE",
+    "STREAM_FILE",
     "RUN_ID_RE",
     "PROCESS_KEY",
     "STATE_COMPLETE",

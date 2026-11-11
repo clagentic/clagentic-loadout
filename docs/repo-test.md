@@ -34,7 +34,7 @@ test:
 
 - Each of `full`, `impacted` and `files` is an argv list. It is run without a shell, with the
   repository root as the working directory, with no stdin.
-- Every command must contain the `{junit}` placeholder. Loadout replaces it with the path the
+- Under `junit`, every command must contain the `{junit}` placeholder. Loadout replaces it with the path the
   command has to write its JUnit XML report to, and reads the counts and failing test ids
   from that file. A command that writes no readable report leaves an `unrunnable` run.
 - The report path is in a per-run scratch directory outside the run record, mode `1733`
@@ -73,6 +73,15 @@ test:
   declares it records `prepare` (`command`, `exit_code`) in the result, and `test report
   --summary` shows it. Without the key a run is recorded exactly as before. Loadout ships no
   default prepare command.
+- `report_format` is optional and applies to every mode and tier of the block: `junit` (the
+  default, and what a block without the key means) or `go-test-json`. Any other value makes the
+  profile invalid, naming `test.report_format`. Under `go-test-json` the command writes an event
+  stream, one JSON object per line, to its standard output (the stream `go test -json` writes),
+  and no command carries `{junit}`: there is no report file. Loadout captures the command's
+  standard output to `go-test.jsonl` in the run directory, leaves its standard error in
+  `output.log`, and converts the stream in-process; no extra binary is needed on the host.
+  Example: `full: [go, test, -json, ./...]` with `report_format: go-test-json`. See
+  [Reading a go-test-json stream](#reading-a-go-test-json-stream).
 - Every key is optional. Asking for a mode whose key is absent exits `72` and names the key
   (`test.files`); a missing, invalid or absent-`test` profile is refused cleanly too. The block
   is validated strictly like the rest of the profile, and `loadout-profile check` reports an
@@ -111,6 +120,33 @@ and the counts.
 A test id is `<classname>::<name>` from the JUnit `testcase` (just `<name>` when there is no
 class name). A case with a `failure` or `error` child is failing; one with `skipped` is
 skipped.
+
+### Reading a go-test-json stream
+
+Under `report_format: go-test-json` the run's `result.json` records `report_format`, and the
+rules are:
+
+- A test id is `<package>::<test>` from the event's `Package` and `Test` (just `<test>` when the
+  event names no package). Lines that are not a JSON object with a string `Action` are skipped.
+- `pass` ends a test as passed, `skip` as skipped, `fail` as failed. A test that ran or printed
+  output and never reached one of those counts as failed (a panic, a timeout, a kill). Output
+  after a test has ended does not reopen it; a new `run` event does, so `-count=N` gives N cases.
+- A `fail` with no `Test` is a package-level failure (a build failure, a `TestMain` failure, a
+  panic outside a test): a failing id of its own, `<package>`, counted as one failed case. So a
+  package with a failing test lists two failing ids, the test and its package. `failed` equals
+  the number of failing ids (`id_scheme` 2).
+- A `/` inside a subtest name cannot be told from nesting, so two distinct tests can share an
+  id; the ids are a multiset, so both are counted.
+- A run whose standard output holds no parseable event is `unrunnable` with `problem` saying so,
+  never a complete run with zero counts.
+- Caps: a line over 1 MiB, or an event whose package and test names together pass 512
+  characters, is skipped; the stream is read line by line up to 256 MiB; at most 200000 distinct
+  tests are tracked and 10000 failed cases kept, and a stream past either of those limits is
+  `unrunnable`. `--failures` text is each failing test's `Output` events, cut at 6000
+  characters per case and 4 MiB in all (a cut case ends with a marker), then passed through the
+  same redaction and bounds as for JUnit.
+- `test report --diff` between a `junit` run and a `go-test-json` run still prints the
+  comparison and adds `report_format_note` ("ids are not comparable across report formats").
 
 ## `test run`
 

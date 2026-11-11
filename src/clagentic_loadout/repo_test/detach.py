@@ -26,6 +26,7 @@ from typing import Any
 
 from clagentic_loadout.repo_test import exits, liveness, store
 from clagentic_loadout.repo_test.run_cmd import PreparedRun, RunRefused, finish_run
+from clagentic_loadout.repo_test.spec import REPORT_JUNIT
 from clagentic_loadout.review.atomic_io import write_json_atomic
 
 _SUPERVISOR_MODULE = "clagentic_loadout.repo_test.detach"
@@ -44,6 +45,7 @@ def _job_of(prepared: PreparedRun) -> str:
             "prepare": list(prepared.prepare) if prepared.prepare else None,
             "base_sha": prepared.base_sha,
             "timeout_seconds": prepared.timeout_seconds,
+            "report_format": prepared.report_format,
         }
     )
 
@@ -61,6 +63,7 @@ def _prepared_of(job: str) -> PreparedRun:
         prepare=tuple(data["prepare"]) if data.get("prepare") else None,
         base_sha=data["base_sha"],
         timeout_seconds=data["timeout_seconds"],
+        report_format=data.get("report_format") or REPORT_JUNIT,
         # The supervisor prints no summary, so it has no use for the provenance.
         recorded={},
     )
