@@ -187,4 +187,63 @@ def redact_push_secrets(text: str, *, known_secrets: tuple[str, ...] = ()) -> st
     return redacted
 
 
-__all__ = ["redact_push_secrets"]
+#: Prepended to a bounded tail when anything was cut. Category-only: it says
+#: output was dropped, never what or how much.
+TRUNCATION_MARKER = "...[truncated]\n"
+
+_LINE_BREAK_RE = re.compile(r"[\r\n]")
+
+
+def _drop_partial_start(text: str) -> str:
+    """*text* without its first, possibly partial, line.
+
+    A capture whose start was cut can begin inside a secret (`ser:pw@host`,
+    `oken=abc`, `ization: abc`), which no pattern recognises. The first line is
+    partial, so it is dropped whole before redaction. A capture with no line
+    break is one partial line: nothing of it is kept."""
+    # Trailing whitespace is not a place to cut: a window that is one partial
+    # line ending in a newline has no complete line to keep.
+    body = text.rstrip()
+    cut = _LINE_BREAK_RE.search(body)
+    return body[cut.end():] if cut else ""
+
+
+def redact_then_bound(
+    text: str,
+    *,
+    max_chars: int,
+    max_lines: int | None = None,
+    start_cut: bool = False,
+    known_secrets: tuple[str, ...] = (),
+) -> str:
+    """The tail of *text* with every secret pattern masked, cut AFTER masking.
+
+    Redacting before the cut means a secret straddling the cut leaves no
+    recognisable prefix. *start_cut* says *text* is itself the end of a longer
+    stream (its beginning was already discarded), so its first partial line is
+    dropped (see `_drop_partial_start`). At most the last *max_lines* lines and
+    the last *max_chars* characters of the redacted text are kept; the
+    truncation marker is added when anything was dropped and is not counted in
+    *max_chars*. The result is stripped of surrounding whitespace."""
+    if start_cut:
+        text = _drop_partial_start(text)
+    redacted = redact_push_secrets(text, known_secrets=known_secrets)
+    dropped = start_cut
+    if max_lines is not None:
+        lines = redacted.splitlines()
+        if len(lines) > max_lines:
+            dropped = True
+            lines = lines[-max_lines:]
+        redacted = "\n".join(lines)
+    redacted = redacted.strip()
+    if len(redacted) > max_chars:
+        dropped = True
+        redacted = redacted[-max_chars:] if max_chars > 0 else ""
+    return TRUNCATION_MARKER + redacted if dropped else redacted
+
+
+__all__ = [
+    "TRUNCATION_MARKER",
+    "redact_push_secrets",
+    "redact_then_bound",
+]
