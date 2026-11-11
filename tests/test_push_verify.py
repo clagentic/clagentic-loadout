@@ -14,6 +14,7 @@ import yaml
 
 from clagentic_loadout.push import verb
 from clagentic_loadout.bounded_capture import TailBuffer
+from clagentic_loadout.push.push_redaction import TRUNCATION_MARKER
 from clagentic_loadout.push.verify_config import (
     InvalidVerifyConfigError,
     VerifyEntry,
@@ -60,6 +61,27 @@ def _write_verify(repo, entries) -> None:
         existing = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
         if ".clagentic/" not in existing:
             exclude.write_text(existing + ".clagentic/\n", encoding="utf-8")
+
+
+def _fenced_bodies_are_safe(section: str) -> bool:
+    """True when no backtick run inside a fenced block is as long as the
+    block's opening fence, i.e. the content cannot close the fence early."""
+    lines = section.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].rstrip()
+        fence = stripped[: len(stripped) - len(stripped.lstrip("`"))]
+        if len(fence) >= 3 and stripped.startswith(fence + "text"):
+            j = i + 1
+            while j < len(lines) and lines[j].strip() != fence:
+                if fence in lines[j]:
+                    return False
+                j += 1
+            if j == len(lines):
+                return False
+            i = j
+        i += 1
+    return True
 
 
 def _py(name, code, timeout=30):
@@ -263,8 +285,19 @@ class TestRunner:
         )
         (result,) = run_verifications((entry,), tmp_path)
         assert len(result.stdout_tail) < 2100
+        # An unbroken start-cut line is withheld whole, so only the marker remains.
+        assert result.stdout_tail.strip() == TRUNCATION_MARKER.strip()
+        assert _fenced_bodies_are_safe(render_verification_section((result,)))
+
+    def test_line_broken_output_keeps_tail_and_escalates_fence(self, tmp_path):
+        entry = VerifyEntry(
+            "noisy", (PY, "-c", "print('x' * 10000 + '\\n' + 'tail ```')"), 30
+        )
+        (result,) = run_verifications((entry,), tmp_path)
+        assert len(result.stdout_tail) < 2100
         section = render_verification_section((result,))
         assert "````text" in section
+        assert _fenced_bodies_are_safe(section)
 
     def test_runs_in_given_cwd_without_a_shell(self, tmp_path):
         entry = VerifyEntry(
