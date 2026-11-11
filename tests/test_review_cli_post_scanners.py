@@ -119,7 +119,7 @@ class World:
 
     def base_policy(self, profile_text: str) -> None:
         """Make *profile_text* the repo profile at the PR's base revision."""
-        self.host.pull["base"]["sha"] = commit_files(self.env.repo, {PROFILE_PATH: profile_text})
+        self.host.set_base(commit_files(self.env.repo, {PROFILE_PATH: profile_text}))
 
     def head_only_policy(self, profile_text: str) -> None:
         """Commit *profile_text* after the base, as a PR's own change would;

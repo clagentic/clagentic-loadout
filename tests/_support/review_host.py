@@ -55,12 +55,8 @@ class ReviewHost:
         #: How many comment listings fail (HTTP 500) before they succeed.
         self.comment_read_failures = comment_read_failures
         pull = json.loads((PAYLOADS / f"{platform}_pull.json").read_text(encoding="utf-8"))
-        pull["base"]["sha"] = base_sha
-        # The captured Forgejo object states a merge base; for the open PR this
-        # stub models it is the base itself.
-        if "merge_base" in pull:
-            pull["merge_base"] = base_sha
         self.pull = pull
+        self.set_base(base_sha)
         self.number: int = pull["number"]
         self.head_sha: str = pull["head"]["sha"]
         self.diff = diff
@@ -69,6 +65,13 @@ class ReviewHost:
         self.posted: list[dict] = []
         self.login = login
         self.requests: list[tuple[str, str]] = []
+
+    def set_base(self, sha: str) -> None:
+        """Move the PR's base. The captured Forgejo object also states a merge
+        base, which for the open PR this stub models is the base itself."""
+        self.pull["base"]["sha"] = sha
+        if "merge_base" in self.pull:
+            self.pull["merge_base"] = sha
 
     @property
     def comments(self) -> list[dict]:

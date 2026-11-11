@@ -377,7 +377,7 @@ class TestFullReview:
 
     def test_a_base_with_no_allowlist_means_a_full_review(self, world, capsys):
         world.env.base_sha = commit_files(world.env.repo, {PROFILE_PATH: "class: internal\n"})
-        world.host.pull["base"]["sha"] = world.env.base_sha
+        world.host.set_base(world.env.base_sha)
         spec = world.seal()
 
         _, result, _ = world.post([_finding()], spec=spec, capsys=capsys)
