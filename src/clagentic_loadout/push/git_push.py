@@ -872,11 +872,12 @@ def git_ls_remote_with_token(
     # git's diagnostics quote the remote location, and a credential in its path
     # or query matches no secret pattern, so the location is withheld by value
     # before the token pass.
+    locations = push_locations(remote, git_cwd)
     return subprocess.CompletedProcess(
         result.args,
         result.returncode,
-        stdout=redact_push_secrets(redact_remote_locations(result.stdout, (remote,)), known_secrets=(token,)),
-        stderr=redact_push_secrets(redact_remote_locations(result.stderr, (remote,)), known_secrets=(token,)),
+        stdout=redact_push_secrets(redact_remote_locations(result.stdout, locations), known_secrets=(token,)),
+        stderr=redact_push_secrets(redact_remote_locations(result.stderr, locations), known_secrets=(token,)),
     )
 
 

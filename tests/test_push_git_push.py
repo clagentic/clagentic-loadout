@@ -324,6 +324,46 @@ class TestGitPushWithToken:
         assert fake_credential not in result.stderr
         assert fake_credential not in result.stdout
 
+    @pytest.mark.parametrize(
+        "url, fake_credential",
+        [
+            ("https://git.example.test/FAKEPATHCRED7f3a9c/o/r.git", "FAKEPATHCRED7f3a9c"),
+            ("https://git.example.test/o/r.git?sig=FAKEQUERYCRED5d2e1b", "FAKEQUERYCRED5d2e1b"),
+        ],
+        ids=["path-segment", "query-param"],
+    )
+    def test_ls_remote_failure_withholds_a_credential_in_a_configured_remotes_url(
+        self, tmp_path, monkeypatch, url, fake_credential
+    ):
+        """A configured remote NAME is not the location git prints: the
+        remote's URLs are withheld, and the bare name is left alone."""
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        real_git = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
+        wrapper = fake_bin / "git"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'for arg in "$@"; do\n'
+            '  if [ "$arg" = "ls-remote" ]; then\n'
+            f'    echo "fatal: unable to access \'{url}\' via origin" 1>&2\n'
+            "    exit 2\n"
+            "  fi\n"
+            "done\n"
+            f'exec "{real_git}" "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(["init", "-b", "feature"], repo)
+        _git(["remote", "add", "origin", url], repo)
+
+        result = git_ls_remote_with_token("origin", "feature", "unused-token-value", repo)
+
+        assert result.returncode == 2
+        assert fake_credential not in result.stderr
+        assert "via origin" in result.stderr
+
     def test_platform_mismatch_hint_included_on_auth_shaped_failure(self, tmp_path, monkeypatch):
         """A synthetic auth-shaped git stderr (via a wrapper 'git' that
         fails with an auth-marker message) should carry the platform-
