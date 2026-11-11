@@ -207,23 +207,34 @@ class TestFetchFailures:
 
 
 @pytest.mark.parametrize(
-    ("pr_info", "expected_base"),
+    ("pr_info", "expected_range_base", "expected_policy_base"),
     [
-        # Merged or base-advanced: base.sha is the live tip, merge_base the PR's own.
-        ({"base": {"sha": "c" * 40}, "merge_base": "e" * 40}, "e" * 40),
+        # Open PR whose base has advanced: the range starts at merge_base, policy
+        # is read at the live tip.
+        ({"base": {"sha": "c" * 40}, "merge_base": "e" * 40}, "e" * 40, "c" * 40),
+        # Merged PR: the same split.
+        (
+            {"base": {"sha": "c" * 40}, "merge_base": "e" * 40, "merged": True},
+            "e" * 40,
+            "c" * 40,
+        ),
         # Open PR on a host that reports merge_base equal to the base.
-        ({"base": {"sha": "c" * 40}, "merge_base": "c" * 40}, "c" * 40),
-        # No merge_base field, an empty one, or a non-string one: base.sha, no refusal.
-        ({"base": {"sha": "c" * 40}}, "c" * 40),
-        ({"base": {"sha": "c" * 40}, "merge_base": ""}, "c" * 40),
-        ({"base": {"sha": "c" * 40}, "merge_base": None}, "c" * 40),
+        ({"base": {"sha": "c" * 40}, "merge_base": "c" * 40}, "c" * 40, "c" * 40),
+        # No merge_base field, an empty one, or a non-string one: base.sha for
+        # both, no refusal.
+        ({"base": {"sha": "c" * 40}}, "c" * 40, "c" * 40),
+        ({"base": {"sha": "c" * 40}, "merge_base": ""}, "c" * 40, "c" * 40),
+        ({"base": {"sha": "c" * 40}, "merge_base": None}, "c" * 40, "c" * 40),
     ],
 )
-def test_acquired_base_is_merge_base_when_stated(pr_info, expected_base):
+def test_acquired_range_base_is_merge_base_and_policy_base_is_base_sha(
+    pr_info, expected_range_base, expected_policy_base
+):
     body = json.dumps({**pr_info, "head": {"sha": "d" * 40}}).encode("utf-8")
     opener = _make_opener(pr_info_body=body)
     acquired = fetch_pr_content(_GIT_HOST_BASE, "tok", _OWNER, _REPO, _PR, opener=opener)
-    assert acquired.base_sha == expected_base
+    assert acquired.base_sha == expected_range_base
+    assert acquired.policy_base_sha == expected_policy_base
     assert acquired.head_sha == "d" * 40
 
 

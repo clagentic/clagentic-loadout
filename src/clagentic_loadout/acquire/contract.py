@@ -91,10 +91,15 @@ class AcquiredPr:
 
     `base_sha` / `head_sha` are sourced from the PR's OWN metadata as read
     from the host API at fetch time — never a caller-supplied guess, never a
-    locally-resolved git ref. `base_sha` is the PR's merge-base/base
-    commit — the correct "other end" of the diff range, resolved by the
-    platform itself (GitHub's `base.sha`; Forgejo/Gitea's `base.sha`), so a
-    caller never has to compute or trust a local `git merge-base` result.
+    locally-resolved git ref. `base_sha` is the RANGE base, the "other end"
+    of the diff range: GitHub's `base.sha`; Forgejo/Gitea's `merge_base` when
+    the host states one, else `base.sha`. It is read by the diff, the reported
+    range, the run record and the host compares, and never by policy.
+
+    `policy_base_sha` is the POLICY base: the live tip of the base branch
+    (`base.sha`) on both platforms, open or merged, the revision policy is
+    read at. It is a separate field so neither base can be taken for the
+    other. Left empty, it follows `base_sha` (a host with one base).
 
     `diff_text` is the whole-PR unified diff (base_sha..head_sha) as a
     single string, suitable for a reviewer to read directly. `changed_files`
@@ -119,6 +124,11 @@ class AcquiredPr:
     #: record is absent, unreadable or says something this module does not
     #: recognise: callers treat None as the worst case, never as private.
     repo_visibility: str | None = None
+    policy_base_sha: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.policy_base_sha:
+            object.__setattr__(self, "policy_base_sha", self.base_sha)
 
     @property
     def changed_filenames(self) -> list[str]:

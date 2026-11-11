@@ -177,13 +177,15 @@ def resolve_delta(
         return full(
             REASON_RANGE_UNSUPPORTED, "this transport cannot tell whether the base was merged in"
         )
-    if not acquired.base_sha:
+    # The live base tip, as on main: a merge base would never differ between the
+    # two heads, so the check could not see a base merged in.
+    if not acquired.policy_base_sha:
         return full(REASON_RANGE_UNAVAILABLE, "the PR reports no base commit")
     try:
         base_merged = backend.fetch_base_merged(
             owner=acquired.owner,
             repo=acquired.repo,
-            base_sha=acquired.base_sha,
+            base_sha=acquired.policy_base_sha,
             since_head=since_head,
             head_sha=acquired.head_sha,
         )

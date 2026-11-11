@@ -755,7 +755,7 @@ def _run_command(
     # so the PR's own base and the host's repository record are taken here.
     evaluation = dataclasses.replace(
         evaluation,
-        policy_base_sha=acquired.base_sha,
+        policy_base_sha=acquired.policy_base_sha,
         visibility=acquired.repo_visibility,
         policy_reader=_policy_reader(args, backend, owner=owner, repo=repo),
         ruling_scope=_ruling_scope(args, owner=owner, repo=repo),
@@ -1533,7 +1533,7 @@ def _post_command(
 
     live_pr = assert_head_unmoved()
     policy_base = _policy_base_for_post(
-        args, loaded_meta.get("policy_base_sha"), live_pr.base_sha
+        args, loaded_meta.get("policy_base_sha"), live_pr.policy_base_sha
     )
 
     # The verdict is computed here, from the facts in the findings file and the
