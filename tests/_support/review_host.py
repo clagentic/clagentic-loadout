@@ -56,6 +56,10 @@ class ReviewHost:
         self.comment_read_failures = comment_read_failures
         pull = json.loads((PAYLOADS / f"{platform}_pull.json").read_text(encoding="utf-8"))
         pull["base"]["sha"] = base_sha
+        # The captured Forgejo object states a merge base; for the open PR this
+        # stub models it is the base itself.
+        if "merge_base" in pull:
+            pull["merge_base"] = base_sha
         self.pull = pull
         self.number: int = pull["number"]
         self.head_sha: str = pull["head"]["sha"]
