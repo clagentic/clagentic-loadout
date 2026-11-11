@@ -1285,28 +1285,33 @@ def test_install_sh_without_groups_file_writes_no_rules_section(
     assert "rules:" not in _config_yaml_path(fake_home).read_text()
 
 
-def test_install_sh_groups_file_replaces_prior_value_and_keeps_other_keys(
-    tmp_path: Path, shared_venv_data_dir: Path
+@pytest.mark.parametrize(
+    "flag,key,name",
+    [("--groups-file", "groups_file", "groups"), ("--consumers-file", "consumers_file", "consumers")],
+)
+def test_install_sh_rules_file_replaces_prior_value_and_keeps_other_keys(
+    tmp_path: Path, shared_venv_data_dir: Path, flag: str, key: str, name: str
 ) -> None:
     fake_home = _fresh_home(tmp_path)
     config_dir = _config_yaml_path(fake_home).parent
     config_dir.mkdir(parents=True)
     (config_dir / "config.yaml").write_text(
         "credentials:\n  token_provider_forgejo: command\n"
-        "rules:\n  groups_file: '/tmp/a/groups.yaml'\n  other_key: keep\n"
+        f"rules:\n  {key}: '/tmp/a/{name}.yaml'\n  other_key: keep\n"
         "forgejo:\n  base_url: 'https://git.example.com'\n"
     )
 
-    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, "--groups-file", "/tmp/b/groups.yaml")
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, flag, f"/tmp/b/{name}.yaml")
     assert result.returncode == 0, result.stderr
 
     content = _config_yaml_path(fake_home).read_text()
-    assert content.count("groups_file:") == 1
-    assert "groups_file: '/tmp/b/groups.yaml'" in content
-    assert "/tmp/a/groups.yaml" not in content
+    assert content.count(f"{key}:") == 1
+    assert f"{key}: '/tmp/b/{name}.yaml'" in content
+    assert f"/tmp/a/{name}.yaml" not in content
     assert "other_key: keep" in content
     assert "token_provider_forgejo: command" in content
     assert "base_url: 'https://git.example.com'" in content
+    assert f"seeded rules.{key}" in result.stderr
 
 
 def test_install_sh_groups_file_keeps_nested_key_and_sets_direct_child(
@@ -1375,31 +1380,27 @@ def test_install_sh_dry_run_reports_groups_file_without_writing(tmp_path: Path) 
 # ---------------------------------------------------------------------------
 
 
-def test_install_sh_consumers_file_seeds_value_and_keeps_other_keys(
-    tmp_path: Path, shared_venv_data_dir: Path
+@pytest.mark.parametrize("flag,key", [("--consumers-file", "consumers_file"), ("--groups-file", "groups_file")])
+def test_install_sh_seed_with_inline_mapping_reports_not_seeded(
+    tmp_path: Path, shared_venv_data_dir: Path, flag: str, key: str
 ) -> None:
     fake_home = _fresh_home(tmp_path)
     config_dir = _config_yaml_path(fake_home).parent
     config_dir.mkdir(parents=True)
     (config_dir / "config.yaml").write_text(
-        "credentials:\n  token_provider_forgejo: command\n"
-        "rules:\n  consumers_file: '/tmp/a/consumers.yaml'\n  other_key: keep\n"
-        "forgejo:\n  base_url: 'https://git.example.com'\n"
+        "forgejo:\n  base_url: 'https://git.example.com'\nrules: {other: keep}\n"
     )
 
-    result = _run_venv_install(
-        shared_venv_data_dir, tmp_path, fake_home, "--consumers-file", "/tmp/b/consumers.yaml"
-    )
+    result = _run_venv_install(shared_venv_data_dir, tmp_path, fake_home, flag, "/tmp/x/map.yaml")
     assert result.returncode == 0, result.stderr
 
     content = _config_yaml_path(fake_home).read_text()
-    assert content.count("consumers_file:") == 1
-    assert "consumers_file: '/tmp/b/consumers.yaml'" in content
-    assert "/tmp/a/consumers.yaml" not in content
-    assert "other_key: keep" in content
-    assert "token_provider_forgejo: command" in content
-    assert "base_url: 'https://git.example.com'" in content
-    assert "seeded rules.consumers_file" in result.stderr
+    assert content.count("rules:") == 1
+    assert "rules: {other: keep}\n" in content
+    assert f"{key}:" not in content
+    assert f"seeded rules.{key}" not in result.stderr
+    assert f"rules.{key} was NOT seeded" in result.stderr
+    assert f"{key}: '/tmp/x/map.yaml'" in result.stderr
 
 
 def test_install_sh_consumers_file_second_run_changes_nothing(

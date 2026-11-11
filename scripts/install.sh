@@ -1581,6 +1581,7 @@ _seed_rules_key() {
     # block header); any other inline value is passed through untouched. In
     # every case the rules: line counts as seen, so no second top-level
     # rules: block is appended.
+    _seed_rc=0
     SEED_LINE="$_seed_line" SEED_KEY="$_seed_key" awk '
         function flush(   i, pad) {
             pad = (indent == "") ? "  " : indent
@@ -1597,7 +1598,7 @@ _seed_rules_key() {
             print
             next
         }
-        /^rules:/ { if (in_rules) flush(); in_rules = 0; seen = 1; print; next }
+        /^rules:/ { if (in_rules) flush(); in_rules = 0; seen = 1; inline_map = 1; print; next }
         /^[A-Za-z_][A-Za-z0-9_]*:/ { if (in_rules) flush(); in_rules = 0 }
         in_rules {
             if (indent == "" && $0 ~ /^[ \t]+[^ \t#]/) {
@@ -1612,11 +1613,18 @@ _seed_rules_key() {
         END {
             if (in_rules) flush()
             else if (!seen) { print "rules:"; print "  " line }
+            # Exit 10 reports that the key could not be written: a non-empty
+            # inline rules: mapping is user YAML this seeder does not rewrite.
+            if (inline_map) exit 10
         }
-    ' "$_seed_src" >> "$_seed_tmp"
+    ' "$_seed_src" >> "$_seed_tmp" || _seed_rc=$?
     rm -f "$_CONFIG_FILE"
     mv "$_seed_tmp" "$_CONFIG_FILE"
     chmod 600 "$_CONFIG_FILE"
+    if [ "$_seed_rc" -eq 10 ]; then
+        echo "$PROG: rules.$_seed_key was NOT seeded: rules: in $_CONFIG_FILE is an inline mapping, which is left untouched. Add $_seed_line under rules: yourself." >&2
+        return 0
+    fi
     echo "$PROG: seeded rules.$_seed_key ($_CONFIG_FILE)." >&2
 }
 
