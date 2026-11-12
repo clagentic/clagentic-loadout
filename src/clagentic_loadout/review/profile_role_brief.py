@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
-from clagentic_loadout.merge.guidance_section import TEST_RULE, guidance_text
+from clagentic_loadout.merge.guidance_section import builder_guidance
 from clagentic_loadout.review.repo_profile import DENY_KINDS, RepoProfile
 from clagentic_loadout.role_vocabulary import (
     CLASS_BUILD,
@@ -165,7 +165,7 @@ def role_brief(
                 "tests": brief["tests"],
                 # The same wording the reviewer is given, so author and reviewer
                 # read one rule.
-                "guidance": {"tests": TEST_RULE, "classes": guidance_text(repeated=False)},
+                "guidance": builder_guidance(),
             }
         )
     else:

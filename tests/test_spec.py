@@ -14,6 +14,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+from clagentic_loadout.review import profile_verb, spec_review
+from clagentic_loadout.review.evaluation import finding_state_id
 from clagentic_loadout.review.policy_source import PROFILE_PATH
 from clagentic_loadout.review.profile_brief import declared_tests, profile_brief
 from clagentic_loadout.review.profile_rules import rule_statements
@@ -22,6 +24,11 @@ from clagentic_loadout.spec import model
 from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.spec import verb as spec_verb
 from clagentic_loadout.transport import provider_config
+from clagentic_loadout.verdict_record.review_record import (
+    build_review_record,
+    review_records_root,
+    write_review_record,
+)
 from tests._review_evaluate_support import commit_files, make_repo
 
 ROLE = "planner-role"
@@ -563,6 +570,163 @@ class TestShow:
         artifact.unlink()
         os.symlink(outside, artifact)
         assert _run(["show", sealed["spec_hash"]], capsys)[0] == spec_verb.EXIT_STORED_INVALID
+
+
+def _finding(file="src/a.py", line=3, rule="R1", **extra):
+    return {"file": file, "line": line, "rule_id": rule, "message": "m", **extra}
+
+
+def _store_record(comment_id, evaluated, opened, head=HEAD_B):
+    """Write a review record the way `post` does: the open entries carry the id,
+    the rule and the fingerprint; the evaluated findings carry the location and
+    the reviewer's class text."""
+    record = build_review_record(
+        comment_id=comment_id, repo="some-owner/some-repo", pr=3, head_sha=head, role="reviewer",
+        policy_base_sha=HEAD_A, spec_hash=None, engines=[], evaluated=evaluated,
+        open_findings=[
+            {"id": finding_state_id(f["file"], f["line"], f["rule_id"]), "rule_id": f["rule_id"],
+             "head": head, **({"fingerprint": f["fingerprint"]} if "fingerprint" in f else {})}
+            for f in opened
+        ],
+        advisory=[], dropped=[], chunks=None,
+    )
+    write_review_record(review_records_root(), record)
+
+
+FP = "fp2:0123456789abcdef"
+
+
+def _fold_draft(repo, capsys, *ids, extra=()):
+    argv = ["new", "--role", ROLE, "--repo-path", str(repo), *extra]
+    for comment_id in ids:
+        argv += ["--from-review", comment_id]
+    code, out, err = _run(argv, capsys)
+    assert code == 0, err
+    return json.loads(out), err
+
+
+class TestFoldRemedy:
+    def test_each_open_blocking_finding_is_copied_with_its_class_fields_and_an_empty_decision(
+        self, repo, capsys
+    ):
+        blocking = _finding(fingerprint=FP, defect_class="denylist", class_fix="allowlist")
+        other = _finding("src/b.py", 9, "R2")
+        _store_record("101", [blocking, other, _finding("src/c.py", 1, "R3")], [blocking, other])
+        draft, _ = _fold_draft(repo, capsys, "101")
+
+        first, second = draft["remedy"]["items"]
+        assert first == {
+            "id": finding_state_id("src/a.py", 3, "R1"), "rule": "R1", "file": "src/a.py",
+            "line": 3, "fingerprint": FP, "comment_id": "101",
+            "reviewer_text": {"defect_class": "denylist", "class_fix": "allowlist"},
+            "decision": None, "sites": [],
+        }
+        assert second["reviewer_text"] == {"defect_class": None, "class_fix": None}
+        assert second["fingerprint"] is None
+        assert draft["remedy"]["note"] is None and len(draft["remedy"]["items"]) == 2
+
+    def test_a_finding_repeated_across_records_is_listed_once(self, repo, capsys):
+        one = _finding()
+        _store_record("101", [one], [one], head=HEAD_A)
+        _store_record("102", [one], [one], head=HEAD_B)
+        draft, _ = _fold_draft(repo, capsys, "101", "102")
+        assert [e["comment_id"] for e in draft["remedy"]["items"]] == ["101"]
+
+    @pytest.mark.parametrize("with_record", [False, True], ids=["no-from-review", "no-blocking"])
+    def test_without_a_blocking_finding_the_section_is_empty_and_says_so(
+        self, repo, capsys, with_record
+    ):
+        ids = []
+        if with_record:
+            _store_record("101", [_finding()], [])
+            ids = ["101"]
+        draft, _ = _fold_draft(repo, capsys, *ids)
+        assert draft["remedy"]["items"] == []
+        assert draft["remedy"]["note"].startswith("no remedy entries")
+
+    @pytest.mark.parametrize("bad", ["404", "not-an-id", "../x"])
+    def test_a_missing_or_invalid_record_warns_naming_the_id_and_the_draft_is_written(
+        self, repo, capsys, bad
+    ):
+        kept = _finding()
+        _store_record("101", [kept], [kept])
+        draft, err = _fold_draft(repo, capsys, bad, "101")
+        assert f"comment {bad}" in err and "WARNING" in err
+        assert [e["comment_id"] for e in draft["remedy"]["items"]] == ["101"]
+
+    def test_a_record_file_that_is_not_valid_is_a_warning_too(self, repo, capsys):
+        broken = review_records_root() / HEAD_A / "505.json"
+        broken.parent.mkdir(parents=True)
+        broken.write_text("{nope", encoding="utf-8")
+        draft, err = _fold_draft(repo, capsys, "505")
+        assert "comment 505" in err and draft["remedy"]["items"] == []
+        assert "could be read" in draft["remedy"]["note"]
+
+    def test_the_guidance_is_the_text_the_profile_brief_prints_for_the_builder(
+        self, repo, capsys
+    ):
+        draft = _new_draft(repo, capsys)
+        code = profile_verb.main(["brief", "--role", "builder", "--repo-path", str(repo)])
+        assert code == 0
+        brief = json.loads(capsys.readouterr().out)["guidance"]
+        guidance = draft["guidance"]
+        assert (guidance["tests"], guidance["classes"]) == (brief["tests"], brief["classes"])
+        assert guidance["tests"] and guidance["classes"]
+
+    def test_a_fold_spec_is_sealed_at_the_pr_head_and_show_prints_decisions_and_guidance(
+        self, repo, tmp_path, capsys
+    ):
+        _, build, _ = _seal(tmp_path, repo, capsys, _fill(_new_draft(repo, capsys)), head=HEAD_A)
+        finding = _finding(defect_class="denylist", class_fix="allowlist")
+        _store_record("101", [finding], [finding])
+        draft, _ = _fold_draft(repo, capsys, "101", extra=["--supersedes", build["spec_hash"]])
+        draft["remedy"]["items"][0].update(decision="fix_shared", sites=["src/a.py", "src/b.py"])
+
+        code, fold, err = _seal(tmp_path, repo, capsys, draft, head=HEAD_B, name="fold.json")
+        assert code == 0, err
+        assert fold["remedy_undecided"] == [] and err == ""
+        code, shown, _ = _run(["show", fold["spec_hash"]], capsys)
+        doc = json.loads(shown)
+        assert doc["remedy"]["items"][0]["decision"] == "fix_shared"
+        assert doc["remedy"]["items"][0]["sites"] == ["src/a.py", "src/b.py"]
+        assert doc["guidance"]["tests"] == draft["guidance"]["tests"]
+
+        # The chain lists both seals, and the review's reader takes the fold spec by hash
+        # although it was sealed at a head that is not the default branch's.
+        _, chain, _ = _run(["show", fold["spec_hash"], "--chain"], capsys)
+        assert json.loads(chain)["chain"] == [fold["spec_hash"], build["spec_hash"]]
+        facts = spec_review.load_spec_facts(fold["spec_hash"])
+        assert facts.criterion_ids == ("ac-1", "ac-2")
+
+    def test_a_remedy_entry_with_no_decision_is_listed_at_seal_and_the_seal_succeeds(
+        self, repo, tmp_path, capsys
+    ):
+        finding = _finding()
+        _store_record("101", [finding], [finding])
+        draft, _ = _fold_draft(repo, capsys, "101")
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(draft), head=HEAD_B)
+        assert code == 0
+        entry_id = finding_state_id("src/a.py", 3, "R1")
+        assert sealed["remedy_undecided"] == [entry_id]
+        assert entry_id in err and "no decision" in err
+
+    @pytest.mark.parametrize("decision", ["fix_everywhere", ""])
+    def test_a_decision_outside_the_three_values_is_not_sealed(
+        self, repo, tmp_path, capsys, decision
+    ):
+        finding = _finding()
+        _store_record("101", [finding], [finding])
+        draft, _ = _fold_draft(repo, capsys, "101")
+        draft["remedy"]["items"][0]["decision"] = decision
+        code, _, _ = _seal(tmp_path, repo, capsys, _fill(draft), head=HEAD_B)
+        assert code == spec_verb.EXIT_DRAFT_INVALID
+
+    def test_a_spec_sealed_before_the_sections_existed_still_reads(self):
+        old = _fill(model.new_draft(ROLE))
+        del old["remedy"], old["guidance"]
+        sealed = model.seal(old, head_sha=HEAD_A, sealed_at="2026-01-01T00:00:00Z")
+        assert model.parse_sealed(sealed.data, sealed.spec_hash) == sealed.doc
+        assert model.undecided_remedy(sealed.doc) == []
 
 
 class TestSpecsRoot:
