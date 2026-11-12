@@ -519,6 +519,21 @@ class TestReviewRecords:
         assert other in capsys.readouterr().err
         assert record_verb.main(["review", "77", "--head", "abc"]) == record_verb.EXIT_USAGE
 
+    def test_a_record_that_fails_the_schema_is_not_written_and_the_failure_is_reported(
+        self, tmp_path
+    ):
+        from clagentic_loadout.review.post_record import record_posted_review
+
+        result = record_posted_review(
+            config_root=tmp_path,
+            comment_id="77", repo="some-owner/some-repo", pr="3", head_sha=HEAD_A,
+            role="reviewer", policy_base_sha=None, spec_hash=None, engines=[],
+            evaluated=[], open_findings=[], advisory=[], dropped=[], chunks=None,
+        )
+        assert result["written"] is False
+        assert "pr" in result["reason"]
+        assert not list(review_records_root(config_root=tmp_path).glob("*/77.json"))
+
     @pytest.mark.parametrize(
         "content",
         [

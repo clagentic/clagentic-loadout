@@ -20,7 +20,10 @@ rewrites the same record. A comment reused after the head moved leaves one recor
 per head; the reader returns the one with the newest ``recorded_at`` unless a head
 is named.
 
-Fields (``schema_version`` 1): ``comment_id``, ``repo``, ``pr``, ``head_sha``,
+The shape is ``schemas/review-record.schema.json``; the writer validates a record
+against it before storing and the reader validates every file it loads.
+
+Fields (``schema_version`` 1):``comment_id``, ``repo``, ``pr``, ``head_sha``,
 ``role``, ``policy_base_sha``, ``spec_hash`` (null when none was given),
 ``engines``, ``recorded_at``, ``findings`` (``evaluated``, ``open``,
 ``advisory``), ``dropped`` (each with its reason) and ``chunks``: one entry per
@@ -46,6 +49,7 @@ from clagentic_loadout.artifact_store import (
     resolve_root,
     write_into_head_dir,
 )
+from clagentic_loadout.envelope import validate_against_schema
 from clagentic_loadout.verdict_record.record import utc_timestamp
 
 REVIEW_RECORDS_DIR_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RECORDS_DIR"
@@ -67,24 +71,8 @@ _REVIEW_RECORDS_KIND = StoreKind(
 _MAX_RECORD_BYTES = 8 * 1024 * 1024
 _SPAN_KEYS = ("first", "last", "old_first", "old_last")
 
-#: Every required top-level field of a stored record and the types it may hold
-#: (``type(None)`` where the schema allows null). The reader validates against it.
-_FIELD_TYPES: dict[str, tuple[type, ...]] = {
-    "schema_version": (int,),
-    "comment_id": (str,),
-    "repo": (str,),
-    "pr": (int,),
-    "head_sha": (str,),
-    "role": (str,),
-    "policy_base_sha": (str, type(None)),
-    "spec_hash": (str, type(None)),
-    "engines": (list,),
-    "recorded_at": (str,),
-    "findings": (dict,),
-    "dropped": (list,),
-    "chunks": (list, type(None)),
-}
-_FINDINGS_KEYS = ("evaluated", "open", "advisory")
+#: The published schema both the writer and the reader validate a record against.
+SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "review-record.schema.json"
 
 
 class ReviewRecordNotFoundError(StoreError):
@@ -189,7 +177,9 @@ def write_review_record(
     root: Path, record: Mapping[str, Any], *, untrusted_roots: Sequence[Path] = ()
 ) -> Path:
     """Store *record* under its head and comment id and return its path. Raises
-    StoreError when the root is a refused location or the file cannot be written."""
+    StoreError when the record does not satisfy the schema, the root is a refused
+    location or the file cannot be written."""
+    _check_schema(record, f"the review record for comment {record.get('comment_id')}")
     payload = json.dumps(record, indent=2, sort_keys=True).encode("utf-8")
     return write_into_head_dir(
         root,
@@ -221,61 +211,17 @@ def _read_file(path: Path, filed_under: str, comment_id: str) -> dict[str, Any]:
         raise ReviewRecordInvalidError(
             f"{path.name}: is filed under {filed_under} but records head {data.get('head_sha')!r}"
         )
-    _validate_fields(data, path.name)
+    _check_schema(data, path.name)
     return data
 
 
-def _is_type(value: Any, allowed: tuple[type, ...]) -> bool:
-    """isinstance that does not let a bool stand in for an int."""
-    if isinstance(value, bool) and bool not in allowed:
-        return False
-    return isinstance(value, allowed)
-
-
-def _validate_fields(data: Mapping[str, Any], name: str) -> None:
-    """Raise ReviewRecordInvalidError naming the first required field that is
-    missing or of the wrong type, using the one field table above."""
-    for field, allowed in _FIELD_TYPES.items():
-        if field not in data:
-            raise ReviewRecordInvalidError(f"{name}: is missing the required field {field!r}")
-        if not _is_type(data[field], allowed):
-            raise ReviewRecordInvalidError(
-                f"{name}: field {field!r} is a {type(data[field]).__name__}, "
-                f"expected {' or '.join(t.__name__ for t in allowed)}"
-            )
-    findings = data["findings"]
-    for key in _FINDINGS_KEYS:
-        if not isinstance(findings.get(key), list):
-            raise ReviewRecordInvalidError(
-                f"{name}: field 'findings' needs a list under {key!r}"
-            )
-    for position, chunk in enumerate(data["chunks"] or ()):
-        _validate_chunk(chunk, position, name)
-
-
-def _is_span(span: Any) -> bool:
-    """One hunk span in the shape ``chunk_boundaries`` writes."""
-    return (
-        isinstance(span, dict)
-        and isinstance(span.get("file"), str)
-        and all(_is_type(span.get(key), (int,)) for key in _SPAN_KEYS)
-    )
-
-
-def _validate_chunk(chunk: Any, position: int, name: str) -> None:
-    """Raise ReviewRecordInvalidError naming the chunk field that is wrong."""
-    where = f"{name}: field 'chunks' entry {position}"
-    if not isinstance(chunk, dict):
-        raise ReviewRecordInvalidError(f"{where} is not an object")
-    files = chunk.get("files")
-    if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
-        raise ReviewRecordInvalidError(f"{where} needs 'files' as a list of strings")
-    hunks = chunk.get("hunks")
-    if hunks is not None and (not isinstance(hunks, list) or not all(_is_span(s) for s in hunks)):
-        raise ReviewRecordInvalidError(
-            f"{where} needs 'hunks' as null or a list of spans "
-            f"(file, {', '.join(_SPAN_KEYS)})"
-        )
+def _check_schema(data: Mapping[str, Any], name: str) -> None:
+    """Raise ReviewRecordInvalidError naming each field path the one published
+    schema rejects. The writer and the reader both go through here, so what is
+    written and what is accepted cannot drift apart."""
+    errors = validate_against_schema(dict(data), SCHEMA_PATH)
+    if errors:
+        raise ReviewRecordInvalidError(f"{name}: " + "; ".join(errors))
 
 
 def load_review_records(

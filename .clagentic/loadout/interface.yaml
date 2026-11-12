@@ -59,6 +59,7 @@ schemas:
   - envelope-out.json
   - loadout-note.schema.json
   - review-facts.json
+  - review-record.schema.json
   - review-result.schema.json
   - scanner-input.schema.json
   - spec.schema.json

@@ -2303,6 +2303,13 @@ post would have returned, and the result carries `record: {"written": false,
 `record: {"written": true, "comment_id": ..., "path": ...}`. Posting again to a
 comment that was reused rewrites the same record.
 
+**Schema.** The record's shape is the published
+[`review-record.schema.json`](../src/clagentic_loadout/schemas/review-record.schema.json).
+`post` validates a record against it before writing, and a record that fails is not
+written and is reported as a write failure above; `loadout-record review` validates
+every file it loads against the same schema and exits `41`, naming the failing field
+path and the file.
+
 **Fields** (`schema_version` 1):
 
 | field | meaning |
