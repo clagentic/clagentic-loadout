@@ -46,6 +46,7 @@ from typing import Any
 from clagentic_loadout.merge.errors import VerdictNotEvaluatedError
 from clagentic_loadout.merge.fence_state import KEY_FINGERPRINT, is_fingerprint
 from clagentic_loadout.merge.gate_evaluation import GateEvaluation, recompute_at_gate
+from clagentic_loadout.merge.scanner_coverage import ScannerDeclaration
 from clagentic_loadout.merge.verdict import ReviewerVerdict
 from clagentic_loadout.review.clearance_policy import ClearancePolicy
 from clagentic_loadout.review.evaluate import OUTCOME_BLOCKED, OUTCOME_STALE, Verdict
@@ -292,6 +293,7 @@ def supersede_at_gate(
     policy_reader: PolicyReader | None,
     visibility: str | None,
     ruling_scope: RulingScope | None = None,
+    repo_gate: ScannerDeclaration | None = None,
 ) -> tuple[tuple[ReviewerVerdict, ...], tuple[GateEvaluation, ...], tuple[str, ...]]:
     """apply_clearances with the policy and the recomputation read the way the gate
     reads them: at the live base revision, through *policy_reader*. Returns the
@@ -308,6 +310,7 @@ def supersede_at_gate(
             policy_reader=policy_reader,
             visibility=visibility,
             ruling_scope=ruling_scope,
+            repo_gate=repo_gate,
         ),
     )
     records = tuple(

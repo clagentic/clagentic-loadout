@@ -6,8 +6,9 @@ produced for, ``evaluate`` returns a Verdict whose outcome is one of:
 
   STALE     the head the findings were produced for is not the expected head;
   DEGRADED  a required input is missing (facts on a blocking finding, a
-            required scanner's result, a policy file), so the result cannot be
-            trusted to clear;
+            required scanner that failed or reported nothing, a policy file), so
+            the result cannot be trusted to clear. A required scanner that was
+            not invoked does not degrade: merge.scanner_coverage reports it;
   BLOCKED   at least one open finding blocks;
   CLEAN     nothing blocks (advisory findings are listed).
 
@@ -28,6 +29,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from clagentic_loadout.merge.scanner_coverage import NOT_RUN_FAILING, classify_scanner
 from clagentic_loadout.review import dispositions as disp
 from clagentic_loadout.review.facts import (
     FLOOR_CATEGORIES,
@@ -57,9 +59,6 @@ OUTCOME_CLEAN = "CLEAN"
 OUTCOME_BLOCKED = "BLOCKED"
 OUTCOME_DEGRADED = "DEGRADED"
 OUTCOME_STALE = "STALE"
-
-_SCANNER_RAN = "ran"
-_SCANNER_NOT_APPLICABLE = "not_applicable"
 
 _PRAISE = "praise"
 
@@ -353,17 +352,6 @@ def _unapplied_rulings(
     return tuple(out)
 
 
-def _scanner_satisfied(entry: Mapping[str, Any]) -> bool:
-    """Allowlist: a scanner counts only when it ran, or declared itself not
-    applicable and said why. Every other status, including one never heard of,
-    is a scanner that gave no usable answer."""
-    status = entry.get("status")
-    if status == _SCANNER_RAN:
-        return True
-    reason = entry.get("reason")
-    return status == _SCANNER_NOT_APPLICABLE and isinstance(reason, str) and bool(reason.strip())
-
-
 def _scanner_problems(
     scanners_run: Sequence[Mapping[str, Any]] | None, required: Sequence[str]
 ) -> list[str]:
@@ -378,8 +366,9 @@ def _scanner_problems(
             problems.append(f"required scanner {name!r} did not report a result")
             continue
         # A scanner that reported twice is satisfied only if every report is.
+        # not_invoked is reported by the coverage record, not a problem here.
         for entry in entries:
-            if not _scanner_satisfied(entry):
+            if classify_scanner(entry) == NOT_RUN_FAILING:
                 reason = entry.get("reason")
                 detail = f": {reason}" if isinstance(reason, str) and reason.strip() else ""
                 problems.append(f"required scanner {name!r} status {entry.get('status')!r}{detail}")

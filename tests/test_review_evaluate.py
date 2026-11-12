@@ -322,7 +322,7 @@ def test_required_scanner_failure_or_absence_is_degraded():
     assert run(clean, required_scanners=["s"], scanners_run=not_applicable).outcome == ev.OUTCOME_CLEAN
 
 
-@pytest.mark.parametrize("status", ["timeout", "failed", "not_invoked", "RAN", "", None, 7])
+@pytest.mark.parametrize("status", ["timeout", "failed", "RAN", "", None, 7])
 def test_a_required_scanner_with_any_status_outside_the_allowlist_is_degraded_naming_it(status):
     clean = [finding(fact=facts())]
     verdict = run(
@@ -330,6 +330,23 @@ def test_a_required_scanner_with_any_status_outside_the_allowlist_is_degraded_na
     )
     assert verdict.outcome == ev.OUTCOME_DEGRADED
     assert "secret-scan" in verdict.degraded[0] and repr(status) in verdict.degraded[0]
+
+
+def test_a_required_scanner_that_was_not_invoked_is_reported_not_degraded():
+    # Behaviour change: not_invoked used to degrade. It is reported through the
+    # scanner coverage record now, as the merge gate always treated it.
+    entry = {"scanner": "secret-scan", "status": "not_invoked", "reason": "judgment-only pass"}
+    verdict = run([finding(fact=facts())], required_scanners=["secret-scan"], scanners_run=[entry])
+    assert verdict.outcome == ev.OUTCOME_CLEAN and verdict.degraded == ()
+
+
+def test_a_scanner_reported_twice_with_one_failed_report_is_degraded_beside_a_not_invoked_one():
+    reports = [
+        {"scanner": "s", "status": "not_invoked", "reason": "r"},
+        {"scanner": "s", "status": "failed", "reason": "boom"},
+    ]
+    verdict = run([finding(fact=facts())], required_scanners=["s"], scanners_run=reports)
+    assert verdict.outcome == ev.OUTCOME_DEGRADED and len(verdict.degraded) == 1
 
 
 @pytest.mark.parametrize("reason", [None, "", "   ", 3])

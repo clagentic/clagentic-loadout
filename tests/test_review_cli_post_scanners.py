@@ -15,11 +15,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+import yaml
 
 from clagentic_loadout.merge.verdict import find_all_verdict_blocks, parse_verdict_block
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.review.evaluate import is_floor_finding
+from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReadError
 from clagentic_loadout.review.policy_source import PROFILE_PATH
 from tests._review_cli_support import Env, identity_provider
 from tests._review_evaluate_support import commit_files
@@ -472,6 +475,157 @@ class TestAScannerThatDidNotComplete:
 
         assert code == 0
         assert world.fence()["scanners_run"] == [{"scanner": "sast-one", "status": "ran"}]
+
+
+def _gate_requiring(*scanners: str) -> str:
+    return yaml.safe_dump(
+        {"merge": {"required_reviewer_roles": ["reviewer"], "required_scanners": {"reviewer": list(scanners)}}}
+    )
+
+
+def _user_level_required(world: World, *scanners: str) -> None:
+    world.env.cfg.mkdir(parents=True, exist_ok=True)
+    (world.env.cfg / "config.yaml").write_text(
+        yaml.safe_dump({"review": {"evaluator": {"required_scanners": list(scanners)}}}),
+        encoding="utf-8",
+    )
+
+
+class TestScannerCoverage:
+    NOT_RUN = "scanners not run: "
+
+    def test_a_failed_scanner_nobody_requires_is_reported_and_the_outcome_is_unchanged(
+        self, world, capsys
+    ):
+        code, result, err = world.post(
+            [_scanner(status="failed", reason="timed out")], findings=[_reviewer_note()],
+            status="clean", capsys=capsys,
+        )
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == "CLEAN" and result["status"] == "clean"
+        assert result["scanner_coverage"] == {
+            "complete": False,
+            "not_run": [
+                {"scanner": "sast-one", "status": "failed", "reason": "timed out", "required": False}
+            ],
+        }
+        assert f"{self.NOT_RUN}sast-one (failed)" in world.host.last_body
+
+    def test_a_scanner_that_ran_leaves_the_coverage_complete_and_the_header_alone(
+        self, world, capsys
+    ):
+        code, result, err = world.post([_scanner()], status="clean", capsys=capsys)
+
+        assert code == 0, err
+        assert result["scanner_coverage"] == {"complete": True, "not_run": []}
+        assert self.NOT_RUN not in world.host.last_body
+
+    def test_a_scanner_the_repo_gate_requires_of_the_role_degrades_when_it_failed(
+        self, world, capsys
+    ):
+        world.host.set_base(commit_files(world.env.repo, {TRACKED_GATE_RELATIVE_PATH: _gate_requiring("sast-one")}))
+        code, result, err = world.post(
+            [_scanner(status="failed", reason="timed out")], findings=[_reviewer_note()], capsys=capsys
+        )
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == "DEGRADED" and result["status"] == "blocking"
+        assert result["scanner_coverage"]["not_run"][0]["required"] is True
+        assert "required scanner 'sast-one'" in world.host.last_body
+
+    def test_a_scanner_the_repo_gate_requires_only_of_another_role_is_not_required_here(
+        self, world, capsys
+    ):
+        gate = yaml.safe_dump(
+            {"merge": {"required_reviewer_roles": ["other"], "required_scanners": {"other": ["sast-one"]}}}
+        )
+        world.host.set_base(commit_files(world.env.repo, {TRACKED_GATE_RELATIVE_PATH: gate}))
+        code, result, err = world.post(
+            [_scanner(status="failed", reason="timed out")], findings=[_reviewer_note()],
+            status="clean", capsys=capsys,
+        )
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == "CLEAN"
+        assert result["scanner_coverage"]["not_run"][0]["required"] is False
+
+    def test_a_gate_declared_only_at_the_head_does_not_make_a_scanner_required(self, world, capsys):
+        commit_files(world.env.repo, {TRACKED_GATE_RELATIVE_PATH: _gate_requiring("sast-one")})
+        code, result, err = world.post(
+            [_scanner(status="failed", reason="timed out")], findings=[_reviewer_note()],
+            status="clean", capsys=capsys,
+        )
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == "CLEAN"
+
+    def test_an_unreadable_gate_file_leaves_the_outcome_as_without_it_and_is_reported(
+        self, world, capsys, monkeypatch
+    ):
+        world.host.set_base(commit_files(world.env.repo, {TRACKED_GATE_RELATIVE_PATH: _gate_requiring("sast-one")}))
+        real = GitPolicyReader.read_text
+
+        def unreadable(self, base, path):
+            if path == TRACKED_GATE_RELATIVE_PATH:
+                raise PolicyReadError("simulated read failure")
+            return real(self, base, path)
+
+        monkeypatch.setattr(GitPolicyReader, "read_text", unreadable)
+        code, result, err = world.post(
+            [_scanner()], findings=[_reviewer_note()], status="clean", capsys=capsys
+        )
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == "CLEAN" and result["status"] == "clean"
+        assert result["scanner_coverage"] == {
+            "complete": True, "not_run": [],
+            "gate_scanners": "unread", "gate_file": TRACKED_GATE_RELATIVE_PATH,
+        }
+        assert TRACKED_GATE_RELATIVE_PATH in err and "simulated read failure" in err
+
+    def test_a_required_scanner_that_was_not_invoked_is_reported_and_does_not_degrade(
+        self, world, capsys
+    ):
+        world.host.set_base(commit_files(world.env.repo, {TRACKED_GATE_RELATIVE_PATH: _gate_requiring("sast-one")}))
+        code, result, err = world.post(
+            [_scanner(status="not_invoked", reason="judgment-only pass")],
+            findings=[_reviewer_note()], status="clean", capsys=capsys,
+        )
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == "CLEAN" and result["status"] == "clean"
+        assert result["scanner_coverage"] == {
+            "complete": False,
+            "not_run": [
+                {"scanner": "sast-one", "status": "not_invoked",
+                 "reason": "judgment-only pass", "required": True}
+            ],
+        }
+
+    @pytest.mark.parametrize(
+        ("status", "outcome"), [("failed", "DEGRADED"), ("not_invoked", "CLEAN"), ("ran", "CLEAN")]
+    )
+    def test_a_user_level_requirement_is_judged_by_the_same_predicate(
+        self, world, capsys, status, outcome
+    ):
+        _user_level_required(world, "sast-one")
+        entry = _scanner(status=status, **({} if status == "ran" else {"reason": "why"}))
+        code, result, err = world.post([entry], findings=[_reviewer_note()], capsys=capsys)
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == outcome
+
+    def test_a_required_scanner_with_no_report_is_listed_as_missing(self, world, capsys):
+        _user_level_required(world, "sast-two")
+        code, result, err = world.post([_scanner()], findings=[_reviewer_note()], capsys=capsys)
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == "DEGRADED"
+        assert result["scanner_coverage"]["not_run"] == [
+            {"scanner": "sast-two", "status": "missing",
+             "reason": "no result was reported", "required": True}
+        ]
 
 
 class TestRefusals:

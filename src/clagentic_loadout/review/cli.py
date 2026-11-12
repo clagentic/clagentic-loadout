@@ -87,6 +87,7 @@ from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     resolve_declared_role,
 )
+from clagentic_loadout.merge.scanner_coverage import scanner_coverage
 from clagentic_loadout.review import (
     changeset_paths,
     changeset_ratio_source,
@@ -133,6 +134,7 @@ from clagentic_loadout.review.evaluation import (
     findings_open_from_verdict,
     is_unsafe_status,
     read_context_policy,
+    with_repo_gate_scanners,
 )
 from clagentic_loadout.review.findings_contract import (
     KEY_FAILURE_SEQUENCE,
@@ -183,6 +185,7 @@ from clagentic_loadout.review.run_pipeline import (
     run_review,
     unusable_acquire_outcome,
 )
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.sha import FULL_SHA_RE
 from clagentic_loadout.spec.model import is_spec_hash
 from clagentic_loadout.transport.attestation import (
@@ -1568,6 +1571,16 @@ def _post_command(
         visibility=live_pr.repo_visibility,
         ruling_scope=_ruling_scope(args, owner=owner, repo=repo),
     )
+    # The required scanners are the user-level ones plus the repo gate's entry
+    # for this role, read at the base revision: the set the merge gate uses.
+    evaluation = with_repo_gate_scanners(evaluation, caller)
+    if evaluation.gate_unread is not None:
+        print(
+            f"loadout-review: cannot read {TRACKED_GATE_RELATIVE_PATH} at the base revision "
+            f"({evaluation.gate_unread}); its required scanners are unknown and only the "
+            "user-level ones apply",
+            file=sys.stderr,
+        )
     scanners_run = state.get(KEY_SCANNERS_RUN)
     # Read once and shared: the docs allowlist and the evaluator's stakes come
     # from the same read of the base revision.
@@ -1795,7 +1808,11 @@ def _post_command(
         "verified_url": posted.get("verified_url"),
         "verified_by_login": posted.get("verified_by_login"),
         "verdict_block_verified": True,
+        "scanner_coverage": scanner_coverage(scanners_run, evaluation.required_scanners),
     }
+    if evaluation.gate_unread is not None:
+        result["scanner_coverage"]["gate_scanners"] = "unread"
+        result["scanner_coverage"]["gate_file"] = TRACKED_GATE_RELATIVE_PATH
     for key in ("comment", "reused_from_created_at", "provider", "self_declared"):
         if key in posted:
             result[key] = posted[key]

@@ -424,10 +424,36 @@ The verdict a `post` computes is the only one that counts. Fields such as `verdi
 and `verdict_reasons` that a producer carries from an earlier stage in the findings file are
 ignored by `post`.
 
-Required scanners are an allowlist: a scanner is satisfied only by status `ran`, or
-`not_applicable` with a non-empty reason. Every other value, including an unrecognised
-string such as `timeout`, is DEGRADED and names the scanner and its status. A scanner that
-reports more than once is satisfied only if every report is.
+The scanners a review must have run (the required set) are the union of two declarations: the
+repo gate's `merge.required_scanners` entry for the reviewing role, read at the base commit, and
+the user-level `review.evaluator.required_scanners`. The evaluator and the merge gate build that
+set through one accessor and judge each report with one predicate, so they cannot disagree. The
+predicate has three outcomes:
+
+- satisfied: status `ran`, or `not_applicable` with a non-empty reason;
+- reported: status `not_invoked`. It is listed in `scanner_coverage` (below) and in the merge
+  output, and it never degrades the verdict and never refuses a merge;
+- failing: status `failed`, no report at all, or any other value, including an unrecognised
+  string such as `timeout`. The verdict is DEGRADED naming the scanner and its status, and the
+  merge gate refuses as it always has.
+
+A scanner that reports more than once is satisfied only if every report is, and a failing report
+outranks a reported one.
+
+Before this unification the evaluator degraded on `not_invoked` while the merge gate accepted it.
+Both now report it and refuse on neither.
+
+`post` also states which scanners did not run, as `scanner_coverage` in its result:
+`{"complete": bool, "not_run": [{"scanner", "status", "reason", "required"}]}`. `not_run` lists every
+report that is not satisfied, whether or not the scanner is required, and each required scanner
+with no report (status `missing`); `complete` is true when `not_run` is empty. The posted comment
+header gains one line, `scanners not run: <scanner> (<status>)`, naming them, and none when all
+ran. The record is for reading; it changes no outcome and adds nothing to the fence.
+
+When `post` cannot read the tracked gate file at the base commit, the gate's scanner entry is
+unknown: the required set is the user-level declaration alone, one warning is written to stderr,
+and `scanner_coverage` gains `"gate_scanners": "unread"` and `"gate_file"` naming the file. The
+outcome is whatever it would be without the gate; nothing is refused for it.
 
 Deduplication: findings with identical file, line, rule and message are merged. The copy
 kept is the strongest: a copy that is not a praise note beats a praise note, then a

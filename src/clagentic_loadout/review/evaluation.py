@@ -20,6 +20,7 @@ computed fields written beside whatever the finding already carried.
 
 from __future__ import annotations
 
+import dataclasses
 import datetime as dt
 import hashlib
 from collections.abc import Mapping, Sequence
@@ -34,6 +35,9 @@ from clagentic_loadout.merge.fence_state import (
     KEY_VERDICT_REASONS,
     PASSES_KEYS,
 )
+from clagentic_loadout.merge.repo_gate_runtime import gate_from_tracked_text
+from clagentic_loadout.merge.scanner_coverage import ScannerDeclaration, required_scanners_for
+from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.review.class_guidance import class_fields_of
 from clagentic_loadout.review.evaluate import (
     EVALUATOR_VERSION,
@@ -45,7 +49,7 @@ from clagentic_loadout.review.evaluate import (
 from clagentic_loadout.review.evaluate_verb import load_evaluator_config
 from clagentic_loadout.review.facts import KEY_FACTS
 from clagentic_loadout.review.finding_identity import KEY_FINGERPRINT, is_fingerprint
-from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader
+from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReader, PolicyReadError
 from clagentic_loadout.review.policy_source import PolicySource, read_policy_from
 from clagentic_loadout.review.profile_settings import ProfileSettings
 from clagentic_loadout.review.ruling_provider import (
@@ -110,6 +114,11 @@ class EvaluationContext:
     #: The deployment's own repo profile settings (review.profile_settings). Used
     #: only by `run`, to state repo profile findings.
     profile_settings: ProfileSettings = field(default_factory=ProfileSettings)
+    #: Why the repo gate's required scanners could not be read
+    #: (with_repo_gate_scanners), None when they were or were not looked for.
+    #: Reported only: it never changes the verdict, because the gate's entry is
+    #: then unknown rather than refused.
+    gate_unread: str | None = None
 
     @property
     def effective_visibility(self) -> str:
@@ -119,14 +128,56 @@ class EvaluationContext:
 
 
 def context_from_config(
-    config_root: str | Path | None, **fields: Any
+    config_root: str | Path | None,
+    *,
+    role: str | None = None,
+    repo_gate: ScannerDeclaration | None = None,
+    **fields: Any,
 ) -> EvaluationContext:
     """An EvaluationContext whose evaluator settings come from the user-level
-    configuration. Raises evaluate_verb.EvaluateError when it is invalid."""
-    block_at, required = load_evaluator_config(config_root)
+    configuration. The required scanners are the user-level ones plus, when
+    *repo_gate* is given, the ones it requires of *role* (required_scanners_for).
+    Raises evaluate_verb.EvaluateError when the configuration is invalid."""
+    block_at, user_level = load_evaluator_config(config_root)
     if "ruling_provider" not in fields:
         fields["ruling_provider"] = resolve_ruling_provider(config_root)
-    return EvaluationContext(block_at=block_at, required_scanners=tuple(required), **fields)
+    return EvaluationContext(
+        block_at=block_at,
+        required_scanners=required_scanners_for(role, repo_gate, user_level),
+        **fields,
+    )
+
+
+def _policy_reader_of(context: EvaluationContext) -> PolicyReader | None:
+    reader = context.policy_reader
+    if reader is None and context.repo_path is not None:
+        reader = GitPolicyReader(context.repo_path)
+    return reader
+
+
+def with_repo_gate_scanners(context: EvaluationContext, role: str) -> EvaluationContext:
+    """*context* with the scanners the repo's tracked gate requires of *role*
+    added to its required set. The gate is read at the policy base revision, the
+    one the PR under review cannot change. With no base revision or no reader
+    nothing is read and the policy read already reports that; a gate that cannot
+    be read leaves the required set as it was (the gate's entry is unknown) and is
+    recorded in ``gate_unread`` for the caller to report; it never degrades."""
+    base = context.policy_base_sha
+    reader = _policy_reader_of(context)
+    if base is None or reader is None:
+        return context
+    try:
+        text = (
+            reader.read_text(base, TRACKED_GATE_RELATIVE_PATH)
+            if TRACKED_GATE_RELATIVE_PATH in reader.list_paths(base)
+            else None
+        )
+    except PolicyReadError as exc:
+        return dataclasses.replace(context, gate_unread=str(exc))
+    gate = gate_from_tracked_text(text, source=f"{base[:12]}:{TRACKED_GATE_RELATIVE_PATH}")
+    return dataclasses.replace(
+        context, required_scanners=required_scanners_for(role, gate, context.required_scanners)
+    )
 
 
 def read_context_policy(context: EvaluationContext) -> PolicySource:
@@ -136,9 +187,7 @@ def read_context_policy(context: EvaluationContext) -> PolicySource:
     if context.policy_base_sha is None:
         reason = "the policy base revision is not known, so no policy was read"
         return PolicySource((), Stakes(visibility=visibility), (reason,))
-    reader = context.policy_reader
-    if reader is None and context.repo_path is not None:
-        reader = GitPolicyReader(context.repo_path)
+    reader = _policy_reader_of(context)
     if reader is None:
         reason = "no policy source is available, so no policy was read"
         return PolicySource((), Stakes(visibility=visibility), (reason,))
@@ -360,4 +409,5 @@ __all__ = [
     "read_context_policy",
     "verdict_document_fields",
     "verdict_reasons",
+    "with_repo_gate_scanners",
 ]

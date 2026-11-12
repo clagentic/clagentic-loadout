@@ -786,9 +786,13 @@ unknown, unrecognised or unverifiable value resolves to the worst case.
   (an unknown `visibility` value, or a `private`/`internal` field that is not
   a Boolean) voids the whole record, whatever its other fields say.
 - **Evaluator settings** (`block_at`, `required_scanners`) come from the
-  user-level configuration only. At `run` no scanner has reported, so a required
+  user-level configuration. At `run` no scanner has reported, so a required
   scanner leaves the run's outcome DEGRADED; at `post`, `scanners_run` from
-  `--state-file` is what the evaluation sees.
+  `--state-file` or `--scanner-input` is what the evaluation sees, and the
+  required set is the user-level `required_scanners` plus the repo gate's
+  `merge.required_scanners` entry for the posting role, read at the base commit.
+  The merge gate uses the same set and the same satisfaction rule; see
+  [review-evaluator.md](review-evaluator.md).
 
 `run` writes, per finding in `findings.json` (additive fields): `computed_severity`
 (`none|low|medium|high|critical`), `blocking`, `facts_state`, `disposition` (the
@@ -1092,6 +1096,12 @@ classification. A hit on a line of a file the diff shows that the change adds be
 or deleted file). Both block unless listed in `--dropped`. A hit on a line of a shown file
 that the change did not add is listed under `Scanner hits outside the changed lines` and
 in the fence as `outside_range`, and takes no part in the verdict. Each scanner's status goes into the fence as `scanners_run`.
+
+The `post` result carries `scanner_coverage`: `{"complete": bool, "not_run": [{"scanner",
+"status", "reason", "required"}]}`, listing each scanner that did not run (`failed`,
+`not_invoked`, or `not_applicable` without a reason) and each required scanner with no report
+(status `missing`). The comment header names them on one line, `scanners not run: ...`, and
+adds no line when every scanner ran. It is a report: it changes no outcome and no fence field.
 
 #### Clearing your own finding
 
@@ -2628,9 +2638,13 @@ role whose newest fence is for another head is still refused as stale. With one
 fence at the head the result and output are the single-fence ones; with
 several, the merge prints a NOTICE naming the comments and each fence's
 notices carry its comment id. A clean verdict that itself lists `findings_open` still refuses. A
-clean verdict reporting a `merge.required_scanners` scanner as `failed`
-refuses, as does one that records no scanner outcomes for a role that has
-required scanners; a scanner name listed twice in a fence is malformed. Each
+clean verdict reporting a required scanner as `failed` (or with any status
+that is not a usable result) refuses, as does one that records no scanner
+outcomes for a role that has required scanners; a scanner name listed twice in
+a fence is malformed. The required set is the role's `merge.required_scanners`
+entry plus the user-level `review.evaluator.required_scanners`, the same set
+the evaluator uses. A required scanner reported `not_invoked` does not refuse:
+the merge prints a warning naming it. Each
 earlier comment with a fence is classified once, and that one classification
 feeds both the carry-forward and the `supersedes` check. An earlier fence that
 cannot be read (JSON that does not parse into an object, a schema error, a

@@ -63,6 +63,7 @@ from clagentic_loadout.merge.errors import (
 )
 from clagentic_loadout.merge.fence_state import docs_only_accepted, docs_only_waiver_line
 from clagentic_loadout.merge.gate_config import EvaluatorGate
+from clagentic_loadout.merge.scanner_coverage import ScannerDeclaration
 from clagentic_loadout.merge.verdict import ReviewerVerdict
 from clagentic_loadout.review.evaluate import (
     OUTCOME_BLOCKED,
@@ -422,17 +423,22 @@ def recompute_at_gate(
     config_root: str | Path | None = None,
     today: dt.date | None = None,
     ruling_scope: RulingScope | None = None,
+    repo_gate: ScannerDeclaration | None = None,
 ) -> Verdict:
     """The gate's own evaluation of the fence's findings. Policy is read through
     *policy_reader* at *live_base_sha*, never at a revision a fence or findings
     file names; with no reader or no base revision it is not read and the
     verdict is DEGRADED. Per-PR rulings are read for *ruling_scope* from the
-    registry, never from the fence."""
+    registry, never from the fence. The required scanners are the ones the same
+    accessor gives the merge gate's own scanner check: *repo_gate*'s entry for
+    the fence's role, plus the user-level ones."""
     state = verdict.state
     assert state.evaluated_findings is not None
     try:
         context = context_from_config(
             config_root,
+            role=verdict.reviewer,
+            repo_gate=repo_gate,
             policy_reader=policy_reader,
             policy_base_sha=live_base_sha or None,
             visibility=visibility,
@@ -493,6 +499,7 @@ def evaluate_at_gate(
     config_root: str | Path | None = None,
     today: dt.date | None = None,
     ruling_scope: RulingScope | None = None,
+    repo_gate: ScannerDeclaration | None = None,
 ) -> GateEvaluation:
     """Apply the decision table in the module docstring to *verdict*, the
     reviewer's newest valid fence (read by merge.verdict.read_reviewer_verdict,
@@ -517,6 +524,7 @@ def evaluate_at_gate(
         config_root=config_root,
         today=today,
         ruling_scope=ruling_scope,
+        repo_gate=repo_gate,
     )
     if verdict.state.docs_only is None:
         return evaluation
@@ -536,6 +544,7 @@ def _apply_decision_table(
     config_root: str | Path | None = None,
     today: dt.date | None = None,
     ruling_scope: RulingScope | None = None,
+    repo_gate: ScannerDeclaration | None = None,
 ) -> GateEvaluation:
     """The decision table of the module docstring, without the waiver line."""
     state = verdict.state
@@ -607,6 +616,7 @@ def _apply_decision_table(
         config_root=config_root,
         today=today,
         ruling_scope=ruling_scope,
+        repo_gate=repo_gate,
     )
     gate_outcome = computed.outcome
     applied = _applied_dispositions(computed)
