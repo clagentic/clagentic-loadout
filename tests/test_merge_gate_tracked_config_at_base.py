@@ -175,39 +175,99 @@ def test_a_tracked_gate_file_is_unchanged_and_deployment_keys_stay_ignored(tmp_p
     assert gate_source_line(gate) == f"gate read from {TRACKED_GATE_RELATIVE_PATH} at {repo.base_sha[:12]}"
 
 
-def _gate_source_lines(capsys) -> list[str]:
-    return [line for line in capsys.readouterr().err.splitlines() if line.startswith("merge: gate read from") or line == "merge: no gate declared"]
+def _tracked_gate_repo(tmp_path) -> GateRepo:
+    return init_gate_repo(tmp_path, tracked_gate={"required_reviewer_roles": []})
 
 
-def test_the_merge_prints_one_line_for_a_tracked_gate(tmp_path, capsys):
-    repo = init_gate_repo(tmp_path, tracked_gate={"required_reviewer_roles": []})
-    assert _merge(repo) == verb.EXIT_OK
-    assert _gate_source_lines(capsys) == [
-        f"merge: gate read from {TRACKED_GATE_RELATIVE_PATH} at {repo.base_sha[:12]}"
-    ]
+def _tracked_config_fallback_repo(tmp_path) -> GateRepo:
+    return _tracked_config_repo(tmp_path, _base_text(required_reviewer_roles=[]), None)
 
 
-def test_the_merge_prints_one_line_for_a_tracked_config_fallback(tmp_path, capsys):
+def _untracked_config_repo(tmp_path) -> GateRepo:
+    repo = init_gate_repo(tmp_path, tracked_gate=None)
+    make_origin_confirmable(tmp_path)
+    write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "required_reviewer_roles": []})
+    return repo
+
+
+def _no_gate_repo(tmp_path) -> GateRepo:
+    return init_gate_repo(tmp_path, tracked_gate=None)
+
+
+def _symlinked_config_repo(tmp_path, link_target: str) -> GateRepo:
+    """The tracked config at base, replaced in the working tree by a symlink."""
     repo = _tracked_config_repo(tmp_path, _base_text(required_reviewer_roles=[]), None)
-    assert _merge(repo) == verb.EXIT_OK
-    assert _gate_source_lines(capsys) == [
+    link = tmp_path / DEFAULT_CONFIG_RELATIVE_PATH
+    link.unlink()
+    link.symlink_to(link_target)
+    return repo
+
+
+def _symlink_to_dev_null_repo(tmp_path) -> GateRepo:
+    return _symlinked_config_repo(tmp_path, "/dev/null")
+
+
+def _symlink_to_in_tree_path_absent_at_base_repo(tmp_path) -> GateRepo:
+    # The target exists in the tree and holds a weaker gate, but is not in the base commit.
+    (tmp_path / "weak.yaml").write_text(
+        yaml.safe_dump({"merge": {"sync_tree_after_merge": False, "required_reviewer_roles": ["reviewer"]}}),
+        encoding="utf-8",
+    )
+    return _symlinked_config_repo(tmp_path, "../../weak.yaml")
+
+
+def _tracked_config_line(repo: GateRepo) -> list[str]:
+    return [
         f"merge: gate read from {DEFAULT_CONFIG_RELATIVE_PATH} at {repo.base_sha[:12]} "
         f"(tracked config fallback; no tracked gate.yaml)"
     ]
 
 
-def test_the_merge_prints_one_line_for_an_untracked_config_fallback(tmp_path, capsys):
-    repo = init_gate_repo(tmp_path, tracked_gate=None)
-    make_origin_confirmable(tmp_path)
-    write_deployment_config(tmp_path, {"sync_tree_after_merge": False, "required_reviewer_roles": []})
-    assert _merge(repo) == verb.EXIT_OK
-    lines = _gate_source_lines(capsys)
+@pytest.mark.parametrize(
+    ("build", "expected", "exit_code"),
+    [
+        pytest.param(
+            _tracked_gate_repo,
+            lambda repo: [f"merge: gate read from {TRACKED_GATE_RELATIVE_PATH} at {repo.base_sha[:12]}"],
+            verb.EXIT_OK,
+            id="tracked_gate",
+        ),
+        pytest.param(_tracked_config_fallback_repo, _tracked_config_line, verb.EXIT_OK, id="tracked_config_fallback"),
+        pytest.param(
+            _untracked_config_repo,
+            lambda repo: ["merge: gate read from untracked deployment config.yaml at "],
+            verb.EXIT_OK,
+            id="untracked_config_fallback",
+        ),
+        pytest.param(_no_gate_repo, lambda repo: ["merge: no gate declared"], verb.EXIT_OK, id="no_gate"),
+        # A /dev/null config cannot carry the sync opt-out the fixture relies on, so the
+        # merge ends at the later tree sync (usage exit); the gate line precedes it.
+        pytest.param(
+            _symlink_to_dev_null_repo, _tracked_config_line, verb.EXIT_USAGE, id="config_symlinked_to_dev_null"
+        ),
+        pytest.param(
+            _symlink_to_in_tree_path_absent_at_base_repo,
+            _tracked_config_line,
+            verb.EXIT_OK,
+            id="config_symlinked_to_in_tree_path_absent_at_base",
+        ),
+    ],
+)
+def test_the_merge_prints_one_gate_source_line_for_each_source(tmp_path, capsys, build, expected, exit_code):
+    repo = build(tmp_path)
+
+    assert _merge(repo) == exit_code
+
+    lines = [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if line.startswith("merge: gate read from") or line == "merge: no gate declared"
+    ]
+    wanted = expected(repo)
     assert len(lines) == 1
-    assert lines[0].startswith("merge: gate read from untracked deployment config.yaml at ")
-    assert lines[0].endswith("(fallback)")
-
-
-def test_the_merge_prints_one_line_when_no_gate_is_declared(tmp_path, capsys):
-    repo = init_gate_repo(tmp_path, tracked_gate=None)
-    assert _merge(repo) == verb.EXIT_OK
-    assert _gate_source_lines(capsys) == ["merge: no gate declared"]
+    # The untracked line names a machine path and ends "(fallback)"; every other
+    # row is matched whole.
+    if wanted[0].endswith("config.yaml at "):
+        assert lines[0].startswith(wanted[0]) and lines[0].endswith("(fallback)")
+    else:
+        assert lines == wanted
