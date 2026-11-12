@@ -467,6 +467,38 @@ class TestReviewRecords:
         assert load_review_record(root, "77") == wanted
         assert wanted["chunks"] == [{"index": 1, "files": ["a.py"], "hunks": None}]
 
+    def test_a_multi_pass_record_states_its_passes_through_the_one_schema(self, tmp_path):
+        root = tmp_path / "records"
+        stability = {"passes_total": 2, "stable": True, "seen_in_some_passes": []}
+        evaluated = [{"file": "a.py", "line": 1, "rule_id": "R1", "message": "m",
+                      "passes_seen": 2, "passes_total": 2}]
+        record = _review_record("77", stability=stability, evaluated=evaluated)
+
+        write_review_record(root, record)
+
+        assert (record["schema_version"], record["passes_total"]) == (2, 2)
+        assert load_review_record(root, "77") == record
+        # A review of one pass is the record it always was.
+        plain = _review_record("78")
+        assert plain["schema_version"] == 1 and "passes_total" not in plain and "stability" not in plain
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            {"passes_total": 1},
+            {"passes_total": "2"},
+            {"findings": {"evaluated": [{"passes_seen": 0}], "open": [], "advisory": []}},
+            {"findings": {"evaluated": [{"passes_total": 1}], "open": [], "advisory": []}},
+        ],
+        ids=["one-pass", "not-an-integer", "seen-zero", "evaluated-total-one"],
+    )
+    def test_the_schema_refuses_a_malformed_pass_field(self, tmp_path, change):
+        stability = {"passes_total": 2, "stable": True, "seen_in_some_passes": []}
+        record = {**_review_record("77", stability=stability), **change}
+
+        with pytest.raises(StoreError):
+            write_review_record(tmp_path / "records", record)
+
     def test_a_comment_id_that_is_not_digits_never_reaches_a_path(self, tmp_path):
         with pytest.raises(StoreError):
             load_review_record(tmp_path, "../x")

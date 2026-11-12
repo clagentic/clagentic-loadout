@@ -494,6 +494,17 @@ deployment asks for it), with facts, beside the reviewer's; see
 [repo-profile.md](repo-profile.md). They are scored like any other finding
 and never hold a merge on their own.
 
+With `review.profiles.<name>.passes` above 1, a full review is made that many times
+independently and the passes' findings are joined by the same merge before anything is
+evaluated, so one verdict is computed over the union. Each finding then carries `passes_seen`
+and `passes_total`, and the document carries a `stability` block: `stable` is true when the
+blocking set of every pass, judged on its own under the same policy, was the same, and
+`seen_in_some_passes` lists the findings not every pass raised. The gate does not read any of
+this; the fence is `fence_schema_version` 9 and the numbers are reported with the verdict, so
+two reviews of one head that sampled differently show it (`stable: false` over a union) instead
+of two unrelated verdicts. The setting is described with the `loadout-review` verb in
+[verbs.md](verbs.md).
+
 `run` evaluates after the chunks are merged and, in delta mode, after prior findings are
 accounted for. Policy is read from the PR's base revision (not the last reviewed head) through
 the host API, or from the repository at `--repo-path` when that is given explicitly;

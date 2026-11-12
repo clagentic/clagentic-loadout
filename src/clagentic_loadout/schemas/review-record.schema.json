@@ -12,8 +12,17 @@
   "properties": {
     "schema_version": {
       "type": "integer",
-      "enum": [1],
-      "description": "Version of this record shape."
+      "enum": [1, 2],
+      "description": "Version of this record shape. 2 marks the record of a review of more than one independent pass, which states passes_total and stability; every other record is version 1."
+    },
+    "passes_total": {
+      "type": "integer",
+      "minimum": 2,
+      "description": "OPTIONAL, version 2. How many independent passes the review ran. Stated together with stability."
+    },
+    "stability": {
+      "type": "object",
+      "description": "OPTIONAL, version 2. The review's stability block: whether the blocking set of each pass was the same, and the findings only some passes raised."
     },
     "comment_id": {
       "type": "string",
@@ -65,7 +74,17 @@
       "required": ["evaluated", "open", "advisory"],
       "description": "The findings the review judged.",
       "properties": {
-        "evaluated": {"type": "array", "items": {"type": "object"}, "description": "Every finding the review evaluated."},
+        "evaluated": {
+          "type": "array",
+          "description": "Every finding the review evaluated.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "passes_seen": {"type": "integer", "minimum": 1, "description": "OPTIONAL, version 2. How many of the review's passes raised the finding."},
+              "passes_total": {"type": "integer", "minimum": 2, "description": "OPTIONAL, version 2. How many passes the review ran."}
+            }
+          }
+        },
         "open": {"type": "array", "items": {"type": "object"}, "description": "The findings left open, which block."},
         "advisory": {"type": "array", "items": {"type": "object"}, "description": "The findings left as advice, which do not block."}
       }

@@ -61,12 +61,15 @@ from clagentic_loadout.merge.fence_state import (
     KEY_FAILURE_SEQUENCES,
     KEY_FINDINGS_OPEN,
     KEY_OUTSIDE_RANGE,
+    KEY_PASSES_SEEN,
+    KEY_PASSES_TOTAL,
     KEY_RESOLVED,
     KEY_SCANNERS_RUN,
     KEY_SPEC_COVERAGE,
     KEY_SPEC_HASH,
     KEY_SPEC_TAG,
     KEY_SPEC_TAGS,
+    KEY_STABILITY,
     KEY_VERDICT_OUTCOME,
     KEY_VERDICT_REASONS,
     COVERAGE_UNMET,
@@ -917,7 +920,7 @@ def _load_findings(
                 validate_finding(
                     item, position, lenient_severity=True, truncate_message=False,
                     carry_fingerprint=True, carry_facts=True, carry_spec_tag=carry_spec_tag,
-                    carry_class=carry_class,
+                    carry_class=carry_class, carry_passes=True,
                 )
             )
         except InvalidReplyError as exc:
@@ -1641,13 +1644,18 @@ def _post_command(
     def spec_note(item: dict[str, Any]) -> list[str]:
         return [f"spec tag: {item[KEY_SPEC_TAG]}"] if spec_fields is not None else []
 
+    def pass_note(item: dict[str, Any]) -> list[str]:
+        if KEY_PASSES_SEEN not in item:
+            return []
+        return [f"raised by {item[KEY_PASSES_SEEN]} of {item[KEY_PASSES_TOTAL]} passes"]
+
     body = {
         "review_status": status,
         "findings": [
             {
                 **{k: item[k] for k in (*_FINDING_KEYS, *_OPTIONAL_FINDING_KEYS) if k in item},
                 "blocking": evaluated.blocking,
-                "notes": [*finding_notes(evaluated), *spec_note(item)],
+                "notes": [*finding_notes(evaluated), *spec_note(item), *pass_note(item)],
             }
             for item, evaluated in zip(annotated, verdict.findings)
         ]
@@ -1655,7 +1663,7 @@ def _post_command(
             {
                 **{k: item[k] for k in (*_FINDING_KEYS, *_OPTIONAL_FINDING_KEYS) if k in item},
                 "blocking": False,
-                "notes": [ADVISORY_NOTE, *spec_note(item)],
+                "notes": [ADVISORY_NOTE, *spec_note(item), *pass_note(item)],
             }
             for item in advisory
         ],
@@ -1805,6 +1813,7 @@ def _post_command(
         policy_base_sha=evaluation.policy_base_sha,
         spec_hash=spec_fields[KEY_SPEC_HASH] if spec_fields is not None else None,
         engines=evidence.get(KEY_ENGINES),
+        stability=evidence.get(KEY_STABILITY),
         evaluated=body[KEY_EVALUATED_FINDINGS],
         open_findings=open_findings,
         advisory=[{k: item[k] for k in _FINDING_KEYS if k in item} for item in advisory],

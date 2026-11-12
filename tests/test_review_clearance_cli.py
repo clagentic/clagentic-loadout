@@ -114,6 +114,16 @@ class TestOpen:
         assert (item["rule_id"], item["file"], item["line"]) == ("R1", "a.py", 3)
         assert item["comment_id"] == 100 and item["message"]
 
+    def test_it_reads_a_fence_of_a_multi_pass_review(self, world, capsys):
+        world.seed(
+            fence_schema_version=9,
+            stability={"passes_total": 2, "stable": True, "seen_in_some_passes": []},
+        )
+
+        code, result, _ = world.review("open", capsys=capsys)
+
+        assert code == 0 and [item["id"] for item in result["open"]] == [OPEN_ID]
+
     def test_a_finding_the_role_already_cleared_is_not_listed(self, world, capsys):
         world.seed()
         cleared = world.seed(comment_id=101)

@@ -226,10 +226,10 @@ class TestFenceVersions:
 
         assert validate_against_schema(fence, verdict_schema_path()) == []
 
-    def test_a_version_nine_fence_is_refused(self):
+    def test_a_fence_above_the_newest_version_is_refused(self):
         fence = {
             "reviewer": "r", "review_status": "clean", "head_sha": HEAD, "pr_number": 1,
-            "fence_schema_version": 9,
+            "fence_schema_version": max(fence_state.FENCE_SCHEMA_VERSIONS) + 1,
         }
 
         assert validate_against_schema(fence, verdict_schema_path())

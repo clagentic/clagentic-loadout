@@ -660,3 +660,61 @@ def test_a_fresh_run_after_a_completed_one_calls_the_carrier_again(tmp_path):
     run_review(acquired, profile, run_dir, emit=lambda *a, **k: None, runner=runner)
 
     assert calls.count("carrier-engine") == 2
+
+
+# --- passes -------------------------------------------------------------------
+
+_PASS_KEYS = {"passes_total", "stability", "pass_chunks"}
+
+
+def _state_dirs(payload: dict) -> list[str]:
+    return sorted(path.name for path in Path(payload["run_dir"]).glob("state-*"))
+
+
+def test_the_default_is_one_pass_and_states_nothing_of_passes(env, capsys):
+    env.configure()
+
+    code, payload = env.run(capsys=capsys)
+
+    assert code == 0
+    document = _chunk_records(payload)
+    assert len(_state_dirs(payload)) == 1
+    assert not _PASS_KEYS & set(document) and not _PASS_KEYS & set(payload)
+    assert not any("passes_seen" in finding for finding in document["findings"])
+    assert [s["stage"] for s in payload["stages"]] == ["acquired", "chunked", "chunk-1", "merged"]
+
+
+def test_two_passes_sample_independently_and_the_findings_are_unioned(env, capsys):
+    env.configure(carrier_mode="distinct_per_call", passes=2)
+
+    code, payload = env.run(capsys=capsys)
+
+    assert code == 0
+    assert len(prompts(env.stubs, "carrier")) == 2
+    assert len(_state_dirs(payload)) == 2
+    document = _chunk_records(payload)
+    assert sorted(f["message"] for f in document["findings"]) == [
+        "stub finding one",
+        "stub finding zero",
+    ]
+    assert [s["stage"] for s in payload["stages"] if s["stage"].startswith("pass-1")] == [
+        "pass-1-chunked",
+        "pass-1-chunk-1",
+    ]
+    assert payload["engines"] == {"carrier": 2}
+    # A rerun serves each pass from its own cache.
+    code, _ = env.run(capsys=capsys)
+    assert code == 0 and len(prompts(env.stubs, "carrier")) == 2
+
+
+def test_raising_the_pass_count_keeps_the_first_pass_cache(env, capsys):
+    env.configure()
+    _, one = env.run(capsys=capsys)
+    before = set(_state_dirs(one))
+    env.configure(passes=2)
+
+    code, two = env.run(capsys=capsys)
+
+    assert code == 0
+    assert before < set(_state_dirs(two))
+    assert len(prompts(env.stubs, "carrier")) == 2

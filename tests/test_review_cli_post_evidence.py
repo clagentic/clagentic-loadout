@@ -5,6 +5,7 @@ candidates, the commit range, and the engine that answered each run."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -247,6 +248,67 @@ def test_a_fallback_without_a_model_label_still_names_the_engine(env, capsys):
     body = _run_and_post(env, capsys)
 
     assert "engine: fallback, reason usage_limit" in body.split("```review-result")[0]
+
+
+def _run_and_post_passes(env, capsys, *run_extra):
+    code, run = env.run(*run_extra, capsys=capsys)
+    assert code == 0, run
+    code, payload = env.post("--findings", run["findings_file"], capsys=capsys)
+    assert code == 0, payload
+    return payload, parse_verdict_block(env.opener_state["posted_body"])
+
+
+def test_two_passes_that_disagree_post_one_union_verdict_with_the_stability_block(env, capsys):
+    env.configure(carrier_mode="distinct_per_call", passes=2)
+
+    payload, fence = _run_and_post_passes(env, capsys)
+
+    assert fence["fence_schema_version"] == 9
+    assert fence["stability"]["passes_total"] == 2 and fence["stability"]["stable"] is False
+    assert sorted(
+        (entry["message"], entry["passes_seen"]) for entry in fence["stability"]["seen_in_some_passes"]
+    ) == [("stub finding one", 1), ("stub finding zero", 1)]
+    assert [(f["passes_seen"], f["passes_total"]) for f in fence["evaluated_findings"]] == [(1, 2)] * 2
+    # One verdict over the union: the blocking finding of one pass blocks it.
+    assert fence["review_status"] == "blocking" and len(fence["findings_open"]) == 1
+    prose = env.opener_state["posted_body"].split("```review-result")[0]
+    assert "passes: 2, unstable, 2 finding(s) seen in only some passes" in prose
+    assert "raised by 1 of 2 passes" in prose
+    record = json.loads(Path(payload["record"]["path"]).read_text(encoding="utf-8"))
+    assert record["schema_version"] == 2 and record["passes_total"] == 2
+    assert record["stability"] == fence["stability"]
+    assert [f["passes_seen"] for f in record["findings"]["evaluated"]] == [1, 1]
+
+
+def test_two_passes_that_agree_are_stable_and_every_finding_was_seen_twice(env, capsys):
+    env.configure(carrier_mode="facts_serious", passes=2)
+
+    _, fence = _run_and_post_passes(env, capsys)
+
+    assert fence["stability"] == {"passes_total": 2, "stable": True, "seen_in_some_passes": []}
+    assert [(f["passes_seen"], f["passes_total"]) for f in fence["evaluated_findings"]] == [(2, 2)]
+
+
+def test_the_same_head_reviewed_twice_in_passes_gives_the_same_union_verdict_and_stability(
+    env, capsys, tmp_path
+):
+    env.configure(carrier_mode="distinct_per_call", passes=2)
+
+    _, first = _run_and_post_passes(env, capsys, "--out", str(tmp_path / "one"))
+    _, second = _run_and_post_passes(env, capsys, "--out", str(tmp_path / "two"))
+
+    assert first["stability"]["stable"] is False and second["stability"]["stable"] is False
+    for key in ("verdict_outcome", "review_status", "evaluated_findings", "stability"):
+        assert first[key] == second[key], key
+
+
+def test_one_pass_posts_the_fence_it_always_did(env, capsys):
+    env.configure(carrier_mode="facts_serious")
+
+    _, fence = _run_and_post_passes(env, capsys)
+
+    assert "stability" not in fence and fence["fence_schema_version"] < 9
+    assert not any("passes_seen" in finding for finding in fence["evaluated_findings"])
 
 
 def test_a_bare_findings_array_has_no_run_evidence(env, tmp_path, capsys):

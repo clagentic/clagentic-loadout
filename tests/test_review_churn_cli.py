@@ -22,7 +22,7 @@ from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.transport import github_app_config, provider_config
 from tests._review_cli_support import Env, identity_provider, make_diff
 from tests._review_evaluate_support import facts
-from tests._support.churn_fences import verdict_comment
+from tests._support.churn_fences import replace_fence, verdict_comment
 from tests._support.fakes import FakeResponse, json_resp
 from tests._support.review_host import PRIOR_HEAD, ReviewHost
 
@@ -169,6 +169,19 @@ class TestSecondBlockedRound:
         steps = [line for line in report["brief"].splitlines() if line[:2] in {f"{n}." for n in "12345678"}]
         assert [line[0] for line in steps] == list("12345678")
         assert report["options"] == [] and "STOP" not in report["brief"]
+
+    def test_a_prior_round_from_a_multi_pass_review_counts_as_a_round(self, world, capsys):
+        world.seed(PRIOR_HEAD)
+        prior = world.host.seeded[-1]
+        world.host.seeded[-1] = replace_fence(
+            prior,
+            fence_schema_version=9,
+            stability={"passes_total": 2, "stable": True, "seen_in_some_passes": []},
+        )
+
+        code, result, _ = world.post([_finding()], capsys=capsys)
+
+        assert code == 0 and _churn(result)["level"] == churn.LEVEL_BRIEF
 
     def test_a_first_blocked_round_has_nothing_to_report(self, world, capsys):
         code, result, _ = world.post([_finding()], capsys=capsys)

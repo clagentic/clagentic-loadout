@@ -11,7 +11,9 @@ from clagentic_loadout.review.findings_contract import (
     merge_findings,
     parse_chunk_output,
     parse_chunk_reply,
+    validate_finding,
 )
+from clagentic_loadout.review.pass_union import union_passes
 
 _FINDING = {"file": "a.py", "line": 3, "rule_id": "R1", "severity": "nit", "message": "m"}
 # A reply states facts and never a severity: the severity above is what an older
@@ -135,6 +137,63 @@ def test_merge_keeps_every_copy_that_states_different_facts():
     merged = merge_findings([(1, [mild]), (2, [harsh])])
 
     assert [f["facts"] for f in merged] == [mild["facts"], harsh["facts"]]
+
+
+def _blocks_on(*ids):
+    return lambda findings: frozenset(i for i in ids if any(f["message"] == i for f in findings))
+
+
+def test_a_union_of_passes_goes_through_the_merge_and_counts_the_passes_that_raised_each():
+    both, only_first = {**_PARSED, "message": "both"}, {**_PARSED, "line": 9, "message": "first"}
+
+    union = union_passes([[(1, [both, only_first])], [(1, [dict(both)])]], _blocks_on())
+
+    assert union.findings == [
+        {**both, "chunk": 1, "passes_seen": 2, "passes_total": 2},
+        {**only_first, "chunk": 1, "passes_seen": 1, "passes_total": 2},
+    ]
+    assert union.stability == {
+        "passes_total": 2,
+        "stable": True,
+        "seen_in_some_passes": [
+            {"file": "a.py", "line": 9, "rule_id": "R1", "message": "first", "passes_seen": 1}
+        ],
+    }
+
+
+def test_the_union_is_unstable_when_the_passes_block_on_different_findings():
+    first, second = {**_PARSED, "message": "first"}, {**_PARSED, "line": 9, "message": "second"}
+
+    union = union_passes([[(1, [first])], [(1, [second])]], _blocks_on("first", "second"))
+
+    assert union.stability["stable"] is False
+    assert [f["passes_seen"] for f in union.findings] == [1, 1]
+
+
+def test_a_single_pass_is_its_merged_findings_untouched():
+    union = union_passes([[(2, [_FINDING]), (1, [_FINDING])]], _blocks_on())
+
+    assert union.stability is None
+    assert union.findings == merge_findings([(2, [_FINDING]), (1, [_FINDING])])
+
+
+@pytest.mark.parametrize(
+    "pair, kept",
+    [
+        ({"passes_seen": 1, "passes_total": 2}, True),
+        ({"passes_seen": 2, "passes_total": 2}, True),
+        ({"passes_seen": 3, "passes_total": 2}, False),
+        ({"passes_seen": 1, "passes_total": 1}, False),
+        ({"passes_seen": "1", "passes_total": 2}, False),
+        ({"passes_seen": 1}, False),
+    ],
+)
+def test_the_pass_pair_is_carried_only_from_a_findings_file_and_only_when_well_formed(pair, kept):
+    carried = validate_finding({**_FINDING, **pair}, 1, carry_passes=True)
+    dropped = validate_finding({**_FINDING, **pair}, 1)
+
+    assert ("passes_seen" in carried) is kept
+    assert "passes_seen" not in dropped and "passes_total" not in dropped
 
 
 def test_the_output_contract_offers_exactly_the_published_vocabulary():

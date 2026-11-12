@@ -15,7 +15,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from clagentic_loadout.merge.fence_state import KEY_SPEC_TAG, SPEC_TAGS
+from clagentic_loadout.merge.fence_state import (
+    KEY_PASSES_SEEN,
+    KEY_PASSES_TOTAL,
+    KEY_SPEC_TAG,
+    SPEC_TAGS,
+)
 from clagentic_loadout.review.class_guidance import CLASS_FIELDS_CONTRACT, class_fields_of
 from clagentic_loadout.review import facts as vocab
 from clagentic_loadout.review.facts import KEY_FACTS
@@ -133,6 +138,7 @@ def validate_finding(
     carry_facts: bool = False,
     carry_spec_tag: bool = False,
     carry_class: bool = False,
+    carry_passes: bool = False,
     reply_contract: bool = False,
     problems: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -176,6 +182,12 @@ def validate_finding(
     finding. Neither is read by the evaluator. Without the flag they are dropped
     like any unknown key, which is how a deployment that does not state classes
     keeps the contract it always had.
+
+    ``passes_seen`` and ``passes_total`` (see review.pass_union) are carried only
+    with ``carry_passes``, for findings read back from a findings file of a
+    multi-pass run: both must be integers with 1 <= passes_seen <= passes_total,
+    and a pair that is not is left out without touching the finding. A model
+    reply never sets them.
 
     ``facts`` (see review.facts) is optional and additive: it is carried through
     only with ``carry_facts``, exactly as the reader found it, because judging it
@@ -248,6 +260,15 @@ def validate_finding(
         validated[KEY_SPEC_TAG] = tag
     if carry_class:
         validated.update(class_fields_of(item))
+    if carry_passes:
+        seen, total = item.get(KEY_PASSES_SEEN), item.get(KEY_PASSES_TOTAL)
+        if (
+            all(isinstance(n, int) and not isinstance(n, bool) for n in (seen, total))
+            and 1 <= seen <= total
+            and total >= 2
+        ):
+            validated[KEY_PASSES_SEEN] = seen
+            validated[KEY_PASSES_TOTAL] = total
     if carry_fingerprint and is_fingerprint(item.get(KEY_FINGERPRINT)):
         validated[KEY_FINGERPRINT] = item[KEY_FINGERPRINT]
     if carry_facts and item.get(KEY_FACTS) is not None:
@@ -358,6 +379,12 @@ def parse_chunk_reply(text: str, *, carry_class: bool = False) -> list[dict[str,
     return parse_chunk_output(text, carry_class=carry_class).findings
 
 
+def finding_key(finding: dict[str, Any]) -> tuple[Any, ...]:
+    """What makes two findings the same finding: the one comparison every merge
+    and every cross-pass tally goes through (see merge_findings)."""
+    return (finding["file"], finding["line"], finding["rule_id"], finding["message"])
+
+
 def merge_findings(
     per_chunk: list[tuple[int, list[dict[str, Any]]]],
 ) -> list[dict[str, Any]]:
@@ -375,7 +402,7 @@ def merge_findings(
     copies: dict[tuple[Any, ...], list[int]] = {}
     for index, findings in sorted(per_chunk, key=lambda pair: pair[0]):
         for finding in findings:
-            key = (finding["file"], finding["line"], finding["rule_id"], finding["message"])
+            key = finding_key(finding)
             positions = copies.setdefault(key, [])
             same_facts = next(
                 (p for p in positions if merged[p].get(KEY_FACTS) == finding.get(KEY_FACTS)), None

@@ -22,6 +22,7 @@ which is normally the reviewer role):
           churn_count: pr                             # pr (default): count blocked rounds PR-wide; key: per (rule_id, file)
           defect_class: true                          # false: reviewers state no defect classes
           guidance_in_comment: true                   # false: no Class guidance section in the comment
+          passes: 1                                   # integer >= 1: independent full-review passes
 
 Two tiers, with a deliberate asymmetry. The USER-LEVEL file
 (``~/.config/clagentic/loadout/config.yaml``) is the host default and owns
@@ -44,6 +45,13 @@ what its reviewer is asked to state or what the posted comment says. With
 kept, and the fence version is unchanged, which is the old contract exactly.
 With ``guidance_in_comment`` false the guidance is still in the result, and the
 comment carries no Class guidance section.
+
+``passes`` (an integer of 1 or more, default 1) is how many independent passes a
+full review makes of the same diff. Each pass samples on its own and the passes'
+findings are joined into one set, judged once, with a stability report beside
+the verdict (review.pass_union). It is deployment-only: it multiplies the work
+of every review, which a repository under review must not be able to do. With
+the default the review is exactly the single pass it always was.
 
 The carrier contract: the argv is executed directly (no shell), the chunk
 prompt is written to its stdin, and the reply is read from its stdout. Exit
@@ -101,11 +109,14 @@ _REPO_OVERRIDABLE_KEYS = (
 _REPO_REFUSED_KEYS = ("carrier", "fallback", "carrier_model", "fallback_model")
 CONFIG_KEY_DEFECT_CLASS = "defect_class"
 CONFIG_KEY_GUIDANCE_IN_COMMENT = "guidance_in_comment"
+CONFIG_KEY_PASSES = "passes"
+DEFAULT_PASSES = 1
 _REPO_DEPLOYMENT_ONLY_KEYS = (
     CONFIG_KEY_ESCALATION_ROUND,
     CONFIG_KEY_CHURN_COUNT,
     CONFIG_KEY_DEFECT_CLASS,
     CONFIG_KEY_GUIDANCE_IN_COMMENT,
+    CONFIG_KEY_PASSES,
 )
 _MAX_LABEL_CHARS = 100
 
@@ -164,6 +175,18 @@ class ReviewProfile:
     churn_count: str = DEFAULT_CHURN_COUNT
     defect_class: bool = True
     guidance_in_comment: bool = True
+    passes: int = DEFAULT_PASSES
+
+
+def _passes(value: object, profile: str) -> int:
+    """*value* as the pass count: an integer of 1 or more. A bool is not an
+    integer here, since YAML `yes` must not read as one pass."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ReviewProfileError(
+            f"review profile {profile!r}: {CONFIG_KEY_PASSES!r} must be an integer of 1 or "
+            f"more, got {value!r}"
+        )
+    return value
 
 
 def _escalation_round(value: object, profile: str) -> int:
@@ -472,4 +495,5 @@ def load_review_profile(
         guidance_in_comment=_flag(
             merged.get(CONFIG_KEY_GUIDANCE_IN_COMMENT, True), CONFIG_KEY_GUIDANCE_IN_COMMENT, name
         ),
+        passes=_passes(merged.get(CONFIG_KEY_PASSES, DEFAULT_PASSES), name),
     )

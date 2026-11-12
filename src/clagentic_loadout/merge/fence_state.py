@@ -50,6 +50,15 @@ the verdict prose shows:
                                          the commit range the review covered
   engines           [{engine, model, reason, chunks}]
                                          which engine answered the run's chunks
+  stability         {passes_total, stable, seen_in_some_passes}
+                                         a review of several independent passes
+                                         (fence_schema_version 9): how many ran,
+                                         whether their blocking sets agreed, and
+                                         the findings only some passes raised,
+                                         each with passes_seen; each of the
+                                         evaluated_findings then also carries
+                                         passes_seen and passes_total. Reported,
+                                         never a gate rule
 
 EVALUATION fields record the verdict the evaluator computed, and are what a
 fence_schema_version 3 fence adds:
@@ -164,8 +173,29 @@ CLEARANCE_FENCE_SCHEMA_VERSION = 7
 #: and 8, and a review that states no class still stamps what it always did.
 CLASS_FENCE_SCHEMA_VERSION = 8
 
-#: Every fence_schema_version a reader accepts.
-FENCE_SCHEMA_VERSIONS = (1, 2, 3, 4, 5, 6, 7, 8)
+#: Version stamped on a fence from a review of more than one independent pass:
+#: its evaluated_findings carry passes_seen and passes_total and it carries the
+#: stability block. A superset of version 8, for the same reason: a reader below
+#: it refuses the unknown keys. Additive: stamped only when passes_total is above
+#: 1, so a single-pass review stamps what it always did.
+PASSES_FENCE_SCHEMA_VERSION = 9
+
+#: THE definition of the fence versions a reader accepts, and the one place a
+#: new version is added: one step constant above, one entry here. The fence
+#: regex below is derived from it; the review-result schema's enum and the
+#: stamping chain in normalize_findings_state are checked against it by one
+#: test (tests/test_merge_fence_versions.py), so a bump cannot leave a copy behind.
+FENCE_SCHEMA_VERSIONS = (
+    1,
+    FENCE_SCHEMA_VERSION,
+    EVALUATED_FENCE_SCHEMA_VERSION,
+    SPEC_FENCE_SCHEMA_VERSION,
+    DOCS_ONLY_FENCE_SCHEMA_VERSION,
+    FINGERPRINT_FENCE_SCHEMA_VERSION,
+    CLEARANCE_FENCE_SCHEMA_VERSION,
+    CLASS_FENCE_SCHEMA_VERSION,
+    PASSES_FENCE_SCHEMA_VERSION,
+)
 
 KEY_FENCE_SCHEMA_VERSION = "fence_schema_version"
 
@@ -190,6 +220,15 @@ KEY_RESOLVED = "resolved"
 KEY_OUTSIDE_RANGE = "outside_range"
 KEY_RANGE = "range"
 KEY_ENGINES = "engines"
+
+#: The pass fields of a multi-pass review: the block beside engines, and the two
+#: keys each evaluated finding carries (see review.pass_union).
+KEY_STABILITY = "stability"
+KEY_PASSES_SEEN = "passes_seen"
+KEY_PASSES_TOTAL = "passes_total"
+KEY_STABLE = "stable"
+KEY_SEEN_IN_SOME_PASSES = "seen_in_some_passes"
+PASSES_KEYS = (KEY_PASSES_SEEN, KEY_PASSES_TOTAL)
 
 #: The caller-suppliable evidence fields, in the order they render. Kept apart
 #: from STATE_KEYS on purpose: the gate's "does this fence assert state" logic
@@ -247,6 +286,7 @@ EVIDENCE_KEYS = (
     KEY_OUTSIDE_RANGE,
     KEY_RANGE,
     KEY_ENGINES,
+    KEY_STABILITY,
     *EVALUATION_KEYS,
     *SPEC_KEYS,
     KEY_DOCS_ONLY,
@@ -524,6 +564,44 @@ def _normalize_engines(value: Any) -> list[dict[str, Any]]:
     return rendered
 
 
+def _count(value: Any, where: str, *, at_least: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < at_least:
+        raise ValueError(f"{where} must be an integer of {at_least} or greater, got {value!r}")
+    return value
+
+
+def _normalize_stability(value: Any) -> dict[str, Any]:
+    """The stability block of a multi-pass review: how many passes ran, whether
+    their blocking sets agreed, and the findings only some passes raised. Only a
+    review of more than one pass states one."""
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{KEY_STABILITY} must be a JSON object, got {type(value).__name__}")
+    _exact_keys(value, (KEY_PASSES_TOTAL, KEY_STABLE, KEY_SEEN_IN_SOME_PASSES), KEY_STABILITY)
+    missing = [k for k in (KEY_PASSES_TOTAL, KEY_STABLE, KEY_SEEN_IN_SOME_PASSES) if k not in value]
+    if missing:
+        raise ValueError(f"{KEY_STABILITY} is missing {missing}")
+    total = _count(value[KEY_PASSES_TOTAL], f"{KEY_STABILITY}.{KEY_PASSES_TOTAL}", at_least=2)
+    if not isinstance(value[KEY_STABLE], bool):
+        raise ValueError(f"{KEY_STABILITY}.{KEY_STABLE} must be true or false")
+    partial = []
+    for index, entry in enumerate(_entries(value[KEY_SEEN_IN_SOME_PASSES], KEY_SEEN_IN_SOME_PASSES)):
+        where = f"{KEY_STABILITY}.{KEY_SEEN_IN_SOME_PASSES}[{index}]"
+        _exact_keys(entry, ("file", "line", "rule_id", "message", KEY_PASSES_SEEN), where)
+        seen = _count(entry.get(KEY_PASSES_SEEN), f"{where}.{KEY_PASSES_SEEN}", at_least=1)
+        if seen >= total:
+            raise ValueError(f"{where}.{KEY_PASSES_SEEN} must be below {KEY_PASSES_TOTAL} ({total})")
+        partial.append(
+            {
+                "file": _text(entry.get("file"), f"{where}.file"),
+                "line": _line_number(entry.get("line"), f"{where}.line"),
+                "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+                "message": _text(entry.get("message"), f"{where}.message", single_line=False),
+                KEY_PASSES_SEEN: seen,
+            }
+        )
+    return {KEY_PASSES_TOTAL: total, KEY_STABLE: value[KEY_STABLE], KEY_SEEN_IN_SOME_PASSES: partial}
+
+
 def normalize_findings_state(
     raw: Mapping[str, Any] | None, *, head_sha: str, review_status: str
 ) -> dict[str, Any]:
@@ -656,6 +734,8 @@ def normalize_findings_state(
         out[KEY_RANGE] = _normalize_range(raw[KEY_RANGE])
     if KEY_ENGINES in raw:
         out[KEY_ENGINES] = _normalize_engines(raw[KEY_ENGINES])
+    if KEY_STABILITY in raw:
+        out[KEY_STABILITY] = _normalize_stability(raw[KEY_STABILITY])
     if any(key in raw for key in EVALUATION_KEYS):
         out.update(_normalize_evaluation(raw))
         out[KEY_FENCE_SCHEMA_VERSION] = EVALUATED_FENCE_SCHEMA_VERSION
@@ -673,6 +753,10 @@ def normalize_findings_state(
         key in entry for entry in out.get(KEY_EVALUATED_FINDINGS, ()) for key in CLASS_KEYS
     ):
         out[KEY_FENCE_SCHEMA_VERSION] = CLASS_FENCE_SCHEMA_VERSION
+    if KEY_STABILITY in out or any(
+        key in entry for entry in out.get(KEY_EVALUATED_FINDINGS, ()) for key in PASSES_KEYS
+    ):
+        out[KEY_FENCE_SCHEMA_VERSION] = PASSES_FENCE_SCHEMA_VERSION
     return out
 
 
@@ -910,7 +994,10 @@ def _normalize_evaluated_findings(value: Any) -> list[dict[str, Any]]:
         where = f"{KEY_EVALUATED_FINDINGS}[{index}]"
         _exact_keys(
             entry,
-            ("file", "line", "rule_id", "message", "facts", "severity", "fingerprint", *CLASS_KEYS),
+            (
+                "file", "line", "rule_id", "message", "facts", "severity", "fingerprint",
+                *CLASS_KEYS, *PASSES_KEYS,
+            ),
             where,
         )
         item: dict[str, Any] = {
@@ -940,6 +1027,15 @@ def _normalize_evaluated_findings(value: Any) -> list[dict[str, Any]]:
                         f"{where}.{class_key} must be at most {MAX_CLASS_CHARS} characters"
                     )
                 item[class_key] = class_text
+        present = [key for key in PASSES_KEYS if entry.get(key) is not None]
+        if present:
+            if len(present) != len(PASSES_KEYS):
+                raise ValueError(f"{where} must state {KEY_PASSES_SEEN} and {KEY_PASSES_TOTAL} together")
+            total = _count(entry[KEY_PASSES_TOTAL], f"{where}.{KEY_PASSES_TOTAL}", at_least=2)
+            seen = _count(entry[KEY_PASSES_SEEN], f"{where}.{KEY_PASSES_SEEN}", at_least=1)
+            if seen > total:
+                raise ValueError(f"{where}.{KEY_PASSES_SEEN} must not exceed {KEY_PASSES_TOTAL}")
+            item[KEY_PASSES_SEEN], item[KEY_PASSES_TOTAL] = seen, total
         if entry.get("severity") is not None:
             if entry["severity"] != _PRAISE:
                 raise ValueError(
@@ -959,11 +1055,11 @@ def has_findings_state(data: Mapping[str, Any]) -> bool:
     )
 
 
+# Derived from FENCE_SCHEMA_VERSIONS: every stamped version (all but the
+# unstamped version 1) names findings state, so none can be left out of the scan.
 _RAW_VERSION_2_RE = re.compile(
     rf"{KEY_FENCE_SCHEMA_VERSION}\W+"
-    rf"(?:{FENCE_SCHEMA_VERSION}|{EVALUATED_FENCE_SCHEMA_VERSION}|{SPEC_FENCE_SCHEMA_VERSION}"
-    rf"|{DOCS_ONLY_FENCE_SCHEMA_VERSION}|{FINGERPRINT_FENCE_SCHEMA_VERSION}"
-    rf"|{CLEARANCE_FENCE_SCHEMA_VERSION}|{CLASS_FENCE_SCHEMA_VERSION})\b"
+    rf"(?:{'|'.join(str(v) for v in FENCE_SCHEMA_VERSIONS if v >= FENCE_SCHEMA_VERSION)})\b"
 )
 
 
@@ -1077,6 +1173,18 @@ def render_engines(entries: Iterable[Mapping[str, Any]]) -> str:
     return "engine: " + "; ".join(parts)
 
 
+def render_stability(value: Mapping[str, Any]) -> str:
+    """The verdict line for a normalized stability block: how many passes ran,
+    whether their blocking sets agreed, and how many findings only some passes
+    raised."""
+    state = "stable" if value[KEY_STABLE] else "unstable"
+    partial = len(value[KEY_SEEN_IN_SOME_PASSES])
+    return (
+        f"passes: {value[KEY_PASSES_TOTAL]}, {state}, "
+        f"{partial} finding(s) seen in only some passes"
+    )
+
+
 def failure_sequences_of(findings: Iterable[Mapping[str, Any]]) -> list[dict[str, Any]]:
     """The fence's machine-readable copy of each finding's failure_sequence:
     one entry per finding that carries a non-empty one, in finding order. The
@@ -1163,6 +1271,14 @@ __all__ = [
     "failure_sequences_of",
     "render_engines",
     "render_range",
+    "render_stability",
+    "KEY_PASSES_SEEN",
+    "KEY_PASSES_TOTAL",
+    "KEY_SEEN_IN_SOME_PASSES",
+    "KEY_STABILITY",
+    "KEY_STABLE",
+    "PASSES_FENCE_SCHEMA_VERSION",
+    "PASSES_KEYS",
     "FENCE_SCHEMA_VERSION",
     "KEY_CLEARED_CLAIMS",
     "KEY_FENCE_SCHEMA_VERSION",

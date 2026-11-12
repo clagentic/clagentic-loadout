@@ -73,6 +73,31 @@ def test_malformed_values_are_refused(tmp_path, bad):
         load_review_profile("reviewer", config_root=root)
 
 
+def test_passes_defaults_to_one_and_reads_an_integer_of_one_or_more(tmp_path):
+    root = _user(tmp_path, {"one": {"carrier": ["x"]}, "three": {"carrier": ["x"], "passes": 3}})
+
+    assert load_review_profile("one", config_root=root).passes == 1
+    assert load_review_profile("three", config_root=root).passes == 3
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, "2", None])
+def test_a_passes_value_that_is_not_an_integer_of_one_or_more_is_refused_by_name(tmp_path, bad):
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"], "passes": bad}})
+
+    with pytest.raises(ReviewProfileError, match="'passes'"):
+        load_review_profile("reviewer", config_root=root)
+
+
+def test_a_repo_level_passes_is_ignored_with_a_warning(tmp_path, capsys):
+    root = _user(tmp_path, {"reviewer": {"carrier": ["x"], "passes": 2}})
+    repo = _repo(tmp_path, {"reviewer": {"passes": 9}})
+
+    profile = load_review_profile("reviewer", config_root=root, repo_root=repo)
+
+    assert profile.passes == 2
+    assert "passes in the repo-level config" in capsys.readouterr().err
+
+
 def test_repo_level_may_override_bounds(tmp_path):
     root = _user(tmp_path, {"reviewer": {"carrier": ["x"], "chunk_lines": 600}})
     repo = _repo(tmp_path, {"reviewer": {"chunk_lines": 50, "timeout_seconds": 9}})

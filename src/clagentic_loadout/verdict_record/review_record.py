@@ -29,7 +29,9 @@ Fields (``schema_version`` 1):``comment_id``, ``repo``, ``pr``, ``head_sha``,
 ``advisory``), ``dropped`` (each with its reason) and ``chunks``: one entry per
 chunk with its ``index``, ``files`` and ``hunks`` (the line spans of each hunk,
 or null when the findings file predates span recording). ``chunks`` is null when
-the findings file carried no chunk record at all.
+the findings file carried no chunk record at all. A review of several independent
+passes adds ``passes_total`` and ``stability`` (``schema_version`` 2), and each
+entry of ``findings.evaluated`` may carry ``passes_seen`` and ``passes_total``.
 """
 
 from __future__ import annotations
@@ -56,6 +58,11 @@ REVIEW_RECORDS_DIR_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RECORDS_DIR"
 CONFIG_SECTION = "review_records"
 CONFIG_KEY_DIR = "dir"
 SCHEMA_VERSION = 1
+
+#: Stamped on the record of a review of more than one pass, which carries
+#: ``passes_total`` and ``stability``. Additive, and stamped by content like the
+#: fence: a single-pass review's record stays version 1.
+PASSES_SCHEMA_VERSION = 2
 
 #: A host's comment id is a decimal integer; anything else never reaches a path.
 COMMENT_ID_RE = re.compile(r"\A[0-9]{1,20}\Z")
@@ -146,14 +153,23 @@ def build_review_record(
     advisory: Sequence[Mapping[str, Any]],
     dropped: Sequence[Mapping[str, Any]] | None,
     chunks: Any,
+    stability: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The record for one verified comment. Raises StoreError when *comment_id*
-    is not a decimal id."""
+    is not a decimal id. A review of several passes gives its *stability* block;
+    the record then states ``passes_total`` and the block, and is stamped
+    PASSES_SCHEMA_VERSION; any other review's record is exactly what it was."""
     comment = str(comment_id)
     if COMMENT_ID_RE.match(comment) is None:
         raise StoreError(f"{comment!r} is not a comment id (expected decimal digits)")
+    passes = (
+        {"passes_total": stability.get("passes_total"), "stability": dict(stability)}
+        if stability is not None
+        else {}
+    )
     return {
-        "schema_version": SCHEMA_VERSION,
+        **passes,
+        "schema_version": PASSES_SCHEMA_VERSION if passes else SCHEMA_VERSION,
         "comment_id": comment,
         "repo": repo,
         "pr": pr,
@@ -273,6 +289,7 @@ __all__ = [
     "COMMENT_ID_RE",
     "CONFIG_KEY_DIR",
     "CONFIG_SECTION",
+    "PASSES_SCHEMA_VERSION",
     "REVIEW_RECORDS_DIR_ENV_VAR",
     "SCHEMA_VERSION",
     "ReviewRecordInvalidError",

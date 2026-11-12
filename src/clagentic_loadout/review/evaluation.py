@@ -32,6 +32,7 @@ from clagentic_loadout.merge.fence_state import (
     KEY_POLICY_BASE_SHA,
     KEY_VERDICT_OUTCOME,
     KEY_VERDICT_REASONS,
+    PASSES_KEYS,
 )
 from clagentic_loadout.review.class_guidance import class_fields_of
 from clagentic_loadout.review.evaluate import (
@@ -278,6 +279,9 @@ def evaluated_findings_for_fence(
         # The reviewer's class statement rides along as evidence only: the
         # evaluator never reads it, so it cannot change what the gate computes.
         item.update(class_fields_of(finding))
+        # How many independent passes raised it: evidence of a multi-pass review,
+        # never read by the evaluator.
+        item.update({key: finding[key] for key in PASSES_KEYS if finding.get(key) is not None})
         carried.append(item)
     return carried
 

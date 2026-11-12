@@ -972,6 +972,7 @@ review:
       churn_count: pr                             # optional; pr (default) or key (per rule and file)
       defect_class: true                          # optional; false: no defect classes (default true)
       guidance_in_comment: true                   # optional; false: no Class guidance section (default true)
+      passes: 1                                   # optional; integer >= 1, independent passes of a full review (default 1)
 ```
 
 The repo-level config (`.clagentic/loadout/config.yaml`, same
@@ -994,7 +995,37 @@ and `churn_count` (see [Churn breaker](#churn-breaker)) are deployment-only: a
 repo-level value is ignored with a warning, since a repository under review must not
 be able to switch the breaker off or change what it counts. `defect_class` and `guidance_in_comment` (see
 [Defect classes and class guidance](#defect-classes-and-class-guidance)) are
-deployment-only for the same reason.
+deployment-only for the same reason, and so is `passes`.
+
+**Passes.** `review.profiles.<name>.passes` (an integer of 1 or more, default **1**) is how
+many independent passes `run` makes of a full review. Pass 0 is keyed exactly as the single
+pass always was, so a cache built before this setting stays valid and a default review is
+byte-for-byte what it was; every later pass adds its index to the chunk resume key, so it
+keeps its own `state-<key>` directory under the run directory and its chunks are sampled again
+rather than replayed from pass 0. The passes run one after another, each chunk of a pass still
+running in parallel; the stages of pass N (N above 0) are named `pass-N-chunked` and
+`pass-N-chunk-<i>`. The findings of all passes are joined by the same merge that joins the
+chunks of one pass (same file, line, rule and message is one finding; copies that state
+different facts are all kept for the evaluator), and the verdict is computed once, over the
+union. `findings.json` of a multi-pass run gains `passes_total`, `pass_chunks` (the chunk
+records of the passes after the first, which `engines` counts), a `stability` block, and on
+each finding `passes_seen` and `passes_total`. The stability block says whether every pass
+blocked on the same findings and lists those only some passes raised:
+
+```json
+"stability": {"passes_total": 2, "stable": false,
+              "seen_in_some_passes": [{"file": "a.py", "line": 3, "rule_id": "R1",
+                                       "message": "...", "passes_seen": 1}]}
+```
+
+`post` carries the block into the fence beside `engines`, each finding's pair into
+`evaluated_findings`, and says so in the comment (a `passes:` line, and `raised by N of M
+passes` under a finding). Stability is reported, never a merge rule: the merge gate reads the
+fence as it always has. A delta review is one pass whatever the setting, since it accounts for
+the findings a prior review left open. Such a fence is `fence_schema_version` **9**, stamped
+only when `passes_total` is above 1 (see the compatibility table); the review record
+(`loadout-record review`) gains `passes_total` and `stability`, and
+`passes_seen`/`passes_total` on each evaluated finding, at record `schema_version` 2.
 
 **`post`** stages the findings and posts them through the existing
 `loadout-review-post` structured-findings route (`--verdict-findings`), so the
@@ -3986,6 +4017,8 @@ every earlier version.
 | review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 6 | 1 to 7 | adds the optional `fingerprint` to each `cleared_claims` entry at version 7, a superset of version 6. It is stamped only on a fence whose clearance states a fingerprint (a `post --clear` of a finding that carried one); every other fence keeps the version it had, and every earlier fence is still read. A reader below version 7 refuses a fence that carries it, so every reader of a deployment (the installed loadout, which the post-merge install refreshes, and any consumer that validates the fence schema) must be at this release before a reviewer clears a fingerprinted finding. A consumer that does not validate the fence's version is unaffected |
 
 | review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 7 | 1 to 8 | adds the optional `defect_class` and `class_fix` to each `evaluated_findings` entry at version 8, a superset of version 7 that adds nothing to the computed verdict. It is stamped only on a fence whose findings state a class; every other fence keeps the version it had, and every earlier fence is still read. A reader below version 8 refuses a fence that carries them, so every reader of a deployment must be at this release before `defect_class` is switched on for a reviewer |
+| review-result fence (`review-result.schema.json`) | `fence_schema_version` 1 to 8 | 1 to 9 | adds the optional `stability` block and, on each `evaluated_findings` entry, `passes_seen` and `passes_total` at version 9, a superset of version 8 that adds nothing to the computed verdict. It is stamped only on a fence of a review whose `review.profiles.<name>.passes` was above 1; every other fence keeps the version it had, and every earlier fence is still read. A reader below version 9 refuses a fence that carries them, so every reader of a deployment must be at this release before `passes` is raised above 1 for a reviewer. The accepted versions are defined once, as `FENCE_SCHEMA_VERSIONS` in `merge/fence_state.py`; the regex that scans a damaged fence is derived from it, and one test holds the schema's enum and the stamping chain to it |
+| review record (`review-record.schema.json`) | `schema_version` 1 | 1 to 2 | adds the optional `passes_total` and `stability` at version 2, and `passes_seen` and `passes_total` on each `findings.evaluated` entry. Stamped only for a review of more than one pass; every other record stays version 1 |
 
 A reader that predates a version refuses a fence or record that carries it, which is why
 the versions moved; an upgrade needs every reader of a deployment to be at this release

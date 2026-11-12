@@ -21,10 +21,12 @@ from clagentic_loadout.merge.fence_state import (
     ENGINE_FALLBACK,
     KEY_ENGINES,
     KEY_RANGE,
+    KEY_STABILITY,
     RANGE_BASIS_BASE_HEAD,
     RANGE_BASIS_SINCE,
 )
 from clagentic_loadout.review.delta import MODE_DELTA
+from clagentic_loadout.review.pass_union import KEY_PASS_CHUNKS
 from clagentic_loadout.sha import FULL_SHA_RE
 
 #: Reason recorded for a fallback that took over because the carrier ran and
@@ -70,8 +72,10 @@ def engines_of(document: Mapping[str, Any]) -> list[dict[str, Any]]:
     chunks = document.get("chunks")
     if not isinstance(chunks, list):
         return []
+    # The chunks of a multi-pass run's later passes are engine answers too.
+    later = document.get(KEY_PASS_CHUNKS)
     counts: dict[tuple[str, str | None, str | None], int] = {}
-    for chunk in chunks:
+    for chunk in [*chunks, *(later if isinstance(later, list) else [])]:
         if not isinstance(chunk, Mapping):
             continue
         engine = chunk.get("engine")
@@ -98,7 +102,8 @@ def engines_of(document: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def evidence_from_document(document: Mapping[str, Any]) -> dict[str, Any]:
-    """The fence evidence fields (range, engines) a run output supports."""
+    """The fence evidence fields (range, engines, and for a multi-pass run its
+    stability) a run output supports."""
     evidence: dict[str, Any] = {}
     commit_range = range_of(document)
     if commit_range is not None:
@@ -106,6 +111,10 @@ def evidence_from_document(document: Mapping[str, Any]) -> dict[str, Any]:
     engines = engines_of(document)
     if engines:
         evidence[KEY_ENGINES] = engines
+    # Stated only by a run of more than one pass; the fence validates its shape.
+    stability = document.get(KEY_STABILITY)
+    if isinstance(stability, Mapping):
+        evidence[KEY_STABILITY] = dict(stability)
     return evidence
 
 
