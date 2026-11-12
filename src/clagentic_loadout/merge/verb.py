@@ -668,6 +668,7 @@ from clagentic_loadout.push.namespace_guard import (
 )
 from clagentic_loadout.push.verify_config import InvalidVerifyConfigError, load_verify_entries
 from clagentic_loadout.review.errors import ReviewPostError, ReviewVerifyError
+from clagentic_loadout.review.evaluate_verb import EvaluateError, load_evaluator_config
 from clagentic_loadout.review.forgejo_backend import post_and_verify_comment as _forgejo_post_and_verify_comment
 from clagentic_loadout.review.github_backend import post_and_verify_review as _github_post_and_verify_review
 from clagentic_loadout.review.policy_reader import GitPolicyReader, HostPolicyReader, PolicyReader
@@ -1776,10 +1777,21 @@ def _run(
             args.pr_number,
             (Path(args.repo_path),) if args.repo_path else (),
         )
-        for reviewer_name, bot_login in required_reviewers.items():
-            required_scanners = (
-                () if args.ignore_repo_gate else repo_gate.scanners_for(reviewer_name)
+        # The one required-scanner set: the gate's per-role entry (unless the
+        # caller ignores the repo gate) plus the user-level
+        # review.evaluator.required_scanners, for both the evaluator's recompute
+        # and the scanner check below.
+        scanner_gate = None if args.ignore_repo_gate else repo_gate
+        try:
+            user_scanners = tuple(load_evaluator_config(None)[1])
+        except EvaluateError as exc:
+            user_scanners = ()
+            print(
+                f"merge: WARNING -- review.evaluator.required_scanners not applied to the "
+                f"scanner check: {exc}",
+                file=sys.stderr,
             )
+        for reviewer_name, bot_login in required_reviewers.items():
 
             def read_fence(excluded, bot_login=bot_login, reviewer_name=reviewer_name):
                 return verdict.read_reviewer_verdict(
@@ -1802,7 +1814,6 @@ def _run(
                 candidate,
                 label,
                 reviewer_name=reviewer_name,
-                required_scanners=required_scanners,
                 warned_ignored=warned_ignored,
             ):
                 """Run the full chain on one fence; *label* names its comment
@@ -1829,6 +1840,7 @@ def _run(
                     visibility=host_visibility,
                     evaluator=repo_gate.evaluator,
                     ruling_scope=ruling_scope,
+                    repo_gate=scanner_gate,
                 )
                 for evaluation_notice in evaluation.notices:
                     print(f"merge: NOTICE -- {label}{evaluation_notice}", file=sys.stderr)
@@ -1860,7 +1872,7 @@ def _run(
                         file=sys.stderr,
                     )
                 for scanner_warning in verdict.check_required_scanners(
-                    candidate, reviewer_name, required_scanners
+                    candidate, reviewer_name, scanner_gate, user_scanners
                 ):
                     print(f"merge: WARNING -- {label}{scanner_warning}", file=sys.stderr)
                 # lr-95543d: mirrors assert_clean_verdict's disposition --
@@ -1894,6 +1906,7 @@ def _run(
                     policy_reader=policy_reader,
                     visibility=host_visibility,
                     ruling_scope=ruling_scope,
+                    repo_gate=scanner_gate,
                 )
                 for declined in declined_clearances:
                     print(f"merge: NOTICE -- {reviewer_name.upper()} {declined}", file=sys.stderr)

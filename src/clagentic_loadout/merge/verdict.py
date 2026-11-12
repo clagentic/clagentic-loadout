@@ -131,12 +131,12 @@ from clagentic_loadout.merge.fence_state import (
     KEY_FINDINGS_OPEN,
     KEY_RANGE,
     KEY_RESOLVED,
+    KEY_SCANNERS_RUN,
     KEY_STABILITY,
     KEY_VERDICT_OUTCOME,
     KEY_VERDICT_REASONS,
     RESOLVED_BY_CALLER,
     RESOLVED_BY_REVIEWER,
-    SCANNER_FAILED,
     FindingsState,
     has_findings_state,
     index_scanners,
@@ -153,6 +153,15 @@ from clagentic_loadout.merge.fence_state import (
 from clagentic_loadout.merge.fence_syntax import find_fence_syntax
 from clagentic_loadout.merge.guidance_section import section_lines as class_guidance_lines
 from clagentic_loadout.merge.guidance_section import validate_guidance
+from clagentic_loadout.merge.scanner_coverage import (
+    NOT_RUN_FAILING,
+    NOT_RUN_REPORTED,
+    ScannerDeclaration,
+    classify_scanner,
+    coverage_header_line,
+    required_scanners_for,
+    scanner_coverage,
+)
 from clagentic_loadout.sha import FULL_SHA_RE, InvalidShaError, compare_sha_values, validate_sha
 
 #: The fence language token that marks a machine-readable verdict block.
@@ -452,6 +461,11 @@ def build_findings_verdict_body(
     evaluated = KEY_VERDICT_OUTCOME in evidence
     if evaluated:
         lines.append(f"verdict: {evidence[KEY_VERDICT_OUTCOME]}")
+    # Names a scanner that did not run, from the fence's own scanners_run, so
+    # the header and the machine-readable copy are one source.
+    gap_line = coverage_header_line(scanner_coverage(evidence.get(KEY_SCANNERS_RUN)))
+    if gap_line is not None:
+        lines.append(gap_line)
     if KEY_RANGE in evidence:
         lines.append(render_range(evidence[KEY_RANGE]))
     if KEY_ENGINES in evidence:
@@ -1303,21 +1317,31 @@ def assert_prior_findings_resolved(verdict: ReviewerVerdict, reviewer_name: str)
 
 
 def check_required_scanners(
-    verdict: ReviewerVerdict, reviewer_name: str, required_scanners: "tuple[str, ...]"
+    verdict: ReviewerVerdict,
+    reviewer_name: str,
+    repo_gate: ScannerDeclaration | None,
+    user_scanners: "tuple[str, ...]" = (),
 ) -> list[str]:
-    """Check a verdict's scanner outcomes against the scanners the
-    deployment requires for this reviewer, and return warnings to surface.
+    """Check a verdict's scanner outcomes against the scanners required of this
+    reviewer, and return warnings to surface.
 
-    Refuses when the deployment declares required scanners and the verdict
-    records no scanner outcomes at all (VerdictScannersMissingError), or when
-    a required scanner is reported failed (VerdictScannerFailedError).
-    not_applicable and not_invoked, with their reason, are legitimate. With no
-    required scanners declared, an empty record is accepted without a warning. A required scanner the
-    verdict does not record, even beside others it does record, also refuses
-    (VerdictScannersMissingError): a declared gate gates.
-    A repeated scanner name is malformed (VerdictMalformedError), never
-    last-write-wins.
+    The required set is the one accessor's (merge.scanner_coverage.
+    required_scanners_for): *repo_gate*'s entry for the reviewer plus
+    *user_scanners*, the user-level review.evaluator.required_scanners. Each
+    report is judged by the one predicate (classify_scanner) the evaluator uses.
+
+    Refuses when required scanners are declared and the verdict records no
+    scanner outcomes at all (VerdictScannersMissingError), or when a required
+    scanner's report is not usable, such as one reported failed
+    (VerdictScannerFailedError). not_applicable with a reason is satisfied. A
+    required scanner reported not_invoked is NOT refused: it is returned as a
+    warning. With no required scanners declared, an empty record is accepted
+    without a warning. A required scanner the verdict does not record, even
+    beside others it does record, also refuses (VerdictScannersMissingError): a
+    declared gate gates. A repeated scanner name is malformed
+    (VerdictMalformedError), never last-write-wins.
     """
+    required_scanners = required_scanners_for(reviewer_name, repo_gate, user_scanners)
     try:
         reported = index_scanners(verdict.state.scanners_run)
     except ValueError as exc:
@@ -1335,13 +1359,13 @@ def check_required_scanners(
         )
     for scanner in required_scanners:
         entry = reported.get(scanner)
-        if entry is not None and entry["status"] == SCANNER_FAILED:
+        if entry is not None and classify_scanner(entry) == NOT_RUN_FAILING:
             raise VerdictScannerFailedError(
-                f"{reviewer_name.upper()} reports required scanner {scanner!r} as failed "
-                f"({entry.get('reason', 'no reason given')}) in verdict comment "
-                f"#{verdict.comment_id} on PR #{verdict.pr_number}. A failed scanner is not "
-                f"coverage. Re-run it, or have the reviewer record it as not_applicable or "
-                f"not_invoked with a reason, then retry the merge gate."
+                f"{reviewer_name.upper()} reports required scanner {scanner!r} as "
+                f"{entry['status']} ({entry.get('reason', 'no reason given')}) in verdict "
+                f"comment #{verdict.comment_id} on PR #{verdict.pr_number}. A scanner that did "
+                f"not complete is not coverage. Re-run it, or have the reviewer record it as "
+                f"not_applicable or not_invoked with a reason, then retry the merge gate."
             )
     unrecorded = [scanner for scanner in required_scanners if scanner not in reported]
     if unrecorded:
@@ -1352,7 +1376,13 @@ def check_required_scanners(
             f"record. Have the reviewer re-post it with each required scanner recorded "
             f"(ran, or not_applicable/not_invoked with a reason), then retry the merge gate."
         )
-    warnings: list[str] = []
+    warnings: list[str] = [
+        f"{reviewer_name.upper()} did not invoke required scanner {scanner!r} "
+        f"({reported[scanner].get('reason', 'no reason given')}) in verdict comment "
+        f"#{verdict.comment_id}; reported, not refused"
+        for scanner in required_scanners
+        if classify_scanner(reported[scanner]) == NOT_RUN_REPORTED
+    ]
     if verdict.unresolved_supersedes is not None:
         warnings.append(
             f"{reviewer_name!r} verdict (comment #{verdict.comment_id}) says it supersedes "

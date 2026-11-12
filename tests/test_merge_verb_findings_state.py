@@ -245,6 +245,55 @@ class TestRequiredScanners:
         code, _ = _merge([_comment(1, _fence("clean", HEAD_B, state))], repo_path=self._config(tmp_path))
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
 
+    def test_a_not_invoked_required_scanner_is_reported_and_never_refused(self, tmp_path, capsys):
+        state = self._scanners("not_invoked", "judgment-only pass")
+        code, err = _merge(
+            [_comment(1, _fence("clean", HEAD_B, state))],
+            repo_path=self._config(tmp_path),
+            capsys=capsys,
+        )
+        assert code == verb.EXIT_OK
+        assert "did not invoke required scanner 'alpha'" in err and "judgment-only pass" in err
+
+    @pytest.mark.parametrize(
+        ("status", "reason", "refused"),
+        [
+            ("failed", "timed out", True),
+            ("not_invoked", "judgment-only pass", False),
+            ("not_applicable", "no changed files in scope", False),
+            ("ran", None, False),
+        ],
+    )
+    def test_a_scanner_required_only_at_user_level_meets_the_same_predicate(
+        self, tmp_path, tmp_path_factory, monkeypatch, status, reason, refused
+    ):
+        user_root = tmp_path_factory.mktemp("user-config")
+        (user_root / "config.yaml").write_text(
+            "review:\n  evaluator:\n    required_scanners: [alpha]\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", user_root)
+        _write_config(tmp_path, {"required_reviewer_roles": []})
+        code, _ = _merge(
+            [_comment(1, _fence("clean", HEAD_B, self._scanners(status, reason)))],
+            repo_path=tmp_path,
+        )
+        assert code == (verb.EXIT_GATE_RESULT_BLOCKED if refused else verb.EXIT_OK)
+
+    def test_a_scanner_required_only_at_user_level_is_missing_when_unrecorded(
+        self, tmp_path, tmp_path_factory, monkeypatch, capsys
+    ):
+        user_root = tmp_path_factory.mktemp("user-config")
+        (user_root / "config.yaml").write_text(
+            "review:\n  evaluator:\n    required_scanners: [alpha]\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", user_root)
+        _write_config(tmp_path, {"required_reviewer_roles": []})
+        state = {"scanners_run": [{"scanner": "beta", "status": "ran"}]}
+        code, err = _merge(
+            [_comment(1, _fence("clean", HEAD_B, state))], repo_path=tmp_path, capsys=capsys
+        )
+        assert code == verb.EXIT_GATE_RESULT_BLOCKED and "'alpha'" in err
+
     def test_a_padded_role_key_still_gates_the_role(self, tmp_path):
         _write_config(
             tmp_path, {"required_reviewer_roles": [], "required_scanners": {f"  {NAME} ": [" alpha "]}}

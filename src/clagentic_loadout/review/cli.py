@@ -87,6 +87,7 @@ from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     resolve_declared_role,
 )
+from clagentic_loadout.merge.scanner_coverage import scanner_coverage
 from clagentic_loadout.review import (
     changeset_paths,
     changeset_ratio_source,
@@ -133,6 +134,7 @@ from clagentic_loadout.review.evaluation import (
     findings_open_from_verdict,
     is_unsafe_status,
     read_context_policy,
+    with_repo_gate_scanners,
 )
 from clagentic_loadout.review.findings_contract import (
     KEY_FAILURE_SEQUENCE,
@@ -1568,6 +1570,9 @@ def _post_command(
         visibility=live_pr.repo_visibility,
         ruling_scope=_ruling_scope(args, owner=owner, repo=repo),
     )
+    # The required scanners are the user-level ones plus the repo gate's entry
+    # for this role, read at the base revision: the set the merge gate uses.
+    evaluation = with_repo_gate_scanners(evaluation, caller)
     scanners_run = state.get(KEY_SCANNERS_RUN)
     # Read once and shared: the docs allowlist and the evaluator's stakes come
     # from the same read of the base revision.
@@ -1795,6 +1800,7 @@ def _post_command(
         "verified_url": posted.get("verified_url"),
         "verified_by_login": posted.get("verified_by_login"),
         "verdict_block_verified": True,
+        "scanner_coverage": scanner_coverage(scanners_run, evaluation.required_scanners),
     }
     for key in ("comment", "reused_from_created_at", "provider", "self_declared"):
         if key in posted:
