@@ -632,6 +632,14 @@ class TestFoldRemedy:
         draft, _ = _fold_draft(repo, capsys, "101", "102")
         assert [e["comment_id"] for e in draft["remedy"]["items"]] == ["101"]
 
+    def test_one_fingerprint_at_another_line_in_another_record_is_listed_once(self, repo, capsys):
+        first = _finding(line=3, fingerprint=FP)
+        moved = _finding(line=40, fingerprint=FP)
+        _store_record("101", [first], [first], head=HEAD_A)
+        _store_record("102", [moved], [moved], head=HEAD_B)
+        draft, _ = _fold_draft(repo, capsys, "101", "102")
+        assert [(e["comment_id"], e["line"]) for e in draft["remedy"]["items"]] == [("101", 3)]
+
     @pytest.mark.parametrize("with_record", [False, True], ids=["no-from-review", "no-blocking"])
     def test_without_a_blocking_finding_the_section_is_empty_and_says_so(
         self, repo, capsys, with_record

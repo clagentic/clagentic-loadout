@@ -97,8 +97,9 @@ def read_remedy(
         read_ids.append(comment_id)
         found, unmatched = entries_of_record(record)
         for entry in found:
-            if entry["id"] not in seen:
-                seen.add(entry["id"])
+            key = entry["fingerprint"] or entry["id"]
+            if key not in seen:
+                seen.add(key)
                 entries.append(entry)
         for finding_id in unmatched:
             warnings.append(
