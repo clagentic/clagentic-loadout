@@ -100,6 +100,9 @@
 #                                           # find the group rules file. See
 #                                           # "Groups-file config seeding"
 #                                           # below.
+#   scripts/install.sh --consumers-file <path>
+#                                           # seed rules.consumers_file the
+#                                           # same way as --groups-file.
 #   scripts/install.sh --skills-dir <dir>  # target dir for the global
 #                                           # .claude/skills/-style skill
 #                                           # install (default:
@@ -225,6 +228,11 @@
 #   A PATH that is missing or unreadable at install time is still written,
 #   with one stderr notice -- the install never refuses over it. Skipped by
 #   --no-seed-config.
+#   --consumers-file PATH seeds `rules: consumers_file: PATH` the same way
+#   (shared helper, same replace/preserve/missing-path behaviour); both flags
+#   together land under one rules: section. A rules: line carrying a trailing
+#   comment or an empty inline map is treated as the block header, never
+#   duplicated.
 
 set -eu
 
@@ -262,6 +270,9 @@ GIT_HOST_BASE_URL=""
 # Groups file path to seed into config.yaml's rules.groups_file key. Set only
 # via --groups-file; empty means "leave rules.groups_file alone".
 GROUPS_FILE=""
+# Consumer-map path to seed into rules.consumers_file. Set only via
+# --consumers-file; empty means "leave rules.consumers_file alone".
+CONSUMERS_FILE=""
 # Target dir for the global skill install. Overridable via
 # --skills-dir or CLAGENTIC_LOADOUT_SKILLS_DIR. Empty means the HOME-derived
 # default, ~/.claude/skills -- see _install_skills below. Never a hardcoded
@@ -315,7 +326,13 @@ Options:
                         untouched. A PATH that does not exist yet is still
                         written, with a notice on stderr. Skipped by
                         --no-seed-config.
-  --skills-dir DIR       Target dir for this repo's global .claude/skills/
+  --consumers-file PATH  Seed ~/.config/clagentic/loadout/config.yaml's
+                        rules.consumers_file key with PATH, exactly as
+                        --groups-file seeds rules.groups_file: it replaces any
+                        prior value, leaves every other key alone, and a PATH
+                        that does not exist yet is still written, with a
+                        notice on stderr. Skipped by --no-seed-config.
+  --skills-dir DIR      Target dir for this repo's global .claude/skills/
                         install (default: ~/.claude/skills, override via
                         CLAGENTIC_LOADOUT_SKILLS_DIR). Each shipped skill is
                         copied to <dir>/<skill-name>/, overwriting only that
@@ -390,6 +407,11 @@ while [ "$#" -gt 0 ]; do
         --groups-file)
             [ "$#" -ge 2 ] || { echo "$PROG: --groups-file requires a PATH argument" >&2; exit "$EXIT_USAGE"; }
             GROUPS_FILE="$2"
+            shift 2
+            ;;
+        --consumers-file)
+            [ "$#" -ge 2 ] || { echo "$PROG: --consumers-file requires a PATH argument" >&2; exit "$EXIT_USAGE"; }
+            CONSUMERS_FILE="$2"
             shift 2
             ;;
         --skills-dir)
@@ -484,6 +506,7 @@ BIN_DIR="$(_trim "$BIN_DIR")"
 GIT_HOST_BASE_URL="$(_trim "$GIT_HOST_BASE_URL")"
 SKILLS_DIR="$(_trim "$SKILLS_DIR")"
 GROUPS_FILE="$(_trim "$GROUPS_FILE")"
+CONSUMERS_FILE="$(_trim "$CONSUMERS_FILE")"
 
 # Fail fast on empty/unset HOME rather than silently resolving
 # ${HOME:-}/.local/... down to root-relative paths (/.local/bin,
@@ -1030,6 +1053,14 @@ if [ -n "$GROUPS_FILE" ]; then
     fi
 fi
 
+if [ -n "$CONSUMERS_FILE" ]; then
+    if [ "$NO_SEED_CONFIG" -eq 1 ]; then
+        echo "$PROG: --consumers-file given but --no-seed-config is set -- rules.consumers_file would not be written." >&2
+    else
+        echo "$PROG: would write rules.consumers_file=$CONSUMERS_FILE into the user config.yaml." >&2
+    fi
+fi
+
 if [ "$PRINT_PLAN" -eq 1 ]; then
     if [ "$INSTALLER" != "venv" ]; then
         echo "$PROG: --print-plan needs the venv tier (--installer venv); resolved installer: $INSTALLER" >&2
@@ -1507,55 +1538,74 @@ _seed_git_host_config() {
 # function returns early when a real forgejo.base_url already exists, and the
 # two keys are independent. The value reaches awk through the environment, so
 # it is never interpolated into a shell command or an awk program.
-_seed_groups_file_config() {
-    [ -n "$GROUPS_FILE" ] || return 0
+#
+# Shared by every rules.* path key: _seed_rules_key KEY VALUE LABEL, where LABEL
+# is the flag name without its leading dashes (groups-file, consumers-file).
+_seed_rules_key() {
+    _seed_key="$1"
+    _seed_value="$2"
+    _seed_label="$3"
+    [ -n "$_seed_value" ] || return 0
     if [ -z "${HOME:-}" ]; then
-        echo "$PROG: HOME is empty or unset -- skipping groups-file config seeding (nothing writable to seed under)." >&2
+        echo "$PROG: HOME is empty or unset -- skipping $_seed_label config seeding (nothing writable to seed under)." >&2
         return 0
     fi
     if [ -L "$_CONFIG_FILE" ]; then
-        echo "$PROG: $_CONFIG_FILE is a symlink -- not seeding rules.groups_file through it." >&2
+        echo "$PROG: $_CONFIG_FILE is a symlink -- not seeding rules.$_seed_key through it." >&2
         return 0
     fi
     if [ -e "$_CONFIG_FILE" ] && [ ! -f "$_CONFIG_FILE" ]; then
-        echo "$PROG: $_CONFIG_FILE exists and is not a regular file -- not seeding rules.groups_file." >&2
+        echo "$PROG: $_CONFIG_FILE exists and is not a regular file -- not seeding rules.$_seed_key." >&2
         return 0
     fi
-    if [ ! -r "$GROUPS_FILE" ]; then
-        echo "$PROG: notice: groups file $GROUPS_FILE does not exist or is not readable; writing it to rules.groups_file anyway." >&2
+    if [ ! -r "$_seed_value" ]; then
+        echo "$PROG: notice: ${_seed_label%-file} file $_seed_value does not exist or is not readable; writing it to rules.$_seed_key anyway." >&2
     fi
 
     mkdir -p -m 700 "$_CONFIG_ROOT"
-    _groups_tmp="$_CONFIG_ROOT/.config.yaml.groups.$$"
-    rm -f "$_groups_tmp"
-    : > "$_groups_tmp"
-    chmod 600 "$_groups_tmp"
-    _groups_line="groups_file: '$(_yaml_single_quote "$GROUPS_FILE")'"
+    _seed_tmp="$_CONFIG_ROOT/.config.yaml.seed.$$"
+    rm -f "$_seed_tmp"
+    : > "$_seed_tmp"
+    chmod 600 "$_seed_tmp"
+    _seed_line="$_seed_key: '$(_yaml_single_quote "$_seed_value")'"
     if [ -f "$_CONFIG_FILE" ]; then
-        _groups_src="$_CONFIG_FILE"
+        _seed_src="$_CONFIG_FILE"
     else
-        _groups_src="/dev/null"
+        _seed_src="/dev/null"
     fi
     # Only the direct child of the top-level rules mapping is replaced: the
-    # first indented line under rules: fixes the child indent, and a
-    # groups_file key at any deeper level is left alone. The rules body is
-    # buffered so the new key is written at that detected indent.
-    GROUPS_LINE="$_groups_line" awk '
+    # first indented line under rules: fixes the child indent, and the key at
+    # any deeper level is left alone. The rules body is buffered so the new key
+    # is written at that detected indent. A rules: line may carry a trailing
+    # comment (still a block header) or an empty inline map (rewritten to a
+    # block header); any other inline value is passed through untouched. In
+    # every case the rules: line counts as seen, so no second top-level
+    # rules: block is appended.
+    _seed_rc=0
+    SEED_LINE="$_seed_line" SEED_KEY="$_seed_key" awk '
         function flush(   i, pad) {
             pad = (indent == "") ? "  " : indent
             print pad line
             for (i = 1; i <= n; i++) print buf[i]
             n = 0
         }
-        BEGIN { line = ENVIRON["GROUPS_LINE"]; indent = ""; n = 0 }
-        /^rules:[ \t]*$/ { if (in_rules) flush(); in_rules = 1; seen = 1; indent = ""; print; next }
+        BEGIN { line = ENVIRON["SEED_LINE"]; key = ENVIRON["SEED_KEY"]; indent = ""; n = 0 }
+        /^rules:[ \t]*(#.*)?$/ { if (in_rules) flush(); in_rules = 1; seen = 1; indent = ""; print; next }
+        /^rules:[ \t]*\{[ \t]*\}[ \t]*(#.*)?$/ {
+            if (in_rules) flush()
+            in_rules = 1; seen = 1; indent = ""
+            sub(/[ \t]*\{[ \t]*\}/, "")
+            print
+            next
+        }
+        /^rules:/ { if (in_rules) flush(); in_rules = 0; seen = 1; inline_map = 1; print; next }
         /^[A-Za-z_][A-Za-z0-9_]*:/ { if (in_rules) flush(); in_rules = 0 }
         in_rules {
             if (indent == "" && $0 ~ /^[ \t]+[^ \t#]/) {
                 match($0, /^[ \t]+/)
                 indent = substr($0, 1, RLENGTH)
             }
-            if (indent != "" && index($0, indent "groups_file:") == 1) next
+            if (indent != "" && index($0, indent key ":") == 1) next
             buf[++n] = $0
             next
         }
@@ -1563,19 +1613,27 @@ _seed_groups_file_config() {
         END {
             if (in_rules) flush()
             else if (!seen) { print "rules:"; print "  " line }
+            # Exit 10 reports that the key could not be written: a non-empty
+            # inline rules: mapping is user YAML this seeder does not rewrite.
+            if (inline_map) exit 10
         }
-    ' "$_groups_src" >> "$_groups_tmp"
+    ' "$_seed_src" >> "$_seed_tmp" || _seed_rc=$?
     rm -f "$_CONFIG_FILE"
-    mv "$_groups_tmp" "$_CONFIG_FILE"
+    mv "$_seed_tmp" "$_CONFIG_FILE"
     chmod 600 "$_CONFIG_FILE"
-    echo "$PROG: seeded rules.groups_file ($_CONFIG_FILE)." >&2
+    if [ "$_seed_rc" -eq 10 ]; then
+        echo "$PROG: rules.$_seed_key was NOT seeded: rules: in $_CONFIG_FILE is an inline mapping, which is left untouched. Add $_seed_line under rules: yourself." >&2
+        return 0
+    fi
+    echo "$PROG: seeded rules.$_seed_key ($_CONFIG_FILE)." >&2
 }
 
 if [ "$NO_SEED_CONFIG" -eq 1 ]; then
     echo "$PROG: --no-seed-config -- skipping git-host config seeding." >&2
 else
     _seed_git_host_config
-    _seed_groups_file_config
+    _seed_rules_key groups_file "$GROUPS_FILE" groups-file
+    _seed_rules_key consumers_file "$CONSUMERS_FILE" consumers-file
 fi
 
 echo "$PROG: install complete (installer=$INSTALLER)." >&2

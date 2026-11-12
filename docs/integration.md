@@ -821,6 +821,9 @@ first invocation:
   instead.
 - Optional: `scripts/install.sh --groups-file <path>` seeds `rules.groups_file` in the same
   config file, the released way to point the group-rules verbs at a groups file.
+  `scripts/install.sh --consumers-file <path>` seeds `rules.consumers_file` the same way
+  (both flags land under one `rules:` section); a path that does not exist yet is written
+  with one notice, never refused.
 - `~/.config/clagentic/loadout/roles/<role>.env` exists, mode 600, with
   `CLAGENTIC_LOADOUT_GIT_HOST_TOKEN=<token>`.
 - The role's permission allowlist fragment (see
