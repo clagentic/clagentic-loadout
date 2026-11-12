@@ -2,7 +2,7 @@
 
   loadout-record show RECORD_ID
   loadout-record list --head SHA [--gate GATE]
-  loadout-record review COMMENT_ID
+  loadout-record review COMMENT_ID [--head SHA]
 
 `show` prints one record by id; `list` prints the records filed under one commit,
 oldest first; `review` prints the review record kept for one posted review, by
@@ -47,7 +47,7 @@ from clagentic_loadout.verdict_record.store import (
 from clagentic_loadout.verdict_record.review_record import (
     COMMENT_ID_RE,
     ReviewRecordNotFoundError,
-    load_review_record,
+    load_review_records,
     review_records_root,
 )
 
@@ -71,7 +71,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Example:\n"
             "  loadout-record show 20260101T120000Z-0a1b2c3d\n"
             "  loadout-record list --head <full 40-character commit sha>\n"
-            "  loadout-record review <comment id>\n"
+            "  loadout-record review <comment id> [--head <full commit sha>]\n"
             "\n"
             "Exit codes: 0 ok, 1 usage, 3 records root unusable, 40 no such record, "
             "41 record invalid."
@@ -109,6 +109,14 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     review.add_argument(
         "comment_id", help="The id of the posted review comment, as `loadout-review post` printed it."
     )
+    review.add_argument(
+        "--head",
+        default=None,
+        help=(
+            "Full commit sha. Select the record filed under exactly this head; without it, "
+            "the most recently written record for the comment id is returned."
+        ),
+    )
     return parser
 
 
@@ -145,8 +153,15 @@ def _review(args: argparse.Namespace, config_root: str | Path | None) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    if args.head is not None and not is_full_sha(args.head):
+        print(
+            f"loadout-record: --head must be a full lowercase commit sha (40 or 64 hex "
+            f"digits), got {args.head!r}",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
     try:
-        record = load_review_record(root, args.comment_id)
+        records = load_review_records(root, args.comment_id, head=args.head)
     except ReviewRecordNotFoundError as exc:
         print(f"loadout-record: {exc}", file=sys.stderr)
         return EXIT_NOT_FOUND
@@ -156,6 +171,15 @@ def _review(args: argparse.Namespace, config_root: str | Path | None) -> int:
     except StoreError as exc:
         print(f"loadout-record: {exc}", file=sys.stderr)
         return EXIT_RECORD_INVALID
+    record, others = records[0], records[1:]
+    if others:
+        # Several heads hold the id (a reused comment): say which were not returned.
+        print(
+            f"loadout-record: comment {args.comment_id} also has records at head "
+            f"{', '.join(other['head_sha'] for other in others)}; returned the one at "
+            f"{record['head_sha']} (recorded {record['recorded_at']}); pass --head to choose",
+            file=sys.stderr,
+        )
     print(json.dumps(record))
     return EXIT_OK
 

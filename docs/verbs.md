@@ -2313,7 +2313,7 @@ comment that was reused rewrites the same record.
 | `policy_base_sha` | the base revision policy was read from, or null |
 | `spec_hash` | the spec the review was measured against, or null when none was given |
 | `engines` | the engines that answered the run's chunks, as stated in the fence (empty for a findings file with no run record) |
-| `recorded_at` | UTC time the record was written |
+| `recorded_at` | UTC time the record was written, required; the reader picks the newest of several heads by it |
 | `findings.evaluated` | every finding as the evaluator saw it |
 | `findings.open` | the findings the computed verdict blocks on and holds open |
 | `findings.advisory` | findings kept out of judgment on the lighter docs-only path |
@@ -2335,13 +2335,19 @@ user config root. Nothing prunes the store.
 **Reading one.**
 
 ```
-loadout-record review COMMENT_ID
+loadout-record review COMMENT_ID [--head SHA]
 ```
 
-prints the record as JSON. It is read-only and needs no credential. Exit codes: `0`
-ok, `1` the id is not decimal digits, `3` the root cannot be read, `40` no record
-for that comment id (the message names the resolved root), `41` the file is not a
-valid record.
+prints the record as JSON. It is read-only and needs no credential. A comment id
+can be reused after the head moves, which leaves one record per head. Without
+`--head` the record with the newest `recorded_at` is printed (equal times break on
+the head sha) and stderr names the other heads that hold the id. `--head` takes a
+full commit sha and prints exactly that head's record; with none there it exits
+`40`. Exit codes: `0` ok, `1` the id is not decimal digits or `--head` is not a
+full sha, `3` the root cannot be read, `40` no record for that comment id (or at
+that head; the message names the resolved root), `41` a file is not a valid record:
+a missing or mistyped field, a chunk whose `files` are not all strings, or `hunks`
+that are not null or a list of spans. The message names the field.
 
 ### `loadout-merge` — the merge gate
 

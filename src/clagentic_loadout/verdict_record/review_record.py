@@ -16,7 +16,9 @@ and permission rule as the verdict records store.
 A record is written only for a comment that was read back from the host with its
 verdict block verified, so a comment id that has a record is a review that landed.
 Nothing here edits a stored file; a second post that reuses the same comment
-rewrites the same record.
+rewrites the same record. A comment reused after the head moved leaves one record
+per head; the reader returns the one with the newest ``recorded_at`` unless a head
+is named.
 
 Fields (``schema_version`` 1): ``comment_id``, ``repo``, ``pr``, ``head_sha``,
 ``role``, ``policy_base_sha``, ``spec_hash`` (null when none was given),
@@ -248,32 +250,77 @@ def _validate_fields(data: Mapping[str, Any], name: str) -> None:
                 f"{name}: field 'findings' needs a list under {key!r}"
             )
     for position, chunk in enumerate(data["chunks"] or ()):
-        if (
-            not isinstance(chunk, dict)
-            or not isinstance(chunk.get("files"), list)
-            or not (chunk.get("hunks") is None or isinstance(chunk.get("hunks"), list))
-        ):
-            raise ReviewRecordInvalidError(
-                f"{name}: field 'chunks' entry {position} needs a files list and hunks "
-                "as a list or null"
-            )
+        _validate_chunk(chunk, position, name)
 
 
-def load_review_record(
-    root: Path, comment_id: str, *, untrusted_roots: Sequence[Path] = ()
-) -> dict[str, Any]:
-    """The record for *comment_id*. *comment_id* is untrusted: it must be decimal
+def _is_span(span: Any) -> bool:
+    """One hunk span in the shape ``chunk_boundaries`` writes."""
+    return (
+        isinstance(span, dict)
+        and isinstance(span.get("file"), str)
+        and all(_is_type(span.get(key), (int,)) for key in _SPAN_KEYS)
+    )
+
+
+def _validate_chunk(chunk: Any, position: int, name: str) -> None:
+    """Raise ReviewRecordInvalidError naming the chunk field that is wrong."""
+    where = f"{name}: field 'chunks' entry {position}"
+    if not isinstance(chunk, dict):
+        raise ReviewRecordInvalidError(f"{where} is not an object")
+    files = chunk.get("files")
+    if not isinstance(files, list) or not all(isinstance(item, str) for item in files):
+        raise ReviewRecordInvalidError(f"{where} needs 'files' as a list of strings")
+    hunks = chunk.get("hunks")
+    if hunks is not None and (not isinstance(hunks, list) or not all(_is_span(s) for s in hunks)):
+        raise ReviewRecordInvalidError(
+            f"{where} needs 'hunks' as null or a list of spans "
+            f"(file, {', '.join(_SPAN_KEYS)})"
+        )
+
+
+def load_review_records(
+    root: Path,
+    comment_id: str,
+    *,
+    head: str | None = None,
+    untrusted_roots: Sequence[Path] = (),
+) -> list[dict[str, Any]]:
+    """Every record that holds *comment_id*, newest ``recorded_at`` first (ties
+    break on the head sha, so the order is stable). A comment id can be reused
+    across a head change, so more than one head may hold it. With *head*, only
+    that head's record, or none. *comment_id* is untrusted: it must be decimal
     digits before it touches a path. Raises ReviewRecordNotFoundError when no
-    record has the id, ReviewRecordInvalidError when the one found is not a valid
+    record matches, ReviewRecordInvalidError when a file found is not a valid
     record and RootUnreadableError when the root cannot be listed."""
     if COMMENT_ID_RE.match(comment_id) is None:
         raise StoreError(f"{comment_id!r} is not a comment id (expected decimal digits)")
     refuse_untrusted(root, untrusted_roots, _REVIEW_RECORDS_KIND)
+    found: list[dict[str, Any]] = []
     for directory in list_head_dirs(root, _REVIEW_RECORDS_KIND):
+        if head is not None and directory.name != head:
+            continue
         candidate = directory / f"{comment_id}.json"
         if candidate.is_file() or candidate.is_symlink():
-            return _read_file(candidate, directory.name, comment_id)
-    raise ReviewRecordNotFoundError(f"no review record for comment {comment_id} under {str(root)!r}")
+            found.append(_read_file(candidate, directory.name, comment_id))
+    if not found:
+        where = f" at head {head}" if head is not None else ""
+        raise ReviewRecordNotFoundError(
+            f"no review record for comment {comment_id}{where} under {str(root)!r}"
+        )
+    found.sort(key=lambda record: (record["recorded_at"], record["head_sha"]), reverse=True)
+    return found
+
+
+def load_review_record(
+    root: Path,
+    comment_id: str,
+    *,
+    head: str | None = None,
+    untrusted_roots: Sequence[Path] = (),
+) -> dict[str, Any]:
+    """The newest record for *comment_id* (see load_review_records), or the one
+    at *head* when given."""
+    return load_review_records(root, comment_id, head=head, untrusted_roots=untrusted_roots)[0]
 
 
 __all__ = [
@@ -289,6 +336,7 @@ __all__ = [
     "build_review_record",
     "chunk_boundaries",
     "load_review_record",
+    "load_review_records",
     "review_records_root",
     "write_review_record",
 ]

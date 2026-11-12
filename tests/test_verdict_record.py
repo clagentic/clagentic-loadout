@@ -488,6 +488,37 @@ class TestReviewRecords:
     def test_the_verb_refuses_an_id_that_is_not_digits(self, capsys):
         assert record_verb.main(["review", "../x"]) == record_verb.EXIT_USAGE
 
+    def test_a_chunk_with_well_formed_spans_is_valid(self, capsys):
+        span = {"file": "a.py", "first": 1, "last": 4, "old_first": 1, "old_last": 3}
+        record = _review_record("77", chunks=[{"index": 1, "files": ["a.py"], "hunks": [span]}])
+        write_review_record(review_records_root(), record)
+        assert record_verb.main(["review", "77"]) == record_verb.EXIT_OK
+        assert json.loads(capsys.readouterr().out)["chunks"][0]["hunks"] == [span]
+
+    def test_a_comment_held_by_two_heads_returns_the_newest_and_names_the_other(self, capsys):
+        root = review_records_root()
+        older = {**_review_record("77", head=HEAD_A), "recorded_at": "2026-01-01T00:00:00Z"}
+        newer = {**_review_record("77", head=HEAD_B), "recorded_at": "2026-01-02T00:00:00Z"}
+        write_review_record(root, older)
+        write_review_record(root, newer)
+        assert record_verb.main(["review", "77"]) == record_verb.EXIT_OK
+        captured = capsys.readouterr()
+        assert json.loads(captured.out) == newer
+        assert HEAD_A in captured.err
+
+    def test_head_selects_the_older_record_and_a_head_without_one_is_not_found(self, capsys):
+        root = review_records_root()
+        older = {**_review_record("77", head=HEAD_A), "recorded_at": "2026-01-01T00:00:00Z"}
+        newer = {**_review_record("77", head=HEAD_B), "recorded_at": "2026-01-02T00:00:00Z"}
+        write_review_record(root, older)
+        write_review_record(root, newer)
+        assert record_verb.main(["review", "77", "--head", HEAD_A]) == record_verb.EXIT_OK
+        assert json.loads(capsys.readouterr().out) == older
+        other = "c" * 40
+        assert record_verb.main(["review", "77", "--head", other]) == record_verb.EXIT_NOT_FOUND
+        assert other in capsys.readouterr().err
+        assert record_verb.main(["review", "77", "--head", "abc"]) == record_verb.EXIT_USAGE
+
     @pytest.mark.parametrize(
         "content",
         [
@@ -496,6 +527,9 @@ class TestReviewRecords:
             json.dumps({"comment_id": "78", "head_sha": HEAD_A}),
             json.dumps({k: v for k, v in _review_record("77").items() if k != "findings"}),
             json.dumps({**_review_record("77"), "pr": "3"}),
+            json.dumps(
+                {**_review_record("77"), "chunks": [{"index": 1, "files": [1], "hunks": [1]}]}
+            ),
         ],
         ids=[
             "not-an-object",
@@ -503,6 +537,7 @@ class TestReviewRecords:
             "names-another-comment",
             "missing-required-field",
             "wrong-typed-field",
+            "chunk-elements-of-the-wrong-type",
         ],
     )
     def test_the_verb_reports_a_file_that_is_not_a_valid_record(self, content, capsys):
