@@ -215,7 +215,7 @@ import yaml
 
 from clagentic_loadout.merge.commit_files import (
     CommitFileReadError,
-    read_file_at_commit_following_links,
+    read_blob_at_commit,
 )
 from clagentic_loadout.merge.config_root import (
     resolve_merge_config_path,
@@ -685,13 +685,11 @@ def load_post_merge_steps_from_git_sha(
         # via `cat-file -e` (exit code only) rather than parsing `git show`'s
         # own stderr text, so this is locale-independent regardless of
         # LC_ALL/LANG.
-        # A symlink the commit itself tracks here is followed through that
-        # commit's objects only (never the working tree), failing closed on an
-        # absolute link, a link leaving the repository, or a chain over the
-        # shared limit. A blob that is not UTF-8 text, or any git failure, is
-        # the same loud config error as a malformed config.
+        # An entry the commit tracks here that is not a regular blob (a symlink,
+        # a gitlink) is never followed: it is a config error, like a blob that is
+        # not UTF-8 text or any git failure.
         try:
-            return read_file_at_commit_following_links(git_tree_path, merged_sha, relative_path)
+            return read_blob_at_commit(git_tree_path, merged_sha, relative_path)
         except CommitFileReadError as exc:
             raise PostMergeConfigError(str(exc)) from exc
 

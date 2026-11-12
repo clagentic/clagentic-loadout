@@ -119,8 +119,8 @@ from typing import Iterable
 from clagentic_loadout.git_origin import ConfigTreeBinding, OriginBindingError
 from clagentic_loadout.merge.commit_files import (
     CommitFileReadError,
+    read_blob_at_commit,
     read_file_at_commit,
-    read_file_at_commit_following_links,
 )
 from clagentic_loadout.merge.config_root import MergeConfigRootRefusedError, resolve_merge_config_path
 from clagentic_loadout.merge.fetch_transport import MergeFetchAuth, MergeFetchDeniedError
@@ -493,7 +493,10 @@ def _gate_keys_of(text: str, source: str) -> dict | None:
 
 def _gate_from_config_at_base(config_path: Path, base: BaseRead) -> RepoGate | None:
     """The gate a deployment `config.yaml` declares at the base commit, or None
-    when the file is not tracked there (the caller then reads the working tree).
+    when the commit's tree has no entry at the file's lexical path (the caller
+    then reads the working tree). Any entry there that is not a regular blob, or
+    cannot be read, is the "nothing readable" gate: the working tree is never
+    consulted for a path the base tracks.
 
     A base read is content-addressed, so it needs no origin binding. The text is
     judged by `gate_from_tracked_text`, so a text that is not UTF-8, not YAML or
@@ -506,7 +509,7 @@ def _gate_from_config_at_base(config_path: Path, base: BaseRead) -> RepoGate | N
     sha12 = base.sha[:12]
     source = f"{base.git_tree.resolve()}@{sha12}:{relative}"
     try:
-        text = read_file_at_commit_following_links(
+        text = read_blob_at_commit(
             base.git_tree, base.sha, relative, base_branch=base.base_branch, fetch_auth=base.fetch_auth
         )
     except MergeFetchDeniedError:

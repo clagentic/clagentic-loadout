@@ -3151,8 +3151,10 @@ the base commit** (its path inside the git tree exists there), a PR could change
 are read from the base commit and the working-tree copy is never used; no origin binding applies
 to a base read. Whether the file is tracked is decided from its configured path inside the tree,
 read lexically: a working-tree symlink in its place (to `/dev/null`, outside the tree, or to a
-path absent at base) changes nothing, and a symlink that the base commit itself holds there is
-followed through the base commit's objects only. A working-tree copy whose gate keys differ from base's is not used and earns one
+path absent at base) changes nothing. An entry at that path in the base commit that is not a
+regular file (a symlink, dangling or not, or a submodule) is never followed and never replaced by
+the working tree: it fails like an unreadable tracked file (the gate-source line says the gate
+could not be read), so track `config.yaml` as a regular file. A working-tree copy whose gate keys differ from base's is not used and earns one
 warning naming the file and the base commit. A text at base that is not UTF-8, not YAML, or has a
 non-mapping `merge:` section fails like a tracked `gate.yaml` would (`pre_checks` refuse; the
 reviewer roles and scanners fall back as a pair with a warning). A `config.yaml` that is

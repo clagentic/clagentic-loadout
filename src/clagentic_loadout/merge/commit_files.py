@@ -161,21 +161,10 @@ def read_file_at_commit(
         ) from exc
 
 
-_MAX_BASE_LINKS = 8
+_REGULAR_BLOB_MODES = frozenset({"100644", "100755"})
 
 
-def _tree_entry_mode(git_tree: Path, sha: str, path: str) -> str | None:
-    listed = _git(["ls-tree", "--full-tree", sha, "--", path], cwd=git_tree)
-    if listed.returncode != 0:
-        raise CommitFileReadError(
-            f"git ls-tree {sha} {path} failed (exit {listed.returncode}) in "
-            f"{git_tree}: {listed.stderr.strip()[:400]}"
-        )
-    fields = listed.stdout.split(None, 1)
-    return fields[0] if fields else None
-
-
-def read_file_at_commit_following_links(
+def read_blob_at_commit(
     git_tree: str | Path,
     sha: str,
     relative_path: str,
@@ -183,62 +172,40 @@ def read_file_at_commit_following_links(
     base_branch: str = "",
     fetch_auth: MergeFetchAuth | None = None,
 ) -> str | None:
-    """Like `read_file_at_commit`, but a symlink that the commit's own tree holds
-    on *relative_path* (or on a directory of it) is followed through that commit's
-    objects only, never the working tree. None when the path, or the target of a
-    link on it, is absent at *sha*.
+    """Like `read_file_at_commit`, for a path whose tracked-ness decides which
+    source is trusted. None only when the commit's tree has NO entry at
+    *relative_path*. An entry that is not a regular blob (a symlink, dangling or
+    not, or a gitlink) is never followed and never treated as absent: it raises,
+    so a caller cannot fall back to the working tree for a path the commit tracks.
 
     Raises:
-        CommitFileReadError: as `read_file_at_commit`; or a link at *sha* is
-            absolute, leaves the repository, or the chain is longer than
-            ``_MAX_BASE_LINKS``.
+        CommitFileReadError: as `read_file_at_commit`; or the entry at *sha* is
+            not a regular file.
     """
     git_tree = Path(git_tree)
     ensure_commit_present(git_tree, sha, base_branch=base_branch, fetch_auth=fetch_auth)
-    queue = [part for part in relative_path.split("/") if part]
-    resolved: list[str] = []
-    links = 0
-    while queue:
-        part = queue.pop(0)
-        if part == ".":
-            continue
-        if part == "..":
-            if not resolved:
-                raise CommitFileReadError(f"{relative_path} at {sha} leaves the repository")
-            resolved.pop()
-            continue
-        candidate = "/".join([*resolved, part])
-        mode = _tree_entry_mode(git_tree, sha, candidate)
-        if mode is None:
-            return None
-        if mode != "120000":
-            resolved.append(part)
-            continue
-        links += 1
-        if links > _MAX_BASE_LINKS:
-            raise CommitFileReadError(f"{relative_path} at {sha} passes more than {_MAX_BASE_LINKS} symlinks")
-        shown = _git_bytes(["show", f"{sha}:{candidate}"], cwd=git_tree)
-        if shown.returncode != 0:
-            raise CommitFileReadError(
-                f"git show {sha}:{candidate} failed (exit {shown.returncode}) in {git_tree}: "
-                f"{shown.stderr.decode('utf-8', 'replace').strip()[:400]}"
-            )
-        target = shown.stdout.decode("utf-8", "replace")
-        if target.startswith("/"):
-            raise CommitFileReadError(f"the symlink {candidate} at {sha} is absolute and cannot be read from the commit")
-        queue = [segment for segment in target.split("/") if segment] + queue
-    if not resolved:
+    listed = _git(["ls-tree", "--full-tree", sha, "--", relative_path], cwd=git_tree)
+    if listed.returncode != 0:
+        raise CommitFileReadError(
+            f"git ls-tree {sha} {relative_path} failed (exit {listed.returncode}) in "
+            f"{git_tree}: {listed.stderr.strip()[:400]}"
+        )
+    fields = listed.stdout.split(None, 1)
+    if not fields:
         return None
-    return read_file_at_commit(
-        git_tree, sha, "/".join(resolved), base_branch=base_branch, fetch_auth=fetch_auth
-    )
+    if fields[0] not in _REGULAR_BLOB_MODES:
+        raise CommitFileReadError(
+            f"{relative_path} at {sha} is tracked as a non-regular entry (mode {fields[0]}); "
+            f"it is not followed, so track it as a regular file"
+        )
+    return read_file_at_commit(git_tree, sha, relative_path, base_branch=base_branch, fetch_auth=fetch_auth)
 
 
 __all__ = [
     "CommitFetchDeniedError",
     "CommitFileReadError",
     "ensure_commit_present",
+    "read_blob_at_commit",
     "read_file_at_commit",
-    "read_file_at_commit_following_links",
     "resolve_commit",
 ]

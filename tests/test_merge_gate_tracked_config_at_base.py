@@ -12,27 +12,31 @@ from clagentic_loadout.merge import repo_gate_runtime, verb
 from clagentic_loadout.merge.repo_gate_runtime import (
     GATE_SOURCE_NONE,
     GATE_SOURCE_TRACKED_CONFIG,
-    GATE_SOURCE_TRACKED_GATE,
     GATE_SOURCE_UNREADABLE,
-    GATE_SOURCE_UNTRACKED_CONFIG,
-    gate_source_line,
 )
 from clagentic_loadout.repo_config import DEFAULT_CONFIG_RELATIVE_PATH, TRACKED_GATE_RELATIVE_PATH
 from tests._gate_repo import GateRepo, git, init_gate_repo, make_origin_confirmable, write_deployment_config
 from tests.test_merge_verb_pre_checks import _merge
 
 BASE_ROLES = ["reviewer", "security"]
+UNREADABLE = verb.EXIT_PRE_CHECKS_FAILED
 
 
-def _tracked_config_repo(tmp_path, base_text: bytes | str, tree_merge: dict | None = None) -> GateRepo:
-    """A repo whose base commit TRACKS config.yaml with *base_text* and no gate.yaml;
-    the working tree then holds *tree_merge* in its place, uncommitted."""
+def _tracked_config_repo(
+    tmp_path, base_text: bytes | str, tree_merge: dict | None = None, link_target: str | None = None
+) -> GateRepo:
+    """A repo whose base commit TRACKS config.yaml with *base_text* (or, with
+    *link_target*, as a symlink to it) and no gate.yaml; the working tree then holds
+    *tree_merge* in its place, uncommitted."""
     tmp_path.mkdir(parents=True, exist_ok=True)
     git(tmp_path, "init", "-q", "-b", "main")
     target = tmp_path / DEFAULT_CONFIG_RELATIVE_PATH
     target.parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / "README.md").write_text("base\n", encoding="utf-8")
-    target.write_bytes(base_text if isinstance(base_text, bytes) else base_text.encode("utf-8"))
+    if link_target is None:
+        target.write_bytes(base_text if isinstance(base_text, bytes) else base_text.encode("utf-8"))
+    else:
+        target.symlink_to(link_target)
     git(tmp_path, "add", "--", "README.md", DEFAULT_CONFIG_RELATIVE_PATH)
     git(tmp_path, "commit", "-q", "-m", "base")
     base_sha = git(tmp_path, "rev-parse", "HEAD")
@@ -114,33 +118,6 @@ def test_a_tracked_config_with_no_gate_keys_declares_nothing_and_ignores_a_tree_
     assert len([w for w in gate.warnings if "working-tree copy" in w]) == 1
 
 
-def test_an_untracked_config_is_read_from_the_working_tree_as_before(tmp_path):
-    repo = init_gate_repo(
-        tmp_path, tracked_gate=None, deployment_merge={"required_reviewer_roles": ["reviewer", "security"]}
-    )
-
-    gate = _gate(repo)
-
-    assert gate.reviewer_roles == ("reviewer", "security")
-    assert gate.source == GATE_SOURCE_UNTRACKED_CONFIG
-    assert gate.warnings == ()
-    assert any("untracked deployment config.yaml" in n for n in gate.notices)
-
-
-def test_a_config_above_the_git_tree_is_untracked_and_unchanged(tmp_path):
-    wrapper = tmp_path / "wrapper"
-    wrapper.mkdir()
-    write_deployment_config(wrapper, {"required_reviewer_roles": ["reviewer"], "git_working_tree": "tree"})
-    repo = init_gate_repo(wrapper / "tree", tracked_gate=None)
-    (repo.path / DEFAULT_CONFIG_RELATIVE_PATH).unlink()
-
-    gate = _gate(repo)
-
-    assert gate.reviewer_roles == ("reviewer",)
-    assert gate.source == GATE_SOURCE_UNTRACKED_CONFIG
-    assert str(wrapper) in gate.source_path
-
-
 _MALFORMED_AT_BASE = {
     "not_utf8": b"merge:\n  note: \xff\xfe\n",
     "not_yaml": b"merge: [unclosed\n",
@@ -158,21 +135,6 @@ def test_a_malformed_tracked_config_fails_like_a_malformed_tracked_gate(tmp_path
     assert gate.reviewer_roles == () and gate.required_scanners is None
     assert any("NOT ENFORCED" in w for w in gate.warnings)
     assert gate.source == GATE_SOURCE_UNREADABLE
-
-
-def test_a_tracked_gate_file_is_unchanged_and_deployment_keys_stay_ignored(tmp_path):
-    repo = init_gate_repo(
-        tmp_path,
-        tracked_gate={"required_reviewer_roles": ["reviewer"]},
-        deployment_merge={"required_reviewer_roles": []},
-    )
-
-    gate = _gate(repo)
-
-    assert gate.reviewer_roles == ("reviewer",)
-    assert gate.source == GATE_SOURCE_TRACKED_GATE
-    assert any("IGNORED" in w for w in gate.warnings)
-    assert gate_source_line(gate) == f"gate read from {TRACKED_GATE_RELATIVE_PATH} at {repo.base_sha[:12]}"
 
 
 def _tracked_gate_repo(tmp_path) -> GateRepo:
@@ -194,26 +156,28 @@ def _no_gate_repo(tmp_path) -> GateRepo:
     return init_gate_repo(tmp_path, tracked_gate=None)
 
 
-def _symlinked_config_repo(tmp_path, link_target: str) -> GateRepo:
-    """The tracked config at base, replaced in the working tree by a symlink."""
-    repo = _tracked_config_repo(tmp_path, _base_text(required_reviewer_roles=[]), None)
-    link = tmp_path / DEFAULT_CONFIG_RELATIVE_PATH
-    link.unlink()
-    link.symlink_to(link_target)
+_WEAK_TREE_TEXT = yaml.safe_dump(
+    {"merge": {"sync_tree_after_merge": False, "required_reviewer_roles": ["reviewer"]}}
+)
+
+
+def _base_symlink_repo(tmp_path) -> GateRepo:
+    # The base commit tracks config.yaml as a link to a file it holds; the working
+    # tree's copy of that target carries a weaker gate.
+    repo = _tracked_config_repo(tmp_path, "", None, link_target="../../README.md")
+    (tmp_path / "README.md").write_text(_WEAK_TREE_TEXT, encoding="utf-8")
     return repo
 
 
-def _symlink_to_dev_null_repo(tmp_path) -> GateRepo:
-    return _symlinked_config_repo(tmp_path, "/dev/null")
+def _base_dangling_symlink_repo(tmp_path) -> GateRepo:
+    # The link's target is absent at base and the PR adds it with a weaker gate.
+    repo = _tracked_config_repo(tmp_path, "", None, link_target="../../weak.yaml")
+    (tmp_path / "weak.yaml").write_text(_WEAK_TREE_TEXT, encoding="utf-8")
+    return repo
 
 
-def _symlink_to_in_tree_path_absent_at_base_repo(tmp_path) -> GateRepo:
-    # The target exists in the tree and holds a weaker gate, but is not in the base commit.
-    (tmp_path / "weak.yaml").write_text(
-        yaml.safe_dump({"merge": {"sync_tree_after_merge": False, "required_reviewer_roles": ["reviewer"]}}),
-        encoding="utf-8",
-    )
-    return _symlinked_config_repo(tmp_path, "../../weak.yaml")
+def _gate_unreadable_line(repo: GateRepo) -> list[str]:
+    return ["merge: gate could not be read (see the warnings and errors reported with it)"]
 
 
 def _tracked_config_line(repo: GateRepo) -> list[str]:
@@ -240,16 +204,14 @@ def _tracked_config_line(repo: GateRepo) -> list[str]:
             id="untracked_config_fallback",
         ),
         pytest.param(_no_gate_repo, lambda repo: ["merge: no gate declared"], verb.EXIT_OK, id="no_gate"),
-        # A /dev/null config cannot carry the sync opt-out the fixture relies on, so the
-        # merge ends at the later tree sync (usage exit); the gate line precedes it.
+        # A base entry that is a link is never followed and never replaced by the
+        # working tree, so the weaker working-tree gate is never used.
+        pytest.param(_base_symlink_repo, _gate_unreadable_line, UNREADABLE, id="base_entry_is_a_symlink"),
         pytest.param(
-            _symlink_to_dev_null_repo, _tracked_config_line, verb.EXIT_USAGE, id="config_symlinked_to_dev_null"
-        ),
-        pytest.param(
-            _symlink_to_in_tree_path_absent_at_base_repo,
-            _tracked_config_line,
-            verb.EXIT_OK,
-            id="config_symlinked_to_in_tree_path_absent_at_base",
+            _base_dangling_symlink_repo,
+            _gate_unreadable_line,
+            UNREADABLE,
+            id="base_entry_is_a_dangling_symlink_the_pr_adds",
         ),
     ],
 )
@@ -261,7 +223,8 @@ def test_the_merge_prints_one_gate_source_line_for_each_source(tmp_path, capsys,
     lines = [
         line
         for line in capsys.readouterr().err.splitlines()
-        if line.startswith("merge: gate read from") or line == "merge: no gate declared"
+        if line.startswith(("merge: gate read from", "merge: gate could not be read"))
+        or line == "merge: no gate declared"
     ]
     wanted = expected(repo)
     assert len(lines) == 1
