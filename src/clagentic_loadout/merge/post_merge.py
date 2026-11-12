@@ -293,8 +293,52 @@ def _split_env_assignments(tokens: list[str]) -> tuple[list[str], dict[str, str]
     return remaining, assignments
 
 
-def _resolve_argv(cmd: str | list, *, step_label: str) -> tuple[list[str], dict[str, str]]:
+#: Documented placeholder names a step's argv may carry (see
+#: `_substitute_placeholders`). Callers supply the values by these keys.
+PLACEHOLDER_MERGED_SHA = "merged_sha"
+PLACEHOLDER_MERGE_TREE = "merge_tree"
+
+_PLACEHOLDER_RE = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _substitute_placeholders(
+    tokens: list[str], values: Mapping[str, str], *, step_label: str
+) -> list[str]:
+    """Replace `{name}` in each token for every name in *values*; all other text
+    stays byte-for-byte (awk-style braces such as `{print $1}` never match the
+    placeholder shape). One pass per token, so a substituted value is never
+    expanded again. A `{name}` token that is not a supplied name is reported to
+    stderr and left as written -- never a refusal, the step still runs."""
+
+    def replace(token: str) -> str:
+        def one(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name in values:
+                return values[name]
+            print(
+                f"merge: post-merge {step_label}: unknown placeholder "
+                f"{match.group(0)!r} in argv token {token!r}; left unchanged "
+                f"(documented names: {', '.join('{' + n + '}' for n in sorted(values))})",
+                file=sys.stderr,
+            )
+            return match.group(0)
+
+        return _PLACEHOLDER_RE.sub(one, token)
+
+    return [replace(tok) for tok in tokens]
+
+
+def _resolve_argv(
+    cmd: str | list,
+    *,
+    step_label: str,
+    placeholders: Mapping[str, str] | None = None,
+) -> tuple[list[str], dict[str, str]]:
     """Resolve a step's `cmd` value to (argv, env_assignments).
+
+    With *placeholders* (name -> value), `{name}` tokens are substituted in the
+    resolved argv and env-assignment values; `None` (the default) leaves every
+    token untouched.
 
     `cmd` may be:
       - a shell-quoted STRING (shlex.split, same as the reference
@@ -317,7 +361,10 @@ def _resolve_argv(cmd: str | list, *, step_label: str) -> tuple[list[str], dict[
             raise PostMergeConfigError(
                 f"{step_label}: cmd list entries must all be strings, got {cmd!r}."
             )
-        return _split_env_assignments(list(cmd))
+        listed = list(cmd)
+        if placeholders is not None:
+            listed = _substitute_placeholders(listed, placeholders, step_label=step_label)
+        return _split_env_assignments(listed)
 
     if not isinstance(cmd, str):
         raise PostMergeConfigError(
@@ -352,6 +399,8 @@ def _resolve_argv(cmd: str | list, *, step_label: str) -> tuple[list[str], dict[
             f"shell-quote splitting."
         )
 
+    if placeholders is not None:
+        tokens = _substitute_placeholders(tokens, placeholders, step_label=step_label)
     return _split_env_assignments(tokens)
 
 
@@ -509,6 +558,7 @@ def _run_verify(
     label: str,
     wrap: SandboxWrap | None = None,
     pinned_env: Mapping[str, str] | None = None,
+    placeholders: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
     """Run a step's `verify` argv. Returns (confirmed, evidence): evidence is
     the first stdout line on success, or the reason on failure. A timeout or a
@@ -521,7 +571,9 @@ def _run_verify(
     With *wrap* (a sandbox), the verify command's own `VAR=VALUE` prefix is
     delivered inside the sandbox by the wrapper; the launched sandbox process
     gets *env* untouched."""
-    argv, assignments = _resolve_argv(verify_cmd, step_label=f"{label}.{STEP_KEY_VERIFY}")
+    argv, assignments = _resolve_argv(
+        verify_cmd, step_label=f"{label}.{STEP_KEY_VERIFY}", placeholders=placeholders
+    )
     if wrap is not None:
         argv = wrap(argv, assignments)
         run_env = dict(env if env is not None else os.environ)
@@ -770,8 +822,15 @@ def run_post_merge_steps(
     default_timeout_seconds: int | float | None = None,
     base_env: Mapping[str, str] | None = None,
     argv_prefix: Sequence[str] = (),
+    placeholders: Mapping[str, str] | None = None,
 ) -> None:
     """Execute post_merge_steps IN ORDER inside *project_root*.
+
+    `placeholders`: name -> value, substituted for `{name}` in each step's argv
+    and `verify` argv (not liveness probes). The merge verbs pass
+    `PLACEHOLDER_MERGED_SHA` and `PLACEHOLDER_MERGE_TREE`. `None` (the default,
+    and what the pre-merge gate uses: no merged commit exists there) leaves
+    every argv untouched.
 
     Called ONLY after a successful merge (merge.verb._run step 8 calls this
     after `backend.merge_pr` succeeds) — never on any gate-refusal or
@@ -914,6 +973,7 @@ def run_post_merge_steps(
             default_timeout_seconds=default_timeout_seconds,
             base_env=base_env,
             argv_prefix=argv_prefix,
+            placeholders=placeholders,
         )
 
 
@@ -926,6 +986,7 @@ def _execute_steps(
     default_timeout_seconds: int | float | None,
     base_env: Mapping[str, str] | None,
     argv_prefix: Sequence[str],
+    placeholders: Mapping[str, str] | None = None,
 ) -> None:
     """The step loop of `run_post_merge_steps`; *scratch* owns the private
     per-step directories so they are removed however the loop ends."""
@@ -952,7 +1013,9 @@ def _execute_steps(
             file=sys.stderr,
         )
 
-        argv, env_overrides = _resolve_argv(cmd, step_label=f"post_merge_steps[{i}]")
+        argv, env_overrides = _resolve_argv(
+            cmd, step_label=f"post_merge_steps[{i}]", placeholders=placeholders
+        )
         combined_overrides = {**active_deployment_overrides, **env_overrides}
         check_tmp = (
             scratch.enter_context(_private_check_dir(check_tmp_parent, label=label))
@@ -1111,6 +1174,7 @@ def _execute_steps(
                     label=label,
                     wrap=wrap,
                     pinned_env=pinned_env,
+                    placeholders=placeholders,
                 )
                 if not confirmed:
                     print(
@@ -1152,6 +1216,8 @@ __all__ = [
     "OUTCOME_CONFIRMED",
     "OUTCOME_UNVERIFIED",
     "OUTCOME_VERIFICATION_FAILED",
+    "PLACEHOLDER_MERGED_SHA",
+    "PLACEHOLDER_MERGE_TREE",
     "PostMergeConfigError",
     "PostMergeLivenessError",
     "PostMergeStepFailedError",

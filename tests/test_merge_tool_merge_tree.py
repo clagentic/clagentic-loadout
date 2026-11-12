@@ -11,6 +11,7 @@ directory, which proves the step ran against the merged content and where.
 from __future__ import annotations
 
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -712,6 +713,55 @@ class TestMergeTreeEnv:
         monkeypatch.setenv(f"CLAGENTIC_LOADOUT_POST_MERGE_ENV_{tool_merge_tree.ENV_MERGE_TREE}", "/elsewhere")
         assert _merge(work, merged) == verb.EXIT_OK
         assert marker.read_text().split("|")[0] == str(work.resolve())
+
+
+_PLACEHOLDER_DUMP = (
+    "import json,os,sys;"
+    "open(sys.argv[1],'w').write(json.dumps({'argv': sys.argv[2:], "
+    f"'sha': os.environ.get('{tool_merge_tree.ENV_MERGED_SHA}'), "
+    f"'tree': os.environ.get('{tool_merge_tree.ENV_MERGE_TREE}')}}))"
+)
+
+
+class TestMergedShaPlaceholder:
+    """`{merged_sha}` / `{merge_tree}` reach a step's argv, in both verbs, both
+    forms and both tree cases, with the matching environment variables."""
+
+    @staticmethod
+    def _step(marker, form):
+        tail = ["COMMIT={merged_sha}", "{merge_tree}", "{print $1}"]
+        if form == "list":
+            return _cmd_step([_PY, "-c", _PLACEHOLDER_DUMP, str(marker), *tail])
+        quoted = " ".join(shlex.quote(t) for t in tail)
+        return _cmd_step(f"{_PY} -c {shlex.quote(_PLACEHOLDER_DUMP)} {marker} {quoted}")
+
+    @pytest.mark.parametrize("form", ["string", "list"])
+    @pytest.mark.parametrize("shape", ["feature", "clean-base"], ids=["tool-tree", "in-place"])
+    @pytest.mark.parametrize("verb_name", ["merge", "post-merge"])
+    def test_argv_and_env_carry_the_merged_commit(self, tmp_path, verb_name, shape, form):
+        work, merged, marker = _scenario(tmp_path, shape=shape, steps=False)
+        ms.write_merge_config(work, [self._step(marker, form)])
+        run = _merge if verb_name == "merge" else _post_merge
+        assert run(work, merged) == 0
+        seen = json.loads(marker.read_text())
+        tree = seen["tree"]
+        assert seen["sha"] == merged
+        assert seen["argv"] == [f"COMMIT={merged}", tree, "{print $1}"]
+        assert tree == str(work.resolve()) if shape == "clean-base" else tree.startswith(str(tmp_path / "trees"))
+
+    def test_verify_argv_gets_the_merged_commit(self, tmp_path):
+        work, merged, marker = _scenario(tmp_path, shape="clean-base", steps=False)
+        verify = [_PY, "-c", _PLACEHOLDER_DUMP, str(marker), "{merged_sha}"]
+        ms.write_merge_config(work, [{**_cmd_step([_PY, "-c", "pass"]), "verify": verify}])
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert json.loads(marker.read_text())["argv"] == [merged]
+
+    def test_unknown_placeholder_is_reported_and_the_merge_still_succeeds(self, tmp_path, capsys):
+        work, merged, marker = _scenario(tmp_path, shape="clean-base", steps=False)
+        ms.write_merge_config(work, [_cmd_step([_PY, "-c", _PLACEHOLDER_DUMP, str(marker), "{nope}"])])
+        assert _merge(work, merged) == verb.EXIT_OK
+        assert json.loads(marker.read_text())["argv"] == ["{nope}"]
+        assert "unknown placeholder '{nope}'" in capsys.readouterr().err
 
 
 class TestStepsLoadFromRepoPathConfig:

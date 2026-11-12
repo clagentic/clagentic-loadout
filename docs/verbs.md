@@ -2825,6 +2825,20 @@ What a step can rely on in the tool tree:
   run in: the tool tree in the case above, the repository top-level when `--repo-path`
   is a clean base-branch checkout. A step that needs the tree's root reads it instead
   of hardcoding a path. It overrides a deployment override of the same name.
+- **`CLAGENTIC_LOADOUT_MERGED_SHA`, `{merged_sha}` and `{merge_tree}`.** Every step
+  also gets `CLAGENTIC_LOADOUT_MERGED_SHA`, the commit that landed (the SHA the verb
+  verified and checked out). In a step's `cmd` and `verify` argv, in string or list
+  form, the text `{merged_sha}` is replaced by that commit and `{merge_tree}` by the
+  same absolute path as `CLAGENTIC_LOADOUT_MERGE_TREE`, for example
+  `make install PREFIX=/usr/local COMMIT={merged_sha}`. Both verbs do this, in the
+  tool tree and in place. Only these two names are substituted; all other text,
+  including awk-style braces such as `'{print $1}'`, reaches the step byte-for-byte,
+  and a substituted value is never expanded again. A `{name}` token that is not one
+  of the two names is reported on stderr
+  (`post_merge_steps[N]: unknown placeholder '{name}' in argv token '...'; left unchanged`)
+  and the step runs with the text as written; nothing is refused. Liveness probes and
+  `pre_checks` get no substitution (no merged commit exists when `pre_checks` run).
+  Steps stay argv with no shell, so environment variables are not expanded in argv.
 - **A step may not name `--repo-path` as an absolute path.** In the tool-tree case,
   before any step runs, the verb refuses with `merge-tree-step-names-repo-path` when a
   step's `cmd` (string or list form, including text inside `bash -c '...'`), `verify`

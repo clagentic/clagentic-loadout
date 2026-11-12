@@ -148,6 +148,7 @@ from clagentic_loadout.merge.tool_merge_tree import (
     merge_tree_env,
     refuse_detached_steps,
     refuse_steps_naming_repo_path,
+    step_placeholders,
     steps_dir_in_tree,
     tool_merge_tree,
     unsafe_tree_reason,
@@ -703,9 +704,10 @@ def _run(
                         steps,
                         args.repo_path,
                         deployment_env_overrides=merge_tree_env(
-                            deployment_env_overrides, git_tree_path
+                            deployment_env_overrides, git_tree_path, landed_sha
                         ),
                         default_timeout_seconds=default_step_timeout,
+                        placeholders=step_placeholders(git_tree_path, landed_sha),
                     )
                 else:
                     refuse_detached_steps(steps)
@@ -725,9 +727,10 @@ def _run(
                                 steps,
                                 tool_steps_dir,
                                 deployment_env_overrides=merge_tree_env(
-                                    deployment_env_overrides, tool_tree
+                                    deployment_env_overrides, tool_tree, landed_sha
                                 ),
                                 default_timeout_seconds=default_step_timeout,
+                                placeholders=step_placeholders(tool_tree, landed_sha),
                             )
                         except (
                             PostMergeStepFailedError,
