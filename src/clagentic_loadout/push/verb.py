@@ -220,6 +220,7 @@ import argparse
 import json
 import re
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from collections.abc import Sequence
 from pathlib import Path
@@ -1390,20 +1391,63 @@ def _checkout_head_sha(project_root: Path) -> str | None:
     return sha
 
 
-def _dirty_path_count(project_root: Path) -> int | None:
-    """Number of paths with uncommitted state in the checkout: tracked changes
-    (staged or not) plus untracked, non-ignored files. 0 means a clean tree;
-    None means the state could not be read, which callers must not treat as
-    clean."""
+#: How many dirty entries the dirty-tree skip message lists before an
+#: "and M more" tail.
+DIRTY_ENTRIES_SHOWN = 5
+
+
+@dataclass(frozen=True)
+class DirtyTree:
+    """Uncommitted state of a checkout in git's default status view."""
+
+    #: One `git status --short` line per entry; an untracked directory is a
+    #: single entry, not one per file inside it.
+    entries: tuple[str, ...]
+    #: True when there is at least one entry and every entry is untracked.
+    untracked_only: bool
+
+    @property
+    def count(self) -> int:
+        return len(self.entries)
+
+
+def _dirty_tree(project_root: Path) -> DirtyTree | None:
+    """The checkout's uncommitted entries: tracked changes (staged or not) plus
+    untracked, non-ignored paths, with an untracked directory collapsed to one
+    entry as `git status` shows it. No entries means a clean tree; None means
+    the state could not be read, which callers must not treat as clean."""
     import subprocess
 
     probe = subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=all"],
+        ["git", "status", "--porcelain", "--untracked-files=normal"],
         cwd=str(project_root), capture_output=True, text=True,
     )
     if probe.returncode != 0:
         return None
-    return len([line for line in probe.stdout.splitlines() if line.strip()])
+    entries = tuple(line.rstrip() for line in probe.stdout.splitlines() if line.strip())
+    return DirtyTree(
+        entries=entries,
+        untracked_only=bool(entries) and all(e.startswith("??") for e in entries),
+    )
+
+
+def _dirty_skip_message(tree: DirtyTree | None) -> str:
+    """The stderr line for a push.verify skip caused by a dirty tree."""
+    if tree is None:
+        shown = "an unreadable number of path(s)"
+    else:
+        shown = f"{tree.count} path(s)"
+        if tree.untracked_only:
+            shown += " (untracked-only)"
+        listed = list(tree.entries[:DIRTY_ENTRIES_SHOWN])
+        hidden = tree.count - len(listed)
+        if hidden > 0:
+            listed.append(f"and {hidden} more")
+        shown += ": " + ", ".join(listed)
+    return (
+        f"push: push.verify checks SKIPPED -- the checkout has "
+        f"uncommitted changes in {shown}; verification would not describe the PR."
+    )
 
 
 def _run_verification(
@@ -2426,17 +2470,11 @@ def _run_update_pr(
             else:
                 # The checkout is the PR head commit, but uncommitted edits
                 # would still make the run describe code the PR lacks.
-                dirty_paths = _dirty_path_count(project_root)
-                if dirty_paths is None or dirty_paths > 0:
+                dirty_tree = _dirty_tree(project_root)
+                if dirty_tree is None or dirty_tree.count > 0:
                     run_checks = False
                     verification = VERIFICATION_SKIPPED_DIRTY_TREE
-                    shown = "an unreadable number of" if dirty_paths is None else str(dirty_paths)
-                    print(
-                        f"push: push.verify checks SKIPPED -- the checkout has "
-                        f"uncommitted changes in {shown} path(s); verification "
-                        f"would not describe the PR.",
-                        file=sys.stderr,
-                    )
+                    print(_dirty_skip_message(dirty_tree), file=sys.stderr)
         if run_checks:
             verify_results: list[VerifyResult] = []
             verify_profile_items: list[CompletenessItem] = []

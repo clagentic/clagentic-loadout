@@ -802,6 +802,75 @@ class TestDirtyTreeAndShaFormats:
         assert result["verification"] == "skipped_dirty_tree"
         assert "verification_sha" not in result
 
+    def test_update_untracked_directory_reports_one_entry(
+        self, repo_with_remote, monkeypatch, capsys
+    ):
+        repo, _remote = repo_with_remote
+        _write_verify(repo, [_py("unit", "print('fine')")])
+        scratch = repo / "scratch_dir"
+        scratch.mkdir()
+        for i in range(20):
+            (scratch / f"f{i}.txt").write_text("x\n")
+        code, _sent = self._update(repo, monkeypatch, _head(repo))
+        assert code == verb.EXIT_OK
+        captured = capsys.readouterr()
+        assert (
+            "uncommitted changes in 1 path(s) (untracked-only): ?? scratch_dir/;"
+            in captured.err
+        )
+        assert "20" not in captured.err
+        result = json.loads(captured.out.strip().splitlines()[-1])
+        assert result["verification"] == "skipped_dirty_tree"
+
+    # (setup, expected entries, expected untracked_only)
+    @pytest.mark.parametrize(
+        "setup,entries,untracked_only",
+        [
+            ("clean", (), False),
+            ("untracked_dir", ("?? scratch_dir/",), True),
+            ("tracked_and_untracked", (" M feature.txt", "?? new.txt"), False),
+        ],
+    )
+    def test_dirty_tree_probe(self, repo_with_remote, setup, entries, untracked_only):
+        repo, _remote = repo_with_remote
+        if setup == "untracked_dir":
+            (repo / "scratch_dir").mkdir()
+            for i in range(20):
+                (repo / "scratch_dir" / f"f{i}.txt").write_text("x\n")
+        elif setup == "tracked_and_untracked":
+            (repo / "feature.txt").write_text("edited\n")
+            (repo / "new.txt").write_text("new\n")
+        tree = verb._dirty_tree(repo)
+        assert tree is not None
+        assert tree.entries == entries
+        assert tree.count == len(entries)
+        assert tree.untracked_only is untracked_only
+
+    def test_dirty_tree_message_lists_paths_for_mixed_tree(self):
+        tree = verb.DirtyTree(entries=(" M feature.txt", "?? new.txt"), untracked_only=False)
+        message = verb._dirty_skip_message(tree)
+        assert "2 path(s): " in message
+        assert "untracked-only" not in message
+        assert " M feature.txt" in message and "?? new.txt" in message
+
+    def test_dirty_tree_message_truncates_with_remainder(self):
+        total = verb.DIRTY_ENTRIES_SHOWN + 3
+        entries = tuple(f"?? f{i}.txt" for i in range(total))
+        message = verb._dirty_skip_message(verb.DirtyTree(entries=entries, untracked_only=True))
+        assert f"{total} path(s) (untracked-only)" in message
+        assert "?? f0.txt" in message
+        assert f"?? f{verb.DIRTY_ENTRIES_SHOWN}.txt" not in message
+        assert "and 3 more" in message
+
+    def test_dirty_tree_unreadable_state(self, tmp_path, monkeypatch):
+        class _Probe:
+            returncode = 128
+            stdout = ""
+
+        monkeypatch.setattr("subprocess.run", lambda *a, **k: _Probe())
+        assert verb._dirty_tree(tmp_path) is None
+        assert "an unreadable number of path(s)" in verb._dirty_skip_message(None)
+
     def test_update_ignored_file_does_not_make_tree_dirty(
         self, repo_with_remote, monkeypatch, capsys
     ):
