@@ -608,6 +608,7 @@ from clagentic_loadout.merge.pre_checks_sandbox import (
     resolve_pre_checks_sandbox,
 )
 from clagentic_loadout.merge.repo_gate_runtime import (
+    gate_source_line,
     load_repo_gate_at_base,
     resolve_gate_git_tree,
 )
@@ -1693,6 +1694,7 @@ def _run(
     repo_gate = resolved_reviewers.gate
     required_reviewers = resolved_reviewers.reviewers
     floor_only_reviewers = resolved_reviewers.floor_only
+    print(f"merge: {gate_source_line(repo_gate)}", file=sys.stderr)
     for warning in repo_gate.warnings:
         print(f"merge: WARNING -- {warning}", file=sys.stderr)
     for notice in repo_gate.notices:
