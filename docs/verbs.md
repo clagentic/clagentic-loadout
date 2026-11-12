@@ -2283,7 +2283,78 @@ loadout-record list --head SHA [--gate GATE]
 `show` prints one record by id; `list` prints the records filed under one commit,
 and names any file in that directory that did not read as a valid record. Exit
 codes: `0` ok, `1` usage, `3` the records root cannot be used, `40` no record has
-that id, `41` the record exists but is not valid.
+that id, `41` the record exists but is not valid. `loadout-record review` reads a
+different store; see [Review records](#review-records).
+
+### Review records
+
+A **review record** keeps what one posted review judged, keyed by the id of the
+comment it landed as, so a later audit can compare two reviews of the same commit
+finding by finding and see where each was cut into chunks. The comment fence holds
+the findings but not the chunk boundaries.
+
+**When it is written.** `loadout-review post` writes one record after the posted
+comment was read back with its verdict block verified, whatever happens after that
+(a head that has since moved included). A post whose comment was not verified writes
+no record, and its result says so in `record.reason`. A record that cannot be
+written does not change the post: the review stands, the exit code is the one the
+post would have returned, and the result carries `record: {"written": false,
+"reason": ...}` (the reason is also printed on stderr). A successful write reports
+`record: {"written": true, "comment_id": ..., "path": ...}`. Posting again to a
+comment that was reused rewrites the same record.
+
+**Schema.** The record's shape is the published
+[`review-record.schema.json`](../src/clagentic_loadout/schemas/review-record.schema.json).
+`post` validates a record against it before writing, and a record that fails is not
+written and is reported as a write failure above; `loadout-record review` validates
+every file it loads against the same schema and exits `41`, naming the failing field
+path and the file.
+
+**Fields** (`schema_version` 1):
+
+| field | meaning |
+| --- | --- |
+| `comment_id` | the verified comment's id, as a string of digits |
+| `repo`, `pr`, `head_sha` | the pull request and the exact commit reviewed |
+| `role` | the reviewer role that posted |
+| `policy_base_sha` | the base revision policy was read from, or null |
+| `spec_hash` | the spec the review was measured against, or null when none was given |
+| `engines` | the engines that answered the run's chunks, as stated in the fence (empty for a findings file with no run record) |
+| `recorded_at` | UTC time the record was written, required; the reader picks the newest of several heads by it |
+| `findings.evaluated` | every finding as the evaluator saw it |
+| `findings.open` | the findings the computed verdict blocks on and holds open |
+| `findings.advisory` | findings kept out of judgment on the lighter docs-only path |
+| `dropped` | the candidates dropped by the caller, each with its `reason` |
+| `chunks` | one entry per chunk: `index`, `files`, and `hunks`, the spans each hunk covers (`file`, `first`, `last` in the new numbering, `old_first`, `old_last` in the old). `hunks` is null when the findings file predates span recording, and `chunks` is null when the findings file carries no chunk record (a bare findings array) |
+
+`loadout-review run` writes the same spans into each `chunks[]` entry of
+`findings.json`, additively; a reader that does not know `hunks` ignores it.
+
+**Where records live.** One file per record, `<root>/<head sha>/<comment id>.json`,
+in the shared head-keyed store: written atomically, readable by every user on the
+host, a root inside the checkout under review refused, and the same permission rule
+for a multi-user deployment as the verdict records store. The root is, in order:
+`CLAGENTIC_LOADOUT_REVIEW_RECORDS_DIR`, the user-level `review_records.dir`
+setting, then `<user config root>/state/review-records`. A spawner that filters the
+child environment must pass the variable through, or give each identity the same
+user config root. Nothing prunes the store.
+
+**Reading one.**
+
+```
+loadout-record review COMMENT_ID [--head SHA]
+```
+
+prints the record as JSON. It is read-only and needs no credential. A comment id
+can be reused after the head moves, which leaves one record per head. Without
+`--head` the record with the newest `recorded_at` is printed (equal times break on
+the head sha) and stderr names the other heads that hold the id. `--head` takes a
+full commit sha and prints exactly that head's record; with none there it exits
+`40`. Exit codes: `0` ok, `1` the id is not decimal digits or `--head` is not a
+full sha, `3` the root cannot be read, `40` no record for that comment id (or at
+that head; the message names the resolved root), `41` a file is not a valid record:
+a missing or mistyped field, a chunk whose `files` are not all strings, or `hunks`
+that are not null or a list of spans. The message names the field.
 
 ### `loadout-merge` — the merge gate
 

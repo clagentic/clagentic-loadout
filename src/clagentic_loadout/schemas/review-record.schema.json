@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://clagentic.ai/schemas/loadout/review-record.schema.json",
+  "title": "review record",
+  "description": "What one posted review judged, kept by the id of the comment it landed as: the findings it evaluated, kept open and left as advisory, the findings it dropped with their reasons, and the chunk boundaries it was cut along. Written once the posted comment has been read back and its verdict block verified; read back by comment id. schema_version is bumped on any change that an older reader would misread.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "comment_id", "repo", "pr", "head_sha", "role", "policy_base_sha",
+    "spec_hash", "engines", "recorded_at", "findings", "dropped", "chunks"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "enum": [1],
+      "description": "Version of this record shape."
+    },
+    "comment_id": {
+      "type": "string",
+      "pattern": "^[0-9]{1,20}$",
+      "description": "The host's id of the posted comment, decimal digits. The handle the record is read by."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "owner/repo the review was posted on."
+    },
+    "pr": {
+      "type": "integer",
+      "description": "The pull request number the comment was posted on."
+    },
+    "head_sha": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The commit the review judged."
+    },
+    "role": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The reviewing role that posted the comment."
+    },
+    "policy_base_sha": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "The base revision the review policy was read at. Null when none was recorded."
+    },
+    "spec_hash": {
+      "type": ["string", "null"],
+      "minLength": 1,
+      "description": "Hash of the acceptance specification the review measured against. Null when none was given."
+    },
+    "engines": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "The engines that ran the review, one entry each."
+    },
+    "recorded_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$",
+      "description": "UTC time the record was written, to the second. The newest record wins when a comment id is held by more than one head."
+    },
+    "findings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evaluated", "open", "advisory"],
+      "description": "The findings the review judged.",
+      "properties": {
+        "evaluated": {"type": "array", "items": {"type": "object"}, "description": "Every finding the review evaluated."},
+        "open": {"type": "array", "items": {"type": "object"}, "description": "The findings left open, which block."},
+        "advisory": {"type": "array", "items": {"type": "object"}, "description": "The findings left as advice, which do not block."}
+      }
+    },
+    "dropped": {
+      "type": "array",
+      "items": {"type": "object"},
+      "description": "The findings the review dropped, each with its reason."
+    },
+    "chunks": {
+      "type": ["array", "null"],
+      "description": "The chunks the review was cut into. Null when the findings file carried no chunk record.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["index", "files", "hunks"],
+        "properties": {
+          "index": {"type": "integer", "description": "Position of the chunk in the review."},
+          "files": {"type": "array", "items": {"type": "string"}, "description": "The files the chunk covers."},
+          "hunks": {
+            "type": ["array", "null"],
+            "description": "The line span of each hunk in the chunk. Null when the findings file predates span recording.",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["file", "first", "last", "old_first", "old_last"],
+              "properties": {
+                "file": {"type": "string", "description": "The file the hunk is in."},
+                "first": {"type": "integer", "description": "First line of the hunk in the new file."},
+                "last": {"type": "integer", "description": "Last line of the hunk in the new file."},
+                "old_first": {"type": "integer", "description": "First line of the hunk in the old file."},
+                "old_last": {"type": "integer", "description": "Last line of the hunk in the old file."}
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

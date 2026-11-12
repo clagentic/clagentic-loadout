@@ -55,6 +55,21 @@ def test_complete_run_reviews_the_api_diff_and_binds_the_api_head(env, capsys):
     assert payload["stages"][-1]["stage"] == "merged"
 
 
+def test_each_chunk_record_carries_its_files_and_hunk_spans(env, capsys):
+    env.diff = make_diff({"a.py": 4, "b.py": 2})
+    env.configure()
+    code, payload = env.run(capsys=capsys)
+
+    assert code == 0
+    [chunk] = _chunk_records(payload)["chunks"]
+    assert chunk["files"] == ["a.py", "b.py"]
+    assert chunk["hunks"] == [
+        # A pure addition has no old lines; its old side is anchored at line 1.
+        {"file": "a.py", "first": 1, "last": 4, "old_first": 1, "old_last": 1},
+        {"file": "b.py", "first": 1, "last": 2, "old_first": 1, "old_last": 1},
+    ]
+
+
 def test_stale_local_checkout_does_not_change_the_reviewed_diff(env, capsys, monkeypatch):
     subprocess.run(["git", "init", "-q", str(env.repo)], check=True)
     (env.repo / "unrelated.txt").write_text("local-only content\n", encoding="utf-8")

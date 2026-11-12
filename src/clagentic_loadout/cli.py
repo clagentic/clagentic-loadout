@@ -228,7 +228,7 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         "Run a repo's declared tests (run); read results by run id (report).",
         _test_main,
     ),
-    "record": ("Read the verdict records gates left for a commit (show, list).", _record_main),
+    "record": ("Read the verdict records gates left for a commit (show, list) and the review records kept by comment id (review).", _record_main),
     "spec": ("Create, seal and read the standard spec (new, seal, show).", _spec_main),
     "interface": (
         "Diff a repo's declared interface (diff); list who consumes its elements (consumers).",

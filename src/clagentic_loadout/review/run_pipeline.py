@@ -27,7 +27,7 @@ import shutil
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -748,6 +748,10 @@ def run_review(
                     "carrier_unavailable_reason", "carrier_failure",
                 )
             }
+            # Taken from the plan, not the persisted record, so a chunk cached by
+            # an earlier release carries its spans too. They are what lets a
+            # later reader see where this review's chunks were cut.
+            | {"hunks": [asdict(span) for span in chunk.hunks]}
             | (
                 {KEY_CLASS_RULES: records[chunk.index][KEY_CLASS_RULES]}
                 if KEY_CLASS_RULES in records[chunk.index]
