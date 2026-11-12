@@ -3684,7 +3684,7 @@ with or without `--repo-root`.
 ```
 loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
                   [--consumers-file FILE] [--path GLOB]... [--element NAME]...
-                  [--supersedes HASH] [--out FILE]
+                  [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
 loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
 loadout-spec show HASH [--chain]
 ```
@@ -3719,6 +3719,8 @@ The published contract is `schemas/spec.schema.json`
 | `rulings_already_made` | Decisions the build must not reopen. | authored |
 | `profile_completeness` | `{source, note, items}`: one line per thing the repo profile is missing or has wrong. | the repo profile |
 | `docs_only_justification` | Why no tests are needed because only documentation changed, or `null`. | authored |
+| `remedy` | `{source, note, items}`, optional: one entry per open blocking finding of the reviews a fold round answers. See [Fold rounds](#fold-rounds). | `new --from-review` + authored |
+| `guidance` | `{source, note, tests, classes}`, optional: the builder guidance, the text `loadout-profile brief --role` prints for a build role. | the profile brief |
 
 `new` fills `class_rules` and `test_plan.declared` from the repo profile through the
 same reader `loadout-profile check` uses (the working tree, or `--ref`), by way of
@@ -3757,8 +3759,8 @@ never replaces an existing file.
 `seal` validates the draft (a non-empty `goal`, at least one acceptance criterion, no
 repeated criterion id, no unknown key), binds it to a branch head, stores it as a
 content-addressed artifact under the specs root, and prints one JSON object:
-`spec_hash`, `head_sha`, `role`, `sealed_at`, `supersedes`, `artifact` (the path), and
-`pr_body_copy`. The head is `--head` or, by default, `git rev-parse HEAD` in
+`spec_hash`, `head_sha`, `role`, `sealed_at`, `supersedes`, `artifact` (the path),
+`remedy_undecided` (the ids of remedy entries with no decision) and `pr_body_copy`. The head is `--head` or, by default, `git rev-parse HEAD` in
 `--repo-path`; it must be a full sha (40 or 64 lowercase hex digits).
 
 `show HASH` prints the sealed spec stored under `HASH`, byte for byte, after
@@ -3809,6 +3811,41 @@ The verb binds no caller and mints no credential. The `role` is the author's own
 statement, kept in the sealed record, and the protection is against the verbs, not
 against a process that can write the specs root as the same user (the limit the
 verdict records store documents; the pre-checks sandbox is the control for it).
+
+### Fold rounds
+
+A review that blocks is answered by a fix round. The spec for that round records, before
+the build, what was decided about each blocking finding, and the builder reads it with
+`loadout-spec show HASH`:
+
+1. `loadout-spec new --role ROLE --supersedes PREV --from-review ID [--from-review ID]...
+   --out fold.json`. `PREV` is the spec the round builds on; each `ID` is the comment id of a
+   posted review (the review records are keyed by it). Every open blocking finding of those
+   records becomes an entry of `remedy.items`:
+   `{id, rule, file, line, fingerprint, comment_id, reviewer_text, decision, sites}`.
+   `reviewer_text` holds the reviewer's `defect_class` and `class_fix` as posted and unchecked,
+   apart from the decision. `decision` is `null` and `sites` is `[]`. A finding repeated across
+   the records is listed once.
+2. Edit the draft: set each `decision` to `fix_shared` (fix the class once at the shared
+   primitive), `fix_here` (fix this site only) or `decline`, and list the `sites` to change.
+   Nothing fills a decision.
+3. `loadout-spec seal --file fold.json --head PR_HEAD`: `PR_HEAD` is the head of the pull request
+   under review, any branch head is accepted. Each entry that still has no decision is
+   named on standard error and in `remedy_undecided` of the output; the seal still succeeds
+   (exit 0).
+
+`remedy` is replaced on every `new`: without `--from-review`, or when the records hold no
+open blocking finding, it is empty and `note` says so. A comment id with no review record, or
+one that is not valid, is a warning on standard error naming the id; the draft is still written.
+`guidance` is the text the profile brief prints for a build role, from one definition
+(`merge.guidance_section.builder_guidance`). `show HASH` prints the sealed spec, so the builder
+sees the decisions and the guidance; `show HASH --chain` lists the build spec and each fold spec.
+
+Both sections are optional in the schema, so a spec sealed before they existed still reads.
+No reader of a sealed spec depends on the spec's `head_sha` being the repository's default
+branch: `loadout-review run --spec-hash`, `post --spec-hash` and the merge's interface notice
+read the criteria, scope, justification and dispositions only, and the store files a spec under
+its own `head_sha`.
 
 ### Exit codes
 

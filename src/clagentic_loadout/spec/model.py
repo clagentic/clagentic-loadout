@@ -110,7 +110,74 @@ def new_draft(role: str) -> dict[str, Any]:
         "rulings_already_made": [],
         "profile_completeness": _empty_section(),
         "docs_only_justification": None,
+        "remedy": _empty_section(),
+        "guidance": {"source": None, "note": NO_SOURCE_NOTE, "tests": "", "classes": ""},
     }
+
+
+def remedy_entry(
+    *,
+    finding_id: str,
+    rule: str,
+    file: str,
+    line: int,
+    fingerprint: str | None,
+    comment_id: str,
+    defect_class: str | None,
+    class_fix: str | None,
+) -> dict[str, Any]:
+    """One remedy entry: the finding as a review record holds it, the reviewer's
+    class statements kept apart as reviewer text, and no decision and no sites."""
+    return {
+        "id": finding_id,
+        "rule": rule,
+        "file": file,
+        "line": line,
+        "fingerprint": fingerprint,
+        "comment_id": comment_id,
+        "reviewer_text": {"defect_class": defect_class, "class_fix": class_fix},
+        "decision": None,
+        "sites": [],
+    }
+
+
+def apply_remedy(
+    draft: dict[str, Any],
+    entries: Sequence[dict[str, Any]],
+    *,
+    source: str | None,
+    note: str,
+) -> dict[str, Any]:
+    """*draft* with its remedy section set to *entries* (see remedy_entry), from
+    *source*. Whatever the draft held is replaced: each round's entries come from
+    that round's reviews. With no entries *note* says why the section is empty."""
+    out = copy.deepcopy(draft)
+    out["remedy"] = {
+        "source": source,
+        "note": None if entries else note,
+        "items": [copy.deepcopy(entry) for entry in entries],
+    }
+    return out
+
+
+def apply_guidance(draft: dict[str, Any], guidance: dict[str, str], *, source: str) -> dict[str, Any]:
+    """*draft* with its guidance section set to *guidance* (``tests`` and
+    ``classes`` text), from *source*."""
+    out = copy.deepcopy(draft)
+    out["guidance"] = {
+        "source": source,
+        "note": None,
+        "tests": guidance["tests"],
+        "classes": guidance["classes"],
+    }
+    return out
+
+
+def undecided_remedy(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """The remedy entries of *doc* that carry no decision. A spec with no remedy
+    section (sealed before it existed) has none."""
+    remedy = doc.get("remedy") or {}
+    return [entry for entry in remedy.get("items", []) if entry.get("decision") is None]
 
 
 def apply_brief(
@@ -283,12 +350,16 @@ __all__ = [
     "apply_completeness",
     "apply_consumers",
     "apply_group_rules",
+    "apply_guidance",
+    "apply_remedy",
     "canonical_bytes",
     "draft_from_sealed",
     "hash_bytes",
     "is_spec_hash",
     "new_draft",
     "parse_sealed",
+    "remedy_entry",
     "seal",
+    "undecided_remedy",
     "validate_sealed_doc",
 ]

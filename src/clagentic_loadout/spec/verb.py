@@ -2,7 +2,7 @@
 
   loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
                     [--consumers-file FILE] [--path GLOB]... [--element NAME]...
-                    [--supersedes HASH] [--out FILE]
+                    [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
   loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
   loadout-spec show HASH [--chain]
 
@@ -16,11 +16,21 @@ to replace; an unavailable map leaves the section empty with a note, again witho
 is an ordinary file for the author to edit. With --supersedes it starts from a sealed spec instead, which is the only
 way to change one.
 
+The draft also carries a remedy section and a guidance section. Each --from-review
+COMMENT_ID names a posted review: its review record is read through the review
+records reader and every open blocking finding becomes a remedy entry (id, rule,
+file, line, fingerprint, the reviewer's defect_class and class_fix kept as reviewer
+text, an empty decision of fix_shared, fix_here or decline, and an empty list of
+sites). Without --from-review, or with records that hold no blocking finding, the
+section is empty and says so; a comment id with no usable record is a warning that
+names it. The guidance section is the text the profile brief prints for a build role.
+
 `seal` validates a finished draft, binds it to a branch head (--head, or the head
 of the repository at --repo-path), stores it as a content-addressed artifact under
 the specs root, and prints its hash with the copy to put in the pull request body.
 The copy is the artifact's own bytes. A document that already carries a seal is
-refused: no verb edits a sealed spec in place.
+refused: no verb edits a sealed spec in place. Remedy entries with no decision are
+listed (stderr, and ``remedy_undecided`` in the output) and the seal still succeeds.
 
 `show` prints the sealed spec stored under HASH, byte for byte, after recomputing
 the hash and refusing a file that does not match its name. With --chain it prints
@@ -73,9 +83,12 @@ from clagentic_loadout.review.repo_profile import RepoProfile
 from clagentic_loadout.rules.applying import applying_group_rules, format_rule_item, source_label
 from clagentic_loadout.rules import groups as gr
 from clagentic_loadout.rules.groups import GroupsFileError
+from clagentic_loadout.merge.guidance_section import builder_guidance
 from clagentic_loadout.spec import model
+from clagentic_loadout.spec import remedy as remedy_mod
 from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.verdict_record.record import is_full_sha, utc_timestamp
+from clagentic_loadout.verdict_record.review_record import review_records_root
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -87,6 +100,7 @@ EXIT_REFUSED = 53
 EXIT_PROFILE_INVALID = 54
 EXIT_IO_FAILED = 55
 
+GUIDANCE_SOURCE = "profile brief, build role"
 _MAX_DRAFT_BYTES = 1024 * 1024
 _GIT_TIMEOUT_SECONDS = 10
 
@@ -116,7 +130,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "  loadout-spec new --role some-role --repo-path . --out spec.json\n"
             "  loadout-spec seal --file spec.json --repo-path .\n"
             "  loadout-spec show <64-character spec hash>\n"
-            "  loadout-spec new --role some-role --supersedes <spec hash> --out spec-2.json\n"
+            "  loadout-spec new --role some-role --supersedes <spec hash> --from-review <comment id> --out spec-2.json\n"
             "\n"
             "Exit codes: 0 ok, 1 usage, 3 specs root unusable, 50 no such spec, 51 stored "
             "spec invalid, 52 draft invalid, 53 refused, 54 repo profile invalid, 55 file or "
@@ -186,6 +200,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="HASH",
         help="Start from this sealed spec (same role) and name it in the draft's supersedes.",
+    )
+    new.add_argument(
+        "--from-review",
+        action="append",
+        default=[],
+        metavar="COMMENT_ID",
+        help="The comment id of a posted review: each open blocking finding of its review "
+        "record becomes a remedy entry with an empty decision. A comment id with no usable "
+        "record is a warning and the draft is still written. May be repeated.",
     )
     new.add_argument(
         "--out",
@@ -332,6 +355,32 @@ def _with_consumers(
     )
 
 
+def _with_remedy(
+    draft: dict[str, object], args: argparse.Namespace, config_root: str | Path | None
+) -> dict[str, object]:
+    """*draft* with its remedy section filled from the review records the author
+    named with --from-review: one entry per open blocking finding, no decision.
+    The section is replaced on every draft, so a fold round starts from its own
+    reviews. A record that cannot be used is a warning naming the comment id and
+    never stops the draft."""
+    ids = list(dict.fromkeys(args.from_review))
+    read = remedy_mod.RemedyRead((), (), ())
+    if ids:
+        read = remedy_mod.read_remedy(
+            review_records_root(config_root=config_root),
+            ids,
+            untrusted_roots=_untrusted_roots(args.repo_path),
+        )
+    for warning in read.warnings:
+        print(f"loadout-spec: WARNING -- {warning}", file=sys.stderr)
+    return model.apply_remedy(
+        draft,
+        read.entries,
+        source=remedy_mod.remedy_source(read),
+        note=remedy_mod.remedy_note(ids, read),
+    )
+
+
 def _new(
     args: argparse.Namespace,
     root: Path,
@@ -373,6 +422,8 @@ def _new(
     draft = model.apply_completeness(draft, [item.render() for item in items])
     draft = _with_group_rules(draft, args, snapshot.profile, config_root)
     draft = _with_consumers(draft, args, config_root)
+    draft = _with_remedy(draft, args, config_root)
+    draft = model.apply_guidance(draft, builder_guidance(), source=GUIDANCE_SOURCE)
     text = json.dumps(draft, indent=2) + "\n"
     if args.out is None:
         sys.stdout.write(text)
@@ -439,6 +490,15 @@ def _seal(args: argparse.Namespace, root: Path) -> int:
         path = spec_store.write_sealed(root, sealed, untrusted_roots=untrusted)
     except StoreError as exc:
         raise SpecVerbError(str(exc), _store_error_code(exc)) from exc
+    # Reporting only: an entry with no decision is listed for the author to act
+    # on, and the seal has already succeeded.
+    undecided = model.undecided_remedy(sealed.doc)
+    for entry in undecided:
+        print(
+            f"loadout-spec: remedy entry {entry['id']} ({entry['rule']} at {entry['file']}:"
+            f"{entry['line']}) has no decision; a fold spec records fix_shared, fix_here or decline",
+            file=sys.stderr,
+        )
     print(
         json.dumps(
             {
@@ -448,6 +508,7 @@ def _seal(args: argparse.Namespace, root: Path) -> int:
                 "sealed_at": sealed.doc["sealed_at"],
                 "supersedes": prior_hash,
                 "artifact": str(path),
+                "remedy_undecided": [entry["id"] for entry in undecided],
                 "pr_body_copy": sealed.data.decode("ascii"),
             }
         )

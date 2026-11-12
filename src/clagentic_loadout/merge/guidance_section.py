@@ -104,6 +104,13 @@ def guidance_text(*, repeated: bool) -> str:
     return " ".join(lines)
 
 
+def builder_guidance() -> dict[str, str]:
+    """The guidance a builder is given before it writes: the test rule and the
+    class text. The one definition both the profile brief for a build role and a
+    spec draft read, so the two cannot differ."""
+    return {"tests": TEST_RULE, "classes": guidance_text(repeated=False)}
+
+
 def _single_line(value: Any, where: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{where} must be a non-empty string")
@@ -210,6 +217,7 @@ __all__ = [
     "TEST_REVIEW_RULE",
     "TEST_RULE",
     "TEST_SECTION_TITLE",
+    "builder_guidance",
     "guidance_text",
     "section_lines",
     "file_test_line",

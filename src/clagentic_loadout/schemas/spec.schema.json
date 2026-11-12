@@ -175,6 +175,60 @@
       "type": ["string", "null"],
       "minLength": 1,
       "description": "Why the change needs no tests because it only changes documentation; null when it does not claim that."
+    },
+    "remedy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "items"],
+      "description": "OPTIONAL, additive. One entry per open blocking finding of the posted reviews a fold round answers, copied from the review records when the draft is created, each with a decision for the author of the spec to fill before the spec is sealed. The reviewer's class statements are the reviewer's own text, kept apart from the decision. An absent section is a spec sealed before this section existed.",
+      "properties": {
+        "source": {"type": ["string", "null"], "description": "Where the entries came from; null when no review record was read."},
+        "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "rule", "file", "line", "fingerprint", "comment_id", "reviewer_text", "decision", "sites"],
+            "properties": {
+              "id": {"type": "string", "minLength": 1, "description": "The finding id the review recorded for the open finding."},
+              "rule": {"type": "string", "minLength": 1, "description": "The rule id the finding was raised under."},
+              "file": {"type": "string", "minLength": 1},
+              "line": {"type": "integer"},
+              "fingerprint": {"type": ["string", "null"], "description": "The finding's fingerprint, or null when the record held none."},
+              "comment_id": {"type": "string", "pattern": "^[0-9]{1,20}$", "description": "The comment id of the review record the entry was copied from."},
+              "reviewer_text": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["defect_class", "class_fix"],
+                "description": "The reviewer's own statements, unchecked. Each is null when the review gave none.",
+                "properties": {
+                  "defect_class": {"type": ["string", "null"]},
+                  "class_fix": {"type": ["string", "null"]}
+                }
+              },
+              "decision": {
+                "type": ["string", "null"],
+                "enum": ["fix_shared", "fix_here", "decline", null],
+                "description": "The author's decision: fix at the shared primitive, fix at this site only, or decline. null until decided."
+              },
+              "sites": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "The sites to change, filled with the decision."}
+            }
+          }
+        }
+      }
+    },
+    "guidance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "tests", "classes"],
+      "description": "OPTIONAL, additive. The guidance a builder is given before it writes, copied when the draft is created from the one definition the profile brief for a build role prints.",
+      "properties": {
+        "source": {"type": ["string", "null"]},
+        "note": {"type": ["string", "null"]},
+        "tests": {"type": "string", "description": "The rule on tests."},
+        "classes": {"type": "string", "description": "The rule on fixing a defect class once."}
+      }
     }
   }
 }
