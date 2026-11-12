@@ -977,6 +977,23 @@ class TestLoadPostMergeStepsFromGitSha:
         result = load_post_merge_steps_from_git_sha(tmp_path, second_sha)
         assert result == [{"cmd": "echo hi"}]
 
+        # A config the commit tracks as a symlink yields its target's steps
+        # from the commit's own objects, not the link text and not whatever
+        # the working tree's link points at.
+        _git(["checkout", "main"], cwd=tmp_path)
+        (tmp_path / "real.yaml").write_text(
+            yaml.safe_dump({"merge": {"post_merge_steps": [{"cmd": "via link"}]}}), encoding="utf-8"
+        )
+        config = tmp_path / ".clagentic" / "loadout" / "config.yaml"
+        config.unlink()
+        config.symlink_to("../../real.yaml")
+        _git(["add", "real.yaml", ".clagentic/loadout/config.yaml"], cwd=tmp_path)
+        _git(["commit", "-m", "link"], cwd=tmp_path)
+        linked_sha = _git(["rev-parse", "HEAD"], cwd=tmp_path).stdout.strip()
+        config.unlink()
+        config.symlink_to("/dev/null")
+        assert load_post_merge_steps_from_git_sha(tmp_path, linked_sha) == [{"cmd": "via link"}]
+
     def test_no_config_at_that_commit_returns_none_not_empty_list(self, tmp_path):
         # THE load-bearing distinction: absent-from-git-history is None,
         # never a fabricated [] -- a repo that never commits this file

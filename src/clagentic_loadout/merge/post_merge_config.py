@@ -213,6 +213,10 @@ from pathlib import Path
 
 import yaml
 
+from clagentic_loadout.merge.commit_files import (
+    CommitFileReadError,
+    read_file_at_commit_following_links,
+)
 from clagentic_loadout.merge.config_root import (
     resolve_merge_config_path,
     resolve_merge_config_root,
@@ -681,39 +685,15 @@ def load_post_merge_steps_from_git_sha(
         # via `cat-file -e` (exit code only) rather than parsing `git show`'s
         # own stderr text, so this is locale-independent regardless of
         # LC_ALL/LANG.
-        path_check = subprocess.run(
-            ["git", "cat-file", "-e", f"{merged_sha}:{relative_path}"],
-            capture_output=True,
-            text=True,
-            cwd=str(git_tree_path),
-        )
-        if path_check.returncode != 0:
-            return None
-
-        result = subprocess.run(
-            ["git", "show", f"{merged_sha}:{relative_path}"],
-            capture_output=True,
-            cwd=str(git_tree_path),
-        )
-        if result.returncode != 0:
-            # The path was JUST confirmed present at a JUST-verified commit --
-            # a `git show` failure now is some OTHER genuine error (e.g. a
-            # corrupted object database), never a path-absence result this
-            # function's own `None` contract is reserved for. Fail loud.
-            raise PostMergeConfigError(
-                f"git show {merged_sha}:{relative_path} failed (exit "
-                f"{result.returncode}) in {git_tree_path} after "
-                f"cat-file -e confirmed the path present at that commit: "
-                f"{result.stderr.decode('utf-8', 'replace').strip()[:400]}"
-            )
-        # Bytes, decoded strictly: a blob that is not text is the same loud
-        # config error as a malformed one, never an uncaught UnicodeDecodeError.
+        # A symlink the commit itself tracks here is followed through that
+        # commit's objects only (never the working tree), failing closed on an
+        # absolute link, a link leaving the repository, or a chain over the
+        # shared limit. A blob that is not UTF-8 text, or any git failure, is
+        # the same loud config error as a malformed config.
         try:
-            return result.stdout.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise PostMergeConfigError(
-                f"{merged_sha}:{relative_path} is not valid UTF-8 text in {git_tree_path}: {exc}"
-            ) from exc
+            return read_file_at_commit_following_links(git_tree_path, merged_sha, relative_path)
+        except CommitFileReadError as exc:
+            raise PostMergeConfigError(str(exc)) from exc
 
     content: str | None = None
     source_label = f"{merged_sha}:{config_relative_path}"
