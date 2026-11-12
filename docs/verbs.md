@@ -3066,10 +3066,11 @@ tree, post the merge-completion attestation, or send any task signal.
 #### `--repo-path` binding
 
 Two inputs are read from `--repo-path`'s deployment file and are not content-addressed: the
-gate keys used when the PR base commit has no tracked `gate.yaml`, and `post_merge_steps` (the
-commands the verb then runs). The tracked `gate.yaml` is read at the base commit and needs no
-binding. Before either input is taken from the tree, the verb confirms that the tree is a clone
-of `--repo` on the platform's configured host:
+gate keys used when the PR base commit has no tracked `gate.yaml` (and the deployment
+`config.yaml` is not tracked there, see below), and `post_merge_steps` (the commands the verb
+then runs). The tracked `gate.yaml` is read at the base commit and needs no binding. Before
+either input is taken from the tree, the verb confirms that the tree is a clone of `--repo` on
+the platform's configured host:
 
 - `origin` is read **once**, at the git top-level of `--repo-path` itself, and parsed with an anchored parser (`https://`, `http://`,
   `ssh://`, or scp-like `user@host:owner/name`). The tracking remote of the current branch is
@@ -3143,6 +3144,31 @@ fallback gate, the keys are not used and the merge is refused through the same p
 unreadable gate (`pre_checks_error`, which `--skip-pre-checks` bypasses without reading the
 foreign file). An absent `--repo-path` is unchanged. `loadout-post-merge` applies the same check
 after it confirms the PR is merged and before it advances or checks out anything.
+
+**Fallback gate keys and a tracked `config.yaml`.** When the PR base commit has no tracked
+`gate.yaml`, the gate keys come from the deployment `config.yaml`. If that file is **tracked at
+the base commit** (its path inside the git tree exists there), a PR could change it, so the keys
+are read from the base commit and the working-tree copy is never used; no origin binding applies
+to a base read. A working-tree copy whose gate keys differ from base's is not used and earns one
+warning naming the file and the base commit. A text at base that is not UTF-8, not YAML, or has a
+non-mapping `merge:` section fails like a tracked `gate.yaml` would (`pre_checks` refuse; the
+reviewer roles and scanners fall back as a pair with a warning). A `config.yaml` that is
+gitignored or untracked, or that sits above the git tree, is read from the working tree as
+before and the notice says "untracked deployment config.yaml". Neither case is refused; both
+notices point at moving the keys to `gate.yaml`.
+
+**Gate-source line.** Every `loadout-merge` run prints exactly one line on stderr naming where
+the gate came from:
+
+```text
+merge: gate read from .clagentic/loadout/gate.yaml at <sha12>
+merge: gate read from .clagentic/loadout/config.yaml at <sha12> (tracked config fallback; no tracked gate.yaml)
+merge: gate read from untracked deployment config.yaml at <path> (fallback)
+merge: no gate declared
+```
+
+A gate that could not be read prints `merge: gate could not be read (see the warnings and errors
+reported with it)` instead. `<sha12>` is the first 12 characters of the base commit.
 
 ### `loadout-close-pr` — close a PR WITHOUT merging it
 
