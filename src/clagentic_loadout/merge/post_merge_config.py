@@ -213,11 +213,16 @@ from pathlib import Path
 
 import yaml
 
+from clagentic_loadout.merge.commit_files import (
+    CommitFileReadError,
+    read_blob_at_commit,
+)
 from clagentic_loadout.merge.config_root import (
     resolve_merge_config_path,
     resolve_merge_config_root,
 )
 from clagentic_loadout.merge.post_merge import PostMergeConfigError, validate_post_merge_steps
+from clagentic_loadout.merge.tree_paths import lexical_tree_relative_path
 from clagentic_loadout.numeric_validation import is_finite_positive_number
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
@@ -521,19 +526,13 @@ def resolve_git_tree_relative_config_paths(
         config_relative_path=config_relative_path,
         legacy_relative_path=legacy_relative_path,
     ).resolve()
-    git_tree_resolved = Path(git_tree_path).resolve()
 
     def _relative_or_none(relative_path: str) -> str | None:
-        candidate = (config_root / relative_path).resolve()
-        if candidate != git_tree_resolved and git_tree_resolved not in candidate.parents:
-            # Correct direction check for THIS use (contrast
-            # resolve_git_working_tree's own escape check, which asks
-            # whether a DECLARED subdirectory stays within its config root):
-            # here we ask whether the config file sits AT OR BENEATH the git
-            # tree -- git show can only ever resolve a path inside the
-            # repository `git_tree_path` names.
-            return None
-        return candidate.relative_to(git_tree_resolved).as_posix()
+        # Lexical, never a resolve() of the config file: a working-tree symlink
+        # in its place must not change which committed path the git read names.
+        # None when the file sits outside the tree -- git show can only ever
+        # resolve a path inside the repository `git_tree_path` names.
+        return lexical_tree_relative_path(config_root / relative_path, git_tree_path)
 
     return (
         _relative_or_none(config_relative_path),
@@ -686,39 +685,13 @@ def load_post_merge_steps_from_git_sha(
         # via `cat-file -e` (exit code only) rather than parsing `git show`'s
         # own stderr text, so this is locale-independent regardless of
         # LC_ALL/LANG.
-        path_check = subprocess.run(
-            ["git", "cat-file", "-e", f"{merged_sha}:{relative_path}"],
-            capture_output=True,
-            text=True,
-            cwd=str(git_tree_path),
-        )
-        if path_check.returncode != 0:
-            return None
-
-        result = subprocess.run(
-            ["git", "show", f"{merged_sha}:{relative_path}"],
-            capture_output=True,
-            cwd=str(git_tree_path),
-        )
-        if result.returncode != 0:
-            # The path was JUST confirmed present at a JUST-verified commit --
-            # a `git show` failure now is some OTHER genuine error (e.g. a
-            # corrupted object database), never a path-absence result this
-            # function's own `None` contract is reserved for. Fail loud.
-            raise PostMergeConfigError(
-                f"git show {merged_sha}:{relative_path} failed (exit "
-                f"{result.returncode}) in {git_tree_path} after "
-                f"cat-file -e confirmed the path present at that commit: "
-                f"{result.stderr.decode('utf-8', 'replace').strip()[:400]}"
-            )
-        # Bytes, decoded strictly: a blob that is not text is the same loud
-        # config error as a malformed one, never an uncaught UnicodeDecodeError.
+        # An entry the commit tracks here that is not a regular blob (a symlink,
+        # a gitlink) is never followed: it is a config error, like a blob that is
+        # not UTF-8 text or any git failure.
         try:
-            return result.stdout.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise PostMergeConfigError(
-                f"{merged_sha}:{relative_path} is not valid UTF-8 text in {git_tree_path}: {exc}"
-            ) from exc
+            return read_blob_at_commit(git_tree_path, merged_sha, relative_path)
+        except CommitFileReadError as exc:
+            raise PostMergeConfigError(str(exc)) from exc
 
     content: str | None = None
     source_label = f"{merged_sha}:{config_relative_path}"

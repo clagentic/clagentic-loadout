@@ -37,7 +37,7 @@ from tests._support.fakes import FakeResponse
 
 HOST = "git-host.example.test"
 SLUG = "some-owner/some-repo"
-FALLBACK_NOTICE = "gate keys read from deployment config.yaml"
+FALLBACK_NOTICE = "gate keys read from untracked deployment config.yaml"
 GATE = {"required_reviewer_roles": ["reviewer"]}
 STEPS = {"post_merge_steps": [{"cmd": "true"}]}
 

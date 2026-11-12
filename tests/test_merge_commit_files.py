@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import pytest
 
-from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
+from clagentic_loadout.merge.commit_files import (
+    CommitFileReadError,
+    read_file_at_commit,
+)
 from clagentic_loadout.merge.tree_sync import resolve_base_sha
 from tests._gate_repo import commit_files, git
 

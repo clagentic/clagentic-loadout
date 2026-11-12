@@ -704,7 +704,7 @@ class TestTheGateComesFromBaseNotTheWorkingTree:
         code, err = _merge([_comment(1, _fence("clean", HEAD_B))], repo_path=tmp_path, capsys=capsys)
         assert code == verb.EXIT_GATE_RESULT_BLOCKED
         assert "never-posts" in err
-        assert "gate keys read from deployment config.yaml; no tracked gate.yaml at base" in err
+        assert "gate keys read from untracked deployment config.yaml" in err
         assert "IGNORED" not in err
 
     def test_an_unresolvable_deployment_role_degrades_per_role_like_a_tracked_one(

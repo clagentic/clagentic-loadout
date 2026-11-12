@@ -955,13 +955,18 @@ def _repo_gate_findings(repo_root_path: Path) -> _GateFindings:
         role_resolution = _role_resolution_report(declared_roles, platform)
         gate = with_resolvable_reviewer_roles(gate, platform)
 
-    errors = [f"merge (gate declaration): {warning}" for warning in gate.warnings if warning not in ignored]
+    advisory = gate.advisory_warnings
+    errors = [
+        f"merge (gate declaration): {warning}"
+        for warning in gate.warnings
+        if warning not in ignored and warning not in advisory
+    ]
     if gate.pre_checks_error:
         errors.append(f"merge (gate declaration): {gate.pre_checks_error}")
     return _GateFindings(
         declared_roles=declared_roles,
         errors=tuple(errors),
-        warnings=(*(w for w in gate.warnings if w in ignored), *notices),
+        warnings=(*(w for w in gate.warnings if w in ignored or w in advisory), *notices),
         role_resolution=role_resolution,
     )
 

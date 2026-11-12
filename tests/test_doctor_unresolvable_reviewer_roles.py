@@ -137,7 +137,7 @@ def test_roles_only_in_the_deployment_file_are_judged_as_the_fallback_gate(tmp_p
     repo = _repo(tmp_path, deployment_yaml="merge:\n  required_reviewer_roles: [reviewer]\n")
     result = check_repo_loadout_schema(repo)
     assert "IGNORED" not in result.summary
-    assert "gate keys read from deployment config.yaml; no tracked gate.yaml at base" in result.summary
+    assert "gate keys read from untracked deployment config.yaml" in result.summary
     assert "'reviewer'" in result.summary and "DROPPED" in result.summary
     assert result.ok is False
 

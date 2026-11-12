@@ -371,7 +371,7 @@ class TestUnmigratedRepoReadsTheDeploymentConfig:
         repo = self._unmigrated(tmp_path, [{"cmd": [_PY, "-c", "pass"]}])
         assert _merge(repo) == verb.EXIT_OK
         err = capsys.readouterr().err
-        assert err.count("gate keys read from deployment config.yaml; no tracked gate.yaml at base") == 1
+        assert err.count("gate keys read from untracked deployment config.yaml") == 1
         assert "is recommended" in err and TRACKED_GATE_RELATIVE_PATH in err
         assert "IGNORED" not in err
 
