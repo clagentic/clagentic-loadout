@@ -2100,8 +2100,10 @@ and one stderr line names both SHAs (checkout HEAD and PR head). If the PR head 
 read, verification is skipped the same way (never run against an unconfirmed SHA). Commit
 SHAs may be 40-hex (SHA-1) or 64-hex (SHA-256 object format). On `--update-pr` a checkout
 with uncommitted changes (tracked, staged or unstaged, or untracked non-ignored files) is
-treated the same way: nothing runs, no section is appended, and one stderr line names the
-number of dirty paths. The create path is unchanged by this gate. With no
+treated the same way: nothing runs, no section is appended, and one stderr line gives the
+number of dirty entries as `git status --short` shows them (an untracked directory is one
+entry), labels the tree `untracked-only` when every entry is untracked, and lists the first
+five entries with an `and M more` tail. The create path is unchanged by this gate. With no
 body supplied, the `## Verification` section (or the skip notice) is still written: it is
 appended to the PR's existing body, never replacing it, whatever body-mode flag was given.
 A metadata-only update provably without new commits skips, and it says so on stderr.
