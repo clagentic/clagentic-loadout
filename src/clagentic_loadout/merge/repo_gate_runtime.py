@@ -117,7 +117,11 @@ from pathlib import Path
 from typing import Iterable
 
 from clagentic_loadout.git_origin import ConfigTreeBinding, OriginBindingError
-from clagentic_loadout.merge.commit_files import CommitFileReadError, read_file_at_commit
+from clagentic_loadout.merge.commit_files import (
+    CommitFileReadError,
+    read_file_at_commit,
+    read_file_at_commit_following_links,
+)
 from clagentic_loadout.merge.config_root import MergeConfigRootRefusedError, resolve_merge_config_path
 from clagentic_loadout.merge.fetch_transport import MergeFetchAuth, MergeFetchDeniedError
 from clagentic_loadout.merge.gate_config import (
@@ -147,6 +151,7 @@ from clagentic_loadout.merge.reviewer_login import (
     ReviewerLoginNotConfiguredError,
     renamed_declared_role,
 )
+from clagentic_loadout.merge.tree_paths import lexical_tree_relative_path
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, find_git_top_level
 
 #: Keys that belong to the tracked gate file and are never honoured from the
@@ -477,16 +482,6 @@ def gate_from_deployment_config(
     )
 
 
-def _tree_relative_path(config_path: Path, git_tree: Path) -> str | None:
-    """*config_path* relative to *git_tree* as a git path, or None when the file
-    is not inside that tree (a wrapper config above it)."""
-    try:
-        relative = config_path.resolve().relative_to(git_tree.resolve())
-    except ValueError:
-        return None
-    return relative.as_posix()
-
-
 def _gate_keys_of(text: str, source: str) -> dict | None:
     """The gate keys a config text declares, or None when it cannot be parsed."""
     try:
@@ -505,13 +500,13 @@ def _gate_from_config_at_base(config_path: Path, base: BaseRead) -> RepoGate | N
     has a non-mapping `merge:` section fails exactly as a tracked gate file's
     would.
     """
-    relative = _tree_relative_path(config_path, base.git_tree)
+    relative = lexical_tree_relative_path(config_path, base.git_tree)
     if relative is None:
         return None
     sha12 = base.sha[:12]
     source = f"{base.git_tree.resolve()}@{sha12}:{relative}"
     try:
-        text = read_file_at_commit(
+        text = read_file_at_commit_following_links(
             base.git_tree, base.sha, relative, base_branch=base.base_branch, fetch_auth=base.fetch_auth
         )
     except MergeFetchDeniedError:
@@ -523,8 +518,11 @@ def _gate_from_config_at_base(config_path: Path, base: BaseRead) -> RepoGate | N
 
     advisory: tuple[str, ...] = ()
     base_keys = _gate_keys_of(text, source)
+    # Advisory comparison only: the gate never comes from this copy. A regular
+    # file is required so a working-tree symlink to a device or pipe cannot stall
+    # the read.
     try:
-        working_text = config_path.read_text(encoding="utf-8")
+        working_text = config_path.read_text(encoding="utf-8") if config_path.is_file() else None
     except (OSError, UnicodeDecodeError):
         working_text = None
     working_keys = None if working_text is None else _gate_keys_of(working_text, str(config_path))

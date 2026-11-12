@@ -218,6 +218,7 @@ from clagentic_loadout.merge.config_root import (
     resolve_merge_config_root,
 )
 from clagentic_loadout.merge.post_merge import PostMergeConfigError, validate_post_merge_steps
+from clagentic_loadout.merge.tree_paths import lexical_tree_relative_path
 from clagentic_loadout.numeric_validation import is_finite_positive_number
 from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
@@ -521,19 +522,13 @@ def resolve_git_tree_relative_config_paths(
         config_relative_path=config_relative_path,
         legacy_relative_path=legacy_relative_path,
     ).resolve()
-    git_tree_resolved = Path(git_tree_path).resolve()
 
     def _relative_or_none(relative_path: str) -> str | None:
-        candidate = (config_root / relative_path).resolve()
-        if candidate != git_tree_resolved and git_tree_resolved not in candidate.parents:
-            # Correct direction check for THIS use (contrast
-            # resolve_git_working_tree's own escape check, which asks
-            # whether a DECLARED subdirectory stays within its config root):
-            # here we ask whether the config file sits AT OR BENEATH the git
-            # tree -- git show can only ever resolve a path inside the
-            # repository `git_tree_path` names.
-            return None
-        return candidate.relative_to(git_tree_resolved).as_posix()
+        # Lexical, never a resolve() of the config file: a working-tree symlink
+        # in its place must not change which committed path the git read names.
+        # None when the file sits outside the tree -- git show can only ever
+        # resolve a path inside the repository `git_tree_path` names.
+        return lexical_tree_relative_path(config_root / relative_path, git_tree_path)
 
     return (
         _relative_or_none(config_relative_path),
