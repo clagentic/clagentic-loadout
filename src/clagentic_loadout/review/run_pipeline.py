@@ -26,7 +26,7 @@ import re
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,7 +53,13 @@ from clagentic_loadout.review.delta import (
     render_delta_note,
     reviewer_resolved_positions,
 )
-from clagentic_loadout.merge.fence_state import KEY_VERDICT_OUTCOME, KEY_VERDICT_REASONS
+from clagentic_loadout.merge.fence_state import (
+    KEY_PASSES_TOTAL,
+    KEY_STABILITY,
+    KEY_STABLE,
+    KEY_VERDICT_OUTCOME,
+    KEY_VERDICT_REASONS,
+)
 from clagentic_loadout.review.docs_only_review import (
     ChangesetInput,
     render_justification_note,
@@ -68,8 +74,9 @@ from clagentic_loadout.review.evaluation import (
     verdict_document_fields,
 )
 from clagentic_loadout.review.finding_identity import with_fingerprints
-from clagentic_loadout.review.findings_contract import merge_findings
+from clagentic_loadout.review.findings_contract import finding_key, merge_findings
 from clagentic_loadout.review.class_guidance import without_class_keys
+from clagentic_loadout.review.pass_union import KEY_PASS_CHUNKS, union_passes
 from clagentic_loadout.review.profile_config import ReviewProfile
 from clagentic_loadout.review.profile_rules import (
     chunk_class_rules,
@@ -186,7 +193,11 @@ def _resume_key(
     delta_note: str = "",
     class_rules: str = "",
     docs_note: str = "",
+    pass_index: int = 0,
 ) -> str:
+    """The resume key of one pass. Pass 0 is keyed exactly as the single pass
+    always was, so a cache built before passes existed stays valid; every later
+    pass adds its index, so it samples on its own instead of replaying pass 0."""
     digest = hashlib.sha256()
     for part in (
         PIPELINE_VERSION,
@@ -200,6 +211,7 @@ def _resume_key(
         profile.rulebook_text,
         str(profile.chunk_lines),
         str(profile.defect_class),
+        *((f"pass-{pass_index}",) if pass_index else ()),
     ):
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
@@ -316,10 +328,11 @@ def _stage_note(record: dict[str, Any]) -> str | None:
     return context
 
 
-def _engine_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
-    """Which engine answered how many chunks, and why the carrier did not."""
+def _engine_summary(records: Iterable[dict[str, Any]]) -> dict[str, Any]:
+    """Which engine answered how many chunks (of every pass), and why the
+    carrier did not."""
     summary: dict[str, Any] = {"engines": {}}
-    for record in records.values():
+    for record in records:
         engine = record.get("engine")
         summary["engines"][engine] = summary["engines"].get(engine, 0) + 1
         reason = record.get("carrier_unavailable_reason")
@@ -351,10 +364,6 @@ def _class_rules_summary(records: dict[int, dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _finding_key(finding: dict[str, Any]) -> tuple[Any, ...]:
-    return (finding["file"], finding["line"], finding["rule_id"], finding["message"])
-
-
 def _mark_prior_locations(
     findings: list[dict[str, Any]], kept: list[tuple[dict[str, Any], dict[str, Any]]]
 ) -> None:
@@ -363,26 +372,32 @@ def _mark_prior_locations(
     copies that state different facts are all kept until the evaluator decides
     which one stands."""
     for prior, reported in kept:
-        key = _finding_key(reported)
+        key = finding_key(reported)
         for finding in findings:
-            if _finding_key(finding) == key:
+            if finding_key(finding) == key:
                 finding[KEY_PRIOR_LINE] = prior["line"]
 
 
-def _notice_ignored_severity(records: dict[int, dict[str, Any]]) -> None:
+def _pass_prefix(pass_index: int) -> str:
+    """The name prefix of a pass's stages and notices; none for the first pass,
+    so a single-pass run names everything as it always did."""
+    return "" if pass_index == 0 else f"pass-{pass_index}-"
+
+
+def _notice_ignored_severity(records: dict[int, dict[str, Any]], prefix: str = "") -> None:
     """Say on stderr, once per chunk, that a reply carried a severity that was
     discarded. An older rulebook still asks for one; the run is not affected."""
     for index, record in sorted(records.items()):
         ignored = record.get("ignored_severity")
         if isinstance(ignored, int) and not isinstance(ignored, bool) and ignored > 0:
             print(
-                f"loadout-review: notice: chunk {index}: {ignored} finding(s) carried a "
+                f"loadout-review: notice: {prefix}chunk {index}: {ignored} finding(s) carried a "
                 "severity that is ignored; severity is computed from the stated facts",
                 file=sys.stderr,
             )
 
 
-def _notice_reply_problems(records: dict[int, dict[str, Any]]) -> None:
+def _notice_reply_problems(records: dict[int, dict[str, Any]], prefix: str = "") -> None:
     """Say on stderr which reply slips were repaired in place, per chunk."""
     for index, record in sorted(records.items()):
         problems = record.get("reply_problems")
@@ -390,7 +405,25 @@ def _notice_reply_problems(records: dict[int, dict[str, Any]]) -> None:
             continue
         for problem in problems:
             if isinstance(problem, str):
-                print(f"loadout-review: notice: chunk {index}: {problem}", file=sys.stderr)
+                print(f"loadout-review: notice: {prefix}chunk {index}: {problem}", file=sys.stderr)
+
+
+def _pass_chunk_entries(pass_records: list[dict[int, dict[str, Any]]]) -> list[dict[str, Any]]:
+    """The findings document's record of every chunk of every pass after the
+    first: which pass, and which engine answered (what engines_of reads)."""
+    return [
+        {"pass": pass_index}
+        | {
+            key: record.get(key)
+            for key in (
+                "index", "engine", "engine_label", "nonce", "attempts", "exit_code",
+                "carrier_unavailable_reason", "carrier_failure",
+            )
+        }
+        for pass_index, pass_chunks in enumerate(pass_records)
+        if pass_index > 0
+        for record in (pass_chunks[index] for index in sorted(pass_chunks))
+    ]
 
 
 def _resolved_ids_of(record: dict[str, Any]) -> list[str]:
@@ -438,6 +471,205 @@ def unusable_acquire_outcome(acquired: AcquiredPr, *, emit: StageEmitter) -> Run
         f"characters (base={acquired.base_sha!r}, head={acquired.head_sha!r})",
         [{"stage": "acquired", "status": "failed", "reason": REASON_ACQUIRE_INVALID}],
     )
+
+
+@dataclass(frozen=True)
+class _PassPlan:
+    """What every pass of one review shares: the chunks, the profile and the
+    prompt inputs the resume key binds."""
+
+    chunks: list[Chunk]
+    profile: ReviewProfile
+    run_dir: Path
+    head_sha: str
+    runner: Runner
+    delta_notes: dict[int, str]
+    class_rules: dict[int, str]
+    class_rules_sent: dict[int, Any]
+    docs_note: str
+    resume_note: str
+    resume_rules: str
+
+
+def _run_pass(
+    plan: _PassPlan, pass_index: int, stage: StageEmitter, stages: list[dict[str, Any]]
+) -> dict[int, dict[str, Any]] | RunOutcome:
+    """Review every chunk once, as pass *pass_index*, resuming what an earlier
+    invocation finished. Returns the pass's chunk records when every chunk is ok;
+    otherwise the outcome that ends the run (blocked, or resume). Each pass keeps
+    its own state directory under the run directory, keyed by _resume_key, so a
+    later pass samples on its own and never reads an earlier pass's answers."""
+    chunks, profile, run_dir = plan.chunks, plan.profile, plan.run_dir
+    prefix = _pass_prefix(pass_index)
+    key = _resume_key(
+        chunks, profile, plan.head_sha, plan.resume_note, plan.resume_rules, plan.docs_note,
+        pass_index=pass_index,
+    )
+    state_dir = run_dir / f"state-{key}"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        # Reported once, as the stage's only status: "chunked" is not
+        # announced ok until its state directory exists.
+        stage(f"{prefix}chunked", "failed", reason=REASON_RUN_DIR_UNWRITABLE)
+        return _blocked(
+            f"{prefix}chunked",
+            REASON_RUN_DIR_UNWRITABLE,
+            f"cannot create {str(state_dir)!r}: {exc}",
+            stages,
+        )
+    stage(f"{prefix}chunked", "ok", chunk_count=len(chunks))
+
+    records: dict[int, dict[str, Any]] = {}
+    pending: list[Chunk] = []
+    # Chunks whose persisted failure is terminal or exhausted start over with
+    # a fresh attempt budget: only an exit-10 sequence carries counts forward.
+    fresh_budget: set[int] = set()
+    for chunk in chunks:
+        existing = _load_record(state_dir, chunk.index)
+        if existing is not None and existing.get("status") == STATUS_OK:
+            # The resume key binds the exact section text, so a reused record was
+            # produced under the section computed now. A record written before
+            # the evidence field existed carries none; it takes the current value
+            # rather than reporting that no section was sent.
+            if KEY_CLASS_RULES not in existing and plan.class_rules_sent[chunk.index] is not None:
+                existing[KEY_CLASS_RULES] = plan.class_rules_sent[chunk.index]
+                try:
+                    _write_json(_result_path(state_dir, chunk.index), existing)
+                except OSError as exc:
+                    # The in-memory value still serves this run's outputs.
+                    print(
+                        f"loadout-review: notice: {prefix}chunk {chunk.index}: cannot persist the "
+                        f"class rules evidence: {exc}",
+                        file=sys.stderr,
+                    )
+            records[chunk.index] = existing
+            stage(
+                f"{prefix}chunk-{chunk.index}",
+                _stage_status(existing),
+                resumed="yes",
+                nonce=existing.get("nonce"),
+            )
+        else:
+            if existing is not None and _is_terminal(existing, profile.max_attempts):
+                fresh_budget.add(chunk.index)
+            pending.append(chunk)
+
+    # Kept beside the chunk results so a resume of this exact run reuses it;
+    # every terminal outcome below clears it so a fresh run starts clean.
+    breaker = EngineBreaker(state_dir / BREAKER_FILENAME)
+
+    def work(chunk: Chunk) -> dict[str, Any]:
+        previous = _load_record(state_dir, chunk.index) or {}
+        try:
+            chunk_cwd = fresh_chunk_workdir()
+        except OSError as exc:
+            # Persisted through the same write below as any other attempt
+            # outcome, so the attempt count and retriable=false survive a resume.
+            record = {
+                "index": chunk.index,
+                "files": list(chunk.files),
+                "attempts": _attempts(previous) + 1,
+                "status": STATUS_FAILED,
+                "retriable": False,
+                "reason": REASON_RUN_DIR_UNWRITABLE,
+                "detail": f"cannot create the chunk working directory: {exc}",
+            }
+        else:
+            try:
+                record = review_chunk(
+                    chunk,
+                    len(chunks),
+                    profile,
+                    attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
+                    cwd=chunk_cwd,
+                    log_dir=run_dir / CARRIER_LOG_DIRNAME,
+                    runner=plan.runner,
+                    delta_note=plan.delta_notes.get(chunk.index, ""),
+                    breaker=breaker,
+                    class_rules=plan.class_rules[chunk.index],
+                    docs_note=plan.docs_note,
+                )
+            finally:
+                discard_chunk_workdir(chunk_cwd)
+            # Both engines are handed the one prompt, so this holds whichever
+            # answered. Stamped here, where the policy is in hand.
+            if plan.class_rules_sent[chunk.index] is not None:
+                record[KEY_CLASS_RULES] = plan.class_rules_sent[chunk.index]
+        try:
+            _write_json(_result_path(state_dir, chunk.index), record)
+        except OSError as exc:
+            return {
+                **record,
+                "status": STATUS_FAILED,
+                "retriable": False,
+                "reason": REASON_RUN_DIR_UNWRITABLE,
+                "detail": f"cannot persist the chunk result: {exc}",
+            }
+        return record
+
+    if pending:
+        workers = max(1, min(profile.parallel, len(pending)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for chunk, record in zip(pending, pool.map(work, pending)):
+                records[chunk.index] = record
+                stage(
+                    f"{prefix}chunk-{chunk.index}",
+                    _stage_status(record),
+                    nonce=record.get("nonce"),
+                    attempts=record.get("attempts"),
+                    reason=record.get("reason"),
+                    engine=record.get("engine"),
+                    note=_stage_note(record),
+                )
+
+    blocking = [
+        (index, r) for index, r in sorted(records.items())
+        if _is_terminal(r, profile.max_attempts)
+    ]
+    unfinished = sorted(
+        index for index in (c.index for c in chunks)
+        if records.get(index, {}).get("status") != STATUS_OK
+    )
+    if blocking or not unfinished:
+        breaker.clear()
+    if blocking:
+        first_index, first = blocking[0]
+        exhausted = _is_exhausted(first, profile.max_attempts)
+        detail = first.get("detail", "")
+        if exhausted:
+            detail = f"retries exhausted after {first.get('attempts')} attempts: {detail}"
+        _discard_unfinished(state_dir, records)
+        return _blocked(
+            f"{prefix}chunk-{first_index}",
+            first.get("reason", "CHUNK_FAILED"),
+            detail,
+            stages,
+            engine=first.get("engine"),
+            reply_excerpt=first.get("reply_excerpt"),
+            stderr_excerpt=first.get("stderr_excerpt"),
+            stderr_last_line=first.get("stderr_last_line"),
+            stderr_file=first.get("stderr_file"),
+            carrier_stderr_file=first.get("carrier_stderr_file"),
+            fallback_stderr_file=first.get("fallback_stderr_file"),
+            carrier_failure=first.get("carrier_failure"),
+            carrier_unavailable_reason=first.get("carrier_unavailable_reason"),
+            run_dir=str(run_dir),
+        )
+
+    if unfinished:
+        return RunOutcome(
+            EXIT_RESUME,
+            RESULT_RESUME,
+            {
+                "result": RESULT_RESUME,
+                "pending_chunks": unfinished,
+                "action": "run the identical command again; finished chunks are cached",
+                "run_dir": str(run_dir),
+            },
+            stages,
+        )
+    return records
 
 
 def run_review(
@@ -519,175 +751,42 @@ def run_review(
         chunk.index: class_rules_evidence(policy, chunk, class_rules[chunk.index])
         for chunk in chunks
     }
-    resume_note = "\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else ""
-    resume_rules = "\0".join(class_rules[chunk.index] for chunk in chunks)
-    state_dir = (
-        run_dir
-        / f"state-{_resume_key(chunks, profile, acquired.head_sha, resume_note, resume_rules, docs_note)}"
+    plan = _PassPlan(
+        chunks=chunks,
+        profile=profile,
+        run_dir=run_dir,
+        head_sha=acquired.head_sha,
+        runner=runner,
+        delta_notes=delta_notes,
+        class_rules=class_rules,
+        class_rules_sent=class_rules_sent,
+        docs_note=docs_note,
+        resume_note="\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else "",
+        resume_rules="\0".join(class_rules[chunk.index] for chunk in chunks),
     )
-    try:
-        state_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        # Reported once, as the stage's only status: "chunked" is not
-        # announced ok until its state directory exists.
-        stage("chunked", "failed", reason=REASON_RUN_DIR_UNWRITABLE)
-        return _blocked(
-            "chunked", REASON_RUN_DIR_UNWRITABLE, f"cannot create {str(state_dir)!r}: {exc}", stages
-        )
-    stage("chunked", "ok", chunk_count=len(chunks))
+    # A delta review accounts for the findings a prior review left open, which is
+    # one judgment of one pass; the passes are for a full review.
+    passes = profile.passes if delta is None else 1
+    pass_records: list[dict[int, dict[str, Any]]] = []
+    for pass_index in range(passes):
+        ran = _run_pass(plan, pass_index, stage, stages)
+        if isinstance(ran, RunOutcome):
+            return ran
+        pass_records.append(ran)
+    records = pass_records[0]
 
-    records: dict[int, dict[str, Any]] = {}
-    pending: list[Chunk] = []
-    # Chunks whose persisted failure is terminal or exhausted start over with
-    # a fresh attempt budget: only an exit-10 sequence carries counts forward.
-    fresh_budget: set[int] = set()
-    for chunk in chunks:
-        existing = _load_record(state_dir, chunk.index)
-        if existing is not None and existing.get("status") == STATUS_OK:
-            # The resume key binds the exact section text, so a reused record was
-            # produced under the section computed now. A record written before
-            # the evidence field existed carries none; it takes the current value
-            # rather than reporting that no section was sent.
-            if KEY_CLASS_RULES not in existing and class_rules_sent[chunk.index] is not None:
-                existing[KEY_CLASS_RULES] = class_rules_sent[chunk.index]
-                try:
-                    _write_json(_result_path(state_dir, chunk.index), existing)
-                except OSError as exc:
-                    # The in-memory value still serves this run's outputs.
-                    print(
-                        f"loadout-review: notice: chunk {chunk.index}: cannot persist the "
-                        f"class rules evidence: {exc}",
-                        file=sys.stderr,
-                    )
-            records[chunk.index] = existing
-            stage(f"chunk-{chunk.index}", _stage_status(existing), resumed="yes", nonce=existing.get("nonce"))
-        else:
-            if existing is not None and _is_terminal(existing, profile.max_attempts):
-                fresh_budget.add(chunk.index)
-            pending.append(chunk)
-
-    # Kept beside the chunk results so a resume of this exact run reuses it;
-    # every terminal outcome below clears it so a fresh run starts clean.
-    breaker = EngineBreaker(state_dir / BREAKER_FILENAME)
-
-    def work(chunk: Chunk) -> dict[str, Any]:
-        previous = _load_record(state_dir, chunk.index) or {}
-        try:
-            chunk_cwd = fresh_chunk_workdir()
-        except OSError as exc:
-            # Persisted through the same write below as any other attempt
-            # outcome, so the attempt count and retriable=false survive a resume.
-            record = {
-                "index": chunk.index,
-                "files": list(chunk.files),
-                "attempts": _attempts(previous) + 1,
-                "status": STATUS_FAILED,
-                "retriable": False,
-                "reason": REASON_RUN_DIR_UNWRITABLE,
-                "detail": f"cannot create the chunk working directory: {exc}",
-            }
-        else:
-            try:
-                record = review_chunk(
-                    chunk,
-                    len(chunks),
-                    profile,
-                    attempts_before=0 if chunk.index in fresh_budget else _attempts(previous),
-                    cwd=chunk_cwd,
-                    log_dir=run_dir / CARRIER_LOG_DIRNAME,
-                    runner=runner,
-                    delta_note=delta_notes.get(chunk.index, ""),
-                    breaker=breaker,
-                    class_rules=class_rules[chunk.index],
-                    docs_note=docs_note,
-                )
-            finally:
-                discard_chunk_workdir(chunk_cwd)
-            # Both engines are handed the one prompt, so this holds whichever
-            # answered. Stamped here, where the policy is in hand.
-            if class_rules_sent[chunk.index] is not None:
-                record[KEY_CLASS_RULES] = class_rules_sent[chunk.index]
-        try:
-            _write_json(_result_path(state_dir, chunk.index), record)
-        except OSError as exc:
-            return {
-                **record,
-                "status": STATUS_FAILED,
-                "retriable": False,
-                "reason": REASON_RUN_DIR_UNWRITABLE,
-                "detail": f"cannot persist the chunk result: {exc}",
-            }
-        return record
-
-    if pending:
-        workers = max(1, min(profile.parallel, len(pending)))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            for chunk, record in zip(pending, pool.map(work, pending)):
-                records[chunk.index] = record
-                stage(
-                    f"chunk-{chunk.index}",
-                    _stage_status(record),
-                    nonce=record.get("nonce"),
-                    attempts=record.get("attempts"),
-                    reason=record.get("reason"),
-                    engine=record.get("engine"),
-                    note=_stage_note(record),
-                )
-
-    blocking = [
-        (index, r) for index, r in sorted(records.items())
-        if _is_terminal(r, profile.max_attempts)
-    ]
-    unfinished = sorted(
-        index for index in (c.index for c in chunks)
-        if records.get(index, {}).get("status") != STATUS_OK
-    )
-    if blocking or not unfinished:
-        breaker.clear()
-    if blocking:
-        first_index, first = blocking[0]
-        exhausted = _is_exhausted(first, profile.max_attempts)
-        detail = first.get("detail", "")
-        if exhausted:
-            detail = f"retries exhausted after {first.get('attempts')} attempts: {detail}"
-        _discard_unfinished(state_dir, records)
-        return _blocked(
-            f"chunk-{first_index}",
-            first.get("reason", "CHUNK_FAILED"),
-            detail,
-            stages,
-            engine=first.get("engine"),
-            reply_excerpt=first.get("reply_excerpt"),
-            stderr_excerpt=first.get("stderr_excerpt"),
-            stderr_last_line=first.get("stderr_last_line"),
-            stderr_file=first.get("stderr_file"),
-            carrier_stderr_file=first.get("carrier_stderr_file"),
-            fallback_stderr_file=first.get("fallback_stderr_file"),
-            carrier_failure=first.get("carrier_failure"),
-            carrier_unavailable_reason=first.get("carrier_unavailable_reason"),
-            run_dir=str(run_dir),
-        )
-
-    if unfinished:
-        return RunOutcome(
-            EXIT_RESUME,
-            RESULT_RESUME,
-            {
-                "result": RESULT_RESUME,
-                "pending_chunks": unfinished,
-                "action": "run the identical command again; finished chunks are cached",
-                "run_dir": str(run_dir),
-            },
-            stages,
-        )
-
-    _notice_ignored_severity(records)
-    _notice_reply_problems(records)
+    for pass_index, pass_chunks in enumerate(pass_records):
+        _notice_ignored_severity(pass_chunks, _pass_prefix(pass_index))
+        _notice_reply_problems(pass_chunks, _pass_prefix(pass_index))
     by_index = {chunk.index: chunk for chunk in chunks}
-    per_chunk = [
-        (index, with_fingerprints(record.get("findings", []), by_index[index]))
-        for index, record in sorted(records.items())
+    per_pass = [
+        [
+            (index, with_fingerprints(record.get("findings", []), by_index[index]))
+            for index, record in sorted(pass_chunks.items())
+        ]
+        for pass_chunks in pass_records
     ]
+    per_chunk = per_pass[0]
     carried: list[dict[str, Any]] = []
     kept: list[tuple[dict[str, Any], dict[str, Any]]] = []
     resolved: list[dict[str, Any]] = []
@@ -711,8 +810,16 @@ def run_review(
         per_chunk.append((0, carried + left_open))
     rule_findings = profile_findings(policy, chunks, context.profile_settings)
     if rule_findings:
-        per_chunk.append((0, rule_findings))
-    merged_findings = merge_findings(per_chunk)
+        # Rule findings are read from the diff, not sampled, so every pass has them.
+        for pairs in per_pass:
+            pairs.append((0, rule_findings))
+
+    def blocking_ids(pass_findings: list[dict[str, Any]]) -> frozenset[str]:
+        judged = evaluate_findings(pass_findings, acquired.head_sha, context, policy=policy)
+        return frozenset(item.id for item in judged.blocking)
+
+    union = union_passes(per_pass, blocking_ids)
+    merged_findings = union.findings
     if not profile.defect_class:
         # A prior finding carried forward may state a class from an earlier
         # review; a deployment that states none keeps none.
@@ -759,6 +866,15 @@ def run_review(
             )
             for chunk in chunks
         ],
+        **(
+            {
+                KEY_PASSES_TOTAL: passes,
+                KEY_STABILITY: union.stability,
+                KEY_PASS_CHUNKS: _pass_chunk_entries(pass_records),
+            }
+            if union.stability is not None
+            else {}
+        ),
         **verdict_document_fields(verdict, context),
         "findings": findings,
     }
@@ -796,7 +912,14 @@ def run_review(
                 if unknown_resolutions is not None
                 else {}
             ),
-            **_engine_summary({i: records[i] for i in (c.index for c in chunks)}),
+            **_engine_summary(
+                pass_chunks[i] for pass_chunks in pass_records for i in (c.index for c in chunks)
+            ),
+            **(
+                {KEY_PASSES_TOTAL: passes, KEY_STABLE: union.stability[KEY_STABLE]}
+                if union.stability is not None
+                else {}
+            ),
         },
         stages,
     )

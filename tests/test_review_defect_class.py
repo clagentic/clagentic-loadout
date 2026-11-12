@@ -358,8 +358,8 @@ def _fence_dict(version, **extra):
     }
 
 
-@pytest.mark.parametrize("version", [7, 8])
-def test_the_merge_reader_accepts_fence_versions_7_and_8_without_guidance(version):
+@pytest.mark.parametrize("version", [7, 8, 9])
+def test_the_merge_reader_accepts_fence_versions_7_to_9_without_guidance(version):
     body = "```review-result\n" + json.dumps(_fence_dict(version)) + "\n```\n"
 
     data = parse_verdict_block(body)
@@ -369,15 +369,16 @@ def test_the_merge_reader_accepts_fence_versions_7_and_8_without_guidance(versio
     assert fence_state.raw_mentions_findings_state(body)
 
 
-def test_a_fence_of_version_9_is_still_refused():
-    body = "```review-result\n" + json.dumps(_fence_dict(9)) + "\n```\n"
+def test_a_fence_of_the_next_version_is_still_refused():
+    next_version = max(fence_state.FENCE_SCHEMA_VERSIONS) + 1
+    body = "```review-result\n" + json.dumps(_fence_dict(next_version)) + "\n```\n"
 
     with pytest.raises(VerdictMalformedError):
         parse_verdict_block(body)
 
 
-@pytest.mark.parametrize("version", [7, 8])
-def test_the_churn_ledger_reads_fence_versions_7_and_8(version):
+@pytest.mark.parametrize("version", [7, 8, 9])
+def test_the_churn_ledger_reads_fence_versions_7_to_9(version):
     comment = replace_fence(
         verdict_comment("github", comment_id=11, login="bot", head=HEAD_A, pr_number=5,
                         blocks_on=(("R1", "a.py", 3),)),

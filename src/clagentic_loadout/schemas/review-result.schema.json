@@ -34,8 +34,8 @@
     },
     "fence_schema_version": {
       "type": "integer",
-      "enum": [1, 2, 3, 4, 5, 6, 7, 8],
-      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. Version 5 marks a fence that carries the docs_only object; it is a superset of version 4 and adds nothing to the computed verdict. Version 6 marks a fence whose findings_open entries carry a fingerprint; it is a superset of version 5. Version 7 marks a fence whose cleared_claims entries carry a fingerprint; it is a superset of version 6. Version 8 marks a fence whose evaluated_findings carry a defect_class or class_fix; it is a superset of version 7 and adds nothing to the computed verdict. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated. Readers accept every version from 1 to 8."
+      "enum": [1, 2, 3, 4, 5, 6, 7, 8, 9],
+      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. Version 5 marks a fence that carries the docs_only object; it is a superset of version 4 and adds nothing to the computed verdict. Version 6 marks a fence whose findings_open entries carry a fingerprint; it is a superset of version 5. Version 7 marks a fence whose cleared_claims entries carry a fingerprint; it is a superset of version 6. Version 8 marks a fence whose evaluated_findings carry a defect_class or class_fix; it is a superset of version 7 and adds nothing to the computed verdict. Version 9 marks a fence from a review of more than one independent pass: its evaluated_findings carry passes_seen and passes_total and it carries the stability block; it is a superset of version 8 and adds nothing to the computed verdict. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated. Readers accept every version from 1 to 9."
     },
     "docs_only": {
       "type": "object",
@@ -96,7 +96,9 @@
           "severity": {"type": "string", "enum": ["praise"], "description": "Present only for a finding that is not a defect and is not scored."},
           "fingerprint": {"type": "string", "pattern": "^fp2:[0-9a-f]{16}$", "description": "OPTIONAL link hint for the finding. Present only when the deployment records per-PR rulings, which are matched by it; absent otherwise."},
           "defect_class": {"type": "string", "minLength": 1, "maxLength": 200, "description": "OPTIONAL, version 8. The reviewer's own statement of the recurring defect class this finding is an instance of. Reviewer output to check against the code; it never changes severity and is never grounds to add, drop or escalate a finding."},
-          "class_fix": {"type": "string", "minLength": 1, "maxLength": 200, "description": "OPTIONAL, version 8. The reviewer's own statement of the structural change that removes the class. Reviewer output to check against the code; it takes no part in the computed verdict."}
+          "class_fix": {"type": "string", "minLength": 1, "maxLength": 200, "description": "OPTIONAL, version 8. The reviewer's own statement of the structural change that removes the class. Reviewer output to check against the code; it takes no part in the computed verdict."},
+          "passes_seen": {"type": "integer", "minimum": 1, "description": "OPTIONAL, version 9. How many of the review's independent passes raised this finding. Stated together with passes_total; takes no part in the computed verdict."},
+          "passes_total": {"type": "integer", "minimum": 2, "description": "OPTIONAL, version 9. How many independent passes the review ran. Stated together with passes_seen."}
         }
       }
     },
@@ -283,6 +285,32 @@
           "model": {"type": "string", "minLength": 1, "description": "Model label the profile declares for that engine."},
           "reason": {"type": "string", "minLength": 1, "description": "Why the carrier was not used, for a fallback."},
           "chunks": {"type": "integer", "minimum": 1, "description": "How many chunks this engine answered."}
+        }
+      }
+    },
+    "stability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passes_total", "stable", "seen_in_some_passes"],
+      "description": "OPTIONAL evidence, version 9. A review of several independent passes: how many ran, whether the blocking set of each pass was the same, and the findings only some passes raised. Reported, never a merge rule: the verdict is computed once over the union of the passes' findings.",
+      "properties": {
+        "passes_total": {"type": "integer", "minimum": 2, "description": "How many independent passes the review ran."},
+        "stable": {"type": "boolean", "description": "True when every pass's blocking set was the same."},
+        "seen_in_some_passes": {
+          "type": "array",
+          "description": "The findings raised by some passes and not all, each with how many raised it.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["file", "line", "rule_id", "message", "passes_seen"],
+            "properties": {
+              "file": {"type": "string", "minLength": 1, "description": "Path the finding was raised on."},
+              "line": {"type": "integer", "minimum": 1, "description": "Line the finding was raised on."},
+              "rule_id": {"type": "string", "minLength": 1, "description": "Rule the finding was raised under."},
+              "message": {"type": "string", "minLength": 1, "description": "What the finding claimed."},
+              "passes_seen": {"type": "integer", "minimum": 1, "description": "How many passes raised it."}
+            }
+          }
         }
       }
     }

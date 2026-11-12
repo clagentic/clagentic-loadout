@@ -61,6 +61,13 @@ STUB_SCRIPT = textwrap.dedent(
         print(with_facts(SERIOUS))
     elif mode == "facts_mild":
         print(with_facts(MILD))
+    elif mode == "distinct_per_call":
+        # Every other call raises a different finding: the first a blocking one,
+        # the second a mild one, as two samples of one model can.
+        first = count % 2 == 0
+        print(json.dumps([{"file": path, "line": 1, "rule_id": "R1",
+                           "message": "stub finding " + ("zero" if first else "one"),
+                           "facts": SERIOUS if first else MILD}]))
     elif mode == "facts_serious_class":
         print(with_facts(SERIOUS, defect_class="unchecked path join",
                          class_fix="one path-join helper that refuses escapes"))

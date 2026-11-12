@@ -131,6 +131,7 @@ from clagentic_loadout.merge.fence_state import (
     KEY_FINDINGS_OPEN,
     KEY_RANGE,
     KEY_RESOLVED,
+    KEY_STABILITY,
     KEY_VERDICT_OUTCOME,
     KEY_VERDICT_REASONS,
     RESOLVED_BY_CALLER,
@@ -144,6 +145,7 @@ from clagentic_loadout.merge.fence_state import (
     render_docs_only,
     render_engines,
     render_range,
+    render_stability,
     state_from_fence,
     unresolved_prior_findings,
     with_derived_failure_sequences,
@@ -454,6 +456,8 @@ def build_findings_verdict_body(
         lines.append(render_range(evidence[KEY_RANGE]))
     if KEY_ENGINES in evidence:
         lines.append(render_engines(evidence[KEY_ENGINES]))
+    if KEY_STABILITY in evidence:
+        lines.append(render_stability(evidence[KEY_STABILITY]))
     if KEY_DOCS_ONLY in evidence:
         lines.append(render_docs_only(evidence[KEY_DOCS_ONLY]))
     if evaluated:
