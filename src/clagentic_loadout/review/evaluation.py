@@ -115,8 +115,10 @@ class EvaluationContext:
     #: only by `run`, to state repo profile findings.
     profile_settings: ProfileSettings = field(default_factory=ProfileSettings)
     #: Why the repo gate's required scanners could not be read
-    #: (with_repo_gate_scanners); carried into the verdict's degraded reasons.
-    gate_read_degraded: tuple[str, ...] = ()
+    #: (with_repo_gate_scanners), None when they were or were not looked for.
+    #: Reported only: it never changes the verdict, because the gate's entry is
+    #: then unknown rather than refused.
+    gate_unread: str | None = None
 
     @property
     def effective_visibility(self) -> str:
@@ -158,7 +160,8 @@ def with_repo_gate_scanners(context: EvaluationContext, role: str) -> Evaluation
     added to its required set. The gate is read at the policy base revision, the
     one the PR under review cannot change. With no base revision or no reader
     nothing is read and the policy read already reports that; a gate that cannot
-    be read is a DEGRADED reason, because the required set is then not known."""
+    be read leaves the required set as it was (the gate's entry is unknown) and is
+    recorded in ``gate_unread`` for the caller to report; it never degrades."""
     base = context.policy_base_sha
     reader = _policy_reader_of(context)
     if base is None or reader is None:
@@ -170,8 +173,7 @@ def with_repo_gate_scanners(context: EvaluationContext, role: str) -> Evaluation
             else None
         )
     except PolicyReadError as exc:
-        reason = f"cannot read the repository gate, so the required scanners are not known: {exc}"
-        return dataclasses.replace(context, gate_read_degraded=(*context.gate_read_degraded, reason))
+        return dataclasses.replace(context, gate_unread=str(exc))
     gate = gate_from_tracked_text(text, source=f"{base[:12]}:{TRACKED_GATE_RELATIVE_PATH}")
     return dataclasses.replace(
         context, required_scanners=required_scanners_for(role, gate, context.required_scanners)
@@ -214,7 +216,7 @@ def evaluate_findings(
     if policy is None:
         policy = read_context_policy(context)
     ruled = _rulings(context)
-    degraded = [*policy.degraded, *ruled.degraded, *context.gate_read_degraded]
+    degraded = [*policy.degraded, *ruled.degraded]
     if context.visibility not in VISIBILITIES:
         degraded.append(
             "the repository visibility was not established from the host record, "

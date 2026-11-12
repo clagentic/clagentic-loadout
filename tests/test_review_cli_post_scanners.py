@@ -22,6 +22,7 @@ from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.review.evaluate import is_floor_finding
+from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReadError
 from clagentic_loadout.review.policy_source import PROFILE_PATH
 from tests._review_cli_support import Env, identity_provider
 from tests._review_evaluate_support import commit_files
@@ -558,6 +559,30 @@ class TestScannerCoverage:
 
         assert code == 0, err
         assert result["verdict_outcome"] == "CLEAN"
+
+    def test_an_unreadable_gate_file_leaves_the_outcome_as_without_it_and_is_reported(
+        self, world, capsys, monkeypatch
+    ):
+        world.host.set_base(commit_files(world.env.repo, {TRACKED_GATE_RELATIVE_PATH: _gate_requiring("sast-one")}))
+        real = GitPolicyReader.read_text
+
+        def unreadable(self, base, path):
+            if path == TRACKED_GATE_RELATIVE_PATH:
+                raise PolicyReadError("simulated read failure")
+            return real(self, base, path)
+
+        monkeypatch.setattr(GitPolicyReader, "read_text", unreadable)
+        code, result, err = world.post(
+            [_scanner()], findings=[_reviewer_note()], status="clean", capsys=capsys
+        )
+
+        assert code == 0, err
+        assert result["verdict_outcome"] == "CLEAN" and result["status"] == "clean"
+        assert result["scanner_coverage"] == {
+            "complete": True, "not_run": [],
+            "gate_scanners": "unread", "gate_file": TRACKED_GATE_RELATIVE_PATH,
+        }
+        assert TRACKED_GATE_RELATIVE_PATH in err and "simulated read failure" in err
 
     def test_a_required_scanner_that_was_not_invoked_is_reported_and_does_not_degrade(
         self, world, capsys

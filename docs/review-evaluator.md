@@ -450,6 +450,11 @@ with no report (status `missing`); `complete` is true when `not_run` is empty. T
 header gains one line, `scanners not run: <scanner> (<status>)`, naming them, and none when all
 ran. The record is for reading; it changes no outcome and adds nothing to the fence.
 
+When `post` cannot read the tracked gate file at the base commit, the gate's scanner entry is
+unknown: the required set is the user-level declaration alone, one warning is written to stderr,
+and `scanner_coverage` gains `"gate_scanners": "unread"` and `"gate_file"` naming the file. The
+outcome is whatever it would be without the gate; nothing is refused for it.
+
 Deduplication: findings with identical file, line, rule and message are merged. The copy
 kept is the strongest: a copy that is not a praise note beats a praise note, then a
 blocking copy beats a non-blocking one, then the most severe wins. A blocking finding is
