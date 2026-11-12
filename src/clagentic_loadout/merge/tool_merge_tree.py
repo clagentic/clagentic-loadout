@@ -48,6 +48,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from clagentic_loadout.artifact_store import StoreKind, resolve_root
+from clagentic_loadout.merge.post_merge import PLACEHOLDER_MERGE_TREE, PLACEHOLDER_MERGED_SHA
 from clagentic_loadout.merge.tree_sync import TreeSyncError
 
 TREES_DIR_ENV_VAR = "CLAGENTIC_LOADOUT_MERGE_TREES_DIR"
@@ -71,6 +72,7 @@ OUTCOME_DETACHED_STEP = "merge-tree-detached-step"
 #: (the repository top-level when --repo-path is a clean base checkout, the tool tree
 #: otherwise).
 ENV_MERGE_TREE = "CLAGENTIC_LOADOUT_MERGE_TREE"
+ENV_MERGED_SHA = "CLAGENTIC_LOADOUT_MERGED_SHA"
 
 #: Appended to a step's failure message when it ran in the tool tree, because the
 #: tree holds tracked content only and a step that needed an untracked file fails here.
@@ -353,16 +355,32 @@ def refuse_detached_steps(steps: list[dict]) -> None:
 
 
 def merge_tree_env(
-    overrides: Mapping[str, str] | None, tree: str | Path
+    overrides: Mapping[str, str] | None,
+    tree: str | Path,
+    merged_sha: str | None = None,
 ) -> dict[str, str]:
     """*overrides* plus ``CLAGENTIC_LOADOUT_MERGE_TREE`` set to the absolute path of
-    *tree*, the tree the steps run in. It wins over a deployment override of the
-    same name, so a step always reads the tree it actually runs in."""
-    return {**(overrides or {}), ENV_MERGE_TREE: str(Path(tree).resolve())}
+    *tree*, the tree the steps run in, and, when *merged_sha* is given,
+    ``CLAGENTIC_LOADOUT_MERGED_SHA`` set to it. Both win over a deployment override
+    of the same name, so a step always reads the tree and commit it actually runs."""
+    env = {**(overrides or {}), ENV_MERGE_TREE: str(Path(tree).resolve())}
+    if merged_sha is not None:
+        env[ENV_MERGED_SHA] = merged_sha
+    return env
+
+
+def step_placeholders(tree: str | Path, merged_sha: str) -> dict[str, str]:
+    """The `{merged_sha}` / `{merge_tree}` values for a step's argv; the same
+    values `merge_tree_env` exports as environment variables."""
+    return {
+        PLACEHOLDER_MERGED_SHA: merged_sha,
+        PLACEHOLDER_MERGE_TREE: str(Path(tree).resolve()),
+    }
 
 
 __all__ = [
     "ENV_MERGE_TREE",
+    "ENV_MERGED_SHA",
     "DetachedStepInToolTreeError",
     "MergeTreeUnavailableError",
     "OUTCOME_DETACHED_STEP",
@@ -374,6 +392,7 @@ __all__ = [
     "merge_tree_env",
     "refuse_detached_steps",
     "refuse_steps_naming_repo_path",
+    "step_placeholders",
     "steps_dir_in_tree",
     "tool_merge_tree",
     "trees_root",
