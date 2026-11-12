@@ -56,6 +56,7 @@ from clagentic_loadout.merge.fence_state import (
     KEY_CLEARED_CLAIMS,
     KEY_DOCS_ONLY,
     KEY_DROPPED,
+    KEY_ENGINES,
     KEY_EVALUATED_FINDINGS,
     KEY_FAILURE_SEQUENCES,
     KEY_FINDINGS_OPEN,
@@ -136,6 +137,11 @@ from clagentic_loadout.review.findings_contract import (
     validate_finding,
 )
 from clagentic_loadout.review.policy_reader import GitPolicyReader, HostPolicyReader, PolicyReader
+from clagentic_loadout.review.post_record import (
+    REASON_UNVERIFIED,
+    record_posted_review,
+    unrecorded,
+)
 from clagentic_loadout.review.pr_record import write_pr_record
 from clagentic_loadout.review.profile_settings import load_profile_settings
 from clagentic_loadout.review.repo_profile import ProfileFormatError
@@ -852,7 +858,8 @@ def _load_findings(
     may have edited the file; messages are kept whole; each finding's facts are
     carried for the evaluator. A bare array has no run record, so its evidence
     is empty. When *meta* is given, the base revision the run read policy from
-    (``policy_base_sha``) is stored in it when the file records a valid one.
+    (``policy_base_sha``) is stored in it when the file records a valid one, and
+    so is the file's ``chunks`` array as read (None when it has none).
     With *carry_spec_tag* every finding must carry exactly one spec tag, which
     is kept. With *carry_class* a finding's defect_class and class_fix are kept;
     without it they are dropped, which is what a deployment that states no
@@ -885,6 +892,10 @@ def _load_findings(
         recorded_base = data.get("policy_base_sha")
         if meta is not None and isinstance(recorded_base, str) and FULL_SHA_RE.match(recorded_base):
             meta["policy_base_sha"] = recorded_base
+        if meta is not None:
+            # Kept as read: the review record validates what it copies, and a
+            # file from an earlier release has no spans in it.
+            meta["chunks"] = data.get("chunks")
         resolved = data.get(KEY_RESOLVED)
         if resolved:
             evidence[KEY_RESOLVED] = resolved
@@ -1711,7 +1722,15 @@ def _post_command(
         # post_failed report below is still printed.
         code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
     if code != 0:
-        print(json.dumps({"result": "post_failed", "review_post_exit_code": code}))
+        print(
+            json.dumps(
+                {
+                    "result": "post_failed",
+                    "review_post_exit_code": code,
+                    "record": unrecorded(REASON_UNVERIFIED),
+                }
+            )
+        )
         print(
             f"loadout-review: posting failed: the review-post path exited {code}",
             file=sys.stderr,
@@ -1734,7 +1753,15 @@ def _post_command(
         or posted.get("verdict_block_verified") is not True
         or posted.get("verified_id") is None
     ):
-        print(json.dumps({"result": "post_failed", "review_post_exit_code": code}))
+        print(
+            json.dumps(
+                {
+                    "result": "post_failed",
+                    "review_post_exit_code": code,
+                    "record": unrecorded(REASON_UNVERIFIED),
+                }
+            )
+        )
         observed = (
             "its output was not a JSON result object"
             if not isinstance(posted, dict)
@@ -1764,6 +1791,26 @@ def _post_command(
     for key in ("comment", "reused_from_created_at", "provider", "self_declared"):
         if key in posted:
             result[key] = posted[key]
+    # The comment is verified and cannot be taken back, so the record is written
+    # whatever happens next (including a head that has since moved), and a failure
+    # to write it is reported in the result without changing the exit code.
+    result["record"] = record_posted_review(
+        config_root=config_root,
+        untrusted_roots=(Path(args.repo_path),) if args.repo_path else (),
+        comment_id=posted["verified_id"],
+        repo=f"{owner}/{repo}",
+        pr=args.pr,
+        head_sha=head_sha,
+        role=caller,
+        policy_base_sha=evaluation.policy_base_sha,
+        spec_hash=spec_fields[KEY_SPEC_HASH] if spec_fields is not None else None,
+        engines=evidence.get(KEY_ENGINES),
+        evaluated=body[KEY_EVALUATED_FINDINGS],
+        open_findings=open_findings,
+        advisory=[{k: item[k] for k in _FINDING_KEYS if k in item} for item in advisory],
+        dropped=evidence.get(KEY_DROPPED),
+        chunks=loaded_meta.get("chunks"),
+    )
     if guidance is not None:
         result[KEY_GUIDANCE] = {
             **guidance,

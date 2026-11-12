@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 from clagentic_loadout.review import cli as review_cli
+from clagentic_loadout.review.post_record import REASON_UNVERIFIED
 from clagentic_loadout.transport import provider_config
+from clagentic_loadout.verdict_record import verb as record_verb
+from clagentic_loadout.verdict_record.review_record import review_records_root
 from tests._review_cli_support import HEAD_SHA, Env
 
 
@@ -136,7 +139,11 @@ def test_a_failing_review_post_path_is_reported_as_post_failed(env, tmp_path, ca
     code, payload = env.post("--findings", str(findings), "--status", "clean", capsys=capsys)
 
     assert code == review_cli.EXIT_POST_FAILED
-    assert payload == {"result": "post_failed", "review_post_exit_code": 9}
+    assert payload == {
+        "result": "post_failed",
+        "review_post_exit_code": 9,
+        "record": {"written": False, "reason": REASON_UNVERIFIED},
+    }
 
 
 @pytest.mark.parametrize("severity", ["Blocking", " blocking", "BLOCKING "])
@@ -231,6 +238,9 @@ def test_an_unverified_landing_is_post_failed_not_posted(
 
     assert code == review_cli.EXIT_POST_FAILED
     assert payload["result"] == "post_failed"
+    # No verified comment, so there is no id to key a record by.
+    assert payload["record"] == {"written": False, "reason": REASON_UNVERIFIED}
+    assert not list(review_records_root().rglob("*.json"))
 
 
 def test_unparseable_review_post_output_is_post_failed_not_posted(
@@ -436,6 +446,7 @@ def test_a_review_post_path_that_exits_directly_still_reports_post_failed(
     assert json.loads(out.strip().splitlines()[-1]) == {
         "result": "post_failed",
         "review_post_exit_code": 2,
+        "record": {"written": False, "reason": REASON_UNVERIFIED},
     }
     assert "inner-exit-detail" in err
 
@@ -505,3 +516,102 @@ def test_a_reused_comment_on_a_moved_head_keeps_both_signals(env, tmp_path, caps
     assert payload["result"] == "posted_head_moved"
     assert payload["comment"] == "reused"
     assert payload["reused_from_created_at"] == "2099-01-01T00:00:10Z"
+    # The comment landed, so its record is kept whether or not the head held.
+    assert payload["record"]["written"] is True
+    assert record_verb.main(["review", str(payload["verified_id"])]) == 0
+
+
+def _read_record(comment_id, capsys) -> dict:
+    capsys.readouterr()
+    assert record_verb.main(["review", str(comment_id)]) == record_verb.EXIT_OK
+    return json.loads(capsys.readouterr().out)
+
+
+def test_a_verified_post_keeps_a_record_the_read_verb_returns_by_comment_id(env, capsys):
+    env.configure()
+    _, run_payload = env.run(capsys=capsys)
+
+    code, payload = env.post("--findings", run_payload["findings_file"], capsys=capsys)
+
+    assert code == 0
+    assert payload["record"]["written"] is True
+    assert payload["record"]["comment_id"] == str(payload["verified_id"])
+    record = _read_record(payload["verified_id"], capsys)
+    assert {k: record[k] for k in ("repo", "pr", "head_sha", "role", "spec_hash")} == {
+        "repo": "some-owner/some-repo", "pr": 42, "head_sha": HEAD_SHA, "role": "reviewer",
+        "spec_hash": None,
+    }
+    assert record["policy_base_sha"] == env.base_sha
+    assert record["engines"] == [{"engine": "carrier", "chunks": 1}]
+    assert [(f["file"], f["line"]) for f in record["findings"]["evaluated"]] == [("a.py", 1)]
+    assert [entry["rule_id"] for entry in record["findings"]["open"]] == ["R1"]
+    assert record["findings"]["advisory"] == []
+    assert record["dropped"] == []
+    # The chunk is the one the run cut: its files and the lines of its one hunk.
+    [chunk] = record["chunks"]
+    assert (chunk["index"], chunk["files"]) == (1, ["a.py"])
+    assert [(h["file"], h["first"], h["last"]) for h in chunk["hunks"]] == [("a.py", 1, 4)]
+
+
+def test_a_record_keeps_the_dropped_candidates_with_their_reasons(env, tmp_path, capsys):
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+    dropped = [{"file": "b.py", "line": 7, "rule_id": "R2", "message": "m", "reason": "held by caller"}]
+    path = tmp_path / "dropped.json"
+    path.write_text(json.dumps(dropped), encoding="utf-8")
+
+    _, payload = env.post(
+        "--findings", str(findings), "--status", "blocking", "--dropped", str(path), capsys=capsys
+    )
+
+    assert _read_record(payload["verified_id"], capsys)["dropped"] == dropped
+
+
+@pytest.mark.parametrize(
+    ("chunks", "expected"),
+    [
+        pytest.param(
+            [{"index": 1, "files": ["a.py"], "engine": "carrier"}],
+            [{"index": 1, "files": ["a.py"], "hunks": None}],
+            id="earlier-release-without-spans",
+        ),
+        pytest.param(
+            [{"index": 1, "files": ["a.py"], "hunks": [{"file": "a.py", "first": "x"}]}],
+            [{"index": 1, "files": ["a.py"], "hunks": None}],
+            id="malformed-spans",
+        ),
+        pytest.param(None, None, id="no-chunk-record"),
+    ],
+)
+def test_a_findings_file_without_spans_still_posts_and_records_them_as_absent(
+    env, tmp_path, capsys, chunks, expected
+):
+    overrides = {} if chunks is None else {"chunks": chunks}
+    findings = _write_findings(tmp_path / "f.json", [_NIT], policy_base_sha=env.base_sha, **overrides)
+
+    code, payload = env.post("--findings", str(findings), "--status", "blocking", capsys=capsys)
+
+    assert code == 0
+    assert payload["result"] == "posted"
+    assert _read_record(payload["verified_id"], capsys)["chunks"] == expected
+
+
+def test_a_record_that_cannot_be_written_is_reported_and_the_post_stands(
+    env, tmp_path, capsys, monkeypatch
+):
+    # A file where the root should be: no directory can be made under it.
+    blocker = tmp_path / "not-a-directory"
+    blocker.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CLAGENTIC_LOADOUT_REVIEW_RECORDS_DIR", str(blocker))
+    findings = _write_findings(tmp_path / "f.json", [_NIT])
+
+    code, out, err = env.invoke(
+        "post", "--findings", str(findings), "--status", "blocking", capsys=capsys
+    )
+
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert code == 0
+    assert payload["result"] == "posted"
+    assert payload["record"]["written"] is False
+    assert str(blocker) in payload["record"]["reason"]
+    assert "no review record was written" in err
+    assert env.opener_state["posted_body"] is not None

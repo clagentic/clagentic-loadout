@@ -223,6 +223,7 @@ def test_umbrella_unknown_grouped_subverb_reports_reserved_exit_code(capsys) -> 
         ["record"],
         ["record", "show"],
         ["record", "list"],
+        ["record", "review"],
         ["spec"],
         ["spec", "new"],
         ["spec", "seal"],

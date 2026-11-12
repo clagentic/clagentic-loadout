@@ -29,6 +29,13 @@ from clagentic_loadout.verdict_record.record import (
     new_record_id,
     validate_record_dict,
 )
+from clagentic_loadout.verdict_record.review_record import (
+    REVIEW_RECORDS_DIR_ENV_VAR,
+    build_review_record,
+    load_review_record,
+    review_records_root,
+    write_review_record,
+)
 from clagentic_loadout.verdict_record.store import (
     RECORDS_DIR_ENV_VAR,
     RecordNotFoundError,
@@ -429,11 +436,76 @@ class TestVerb:
         assert record_verb.main(["write", "--gate", "ci"]) == record_verb.EXIT_USAGE
 
 
+def _review_record(comment_id="77", head=HEAD_A, **overrides):
+    fields = dict(
+        comment_id=comment_id, repo="some-owner/some-repo", pr=3, head_sha=head,
+        role="reviewer", policy_base_sha=HEAD_B, spec_hash=None, engines=[],
+        evaluated=[], open_findings=[], advisory=[], dropped=[], chunks=None,
+    )
+    return build_review_record(**{**fields, **overrides})
+
+
+class TestReviewRecords:
+    def test_the_root_follows_the_environment_then_the_setting_then_the_default(
+        self, monkeypatch, tmp_path
+    ):
+        (tmp_path / "config.yaml").write_text(
+            f"review_records:\n  dir: {tmp_path / 'from-config'}\n", encoding="utf-8"
+        )
+        monkeypatch.setenv(REVIEW_RECORDS_DIR_ENV_VAR, str(tmp_path / "from-env"))
+        assert review_records_root(config_root=tmp_path) == tmp_path / "from-env"
+        monkeypatch.delenv(REVIEW_RECORDS_DIR_ENV_VAR)
+        assert review_records_root(config_root=tmp_path) == tmp_path / "from-config"
+        (tmp_path / "config.yaml").unlink()
+        assert review_records_root(config_root=tmp_path) == tmp_path / "state" / "review-records"
+
+    def test_a_record_reads_back_by_comment_id_whatever_its_head(self, tmp_path):
+        root = tmp_path / "records"
+        wanted = _review_record("77", head=HEAD_B, chunks=[{"index": 1, "files": ["a.py"]}])
+        write_review_record(root, _review_record("76", head=HEAD_A))
+        write_review_record(root, wanted)
+        assert load_review_record(root, "77") == wanted
+        assert wanted["chunks"] == [{"index": 1, "files": ["a.py"], "hunks": None}]
+
+    def test_a_comment_id_that_is_not_digits_never_reaches_a_path(self, tmp_path):
+        with pytest.raises(StoreError):
+            load_review_record(tmp_path, "../x")
+        with pytest.raises(StoreError):
+            _review_record("../x")
+
+    def test_the_verb_prints_the_record(self, capsys):
+        record = _review_record("77")
+        write_review_record(review_records_root(), record)
+        assert record_verb.main(["review", "77"]) == record_verb.EXIT_OK
+        assert json.loads(capsys.readouterr().out) == record
+
+    def test_the_verb_names_the_resolved_root_when_there_is_no_record(self, capsys):
+        assert record_verb.main(["review", "77"]) == record_verb.EXIT_NOT_FOUND
+        err = capsys.readouterr().err
+        assert "no review record for comment 77" in err
+        assert str(review_records_root()) in err
+
+    def test_the_verb_refuses_an_id_that_is_not_digits(self, capsys):
+        assert record_verb.main(["review", "../x"]) == record_verb.EXIT_USAGE
+
+    @pytest.mark.parametrize(
+        "content",
+        ["[]", "{not json", json.dumps({"comment_id": "78", "head_sha": HEAD_A})],
+        ids=["not-an-object", "not-json", "names-another-comment"],
+    )
+    def test_the_verb_reports_a_file_that_is_not_a_valid_record(self, content, capsys):
+        path = write_review_record(review_records_root(), _review_record("77"))
+        path.write_text(content, encoding="utf-8")
+        assert record_verb.main(["review", "77"]) == record_verb.EXIT_RECORD_INVALID
+        assert "77.json" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize(
     "module",
     [
         "clagentic_loadout.verdict_record.store",
         "clagentic_loadout.verdict_record.emit",
+        "clagentic_loadout.verdict_record.review_record",
         "clagentic_loadout.verdict_record.verb",
         "clagentic_loadout.push.verb",
         "clagentic_loadout.review.verb",

@@ -2,22 +2,28 @@
 
   loadout-record show RECORD_ID
   loadout-record list --head SHA [--gate GATE]
+  loadout-record review COMMENT_ID
 
 `show` prints one record by id; `list` prints the records filed under one commit,
-oldest first. Both are read-only: records are written by the steps that measure
-(the push verification run, the review verdict post, the merge verb), never by
-hand, so an operator can read what a gate recorded and cannot add to it here.
+oldest first; `review` prints the review record kept for one posted review, by
+the id of its comment. All are read-only: records are written by the steps that
+measure (the push verification run, the review verdict post, the merge verb),
+never by hand, so an operator can read what a gate recorded and cannot add to it
+here.
 
 The records root is resolved as in verdict_record.store: the
 CLAGENTIC_LOADOUT_VERDICT_RECORDS_DIR environment variable, the user-level
 ``verdict_records.dir`` setting, then the default under the user config root.
+`review` reads its own store, resolved the same way in verdict_record.review_record:
+CLAGENTIC_LOADOUT_REVIEW_RECORDS_DIR, the ``review_records.dir`` setting, then
+``<user config root>/state/review-records``.
 
 Exit codes:
 
   0   ok
   1   usage error
   3   the records root cannot be used or read
-  40  no record has that id
+  40  no record has that id (for `review`, no record for that comment id)
   41  the record exists but is not a valid record
 """
 
@@ -37,6 +43,12 @@ from clagentic_loadout.verdict_record.store import (
     load_record,
     records_at_head,
     records_root,
+)
+from clagentic_loadout.verdict_record.review_record import (
+    COMMENT_ID_RE,
+    ReviewRecordNotFoundError,
+    load_review_record,
+    review_records_root,
 )
 
 EXIT_OK = 0
@@ -59,6 +71,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "Example:\n"
             "  loadout-record show 20260101T120000Z-0a1b2c3d\n"
             "  loadout-record list --head <full 40-character commit sha>\n"
+            "  loadout-record review <comment id>\n"
             "\n"
             "Exit codes: 0 ok, 1 usage, 3 records root unusable, 40 no such record, "
             "41 record invalid."
@@ -84,6 +97,18 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     listing.add_argument("--head", required=True, help="Full commit sha (40 or 64 hex digits).")
     listing.add_argument("--gate", default=None, help="Only records of this gate.")
+    review = sub.add_parser(
+        "review",
+        help="Print the review record of one posted review by comment id.",
+        description=(
+            "Print the review record kept for one posted review, as JSON; read-only. "
+            "The record holds the findings the review judged, the candidates it "
+            "dropped with their reasons, and the chunk boundaries it was cut along."
+        ),
+    )
+    review.add_argument(
+        "comment_id", help="The id of the posted review comment, as `loadout-review post` printed it."
+    )
     return parser
 
 
@@ -107,6 +132,31 @@ def _show(args: argparse.Namespace, root: Path) -> int:
         print(f"loadout-record: {exc}", file=sys.stderr)
         return EXIT_RECORD_INVALID
     print(json.dumps(record.as_dict()))
+    return EXIT_OK
+
+
+def _review(args: argparse.Namespace, config_root: str | Path | None) -> int:
+    # The review records root is its own store, so it is resolved here and not
+    # with the verdict records root `show` and `list` read.
+    root = review_records_root(config_root=config_root)
+    if COMMENT_ID_RE.match(args.comment_id) is None:
+        print(
+            f"loadout-record: {args.comment_id!r} is not a comment id (expected decimal digits)",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    try:
+        record = load_review_record(root, args.comment_id)
+    except ReviewRecordNotFoundError as exc:
+        print(f"loadout-record: {exc}", file=sys.stderr)
+        return EXIT_NOT_FOUND
+    except RootUnreadableError as exc:
+        print(f"loadout-record: {exc}", file=sys.stderr)
+        return EXIT_STORE_UNUSABLE
+    except StoreError as exc:
+        print(f"loadout-record: {exc}", file=sys.stderr)
+        return EXIT_RECORD_INVALID
+    print(json.dumps(record))
     return EXIT_OK
 
 
@@ -147,6 +197,8 @@ def main(argv: list[str] | None = None, *, config_root: str | Path | None = None
         args = parser.parse_args(argv)
     except SystemExit as exc:
         return EXIT_OK if exc.code in (0, None) else EXIT_USAGE
+    if args.command == "review":
+        return _review(args, config_root)
     root = records_root(config_root=config_root)
     if args.command == "show":
         return _show(args, root)
