@@ -11,6 +11,18 @@
     "verification_evidence_owed", "rulings_already_made", "profile_completeness",
     "docs_only_justification"
   ],
+  "$defs": {
+    "importer_list": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["files", "more"],
+      "description": "The importing files listed, up to the cap, and how many more exist. null when not computed.",
+      "properties": {
+        "files": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "more": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
   "properties": {
     "schema_version": {
       "type": "integer",
@@ -125,6 +137,36 @@
             "properties": {
               "consumer": {"type": "string", "minLength": 1},
               "disposition": {"type": "string", "minLength": 1}
+            }
+          }
+        }
+      }
+    },
+    "impact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "head_sha", "languages_covered", "cap", "skipped_files", "items"],
+      "description": "OPTIONAL, additive. For each path the change names, the files and the test files in the repository that import it, computed from the file-import graph of the tree at one commit when the draft is created. Reported only; it is never a gate. An absent section is a spec sealed before this section existed, or one drafted with no path named.",
+      "properties": {
+        "source": {"type": ["string", "null"], "description": "How the section was computed; null when it could not be."},
+        "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},
+        "head_sha": {"type": ["string", "null"], "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$", "description": "The commit the tree was read at."},
+        "languages_covered": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "The languages the graph covers; a path in any other is listed as not computed."},
+        "cap": {"type": "integer", "minimum": 1, "description": "The most importers listed per path, separately for files and for test files."},
+        "skipped_files": {"type": "integer", "minimum": 0, "description": "Python files in the tree that could not be read or parsed and so add no import."},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "language", "status", "importers", "importing_tests", "note"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1, "description": "A file in the tree, or a glob that matched none."},
+              "language": {"type": "string", "minLength": 1},
+              "status": {"type": "string", "enum": ["computed", "not_computed", "no_match"]},
+              "importers": {"$ref": "#/$defs/importer_list"},
+              "importing_tests": {"$ref": "#/$defs/importer_list"},
+              "note": {"type": ["string", "null"]}
             }
           }
         }

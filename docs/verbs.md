@@ -3714,6 +3714,7 @@ The published contract is `schemas/spec.schema.json`
 | `class_rules` | `{source, note, class, rules, paths}`: the repository class, the rule statements of each class in effect, and the per-path overrides. | the repo profile |
 | `group_rules` | `{source, note, items}`: the group rules that apply to the repository, items as strings. | the groups file |
 | `consumers` | `{source, note, items}`, each item `{consumer, disposition}` | no source yet |
+| `impact` | `{source, note, head_sha, languages_covered, cap, skipped_files, items}`, optional: the importers and importing tests of each `--path`. See [The impact section](#the-impact-section). | `new --path`, from the tree at `--ref` |
 | `test_plan` | `{source, note, declared, plan}`: the commands the profile's `test` block declares, and the author's plan. | profile + authored |
 | `verification_evidence_owed` | `{gate, note}` entries naming the verdict records that must exist. | authored |
 | `rulings_already_made` | Decisions the build must not reopen. | authored |
@@ -3749,6 +3750,41 @@ section is empty (`items: []`) and `note` gives the reason. `consumers` is fille
 `<path> (<origin>)`, each with a placeholder disposition for the author to replace. Otherwise it is
 present and empty with `source: null` and the note `no source yet` (or, with something named and no
 map, the reason), for the author to fill or leave. No field of a spec carries a posture value, and the schema refuses any key it does not name.
+
+### The impact section
+
+`new --path GLOB` also fills `impact`, placed next to `consumers`: for each file matching a glob, the
+files of the same repository that import it and the test files that import it. It is computed from
+the tree at `--ref` (default `HEAD`), which is resolved to one commit once; the tree is listed with
+`git ls-tree` and every file read with `git show` at that commit, so the working tree is never
+consulted. The section is built by one function, `spec.impact.compute_impact`, over one import
+graph, `spec.import_graph.build_import_graph`. No network call is made and nothing is stored.
+
+Shape: `{source, note, head_sha, languages_covered, cap, skipped_files, items}`. `head_sha` is the
+commit the section was computed at and `languages_covered` is `["python"]`. Each item is
+`{path, language, status, importers, importing_tests, note}`; `importers` and `importing_tests` are
+`{files, more}`: up to `cap` paths (25, the constant `spec.impact.IMPORTER_CAP`, applied to each list
+separately) and the count of the rest. A file that imports nothing named reads `none found` in
+`note`.
+
+Limits:
+
+- Python only, parsed with the standard library `ast`: `import a.b`, `from a import b` (a name or a
+  submodule) and relative imports resolved against the package layout (a directory with
+  `__init__.py` is a package; a directory without one is also reachable by its path from the
+  repository root). Imports inside functions and `try` blocks count; dynamic imports
+  (`importlib`, `__import__`) and string references do not.
+- A file in another language has `status: not_computed`, its language named in `language` and
+  `note`. An extension that is not recognised says so rather than naming a language. A glob that
+  matches no file has `status: no_match`.
+- A test file is one under a `test` or `tests` directory, named `test_*` or `*_test`, or
+  `conftest.py`. Everything else that imports the path is an importer.
+- A file-import graph only: no call graph, and nothing outside the repository. Python files that
+  cannot be read (over 512 KiB, not UTF-8) or parsed add no import and are counted in
+  `skipped_files`.
+- If the ref or tree cannot be read the section is empty and `note` says why; the draft is still
+  written. The section is a report and never refuses an action. It is optional in the schema: specs
+  sealed before it existed, and drafts with no `--path`, carry none.
 
 ### The three verbs
 
