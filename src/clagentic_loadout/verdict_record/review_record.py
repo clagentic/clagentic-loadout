@@ -52,7 +52,7 @@ CONFIG_KEY_DIR = "dir"
 SCHEMA_VERSION = 1
 
 #: A host's comment id is a decimal integer; anything else never reaches a path.
-COMMENT_ID_RE = re.compile(r"^[0-9]{1,20}$")
+COMMENT_ID_RE = re.compile(r"\A[0-9]{1,20}\Z")
 
 _REVIEW_RECORDS_KIND = StoreKind(
     label="review records",

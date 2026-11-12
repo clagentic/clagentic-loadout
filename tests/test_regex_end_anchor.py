@@ -24,6 +24,7 @@ from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.review import github_backend
 from clagentic_loadout.review import verb as review_verb
 from clagentic_loadout.transport import git_host_api
+from clagentic_loadout.verdict_record import review_record
 
 SRC = Path(__file__).resolve().parent.parent / "src" / "clagentic_loadout"
 
@@ -39,6 +40,7 @@ VALIDATORS = [
     (verify_config._ENV_NAME_RE, "MY_VAR"),
     (github_backend._ISSUE_COMMENT_ID_RE, "12345"),
     (review_verb._DELETE_COMMENT_ID_RE, "12345"),
+    (review_record.COMMENT_ID_RE, "12345"),
     (sha.FULL_SHA_RE, "a" * 40),
     (sha.ABBREVIATED_SHA_RE, "a" * 7),
     (push_verb._FULL_SHA_RE, "a" * 40),
