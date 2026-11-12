@@ -65,6 +65,25 @@ _REVIEW_RECORDS_KIND = StoreKind(
 _MAX_RECORD_BYTES = 8 * 1024 * 1024
 _SPAN_KEYS = ("first", "last", "old_first", "old_last")
 
+#: Every required top-level field of a stored record and the types it may hold
+#: (``type(None)`` where the schema allows null). The reader validates against it.
+_FIELD_TYPES: dict[str, tuple[type, ...]] = {
+    "schema_version": (int,),
+    "comment_id": (str,),
+    "repo": (str,),
+    "pr": (int,),
+    "head_sha": (str,),
+    "role": (str,),
+    "policy_base_sha": (str, type(None)),
+    "spec_hash": (str, type(None)),
+    "engines": (list,),
+    "recorded_at": (str,),
+    "findings": (dict,),
+    "dropped": (list,),
+    "chunks": (list, type(None)),
+}
+_FINDINGS_KEYS = ("evaluated", "open", "advisory")
+
 
 class ReviewRecordNotFoundError(StoreError):
     """No review record has the comment id asked for."""
@@ -200,7 +219,44 @@ def _read_file(path: Path, filed_under: str, comment_id: str) -> dict[str, Any]:
         raise ReviewRecordInvalidError(
             f"{path.name}: is filed under {filed_under} but records head {data.get('head_sha')!r}"
         )
+    _validate_fields(data, path.name)
     return data
+
+
+def _is_type(value: Any, allowed: tuple[type, ...]) -> bool:
+    """isinstance that does not let a bool stand in for an int."""
+    if isinstance(value, bool) and bool not in allowed:
+        return False
+    return isinstance(value, allowed)
+
+
+def _validate_fields(data: Mapping[str, Any], name: str) -> None:
+    """Raise ReviewRecordInvalidError naming the first required field that is
+    missing or of the wrong type, using the one field table above."""
+    for field, allowed in _FIELD_TYPES.items():
+        if field not in data:
+            raise ReviewRecordInvalidError(f"{name}: is missing the required field {field!r}")
+        if not _is_type(data[field], allowed):
+            raise ReviewRecordInvalidError(
+                f"{name}: field {field!r} is a {type(data[field]).__name__}, "
+                f"expected {' or '.join(t.__name__ for t in allowed)}"
+            )
+    findings = data["findings"]
+    for key in _FINDINGS_KEYS:
+        if not isinstance(findings.get(key), list):
+            raise ReviewRecordInvalidError(
+                f"{name}: field 'findings' needs a list under {key!r}"
+            )
+    for position, chunk in enumerate(data["chunks"] or ()):
+        if (
+            not isinstance(chunk, dict)
+            or not isinstance(chunk.get("files"), list)
+            or not (chunk.get("hunks") is None or isinstance(chunk.get("hunks"), list))
+        ):
+            raise ReviewRecordInvalidError(
+                f"{name}: field 'chunks' entry {position} needs a files list and hunks "
+                "as a list or null"
+            )
 
 
 def load_review_record(

@@ -490,8 +490,20 @@ class TestReviewRecords:
 
     @pytest.mark.parametrize(
         "content",
-        ["[]", "{not json", json.dumps({"comment_id": "78", "head_sha": HEAD_A})],
-        ids=["not-an-object", "not-json", "names-another-comment"],
+        [
+            "[]",
+            "{not json",
+            json.dumps({"comment_id": "78", "head_sha": HEAD_A}),
+            json.dumps({k: v for k, v in _review_record("77").items() if k != "findings"}),
+            json.dumps({**_review_record("77"), "pr": "3"}),
+        ],
+        ids=[
+            "not-an-object",
+            "not-json",
+            "names-another-comment",
+            "missing-required-field",
+            "wrong-typed-field",
+        ],
     )
     def test_the_verb_reports_a_file_that_is_not_a_valid_record(self, content, capsys):
         path = write_review_record(review_records_root(), _review_record("77"))
