@@ -710,10 +710,11 @@ def test_two_passes_sample_independently_and_the_findings_are_unioned(env, capsy
 def test_raising_the_pass_count_keeps_the_first_pass_cache(env, capsys):
     env.configure()
     _, one = env.run(capsys=capsys)
+    before = set(_state_dirs(one))
     env.configure(passes=2)
 
     code, two = env.run(capsys=capsys)
 
     assert code == 0
-    assert set(_state_dirs(one)) < set(_state_dirs(two))
+    assert before < set(_state_dirs(two))
     assert len(prompts(env.stubs, "carrier")) == 2

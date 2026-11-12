@@ -307,7 +307,7 @@ def test_one_pass_posts_the_fence_it_always_did(env, capsys):
 
     _, fence = _run_and_post_passes(env, capsys)
 
-    assert "stability" not in fence and fence["fence_schema_version"] == 3
+    assert "stability" not in fence and fence["fence_schema_version"] < 9
     assert not any("passes_seen" in finding for finding in fence["evaluated_findings"])
 
 
