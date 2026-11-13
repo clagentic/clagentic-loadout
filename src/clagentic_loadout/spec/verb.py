@@ -12,7 +12,9 @@ from it, the group rules from the groups file (for every role; see rules.applyin
 and every other section is present and empty. A groups problem leaves the group
 rules empty with a note and never changes the exit code. When --path or --element names what the change touches, the
 consumers are filled from the consumer map (interface.consumers), each with a placeholder disposition for the author
-to replace; an unavailable map leaves the section empty with a note, again without changing the exit code. The draft
+to replace; an unavailable map leaves the section empty with a note, again without changing the exit code. --path also
+fills an impact section: the files and test files that import each matching Python file, from the tree at --ref read
+through git objects (see spec.impact); a path in another language is listed as not computed. The draft
 is an ordinary file for the author to edit. With --supersedes it starts from a sealed spec instead, which is the only
 way to change one.
 
@@ -84,6 +86,7 @@ from clagentic_loadout.rules.applying import applying_group_rules, format_rule_i
 from clagentic_loadout.rules import groups as gr
 from clagentic_loadout.rules.groups import GroupsFileError
 from clagentic_loadout.merge.guidance_section import builder_guidance
+from clagentic_loadout.spec import impact as impact_mod
 from clagentic_loadout.spec import model
 from clagentic_loadout.spec import remedy as remedy_mod
 from clagentic_loadout.spec import store as spec_store
@@ -161,7 +164,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     new.add_argument(
         "--ref",
         default=None,
-        help="Read the repo profile at this revision instead of the working tree.",
+        help="Read the repo profile, and the tree the impact section is computed from, at this "
+        "revision instead of the working tree.",
     )
     new.add_argument(
         "--repo",
@@ -185,7 +189,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="GLOB",
         help="A glob over the files the change touches; the consumers section is filled from the "
-        "consumer map for it. May be repeated.",
+        "consumer map for it, and the impact section lists the files and tests that import each "
+        "match at --ref (Python only). May be repeated.",
     )
     new.add_argument(
         "--element",
@@ -355,6 +360,14 @@ def _with_consumers(
     )
 
 
+def _with_impact(draft: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
+    """*draft* with its impact section computed for the --path globs from the tree
+    at --ref. Without --path the section is left as it is."""
+    if not args.path:
+        return draft
+    return model.apply_impact(draft, impact_mod.compute_impact(args.repo_path, args.ref, args.path))
+
+
 def _with_remedy(
     draft: dict[str, object], args: argparse.Namespace, config_root: str | Path | None
 ) -> dict[str, object]:
@@ -422,6 +435,7 @@ def _new(
     draft = model.apply_completeness(draft, [item.render() for item in items])
     draft = _with_group_rules(draft, args, snapshot.profile, config_root)
     draft = _with_consumers(draft, args, config_root)
+    draft = _with_impact(draft, args)
     draft = _with_remedy(draft, args, config_root)
     draft = model.apply_guidance(draft, builder_guidance(), source=GUIDANCE_SOURCE)
     text = json.dumps(draft, indent=2) + "\n"

@@ -270,6 +270,21 @@ def apply_consumers(
     return out
 
 
+def apply_impact(draft: dict[str, Any], impact: dict[str, Any]) -> dict[str, Any]:
+    """*draft* with its impact section set to *impact* (see spec.impact), placed
+    right after the consumers section. Whatever the draft held is replaced: the
+    section describes the head it was computed at."""
+    out: dict[str, Any] = {}
+    for key, value in draft.items():
+        if key == "impact":
+            continue
+        out[key] = copy.deepcopy(value)
+        if key == "consumers":
+            out["impact"] = copy.deepcopy(impact)
+    out.setdefault("impact", copy.deepcopy(impact))
+    return out
+
+
 def draft_from_sealed(sealed: dict[str, Any], sealed_hash: str) -> dict[str, Any]:
     """A draft that starts from the sealed spec *sealed* (whose hash is
     *sealed_hash*) and names it in ``supersedes``. The only way to change a
@@ -351,6 +366,7 @@ __all__ = [
     "apply_consumers",
     "apply_group_rules",
     "apply_guidance",
+    "apply_impact",
     "apply_remedy",
     "canonical_bytes",
     "draft_from_sealed",

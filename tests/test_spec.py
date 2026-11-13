@@ -737,6 +737,170 @@ class TestFoldRemedy:
         assert model.undecided_remedy(sealed.doc) == []
 
 
+IMPACT_FILES = {
+    "pkg/__init__.py": "",
+    "pkg/core.py": "X = 1\n",
+    "pkg/lonely.py": "Y = 1\n",
+    "pkg/a.py": "import pkg.core\n",
+    "pkg/sub/__init__.py": "",
+    "pkg/sub/b.py": "from .. import core\n",
+    "pkg/sub/c.py": "from ..core import X\n",
+    "tests/test_core.py": "from pkg.core import X\n",
+    "web/app.js": "export const x = 1;\n",
+    # A namespace package: no __init__.py, so a relative import has no layout to lean on.
+    "ns/x.py": "X = 1\n",
+    "ns/y.py": "from . import x\n",
+    # One file that is not Python, one that is over the read bound, and one that parses.
+    "bad/broken.py": "def (:\n",
+    "bad/big.py": "#" * (600 * 1024) + "\n",
+    "bad/ok.py": "X = 1\n",
+    # No tools/__init__.py: a root-level `import helper` is not tools/helper.py, but a
+    # script inside tools/ importing its sibling is.
+    "tools/helper.py": "X = 1\n",
+    "tools/runner.py": "X = 1\n",
+    "tools/main.py": "import runner\n",
+    "app.py": "import helper\n",
+}
+CORE_IMPORTERS = ["pkg/a.py", "pkg/sub/b.py", "pkg/sub/c.py"]
+SKIPPED = ["bad/big.py", "bad/broken.py"]
+
+
+def _impact_repo(tmp_path: Path) -> tuple[Path, str]:
+    path = make_repo(tmp_path)
+    return path, commit_files(path, IMPACT_FILES)
+
+
+def _impact(repo: Path, capsys, *globs: str, ref: str | None = None) -> dict:
+    argv = ["new", "--role", ROLE, "--repo-path", str(repo)]
+    for glob in globs:
+        argv += ["--path", glob]
+    if ref is not None:
+        argv += ["--ref", ref]
+    code, out, err = _run(argv, capsys)
+    assert code == 0, err
+    return json.loads(out)["impact"]
+
+
+class TestImpact:
+    @pytest.mark.parametrize(
+        ("path", "cap", "files", "more", "tests", "status", "language", "says", "skipped"),
+        [
+            # AC1 and AC6: an absolute import, a relative from-import of the module and a
+            # relative import through the module name are all resolved to it.
+            ("pkg/core.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
+            # AC2: nothing imports it.
+            ("pkg/lonely.py", None, [], 0, [], "computed", "python", "", SKIPPED),
+            # AC3: another language is listed, not computed, and named.
+            ("web/app.js", None, None, None, None, "not_computed", "javascript", "javascript", []),
+            # AC4: over the cap, the cap is listed and the rest counted.
+            ("pkg/core.py", 2, CORE_IMPORTERS[:2], 1, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
+            # A target whose own source is over the read bound or is not Python is not
+            # computed, with the reason, and is never reported as having no importers.
+            ("bad/big.py", None, None, None, None, "not_computed", "python", "could not be read", SKIPPED),
+            ("bad/broken.py", None, None, None, None, "not_computed", "python", "could not be parsed", SKIPPED),
+            # An importer that cannot be parsed leaves the list short; the section names it.
+            ("bad/ok.py", None, [], 0, [], "computed", "python", "", SKIPPED),
+            # A relative import in a package with no __init__.py resolves from the file's path.
+            ("ns/x.py", None, ["ns/y.py"], 0, [], "computed", "python", "", SKIPPED),
+            # `import pkg.core` also runs pkg/__init__.py, so the package is imported too.
+            ("pkg/__init__.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
+            # A file outside any package is not known by its bare stem to a root importer.
+            ("tools/helper.py", None, [], 0, [], "computed", "python", "", SKIPPED),
+            # A script imports its sibling in the same directory.
+            ("tools/runner.py", None, ["tools/main.py"], 0, [], "computed", "python", "", SKIPPED),
+        ],
+        ids=[
+            "importers-and-tests", "none-found", "not-computed", "over-the-cap",
+            "unreadable-target", "unparsable-target", "unparsable-importer-is-named",
+            "namespace-package-relative-import", "dotted-import-counts-the-package-init",
+            "root-import-is-not-a-non-package-stem", "sibling-import-in-a-non-package-dir",
+        ],
+    )
+    def test_each_path_lists_its_importers_or_says_why_not(
+        self, tmp_path, capsys, monkeypatch, path, cap, files, more, tests, status, language, says, skipped
+    ):
+        repo, head = _impact_repo(tmp_path)
+        if cap is not None:
+            monkeypatch.setattr("clagentic_loadout.spec.impact.IMPORTER_CAP", cap)
+
+        section = _impact(repo, capsys, path)
+
+        assert section["head_sha"] == head
+        assert section["languages_covered"] == ["python"]
+        assert section["cap"] == (cap or 25)
+        (item,) = section["items"]
+        assert (item["path"], item["status"], item["language"]) == (path, status, language)
+        assert section["skipped_paths"] == skipped and section["skipped_files"] == len(skipped)
+        if files is None:
+            assert item["importers"] is None and item["importing_tests"] is None
+            assert says in item["note"]
+            return
+        assert (item["importers"], item["importing_tests"]) == (
+            {"files": files, "more": more},
+            {"files": tests, "more": 0},
+        )
+        assert (item["note"] or "").startswith("none found") == (not files and not tests)
+
+    def test_two_refs_that_differ_in_imports_give_two_sections_each_with_its_own_head(
+        self, tmp_path, capsys
+    ):
+        repo, first = _impact_repo(tmp_path)
+        second = commit_files(repo, {"pkg/a.py": "import os\n"})
+
+        before = _impact(repo, capsys, "pkg/core.py", ref=first)
+        after = _impact(repo, capsys, "pkg/core.py", ref=second)
+
+        assert (before["head_sha"], after["head_sha"]) == (first, second)
+        assert before["items"][0]["importers"]["files"] == CORE_IMPORTERS
+        assert after["items"][0]["importers"]["files"] == CORE_IMPORTERS[1:]
+
+    def test_the_tree_is_read_at_the_ref_not_from_the_working_tree(self, tmp_path, capsys):
+        repo, head = _impact_repo(tmp_path)
+        (repo / "pkg" / "a.py").write_text("import os\n", encoding="utf-8")
+        (repo / "pkg" / "extra.py").write_text("import pkg.core\n", encoding="utf-8")
+
+        section = _impact(repo, capsys, "pkg/core.py", ref=head)
+
+        assert section["items"][0]["importers"]["files"] == CORE_IMPORTERS
+
+    def test_a_glob_that_matches_nothing_is_reported_not_refused(self, tmp_path, capsys):
+        repo, _ = _impact_repo(tmp_path)
+
+        none = _impact(repo, capsys, "nothing/*.py")
+
+        assert [(i["status"], i["path"]) for i in none["items"]] == [("no_match", "nothing/*.py")]
+
+    def test_a_spec_with_an_impact_section_seals_and_one_sealed_without_it_still_reads(
+        self, tmp_path, capsys
+    ):
+        repo, _ = _impact_repo(tmp_path)
+        draft = json.loads(_run(["new", "--role", ROLE, "--repo-path", str(repo), "--path", "pkg/core.py"], capsys)[1])
+        assert list(draft).index("impact") == list(draft).index("consumers") + 1
+
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(draft))
+        assert code == 0, err
+        assert model.parse_sealed(sealed["pr_body_copy"].encode("ascii"), sealed["spec_hash"])["impact"]
+
+        old = _fill(model.new_draft(ROLE))
+        assert "impact" not in old
+        legacy = model.seal(old, head_sha=HEAD_A, sealed_at="2026-01-01T00:00:00Z")
+        assert "impact" not in model.parse_sealed(legacy.data, legacy.spec_hash)
+
+    def test_the_computation_makes_no_network_call(self, tmp_path, capsys, monkeypatch):
+        import socket
+
+        def refuse(*_args, **_kwargs):
+            raise AssertionError("network access is forbidden while the impact section is computed")
+
+        repo, _ = _impact_repo(tmp_path)
+        monkeypatch.setattr(socket.socket, "connect", refuse)
+        monkeypatch.setattr(socket, "getaddrinfo", refuse)
+
+        section = _impact(repo, capsys, "pkg/core.py")
+
+        assert section["items"][0]["importers"]["files"] == CORE_IMPORTERS
+
+
 class TestSpecsRoot:
     def test_environment_variable_wins(self, monkeypatch, tmp_path):
         monkeypatch.setenv(spec_store.SPECS_DIR_ENV_VAR, str(tmp_path / "from-env"))
