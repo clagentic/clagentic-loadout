@@ -54,6 +54,27 @@ def test_the_ratio_and_the_over_budget_rule(t_add, t_rem, c_add, c_rem, budget, 
     assert ("does not block" in result["line"]) is over
 
 
+# test net, code net, budget, floor, text the line must carry, text it must not carry
+VERDICT_ROWS = [
+    (150, 50, 2, 200, "above the 2:1 budget, but test growth is under the 200-line floor", "within"),
+    (300, 100, 2, 100, "over the 2:1 budget", "within"),
+    (150, 100, 2, 100, "within the 2:1 budget", "above"),
+    (50, 0, 2, 100, "above the 2:1 budget, but test growth is under the 100-line floor", "within"),
+    (0, 0, 2, 100, "within the 2:1 budget", "above"),
+]
+
+
+@pytest.mark.parametrize(("t_net", "c_net", "budget", "floor", "present", "absent"), VERDICT_ROWS)
+def test_the_verdict_text_agrees_with_the_printed_ratio(t_net, c_net, budget, floor, present, absent):
+    line = cr.compute(
+        [FileDelta("tests/a.py", t_net, 0), FileDelta("src/a.py", c_net, 0)],
+        cr.RatioSettings(budget, floor),
+    )["line"]
+
+    assert present in line
+    assert absent not in line
+
+
 def test_documentation_counts_for_neither_side():
     result = cr.compute([FileDelta("docs/a.md", 900, 0), FileDelta("README.md", 50, 0)])
 
