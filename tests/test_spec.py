@@ -747,8 +747,16 @@ IMPACT_FILES = {
     "pkg/sub/c.py": "from ..core import X\n",
     "tests/test_core.py": "from pkg.core import X\n",
     "web/app.js": "export const x = 1;\n",
+    # A namespace package: no __init__.py, so a relative import has no layout to lean on.
+    "ns/x.py": "X = 1\n",
+    "ns/y.py": "from . import x\n",
+    # One file that is not Python, one that is over the read bound, and one that parses.
+    "bad/broken.py": "def (:\n",
+    "bad/big.py": "#" * (600 * 1024) + "\n",
+    "bad/ok.py": "X = 1\n",
 }
 CORE_IMPORTERS = ["pkg/a.py", "pkg/sub/b.py", "pkg/sub/c.py"]
+SKIPPED = ["bad/big.py", "bad/broken.py"]
 
 
 def _impact_repo(tmp_path: Path) -> tuple[Path, str]:
@@ -769,22 +777,36 @@ def _impact(repo: Path, capsys, *globs: str, ref: str | None = None) -> dict:
 
 class TestImpact:
     @pytest.mark.parametrize(
-        ("path", "cap", "files", "more", "tests", "status", "language"),
+        ("path", "cap", "files", "more", "tests", "status", "language", "says", "skipped"),
         [
             # AC1 and AC6: an absolute import, a relative from-import of the module and a
             # relative import through the module name are all resolved to it.
-            ("pkg/core.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python"),
+            ("pkg/core.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
             # AC2: nothing imports it.
-            ("pkg/lonely.py", None, [], 0, [], "computed", "python"),
+            ("pkg/lonely.py", None, [], 0, [], "computed", "python", "", SKIPPED),
             # AC3: another language is listed, not computed, and named.
-            ("web/app.js", None, None, None, None, "not_computed", "javascript"),
+            ("web/app.js", None, None, None, None, "not_computed", "javascript", "javascript", []),
             # AC4: over the cap, the cap is listed and the rest counted.
-            ("pkg/core.py", 2, CORE_IMPORTERS[:2], 1, ["tests/test_core.py"], "computed", "python"),
+            ("pkg/core.py", 2, CORE_IMPORTERS[:2], 1, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
+            # A target whose own source is over the read bound or is not Python is not
+            # computed, with the reason, and is never reported as having no importers.
+            ("bad/big.py", None, None, None, None, "not_computed", "python", "could not be read", SKIPPED),
+            ("bad/broken.py", None, None, None, None, "not_computed", "python", "could not be parsed", SKIPPED),
+            # An importer that cannot be parsed leaves the list short; the section names it.
+            ("bad/ok.py", None, [], 0, [], "computed", "python", "", SKIPPED),
+            # A relative import in a package with no __init__.py resolves from the file's path.
+            ("ns/x.py", None, ["ns/y.py"], 0, [], "computed", "python", "", SKIPPED),
+            # `import pkg.core` also runs pkg/__init__.py, so the package is imported too.
+            ("pkg/__init__.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
         ],
-        ids=["importers-and-tests", "none-found", "not-computed", "over-the-cap"],
+        ids=[
+            "importers-and-tests", "none-found", "not-computed", "over-the-cap",
+            "unreadable-target", "unparsable-target", "unparsable-importer-is-named",
+            "namespace-package-relative-import", "dotted-import-counts-the-package-init",
+        ],
     )
     def test_each_path_lists_its_importers_or_says_why_not(
-        self, tmp_path, capsys, monkeypatch, path, cap, files, more, tests, status, language
+        self, tmp_path, capsys, monkeypatch, path, cap, files, more, tests, status, language, says, skipped
     ):
         repo, head = _impact_repo(tmp_path)
         if cap is not None:
@@ -797,9 +819,10 @@ class TestImpact:
         assert section["cap"] == (cap or 25)
         (item,) = section["items"]
         assert (item["path"], item["status"], item["language"]) == (path, status, language)
+        assert section["skipped_paths"] == skipped and section["skipped_files"] == len(skipped)
         if files is None:
             assert item["importers"] is None and item["importing_tests"] is None
-            assert "javascript" in item["note"]
+            assert says in item["note"]
             return
         assert (item["importers"], item["importing_tests"]) == (
             {"files": files, "more": more},
@@ -849,7 +872,8 @@ class TestImpact:
 
         old = _fill(model.new_draft(ROLE))
         assert "impact" not in old
-        model.seal(old, head_sha=HEAD_A, sealed_at="2026-01-01T00:00:00Z")
+        legacy = model.seal(old, head_sha=HEAD_A, sealed_at="2026-01-01T00:00:00Z")
+        assert "impact" not in model.parse_sealed(legacy.data, legacy.spec_hash)
 
     def test_the_computation_makes_no_network_call(self, tmp_path, capsys, monkeypatch):
         import socket

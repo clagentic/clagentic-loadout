@@ -3780,8 +3780,13 @@ Limits:
 - A test file is one under a `test` or `tests` directory, named `test_*` or `*_test`, or
   `conftest.py`. Everything else that imports the path is an importer.
 - A file-import graph only: no call graph, and nothing outside the repository. Python files that
-  cannot be read (over 512 KiB, not UTF-8) or parsed add no import and are counted in
-  `skipped_files`.
+  cannot be read (over 512 KiB, not UTF-8) or parsed add no import, so a list may be short by
+  them: they are counted in `skipped_files` and named in the optional `skipped_paths` (up to the
+  cap). A requested path that is itself one of them is `status: not_computed`, with the reason in
+  `note`, never `none found`.
+- A relative import is resolved from the importing file's own directory, with or without
+  `__init__.py`. `import a.b.c` also records an edge to the `__init__.py` of `a` and `a.b` when they
+  exist in the tree.
 - If the ref or tree cannot be read the section is empty and `note` says why; the draft is still
   written. The section is a report and never refuses an action. It is optional in the schema: specs
   sealed before it existed, and drafts with no `--path`, carry none.

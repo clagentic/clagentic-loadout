@@ -94,6 +94,7 @@ def _unavailable(reason: str, head: str | None) -> dict[str, Any]:
         "languages_covered": list(LANGUAGES_COVERED),
         "cap": IMPORTER_CAP,
         "skipped_files": 0,
+        "skipped_paths": [],
         "items": [],
     }
 
@@ -121,7 +122,8 @@ def compute_impact(repo_path: str, ref: str | None, globs: Sequence[str]) -> dic
         targets.extend(p for p in hits if p not in held)
 
     graph: ImportGraph | None = None
-    skipped = 0
+    skipped: list[str] = []
+    reasons: dict[str, str] = {}
     if any(language_of(p) == "python" for p in targets):
         sources: dict[str, str] = {}
         for path in tree:
@@ -129,15 +131,19 @@ def compute_impact(repo_path: str, ref: str | None, globs: Sequence[str]) -> dic
                 continue
             try:
                 sources[path] = reader.read_text(head, path)
-            except PolicyReadError:
-                skipped += 1
+            except PolicyReadError as exc:
+                reasons[path] = f"its source could not be read ({exc})"
         graph = build_import_graph(sources, tree)
-        skipped += len(graph.unparsed)
+        for path in graph.unparsed:
+            reasons[path] = "its source could not be parsed as Python"
+        skipped = sorted(reasons)
 
     items: list[dict[str, Any]] = []
     for path in targets:
         language = language_of(path)
-        if language == "python":
+        if language == "python" and path in reasons:
+            items.append(_entry(path, language, "not_computed", f"not computed: {reasons[path]}", None))
+        elif language == "python":
             items.append(_entry(path, language, "computed", None, graph))
         else:
             covered = ", ".join(LANGUAGES_COVERED)
@@ -152,7 +158,8 @@ def compute_impact(repo_path: str, ref: str | None, globs: Sequence[str]) -> dic
         "head_sha": head,
         "languages_covered": list(LANGUAGES_COVERED),
         "cap": IMPORTER_CAP,
-        "skipped_files": skipped,
+        "skipped_files": len(skipped),
+        "skipped_paths": skipped[:IMPORTER_CAP],
         "items": items,
     }
 

@@ -9,7 +9,9 @@ Only the standard library ``ast`` is used. ``import a.b``, ``from a import b``
 (``b`` may be a name in ``a`` or the submodule ``a.b``) and relative imports are
 resolved against the package layout of the tree: a directory is a package when
 it holds ``__init__.py``, and a module's name is its path below the highest
-contiguous package. A module is also known by its dotted path from the tree root,
+contiguous package. A relative import is resolved from the importing file's own
+directory, with or without ``__init__.py``. Importing ``a.b`` also records an edge
+to the ``__init__.py`` of every package on its dotted path. A module is also known by its dotted path from the tree root,
 which is how a directory without ``__init__.py`` is imported when the root is on
 the import path. An import that names nothing in the tree (a third-party or
 standard-library module) is not an edge. Nothing is guessed: an import that
@@ -29,11 +31,14 @@ _INIT = "__init__"
 
 @dataclass(frozen=True)
 class ImportGraph:
-    """``importers`` maps a path to the paths that import it; ``unparsed`` lists
-    the sources that are not valid Python and so contribute no edge."""
+    """``importers`` maps a path to the paths that import it. ``unparsed`` lists
+    the sources that are not valid Python and ``unread`` the Python paths in the
+    tree with no source supplied; neither contributes an edge, so a list that
+    could have held them is incomplete."""
 
     importers: Mapping[str, frozenset[str]]
     unparsed: tuple[str, ...]
+    unread: tuple[str, ...] = ()
 
 
 def _split(path: str) -> tuple[list[str], str]:
@@ -56,36 +61,60 @@ def _root_name(path: str) -> str:
     return ".".join(dirs + ([] if stem == _INIT else [stem]))
 
 
-def _module_index(sources: Collection[str], tree_paths: Collection[str]) -> dict[str, set[str]]:
+def _module_index(tree_paths: Collection[str]) -> dict[str, set[str]]:
+    """Every Python path in the tree under the names it can be imported by. It is
+    built from the tree, not from the sources that could be read, so a file whose
+    text is unavailable is still a known target."""
     index: dict[str, set[str]] = defaultdict(set)
-    for path in sources:
+    for path in tree_paths:
+        if not path.endswith(PYTHON_SUFFIX):
+            continue
         for name in (_layout_name(path, tree_paths), _root_name(path)):
             if name:
                 index[name].add(path)
     return index
 
 
-def _imported_names(node: ast.AST, package: list[str] | None) -> Iterator[str]:
-    """The dotted module names a single import statement may refer to. *package*
-    is the importing module's package as name parts, or None when it has none."""
+def _package_of(path: str) -> list[str]:
+    """The package a relative import in *path* is resolved against: the file's own
+    directory as name parts. It does not depend on ``__init__.py``, so a namespace
+    package resolves the same way a regular one does."""
+    return _split(path)[0]
+
+
+def _name_prefixes(dotted: str) -> Iterator[str]:
+    parts = dotted.split(".")
+    for end in range(1, len(parts)):
+        yield ".".join(parts[:end])
+
+
+def _imported_names(node: ast.AST, package: list[str]) -> Iterator[tuple[str, bool]]:
+    """The dotted module names a single import statement may refer to, each with
+    whether it names a package only. Importing ``a.b.c`` also runs the ``__init__``
+    of ``a`` and ``a.b``, so those come back flagged package-only: they match a
+    package's ``__init__.py`` and never a plain module of the same name."""
     if isinstance(node, ast.Import):
         for alias in node.names:
-            yield alias.name
+            yield alias.name, False
+            for prefix in _name_prefixes(alias.name):
+                yield prefix, True
         return
     if not isinstance(node, ast.ImportFrom):
         return
     if node.level:
-        if package is None or node.level - 1 > len(package):
+        if node.level - 1 > len(package):
             return
         base_parts = package[: len(package) - (node.level - 1)]
         base = ".".join(base_parts + ([node.module] if node.module else []))
     else:
         base = node.module or ""
     if base:
-        yield base
+        yield base, False
+        for prefix in _name_prefixes(base):
+            yield prefix, True
     for alias in node.names:
         if alias.name != "*":
-            yield f"{base}.{alias.name}" if base else alias.name
+            yield (f"{base}.{alias.name}" if base else alias.name), False
 
 
 def build_import_graph(
@@ -95,7 +124,7 @@ def build_import_graph(
     *tree_paths*, every path in the tree. *sources* must be a subset of
     *tree_paths*."""
     tree = frozenset(tree_paths)
-    index = _module_index(list(sources), tree)
+    index = _module_index(tree)
     edges: dict[str, set[str]] = defaultdict(set)
     unparsed: list[str] = []
     for path in sorted(sources):
@@ -104,18 +133,20 @@ def build_import_graph(
         except (SyntaxError, ValueError):
             unparsed.append(path)
             continue
-        layout = _layout_name(path, tree)
-        is_package = _split(path)[1] == _INIT
-        parts = layout.split(".") if layout else []
-        package: list[str] | None = parts if is_package else (parts[:-1] if len(parts) > 1 else None)
+        package = _package_of(path)
         for node in ast.walk(module):
-            for name in _imported_names(node, package):
+            for name, packages_only in _imported_names(node, package):
                 for target in index.get(name, ()):
-                    if target != path:
-                        edges[target].add(path)
+                    if target == path:
+                        continue
+                    if packages_only and _split(target)[1] != _INIT:
+                        continue
+                    edges[target].add(path)
+    unread = sorted(p for p in tree if p.endswith(PYTHON_SUFFIX) and p not in sources)
     return ImportGraph(
         importers={target: frozenset(found) for target, found in edges.items()},
         unparsed=tuple(unparsed),
+        unread=tuple(unread),
     )
 
 

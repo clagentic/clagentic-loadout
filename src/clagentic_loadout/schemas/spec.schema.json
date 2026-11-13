@@ -154,6 +154,7 @@
         "languages_covered": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "The languages the graph covers; a path in any other is listed as not computed."},
         "cap": {"type": "integer", "minimum": 1, "description": "The most importers listed per path, separately for files and for test files."},
         "skipped_files": {"type": "integer", "minimum": 0, "description": "Python files in the tree that could not be read or parsed and so add no import."},
+        "skipped_paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "description": "Optional. The skipped Python files, named, up to the cap; skipped_files holds the full count. A list of importers may be short by these."},
         "items": {
           "type": "array",
           "items": {
