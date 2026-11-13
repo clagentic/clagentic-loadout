@@ -783,47 +783,66 @@ def _impact(repo: Path, capsys, *globs: str, ref: str | None = None) -> dict:
 
 class TestImpact:
     @pytest.mark.parametrize(
-        ("path", "cap", "files", "more", "tests", "status", "language", "says", "skipped"),
+        ("path", "cap", "files", "more", "tests", "status", "language", "says", "skipped", "supersede"),
         [
             # AC1 and AC6: an absolute import, a relative from-import of the module and a
             # relative import through the module name are all resolved to it.
-            ("pkg/core.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
+            ("pkg/core.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED, False),
             # AC2: nothing imports it.
-            ("pkg/lonely.py", None, [], 0, [], "computed", "python", "", SKIPPED),
+            ("pkg/lonely.py", None, [], 0, [], "computed", "python", "", SKIPPED, False),
             # AC3: another language is listed, not computed, and named.
-            ("web/app.js", None, None, None, None, "not_computed", "javascript", "javascript", []),
+            ("web/app.js", None, None, None, None, "not_computed", "javascript", "javascript", [], False),
             # AC4: over the cap, the cap is listed and the rest counted.
-            ("pkg/core.py", 2, CORE_IMPORTERS[:2], 1, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
+            ("pkg/core.py", 2, CORE_IMPORTERS[:2], 1, ["tests/test_core.py"], "computed", "python", "", SKIPPED, False),
             # A target whose own source is over the read bound or is not Python is not
             # computed, with the reason, and is never reported as having no importers.
-            ("bad/big.py", None, None, None, None, "not_computed", "python", "could not be read", SKIPPED),
-            ("bad/broken.py", None, None, None, None, "not_computed", "python", "could not be parsed", SKIPPED),
+            ("bad/big.py", None, None, None, None, "not_computed", "python", "could not be read", SKIPPED, False),
+            ("bad/broken.py", None, None, None, None, "not_computed", "python", "could not be parsed", SKIPPED, False),
             # An importer that cannot be parsed leaves the list short; the section names it.
-            ("bad/ok.py", None, [], 0, [], "computed", "python", "", SKIPPED),
+            ("bad/ok.py", None, [], 0, [], "computed", "python", "", SKIPPED, False),
             # A relative import in a package with no __init__.py resolves from the file's path.
-            ("ns/x.py", None, ["ns/y.py"], 0, [], "computed", "python", "", SKIPPED),
+            ("ns/x.py", None, ["ns/y.py"], 0, [], "computed", "python", "", SKIPPED, False),
             # `import pkg.core` also runs pkg/__init__.py, so the package is imported too.
-            ("pkg/__init__.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
+            ("pkg/__init__.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED, False),
             # A file outside any package is not known by its bare stem to a root importer.
-            ("tools/helper.py", None, [], 0, [], "computed", "python", "", SKIPPED),
+            ("tools/helper.py", None, [], 0, [], "computed", "python", "", SKIPPED, False),
             # A script imports its sibling in the same directory.
-            ("tools/runner.py", None, ["tools/main.py"], 0, [], "computed", "python", "", SKIPPED),
+            ("tools/runner.py", None, ["tools/main.py"], 0, [], "computed", "python", "", SKIPPED, False),
+            # A superseding draft with no --path recomputes the carried section at its own
+            # ref: pkg/a.py stops importing the core in the later commit.
+            ("pkg/core.py", None, CORE_IMPORTERS[1:], 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED, True),
         ],
         ids=[
             "importers-and-tests", "none-found", "not-computed", "over-the-cap",
             "unreadable-target", "unparsable-target", "unparsable-importer-is-named",
             "namespace-package-relative-import", "dotted-import-counts-the-package-init",
             "root-import-is-not-a-non-package-stem", "sibling-import-in-a-non-package-dir",
+            "superseding-draft-recomputes-the-carried-section",
         ],
     )
     def test_each_path_lists_its_importers_or_says_why_not(
-        self, tmp_path, capsys, monkeypatch, path, cap, files, more, tests, status, language, says, skipped
+        self, tmp_path, capsys, monkeypatch, path, cap, files, more, tests, status, language, says,
+        skipped, supersede,
     ):
         repo, head = _impact_repo(tmp_path)
         if cap is not None:
             monkeypatch.setattr("clagentic_loadout.spec.impact.IMPORTER_CAP", cap)
 
-        section = _impact(repo, capsys, path)
+        if supersede:
+            first = _fill(json.loads(_run(
+                ["new", "--role", ROLE, "--repo-path", str(repo), "--path", path], capsys
+            )[1]))
+            code, sealed, err = _seal(tmp_path, repo, capsys, first)
+            assert code == 0, err
+            head = commit_files(repo, {"pkg/a.py": "import os\n"})
+            code, out, err = _run(
+                ["new", "--role", ROLE, "--repo-path", str(repo), "--supersedes", sealed["spec_hash"]],
+                capsys,
+            )
+            assert code == 0, err
+            section = json.loads(out)["impact"]
+        else:
+            section = _impact(repo, capsys, path)
 
         assert section["head_sha"] == head
         assert section["languages_covered"] == ["python"]
