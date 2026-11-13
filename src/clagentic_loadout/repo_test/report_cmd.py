@@ -10,7 +10,9 @@ see ``repo_test.store``).
 Selecting a run:
 
   * ``<run-id>`` is untrusted input and must match the run id grammar.
-  * ``latest`` is the newest finished run; ``--repo`` narrows it to one
+  * ``latest`` is the newest finished run, or an exit 79 refusal naming the
+    running run when the repository has only runs still in progress;
+    ``--repo`` narrows it to one
     repository (a path, the repository's name, or its remote URL). Without
     ``--repo`` it is scoped to the git repository holding the current directory,
     or refused when the current directory is in none and the runs on record span
@@ -141,10 +143,15 @@ def _scoped_runs(
 
 
 def _load_runs(
-    root: Path, repo: str | None, cwd: Path | None, note: Callable[[str], None] | None
+    root: Path,
+    repo: str | None,
+    cwd: Path | None,
+    note: Callable[[str], None] | None,
+    *,
+    name_running: bool = True,
 ) -> list[RunRecord]:
     try:
-        runs = store.list_runs(root)
+        runs = store.list_runs(root, include_unfinished=True)
     except StoreError as exc:
         raise ReportRefused(str(exc), exits.EXIT_NO_RUNS) from exc
     # An interrupted run ended without a result, so it is never the answer to
@@ -154,10 +161,21 @@ def _load_runs(
         runs = [run for run in runs if repo_matches(run.repo, repo)]
     elif runs:
         runs, _ = _scoped_runs(runs, cwd, note)
-    if not runs:
+    finished = [run for run in runs if run.state != store.STATE_RUNNING]
+    if not finished:
+        # A run still in progress is not a missing one: say so, so the caller waits
+        # instead of concluding there is nothing to read.
+        if runs and name_running:
+            newest = runs[-1]
+            started = newest.result.get("started_at") or "an unrecorded time"
+            raise ReportRefused(
+                f"no finished test run yet: run {newest.run_id} is still running (started {started}); "
+                "read it again when it ends, or pass --wait",
+                exits.EXIT_STILL_RUNNING,
+            )
         scope = f" for repository {repo!r}" if repo is not None else ""
         raise ReportRefused(f"no finished test run{scope} under reports root {str(root)!r}", exits.EXIT_NO_RUNS)
-    return runs
+    return finished
 
 
 def select_run(
@@ -193,7 +211,7 @@ def select_run(
         if note is not None and message is not None:
             note(message)
         return run
-    all_runs = _load_runs(root, repo, cwd, note)
+    all_runs = _load_runs(root, repo, cwd, note, name_running=sha is None)
     runs, future, undatable = _split_future(all_runs, now, note)
     if sha is None:
         if not runs:

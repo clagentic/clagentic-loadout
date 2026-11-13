@@ -26,7 +26,7 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ from clagentic_loadout.repo_test import exits, report_cmd, store
 from clagentic_loadout.repo_test.report_cmd import LATEST, ReportRefused
 from clagentic_loadout.repo_test.detach import start_detached
 from clagentic_loadout.repo_test.run_cmd import RunRefused, execute_run, prepare_run
+from clagentic_loadout.repo_test.store import RunRecord
 from clagentic_loadout.repo_test.spec import MODE_TIER, RUN_MODES
 
 _PROG = "clagentic-loadout test"
@@ -50,7 +51,7 @@ _EXIT_CODES_TEXT = (
     "74 run could not be recorded, 75 no reports root or no matching run, 76 bad or unknown "
     "run id, 77 no run for --sha, 78 refused (not the expected repository or commit, a repository "
     "to scope `latest` to is ambiguous, different repositories, unlike tiers, or a run without results), "
-    "79 report: the run is still running (--wait timed out)."
+    "79 report: the run is still running (--wait timed out, or `latest` found only a running run)."
 )
 
 _TOP_HELP = f"""{_PROG} -- run the tests a repository declares, and read the results by run id.
@@ -325,6 +326,27 @@ def _scoping_cwd(args: argparse.Namespace) -> Path | None:
         return None
 
 
+def _select_waiting(
+    args: argparse.Namespace,
+    root: Path,
+    deadline: float | None,
+    note: Callable[[str], None] | None,
+) -> RunRecord:
+    """Select the run to report. With --wait, `latest` that finds only a running
+    run keeps waiting until *deadline* and then refuses with that run named."""
+    while True:
+        try:
+            return report_cmd.select_run(
+                root, args.run_id, repo=args.repo, sha=args.sha, cwd=_scoping_cwd(args), note=note
+            )
+        except ReportRefused as exc:
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if exc.code != exits.EXIT_STILL_RUNNING or remaining is None or remaining <= 0:
+                raise
+            time.sleep(min(_WAIT_POLL_SECONDS, remaining))
+            note = None
+
+
 def _report(args: argparse.Namespace) -> int:
     root = store.reports_root()
 
@@ -333,22 +355,13 @@ def _report(args: argparse.Namespace) -> int:
 
     deadline = None if args.wait is None else time.monotonic() + args.wait
     try:
-        run = report_cmd.select_run(
-            root,
-            args.run_id,
-            repo=args.repo,
-            sha=args.sha,
-            cwd=_scoping_cwd(args),
-            note=note,
-        )
+        run = _select_waiting(args, root, deadline, note)
         while deadline is not None and not report_cmd.is_terminal(run):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             time.sleep(min(_WAIT_POLL_SECONDS, remaining))
-            run = report_cmd.select_run(
-                root, args.run_id, repo=args.repo, sha=args.sha, cwd=_scoping_cwd(args)
-            )
+            run = _select_waiting(args, root, deadline, None)
         if args.diff is not None:
             _print_json(report_cmd.diff_of(run, report_cmd.load_base_run(root, args.diff, note=note)))
         elif args.failures:

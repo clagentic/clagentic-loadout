@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from xml.etree import ElementTree
 
-from clagentic_loadout.repo_test import store
+from clagentic_loadout.repo_test import liveness, store
 
 FAKE_RUNNER = '''\
 """Stand-in test runner: writes a JUnit report to argv[1]. Every further argument
@@ -145,6 +145,15 @@ def write_run(
     if junit_body is not None:
         (run_dir / store.JUNIT_FILE).write_text(f"<testsuites><testsuite>{junit_body}</testsuite></testsuites>")
     return run_dir
+
+
+def write_unfinished_run(root: Path, run_id: str, repo_path: str, *, alive: bool) -> None:
+    """A detached run with no result: running while *alive*, otherwise interrupted."""
+    run_dir = write_run(root, run_id, finished=False, repo_path=repo_path)
+    identity = liveness.capture_identity(os.getpid()) if alive else {"pid": 2**30}
+    provenance = json.loads((run_dir / store.PROVENANCE_FILE).read_text())
+    provenance[store.PROCESS_KEY] = {**identity, "mode": "full", "started_at": "2026-01-01T00:00:00+00:00"}
+    (run_dir / store.PROVENANCE_FILE).write_text(json.dumps(provenance))
 
 
 def recorded_bases(run_dir: Path) -> list[str]:

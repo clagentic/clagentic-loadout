@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from _repo_test_support import tree_snapshot, write_run
+from _repo_test_support import make_repo, tree_snapshot, write_run, write_unfinished_run
 
 from clagentic_loadout.repo_test import exits, store
 from clagentic_loadout.repo_test.verb import main
@@ -67,6 +67,67 @@ def test_latest_is_filtered_by_repo_path_name_or_remote(
 
     code, _, err = _report(capsys, "latest", "--repo", "gamma")
     assert code == exits.EXIT_NO_RUNS and "'gamma'" in err
+
+
+RUNNING_ID = "20260102T000000Z-11"
+
+
+@pytest.mark.parametrize(
+    ("finished", "running", "scoped", "code", "stderr_has"),
+    [
+        ([], [("alpha", RUNNING_ID)], False, exits.EXIT_STILL_RUNNING, [RUNNING_ID, "2026-01-01T00:00:00", "still running"]),
+        ([], [("alpha", RUNNING_ID)], True, exits.EXIT_STILL_RUNNING, [RUNNING_ID, "still running"]),
+        ([], [("beta", RUNNING_ID)], False, exits.EXIT_NO_RUNS, ["no finished test run for repository 'alpha'"]),
+        ([], [], False, exits.EXIT_NO_RUNS, ["no finished test run for repository 'alpha'"]),
+        ([("alpha", "20260101T000000Z-10")], [("alpha", RUNNING_ID)], False, exits.EXIT_OK, []),
+    ],
+    ids=["running-only-repo", "running-only-cwd", "other-repo-running", "no-run", "finished-and-newer-running"],
+)
+def test_latest_with_no_finished_run_names_a_running_one_and_exits_still_running(
+    tmp_path: Path,
+    reports: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    finished: list[tuple[str, str]],
+    running: list[tuple[str, str]],
+    scoped: bool,
+    code: int,
+    stderr_has: list[str],
+) -> None:
+    project = make_repo(tmp_path / "alpha")
+    paths = {"alpha": str(project.resolve()), "beta": "/repos/beta"}
+    for name, run_id in finished:
+        write_run(reports, run_id, repo_path=paths[name])
+    for name, run_id in running:
+        write_unfinished_run(reports, run_id, paths[name], alive=True)
+    if scoped:
+        monkeypatch.chdir(project)
+
+    argv = ["latest"] if scoped else ["latest", "--repo", "alpha"]
+    got, out, err = _report(capsys, *argv)
+
+    assert got == code
+    assert all(text in err for text in stderr_has)
+    if code == exits.EXIT_OK:
+        assert json.loads(out)["run_id"] == finished[0][1]
+
+
+def test_latest_wait_returns_the_run_that_finishes_while_waiting_and_names_a_running_one_at_the_deadline(
+    reports: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_unfinished_run(reports, RUNNING_ID, "/repos/alpha", alive=True)
+
+    code, _, err = _report(capsys, "latest", "--repo", "alpha", "--wait", "0")
+    assert code == exits.EXIT_STILL_RUNNING and RUNNING_ID in err
+
+    def finish(_seconds: float) -> None:
+        (reports / RUNNING_ID / store.RESULT_FILE).write_text(
+            json.dumps({"schema": 1, "run_id": RUNNING_ID, "state": store.STATE_COMPLETE, "failing_ids": []})
+        )
+
+    monkeypatch.setattr("time.sleep", finish)
+    code, out, _ = _report(capsys, "latest", "--repo", "alpha", "--wait", "30")
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == RUNNING_ID
 
 
 def test_the_run_id_may_follow_the_options(reports: Path, capsys: pytest.CaptureFixture[str]) -> None:
