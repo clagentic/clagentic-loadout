@@ -80,8 +80,16 @@ RUNNING_ID = "20260102T000000Z-11"
         ([], [("beta", RUNNING_ID)], False, exits.EXIT_NO_RUNS, ["no finished test run for repository 'alpha'"]),
         ([], [], False, exits.EXIT_NO_RUNS, ["no finished test run for repository 'alpha'"]),
         ([("alpha", "20260101T000000Z-10")], [("alpha", RUNNING_ID)], False, exits.EXIT_OK, []),
+        ([("alpha", "20260101T000000Z-10")], [("beta", RUNNING_ID)], None, exits.EXIT_OK, []),
     ],
-    ids=["running-only-repo", "running-only-cwd", "other-repo-running", "no-run", "finished-and-newer-running"],
+    ids=[
+        "running-only-repo",
+        "running-only-cwd",
+        "other-repo-running",
+        "no-run",
+        "finished-and-newer-running",
+        "no-git-cwd-other-repo-running",
+    ],
 )
 def test_latest_with_no_finished_run_names_a_running_one_and_exits_still_running(
     tmp_path: Path,
@@ -90,7 +98,7 @@ def test_latest_with_no_finished_run_names_a_running_one_and_exits_still_running
     monkeypatch: pytest.MonkeyPatch,
     finished: list[tuple[str, str]],
     running: list[tuple[str, str]],
-    scoped: bool,
+    scoped: bool | None,
     code: int,
     stderr_has: list[str],
 ) -> None:
@@ -103,7 +111,8 @@ def test_latest_with_no_finished_run_names_a_running_one_and_exits_still_running
     if scoped:
         monkeypatch.chdir(project)
 
-    argv = ["latest"] if scoped else ["latest", "--repo", "alpha"]
+    # None: no --repo and a directory in no git tree (the `reports` fixture's).
+    argv = ["latest"] if scoped is not False else ["latest", "--repo", "alpha"]
     got, out, err = _report(capsys, *argv)
 
     assert got == code

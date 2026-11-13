@@ -116,15 +116,21 @@ def _scoped_runs(
     cwd: Path | None,
     note: Callable[[str], None] | None,
     subject: str = "`latest`",
+    *,
+    empty_ok: bool = False,
 ) -> tuple[list[RunRecord], str | None]:
     """Narrow *runs* when no ``--repo`` was given: to the repository holding *cwd*
     when it is inside a git work tree; otherwise refuse if the runs span more than
-    one repository. Returns the runs and the repository they were narrowed to."""
+    one repository. Returns the runs and the repository they were narrowed to.
+    With *empty_ok*, a git work tree with no run of its own yields no runs instead
+    of a refusal, so the caller can look elsewhere before refusing."""
     top = toplevel(cwd) if cwd is not None else None
     if top is not None:
         scoped = [run for run in runs if run.repo.get("path") == top]
         if note is not None:
             note(f"{subject} is scoped to the repository at {top!r}; pass --repo to name another")
+        if not scoped and empty_ok:
+            return [], top
         if not scoped:
             raise ReportRefused(
                 f"no finished test run for the repository at {top!r} under the reports root; "
@@ -157,21 +163,34 @@ def _load_runs(
     # An interrupted run ended without a result, so it is never the answer to
     # `latest` or `--sha`; it is read by its run id.
     runs = [run for run in runs if run.state != store.STATE_INTERRUPTED]
-    if repo is not None:
-        runs = [run for run in runs if repo_matches(run.repo, repo)]
-    elif runs:
-        runs, _ = _scoped_runs(runs, cwd, note)
     finished = [run for run in runs if run.state != store.STATE_RUNNING]
+    running = [run for run in runs if run.state == store.STATE_RUNNING]
+    top: str | None = None
+    if repo is not None:
+        finished = [run for run in finished if repo_matches(run.repo, repo)]
+        running = [run for run in running if repo_matches(run.repo, repo)]
+    elif runs:
+        # Scoping, and its ambiguity check, sees finished runs only: a run still in
+        # progress must not change which finished run answers.
+        finished, top = _scoped_runs(finished, cwd, note, empty_ok=True)
     if not finished:
         # A run still in progress is not a missing one: say so, so the caller waits
         # instead of concluding there is nothing to read.
-        if runs and name_running:
-            newest = runs[-1]
+        if repo is None and running:
+            running, _ = _scoped_runs(running, cwd, None, empty_ok=True)
+        if running and name_running:
+            newest = running[-1]
             started = newest.result.get("started_at") or "an unrecorded time"
             raise ReportRefused(
                 f"no finished test run yet: run {newest.run_id} is still running (started {started}); "
                 "read it again when it ends, or pass --wait",
                 exits.EXIT_STILL_RUNNING,
+            )
+        if top is not None:
+            raise ReportRefused(
+                f"no finished test run for the repository at {top!r} under the reports root; "
+                "pass --repo to name another repository",
+                exits.EXIT_NO_RUNS,
             )
         scope = f" for repository {repo!r}" if repo is not None else ""
         raise ReportRefused(f"no finished test run{scope} under reports root {str(root)!r}", exits.EXIT_NO_RUNS)
