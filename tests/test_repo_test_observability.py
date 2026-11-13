@@ -10,9 +10,9 @@ import time
 from pathlib import Path
 
 import pytest
-from _repo_test_support import make_repo, profile_text, tree_snapshot, write_run
+from _repo_test_support import make_repo, profile_text, tree_snapshot, write_run, write_unfinished_run
 
-from clagentic_loadout.repo_test import exits, liveness, store
+from clagentic_loadout.repo_test import exits, store
 from clagentic_loadout.repo_test.runner import TAIL_MAX_CHARS, describe_exit
 from clagentic_loadout.repo_test.verb import main
 
@@ -169,21 +169,13 @@ def test_describe_exit(code: int, text: str) -> None:
 # --- test list -------------------------------------------------------------
 
 
-def _unfinished(root: Path, run_id: str, repo_path: str, *, alive: bool) -> None:
-    run_dir = write_run(root, run_id, finished=False, repo_path=repo_path)
-    identity = liveness.capture_identity(os.getpid()) if alive else {"pid": 2**30}
-    provenance = json.loads((run_dir / store.PROVENANCE_FILE).read_text())
-    provenance[store.PROCESS_KEY] = {**identity, "mode": "full", "started_at": "2026-01-01T00:00:00+00:00"}
-    (run_dir / store.PROVENANCE_FILE).write_text(json.dumps(provenance))
-
-
 @pytest.fixture
 def populated(reports: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     write_run(reports, "20260101T000001Z-1", repo_path="/repos/alpha", head_sha="a" * 40)
     write_run(reports, "20260101T000002Z-1", repo_path="/repos/alpha", failing=["x::y"])
     write_run(reports, "20260101T000003Z-1", repo_path="/repos/alpha", state=store.STATE_UNRUNNABLE)
-    _unfinished(reports, "20260101T000004Z-1", "/repos/alpha", alive=True)
-    _unfinished(reports, "20260101T000005Z-1", "/repos/alpha", alive=False)
+    write_unfinished_run(reports, "20260101T000004Z-1", "/repos/alpha", alive=True)
+    write_unfinished_run(reports, "20260101T000005Z-1", "/repos/alpha", alive=False)
     write_run(reports, "20260101T000006Z-1", repo_path="/repos/beta")
     write_run(reports, "29990101T000000Z-1", repo_path="/repos/alpha")
     write_run(reports, "20261301T000000Z-1", repo_path="/repos/alpha")
