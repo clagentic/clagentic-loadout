@@ -362,10 +362,21 @@ def _with_consumers(
 
 def _with_impact(draft: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
     """*draft* with its impact section computed for the --path globs from the tree
-    at --ref. Without --path the section is left as it is."""
-    if not args.path:
-        return draft
-    return model.apply_impact(draft, impact_mod.compute_impact(args.repo_path, args.ref, args.path))
+    at --ref. Without --path, a section carried from a superseded spec describes
+    the head it was sealed at, so it is recomputed at --ref from its own item
+    paths, or dropped when it names none."""
+    paths = list(args.path)
+    if not paths:
+        carried = draft.get("impact")
+        if not isinstance(carried, dict):
+            return draft
+        items = carried.get("items")
+        paths = list(dict.fromkeys(
+            item["path"] for item in items if isinstance(item, dict) and isinstance(item.get("path"), str)
+        )) if isinstance(items, list) else []
+        if not paths:
+            return {key: value for key, value in draft.items() if key != "impact"}
+    return model.apply_impact(draft, impact_mod.compute_impact(args.repo_path, args.ref, paths))
 
 
 def _with_remedy(
