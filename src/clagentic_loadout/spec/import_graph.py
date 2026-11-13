@@ -8,11 +8,14 @@ decides where the text comes from (spec.impact reads it from git objects).
 Only the standard library ``ast`` is used. ``import a.b``, ``from a import b``
 (``b`` may be a name in ``a`` or the submodule ``a.b``) and relative imports are
 resolved against the package layout of the tree: a directory is a package when
-it holds ``__init__.py``, and a module's name is its path below the highest
-contiguous package. A relative import is resolved from the importing file's own
-directory, with or without ``__init__.py``. Importing ``a.b`` also records an edge
-to the ``__init__.py`` of every package on its dotted path. A module is also known by its dotted path from the tree root,
-which is how a directory without ``__init__.py`` is imported when the root is on
+it holds ``__init__.py``, and the name of a file inside a package is its path
+below the highest contiguous package. A relative import is resolved from the
+importing file's own directory, with or without ``__init__.py``. Importing ``a.b``
+also records an edge to the ``__init__.py`` of every package on its dotted path.
+Every module is also known by its dotted path from the tree root, which is the
+only name a file in a directory without ``__init__.py`` has (a tree-root file keeps
+its stem). An absolute import made by a file in such a directory also tries the
+name as a sibling in that directory, since the running script's directory is on
 the import path. An import that names nothing in the tree (a third-party or
 standard-library module) is not an edge. Nothing is guessed: an import that
 cannot be resolved against the tree adds no edge.
@@ -46,9 +49,17 @@ def _split(path: str) -> tuple[list[str], str]:
     return parts[:-1], parts[-1][: -len(PYTHON_SUFFIX)]
 
 
+def _is_package_dir(path: str, tree_paths: Collection[str]) -> bool:
+    return "/".join([*_split(path)[0], _INIT + PYTHON_SUFFIX]) in tree_paths
+
+
 def _layout_name(path: str, tree_paths: Collection[str]) -> str:
-    """The dotted name *path* has below its highest contiguous package."""
+    """The dotted name *path* has below its highest contiguous package. A file whose
+    own directory is not a package has none: it is only known by its path from the
+    tree root, so a bare stem is never guessed for it."""
     dirs, stem = _split(path)
+    if dirs and not _is_package_dir(path, tree_paths):
+        return ""
     top = len(dirs)
     while top > 0 and "/".join(dirs[:top]) + "/" + _INIT + PYTHON_SUFFIX in tree_paths:
         top -= 1
@@ -117,6 +128,18 @@ def _imported_names(node: ast.AST, package: list[str]) -> Iterator[tuple[str, bo
             yield (f"{base}.{alias.name}" if base else alias.name), False
 
 
+def _candidate_names(
+    node: ast.AST, package: list[str], in_package: bool
+) -> Iterator[tuple[str, bool]]:
+    """The names of ``_imported_names`` plus, for an absolute import made by a file
+    whose own directory is not a package, the same names as siblings in that
+    directory: a running script's directory is on the import path."""
+    for name, packages_only in _imported_names(node, package):
+        yield name, packages_only
+        if package and not in_package and not getattr(node, "level", 0):
+            yield ".".join([*package, name]), packages_only
+
+
 def build_import_graph(
     sources: Mapping[str, str], tree_paths: Collection[str]
 ) -> ImportGraph:
@@ -134,8 +157,9 @@ def build_import_graph(
             unparsed.append(path)
             continue
         package = _package_of(path)
+        in_package = _is_package_dir(path, tree)
         for node in ast.walk(module):
-            for name, packages_only in _imported_names(node, package):
+            for name, packages_only in _candidate_names(node, package, in_package):
                 for target in index.get(name, ()):
                     if target == path:
                         continue

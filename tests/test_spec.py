@@ -754,6 +754,12 @@ IMPACT_FILES = {
     "bad/broken.py": "def (:\n",
     "bad/big.py": "#" * (600 * 1024) + "\n",
     "bad/ok.py": "X = 1\n",
+    # No tools/__init__.py: a root-level `import helper` is not tools/helper.py, but a
+    # script inside tools/ importing its sibling is.
+    "tools/helper.py": "X = 1\n",
+    "tools/runner.py": "X = 1\n",
+    "tools/main.py": "import runner\n",
+    "app.py": "import helper\n",
 }
 CORE_IMPORTERS = ["pkg/a.py", "pkg/sub/b.py", "pkg/sub/c.py"]
 SKIPPED = ["bad/big.py", "bad/broken.py"]
@@ -798,11 +804,16 @@ class TestImpact:
             ("ns/x.py", None, ["ns/y.py"], 0, [], "computed", "python", "", SKIPPED),
             # `import pkg.core` also runs pkg/__init__.py, so the package is imported too.
             ("pkg/__init__.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED),
+            # A file outside any package is not known by its bare stem to a root importer.
+            ("tools/helper.py", None, [], 0, [], "computed", "python", "", SKIPPED),
+            # A script imports its sibling in the same directory.
+            ("tools/runner.py", None, ["tools/main.py"], 0, [], "computed", "python", "", SKIPPED),
         ],
         ids=[
             "importers-and-tests", "none-found", "not-computed", "over-the-cap",
             "unreadable-target", "unparsable-target", "unparsable-importer-is-named",
             "namespace-package-relative-import", "dotted-import-counts-the-package-init",
+            "root-import-is-not-a-non-package-stem", "sibling-import-in-a-non-package-dir",
         ],
     )
     def test_each_path_lists_its_importers_or_says_why_not(
