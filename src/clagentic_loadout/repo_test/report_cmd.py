@@ -44,7 +44,13 @@ from clagentic_loadout.repo_test.go_test_json import GoStreamError
 from clagentic_loadout.repo_test.go_test_json import parse_failed_cases as parse_go_failed_cases
 from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, parse_failed_cases
 from clagentic_loadout.repo_test.provenance import toplevel
-from clagentic_loadout.repo_test.repo_match import SHA_ARG_RE, repo_label, repo_matches
+from clagentic_loadout.repo_test.repo_match import (
+    SHA_ARG_RE,
+    legacy_remote_text,
+    recorded_remote,
+    repo_label,
+    repo_matches,
+)
 from clagentic_loadout.repo_test.spec import MODE_TIER, REPORT_FORMATS, REPORT_GO_TEST_JSON, REPORT_JUNIT
 from clagentic_loadout.repo_test.store import RunRecord, StoreError
 
@@ -453,6 +459,11 @@ def _recorded(run: RunRecord, key: str) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _remote_shown(run: RunRecord) -> str:
+    parts = recorded_remote(run.repo)
+    return "/".join(parts) if parts else "an unparsed remote"
+
+
 def _refuse_different(head: RunRecord, base: RunRecord, head_id: str, base_id: str) -> ReportRefused:
     return ReportRefused(
         f"runs {head.run_id} and {base.run_id} are from different repositories "
@@ -470,10 +481,16 @@ def _repo_check(head: RunRecord, base: RunRecord) -> str:
     means the other may just be a clone elsewhere), so that case is unverified,
     as is any run with no path recorded.
     """
-    head_remote, base_remote = _recorded(head, "remote_url"), _recorded(base, "remote_url")
+    head_legacy, base_legacy = legacy_remote_text(head.repo), legacy_remote_text(base.repo)
+    if head_legacy is not None and base_legacy is not None:
+        # Two records of the older form compare as they always did, on the text.
+        head_remote, base_remote = head_legacy, base_legacy
+    else:
+        head_remote, base_remote = recorded_remote(head.repo), recorded_remote(base.repo)
     if head_remote is not None and base_remote is not None:
         if head_remote != base_remote:
-            raise _refuse_different(head, base, head_remote, base_remote)
+            # Parsed parts only: legacy text may carry what the parts never do.
+            raise _refuse_different(head, base, _remote_shown(head), _remote_shown(base))
         return REPO_SAME
     head_path, base_path = _recorded(head, "path"), _recorded(base, "path")
     if head_path is None or base_path is None:

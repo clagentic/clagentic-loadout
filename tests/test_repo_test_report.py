@@ -305,6 +305,41 @@ def test_diff_lists_head_only_base_only_and_the_shared_count(
     }
 
 
+PARTS = {"host": "h.example.test", "owner": "o", "name": "alpha"}
+
+
+@pytest.mark.parametrize(
+    "wanted",
+    ["alpha", "o/alpha", "h.example.test/o/alpha", "https://h.example.test/o/alpha.git", "/repos/alpha"],
+)
+def test_latest_finds_a_run_whose_remote_is_recorded_as_parts(
+    reports: Path, capsys: pytest.CaptureFixture[str], wanted: str
+) -> None:
+    write_run(reports, "20260101T000000Z-10", repo_path="/repos/alpha", remote=PARTS)
+    write_run(reports, "20260102T000000Z-11", repo_path="/repos/beta", remote={**PARTS, "name": "beta"})
+
+    code, out, _ = _report(capsys, "latest", "--repo", wanted)
+
+    assert code == exits.EXIT_OK and json.loads(out)["run_id"] == "20260101T000000Z-10"
+
+
+def test_diff_compares_an_old_format_run_with_a_new_format_run_of_the_same_remote(
+    reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_run(reports, "20260101T000000Z-10", failing=["t::a"], remote_url="https://h.example.test/o/alpha.git")
+    write_run(reports, "20260102T000000Z-11", failing=["t::a"], remote=PARTS)
+    write_run(reports, "20260103T000000Z-12", failing=["t::a"], remote={**PARTS, "name": "beta"})
+
+    code, out, _ = _report(capsys, "20260102T000000Z-11", "--diff", "20260101T000000Z-10")
+    assert code == exits.EXIT_OK and json.loads(out)["repo_check"] == "same"
+
+    code, _, err = _report(capsys, "20260103T000000Z-12", "--diff", "20260101T000000Z-10")
+    assert code == exits.EXIT_DIFF_REFUSED and "different repositories" in err
+
+    code, out, _ = _report(capsys, "20260101T000000Z-10")
+    assert code == exits.EXIT_OK and json.loads(out)["repo"]["remote_url"] == "https://h.example.test/o/alpha.git"
+
+
 def test_diff_refuses_runs_from_different_repositories(reports: Path, capsys: pytest.CaptureFixture[str]) -> None:
     write_run(reports, "20260101T000000Z-10", remote_url="https://h.example.test/o/alpha.git")
     write_run(reports, "20260102T000000Z-11", remote_url="https://h.example.test/o/beta.git")
