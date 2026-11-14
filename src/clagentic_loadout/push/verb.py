@@ -1048,6 +1048,8 @@ def _read_body_env(
         _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
     staged.pair = pair
     staged.caller = caller
+    # The claim must resolve the root the peek just validated.
+    staged.env = (stage_kwargs or {}).get("env")
     return _unwrap_body_json(pair.data, source_label="--body-env")
 
 
@@ -1061,6 +1063,7 @@ class _StagedBody:
     def __init__(self) -> None:
         self.pair: StagedPair | None = None
         self.caller: str | None = None
+        self.env: dict[str, str] | None = None
 
     @property
     def pending(self) -> bool:
@@ -1073,7 +1076,7 @@ class _StagedBody:
         if pair is None:
             return
         try:
-            claim_caller_body(caller=self.caller, expected=pair).consume()
+            claim_caller_body(caller=self.caller, expected=pair, env=self.env).consume()
         except BodyEnvError as exc:
             _fail(str(exc), code=EXIT_BODY_ENV_UNAVAILABLE)
 
