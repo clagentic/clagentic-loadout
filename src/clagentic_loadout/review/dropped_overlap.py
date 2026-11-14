@@ -11,7 +11,9 @@ producer emits overlapping lists into no post at all.
 
 A candidate is identified by its location and rule, ``file:line:rule_id``, the id
 the rest of the review path uses and which a finding and a dropped candidate both
-carry.
+carry. Distinct candidates can share that id, so a dropped entry that carries a
+message removes only the finding with the same message; one without a message
+(an older producer) removes every finding at that id.
 """
 
 from __future__ import annotations
@@ -26,6 +28,21 @@ def candidate_id(entry: Mapping[str, Any]) -> str:
     return f"{entry.get('file')}:{entry.get('line')}:{entry.get('rule_id')}"
 
 
+def _is_dropped(finding: Mapping[str, Any], dropped_by_id: Mapping[str, set[str] | None]) -> bool:
+    """Whether *finding* is a dropped candidate. Two candidates can share
+    ``file:line:rule_id`` (and a fingerprint), so the message tells them apart
+    when the dropped entry carries one. A dropped entry without a message, or a
+    finding without one, can only be matched by location."""
+    key = candidate_id(finding)
+    if key not in dropped_by_id:
+        return False
+    messages = dropped_by_id[key]
+    message = finding.get("message")
+    if messages is None or not isinstance(message, str):
+        return True
+    return message in messages
+
+
 def drop_overlapping(
     findings: list[dict[str, Any]],
     dropped: Iterable[Any],
@@ -36,12 +53,25 @@ def drop_overlapping(
     One stderr notice per removed candidate. Entries that are not mappings are
     left alone; their own validation reports them. With nothing to remove the
     same list is returned, untouched."""
-    dropped_ids = {candidate_id(entry) for entry in dropped if isinstance(entry, Mapping)}
-    if not dropped_ids:
+    # Per location id: the messages of the dropped entries there, or None when
+    # any of them carries no message and so can only match by location.
+    dropped_by_id: dict[str, set[str] | None] = {}
+    for entry in dropped:
+        if not isinstance(entry, Mapping):
+            continue
+        key = candidate_id(entry)
+        message = entry.get("message")
+        messages = dropped_by_id.get(key, set())
+        if not isinstance(message, str):
+            dropped_by_id[key] = None
+        elif messages is not None:
+            messages.add(message)
+            dropped_by_id[key] = messages
+    if not dropped_by_id:
         return findings
     kept: list[dict[str, Any]] = []
     for finding in findings:
-        if isinstance(finding, Mapping) and candidate_id(finding) in dropped_ids:
+        if isinstance(finding, Mapping) and _is_dropped(finding, dropped_by_id):
             print(
                 f"{prog}: notice: candidate {candidate_id(finding)} is in both --findings "
                 "and --dropped; the drop is honoured",
