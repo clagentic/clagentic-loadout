@@ -143,6 +143,26 @@ def test_drop_overlapping_keeps_order_and_ignores_entries_that_are_not_objects(c
     assert capsys.readouterr().err.count("notice: candidate") == 2
 
 
+@pytest.mark.parametrize(
+    ("dropped", "survivors"),
+    [
+        # Same location and rule, different messages: only the dropped one goes.
+        ([_dropped(message="first")], ["second"]),
+        # A true duplicate (same message) is still dropped, with the notice.
+        ([_dropped(message="first"), _dropped(message="second")], []),
+        # A dropped entry with no message matches by file:line:rule_id as before.
+        ([{k: v for k, v in _dropped().items() if k != "message"}], []),
+    ],
+)
+def test_drop_overlapping_tells_same_location_candidates_apart(dropped, survivors, capsys):
+    findings = [_finding(message="first"), _finding(message="second")]
+
+    kept = drop_overlapping(findings, dropped)
+
+    assert [f["message"] for f in kept] == survivors
+    assert capsys.readouterr().err.count("notice: candidate") == len(findings) - len(kept)
+
+
 _ARGV = [
     "--caller", "reviewer", "--platform", "github", "--verdict-findings",
     "--verdict-head-sha", HEAD, "some-owner/some-repo", "42",
@@ -153,7 +173,7 @@ def test_review_post_removes_a_dropped_candidate_from_the_findings(monkeypatch, 
     stdin = json.dumps(
         {
             "review_status": "blocking",
-            "findings": [{"file": "a.py", "line": 3, "rule_id": "R1", "message": "m"}],
+            "findings": [_finding()],
             "dropped": [_dropped()],
         }
     ).encode()
