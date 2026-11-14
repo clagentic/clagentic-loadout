@@ -171,16 +171,25 @@ def redact_push_secrets(text: str, *, known_secrets: tuple[str, ...] = ()) -> st
 
     *known_secrets*: literal values this call site holds and knows must
     never appear in output (the minted token, verbatim) -- masked by EXACT
-    VALUE MATCH first, before the generic pattern-based passes below, so a
-    short or unusually-shaped token is still caught even if it happens not
-    to match `_BEARER_OR_TOKEN_RE`'s shape assumption.
+    VALUE MATCH on the raw text first, before the stripping and the generic
+    pattern-based passes below, so a secret that itself contains a control
+    byte is still caught, as is a short or unusually-shaped token that does
+    not match `_BEARER_OR_TOKEN_RE`'s shape assumption. Each secret's
+    stripped form is matched again after stripping, so a secret is masked
+    in either form.
     """
-    # Stripped first: a control character spliced into a keyword
-    # (`Bea<BEL>rer <token>`) would otherwise defeat every pattern below.
-    redacted = _strip_ansi_and_control_chars(text)
-    for secret in known_secrets:
-        if secret:
-            redacted = redacted.replace(secret, _REDACTED)
+    secrets = tuple(secret for secret in known_secrets if secret)
+    redacted = text
+    for secret in secrets:
+        redacted = redacted.replace(secret, _REDACTED)
+    # Stripped before the pattern passes: a control character spliced into a
+    # keyword (`Bea<BEL>rer <token>`) would otherwise defeat every pattern
+    # below.
+    redacted = _strip_ansi_and_control_chars(redacted)
+    for secret in secrets:
+        stripped_secret = _strip_ansi_and_control_chars(secret)
+        if stripped_secret:
+            redacted = redacted.replace(stripped_secret, _REDACTED)
     redacted = _redact_url_userinfo(redacted)
     redacted = _AUTH_HEADER_RE.sub(lambda m: f"{m.group(1)}{_REDACTED}", redacted)
     redacted = _BEARER_OR_TOKEN_RE.sub(_REDACTED, redacted)
