@@ -35,6 +35,17 @@ once set, the flag/env var can only narrow it. See integration.md's "Host
 restriction (git-host-api read verb)" section for the full precedence and
 the security rationale.
 
+**Exit `18` — cross-platform URL-shape mistake:** the platform is taken from
+the PATH host alone: a full `https://api.github.com/repos/...` URL is GitHub,
+a bare `/api/v1/repos/...` path is Forgejo on the resolved base.
+`--git-host-base-url` sets a Forgejo base only and never selects GitHub. A
+bare `/repos/<owner>/<repo>/...` path (no host, no `/api/v1`) is routed as
+Forgejo and exits `18`, and the message names both working forms: the full
+GitHub URL `https://api.github.com/repos/<owner>/<repo>/...` for a GitHub
+repo, and `<resolved base>/api/v1/repos/<owner>/<repo>/...` for Forgejo.
+When the resolved base host is itself a GitHub host, no `/api/v1` form is
+suggested on it; the message names the full GitHub URL only.
+
 **`--paginate` — read every comment on a PR or issue:**
 a bare `GET` of a comments listing returns only the host's first page; on
 GitHub that is the oldest 30 comments, so the newest verdict on a long PR is
