@@ -265,17 +265,30 @@ def test_a_repo_outside_a_git_work_tree_runs_with_null_commit_fields(
     assert run.repo["is_git"] is False and run.repo["path"] == str(repo.resolve())
 
 
-def test_the_remote_url_is_recorded_without_credentials(
-    tmp_path: Path, reports: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("origin", "recorded"),
+    [
+        ("https://user:secret-value@git.example.test:8443/o/r.git", {"host": "git.example.test", "owner": "o", "name": "r"}),
+        ("https://secret-value@git.example.test/o/r.git", {"host": "git.example.test", "owner": "o", "name": "r"}),
+        ("https://git.example.test/o/r.git?access_token=secret-value", None),
+        ("https://git.example.test/o/r.git#secret-value", None),
+        ("https://git.example.test/secret-value/o/r.git", None),
+    ],
+    ids=["userinfo-password", "userinfo-token", "query", "fragment", "path"],
+)
+def test_the_remote_is_recorded_as_parts_and_never_as_text(
+    tmp_path: Path, reports: Path, capsys: pytest.CaptureFixture[str], origin: str, recorded: dict[str, str] | None
 ) -> None:
     repo = make_repo(tmp_path / "repo")
-    git(repo, "remote", "add", "origin", "https://user:secret-value@git.example.test:8443/o/r.git")
+    git(repo, "remote", "add", "origin", origin)
 
     _, summary, _ = _run(capsys, "full", "--repo-root", str(repo))
 
     run = store.load_run(reports, summary["run_id"])
-    assert run.repo["remote_url"] == "https://git.example.test:8443/o/r.git"
+    assert run.repo["remote"] == recorded and "remote_url" not in run.repo
+    assert run.provenance["schema"] == 2
     assert "secret-value" not in json.dumps(dict(run.provenance))
+    assert "secret-value" not in json.dumps(summary)
 
 
 def test_a_malformed_remote_is_recorded_as_null_and_the_run_proceeds(
@@ -287,7 +300,7 @@ def test_a_malformed_remote_is_recorded_as_null_and_the_run_proceeds(
     code, summary, _ = _run(capsys, "full", "--repo-root", str(repo))
 
     assert code == exits.EXIT_OK
-    assert store.load_run(reports, summary["run_id"]).repo["remote_url"] is None
+    assert store.load_run(reports, summary["run_id"]).repo["remote"] is None
 
 
 def test_the_child_exit_code_is_never_the_verbs_exit_code(

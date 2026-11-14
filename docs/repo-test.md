@@ -112,8 +112,9 @@ output to stderr, and the same tail (the last 40 lines, redacted, at most 8192 c
 recorded in `result.json` as the optional `failure_log_tail`, so a detached run can be diagnosed
 with `test report --summary`.
 
-Every run records: the repository (top-level path, name, remote URL with any credentials
-removed, or null if it cannot be parsed), the HEAD commit, whether the tree had uncommitted
+Every run records: the repository (top-level path, name, and the origin remote as parsed
+parts `remote: {host, owner, name}`, or null when the remote is not a plain
+`host/owner/name` URL; URL text is never recorded, so no credential in it can be), the HEAD commit, whether the tree had uncommitted
 changes, the base commit when one was used, the declared command, the command's exit code,
 and the counts.
 
@@ -151,7 +152,7 @@ rules are:
 ## `test run`
 
 Prints the run summary as JSON (`run_id`, `state`, `mode`, `tier`, `counts`, `failing_id_count`,
-`command_exit_code`, `problem`, `repo` (name, path, remote URL), `head_sha`, `dirty`, timestamps)
+`command_exit_code`, `problem`, `repo` (name, path, `remote` parts), `head_sha`, `dirty`, timestamps)
 and exits. It also prints one line to stderr before the command starts and one after it ends,
 each naming the run id, repository name and path, head SHA (`unknown` outside a git work
 tree) and `dirty`. Once the first line has printed, the second always prints, including when
@@ -159,7 +160,8 @@ the run is then refused (for example the result cannot be recorded): it reads
 `finished (refused, exit <code>)` and the exit code is unchanged.
 
 - `--expect-repo VALUE` refuses (exit `78`) unless the tree to test is that repository, matched
-  like `test report --repo` (path, name, remote URL). `--expect-head SHA` refuses (exit `78`)
+  like `test report --repo` (path, name, `owner/name`, or a remote URL naming the same host,
+  owner and name). `--expect-head SHA` refuses (exit `78`)
   unless HEAD is that commit (full SHA or a prefix of 7 or more hex characters), and also when
   the head is unknown. A refusal names the expected and the actual value and happens before the
   command runs and before any run is recorded.
@@ -194,7 +196,9 @@ below).
 - **Choosing the run.** `RUN_ID` (default `latest`) is untrusted input and must match the run
   id grammar before it touches a path; it is resolved directly under the reports root, and a
   run directory that is a symlink is refused. `latest` is the newest finished run.
-  `--repo` narrows `latest` to one repository, by path, name or remote URL. Without `--repo`,
+  `--repo` narrows `latest` to one repository, by path, name, `owner/name` or remote URL.
+  Records written before the provenance schema moved to version 2 hold `remote_url` text
+  instead of `remote` parts; they stay readable and matchable and are never rewritten. Without `--repo`,
   `latest` is scoped to the git repository holding the current directory (stated on stderr);
   when the current directory is in no git work tree and runs are on record for more than one
   repository, it exits `78` naming them and asking for `--repo`. With one repository on record

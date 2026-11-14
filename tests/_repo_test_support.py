@@ -96,6 +96,7 @@ def write_run(
     dirty: bool | None = False,
     repo_path: str | None = "/repos/alpha",
     remote_url: str | None = None,
+    remote: dict[str, str] | None = None,
     finished: bool = True,
     mode: str = "full",
     tier: str | None = None,
@@ -110,7 +111,13 @@ def write_run(
     repo = None
     if repo_path is not None:
         repo = {"path": repo_path, "name": Path(repo_path).name, "remote_url": remote_url, "is_git": True}
+        if remote is not None:
+            # The current form: parsed parts, no URL text.
+            del repo["remote_url"]
+            repo["remote"] = remote
     provenance = {"repo": repo, "head_sha": head_sha, "dirty": dirty, "base_sha": None}
+    if remote is not None:
+        provenance["schema"] = 2
     (run_dir / store.PROVENANCE_FILE).write_text(json.dumps(provenance))
     if finished:
         ids = failing or []
