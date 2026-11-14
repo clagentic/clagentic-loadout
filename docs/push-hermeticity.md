@@ -114,7 +114,8 @@ the sole credential-delivery mechanism. This is the correct tier and is preserve
   `--trace`, or the `CLAGENTIC_LOADOUT_PUSH_GIT_TRACE` env var it keeps working as a compat
   alias for) deliberately widens what stderr an operator can see. `--dry-run` widens it
   further still (a read-only `git push --dry-run` through this SAME hermetic envelope,
-  transcript printed to stderr) — see
+  transcript printed to stderr, with pre-push hook output withheld and each remote location
+  replaced in git's own and `remote: ` lines) — see
   [verbs.md](verbs.md#loadout-push--bot-attributed-commit-push--pr-openupdate) for both
   flags.
 - `GIT_ASKPASS` reading from a private temp file is the tier this package uses: no argv

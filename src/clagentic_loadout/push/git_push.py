@@ -880,13 +880,16 @@ def git_ls_remote_with_token(
 #: Shapes of git's OWN push output lines. A pre-push hook writes to the same
 #: streams and can echo the remote it is handed, whole or in pieces, which no
 #: filter can mask reliably; hook output is therefore never kept, and only a
-#: line that has one of these shapes is.
+#: line that has one of these shapes is. A "remote: " sideband line is kept: its
+#: locations are replaced like any other. Known limit: a hook line that mimics
+#: one of these shapes exactly and carries a lone piece of the remote is kept.
 _GIT_OWN_LINE_RE = re.compile(
     r"^(?:"
     r"To \S"
     r"|\s*[ +\-*!=]\s*\[[^\]]+\]\s"
     r"|\s*[ +\-*!=]\s+[0-9a-f]+\.\.\.?[0-9a-f]+\s"
     r"|(?:error|fatal|hint|warning): "
+    r"|remote:(?: |\Z)"
     r"|Everything up-to-date\Z"
     r"|[Bb]ranch '"
     r"|\d\d:\d\d:\d\d\.\d+ \S+\s+trace: "

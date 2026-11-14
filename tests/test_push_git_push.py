@@ -330,7 +330,13 @@ class TestGitPushWithToken:
         fake_bin.mkdir()
         real_git = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
         hook_text = "\n".join([f"hook saw {remote}", *(f"hook saw {piece}" for piece in echoed)])
-        git_text = "\n".join([f"To {_drop_password(remote)}", " * [new branch]      feature -> feature"])
+        git_text = "\n".join(
+            [
+                f"To {_drop_password(remote)}",
+                " * [new branch]      feature -> feature",
+                f"remote: served {remote}",
+            ]
+        )
         (tmp_path / "hook-out").write_text(hook_text + "\n")
         (tmp_path / "git-out").write_text(git_text + "\n")
         wrapper = fake_bin / "git"
@@ -359,6 +365,7 @@ class TestGitPushWithToken:
             assert "hook saw" not in stream
         assert "[new branch]" in transcript
         assert "To https://git.example.test/[REDACTED]" in transcript
+        assert "remote: served https://git.example.test/[REDACTED]" in transcript
 
     def test_dry_run_with_a_real_pre_push_hook_echoing_a_path_credential(self, tmp_path, capsys):
         """The same guarantee against real git and a real hook: the remote's
