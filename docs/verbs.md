@@ -1943,8 +1943,15 @@ credential resolution, the identical hermeticity pre-flight (`check_git_version`
 `tests/test_push_shared_git_push_entrypoint.py`) a real push uses — a dry-run that used a
 second call site or skipped pre-flight could report success where a real push would refuse,
 which is a misleading affordance, worse than none. **No ref is updated on the remote.** The
-full transcript (stdout and stderr, including any `remote: `-prefixed sideband a real push
-would also receive) is printed to stderr under the caller's own identity — this is the
+transcript is printed to stderr under the caller's own identity. **Output of the repository's
+pre-push hook is withheld from it**, because a hook can echo the remote it is handed, whole or
+in pieces, in a form no filter can mask reliably. Git's own lines (`To ...`, ref-status lines,
+`error:`/`fatal:`/`hint:` lines) and any `remote: `-prefixed sideband are kept, with each
+remote location (raw, percent-decoded, and with its userinfo removed) replaced and the token
+masked. The hook still runs, so the dry run still proves what a real push would do. Known
+limit: a hook line that exactly mimics one of git's own line shapes and carries a lone piece
+of the remote (not a whole location) is kept, because the tool cannot tell repo-owned hook
+text from git's text by content. This is the
 sanctioned substitute for an agent shelling out to raw git under an ambient credential when
 a push fails opaquely and the classified failure message alone isn't enough. `--dry-run`
 skips PR creation/update and the post-push remote readback (nothing was actually pushed to

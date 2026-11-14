@@ -107,11 +107,15 @@ second, unredacted path for trace output to reach a caller.
 
 **`--dry-run`'s transcript is redacted through this SAME choke point, not a second one.** A
 `--dry-run` push (see [verbs.md](verbs.md#loadout-push--bot-attributed-commit-push--pr-openupdate))
-prints its stdout+stderr transcript via `push.push_redaction.redact_push_secrets` with the
-resolved token passed as a known secret — the identical function every other field on this
+prints git's stderr lines as its transcript, through `push.push_redaction.redact_push_secrets`
+with the resolved token passed as a known secret — the identical function every other field on this
 page already goes through, called at the identical two sites (`GitPushError.__init__` for a
 failing push, and `git_push.git_push_with_token`'s own dry-run branch for a successful one)
-rather than a new, divergently-implemented redaction pass for this one surface.
+rather than a new, divergently-implemented redaction pass for this one surface. The
+transcript also withholds pre-push hook output whole and keeps git's own lines and any
+`remote: ` sideband with each remote location replaced (raw, percent-decoded,
+userinfo-stripped, and its bare `scheme://userinfo@host` authority). Known limit: a hook line that exactly mimics one of git's own line
+shapes and carries a lone piece of the remote (not a whole location) is kept.
 
 **The pre-reauthor fetch is credentialed, not ambient.** `loadout-push` fetches the target
 branch's remote-tracking ref before re-authoring commits, via
