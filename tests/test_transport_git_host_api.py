@@ -2106,6 +2106,47 @@ class TestMainCrossPlatformUrlShapeMismatch:
         assert "some-owner/some-repo" in stderr
         assert "http://forgejo.example.com:3000/api/v1/repos/some-owner/some-repo" in stderr
 
+    @pytest.mark.parametrize(
+        "argv_prefix, must_have, must_not_have",
+        [
+            # No GitHub base: both remedies are named.
+            (
+                [],
+                [
+                    "https://api.github.com/repos/some-owner/some-repo/...",
+                    "/api/v1/repos/some-owner/some-repo/...",
+                ],
+                [],
+            ),
+            # GitHub-host base: GitHub URL only, no /api/v1 on a GitHub host.
+            (
+                ["--git-host-base-url", "https://api.github.com"],
+                [
+                    "https://api.github.com/repos/some-owner/some-repo/...",
+                    "sets a Forgejo base only",
+                ],
+                ["/api/v1/"],
+            ),
+        ],
+    )
+    def test_bare_repos_path_message_names_remedy_per_platform(
+        self, capsys, argv_prefix, must_have, must_not_have
+    ):
+        def fake_opener(req, timeout=15):
+            raise AssertionError("no request may be made on exit 18")
+
+        rc = git_host_api.main(
+            [*argv_prefix, "GET", "/repos/some-owner/some-repo/pulls/42"],
+            token_provider=_RepoRecordingProvider(),
+            opener=fake_opener,
+        )
+        assert rc == git_host_api.EXIT_CROSS_PLATFORM_URL_SHAPE_MISMATCH
+        stderr = capsys.readouterr().err
+        for text in must_have:
+            assert text in stderr
+        for text in must_not_have:
+            assert text not in stderr
+
     def test_correctly_shaped_github_call_is_unaffected(self, capsys):
         """Regression guard: a correctly-shaped GitHub call must still
         succeed byte-for-byte -- this check only fires when call_repo is

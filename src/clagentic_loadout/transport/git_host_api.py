@@ -1908,11 +1908,31 @@ def _check_cross_platform_url_shape_mistake(
         github_shaped_match = _BARE_REPOS_PATH_RE.match(path_arg)
         if github_shaped_match:
             owner, repo = github_shaped_match.group(1), github_shaped_match.group(2)
+            github_url = f"https://api.{DEFAULT_GITHUB_HOSTNAME}/repos/{owner}/{repo}/..."
+            # The platform comes from the PATH host alone, so a bare path is
+            # always routed as Forgejo. Under a GitHub-host base an /api/v1
+            # remedy would point at a URL GitHub does not serve.
+            base_host = (urllib.parse.urlsplit(git_host_base).hostname or "").lower()
+            base_is_github = base_host in (
+                DEFAULT_GITHUB_HOSTNAME,
+                f"api.{DEFAULT_GITHUB_HOSTNAME}",
+            )
+            if base_is_github:
+                remedy = (
+                    f"For a GitHub repo, pass the full URL {github_url} as PATH. "
+                    f"--git-host-base-url sets a Forgejo base only and does not "
+                    f"select GitHub; the platform is taken from the PATH host."
+                )
+            else:
+                remedy = (
+                    f"For a GitHub repo, pass the full URL {github_url} as PATH. "
+                    f"For a Forgejo repo, use "
+                    f"{git_host_base}/api/v1/repos/{owner}/{repo}/... instead."
+                )
             _fail(
-                f"cross-platform URL-shape mistake -- PATH {path_arg!r} targets a "
-                f"Forgejo host but uses the GitHub path shape (/repos/... with no "
-                f"/api/v1 prefix). Detected owner/repo: {owner}/{repo}. Use "
-                f"{git_host_base}/api/v1/repos/{owner}/{repo}/... instead.",
+                f"cross-platform URL-shape mistake -- PATH {path_arg!r} is a bare "
+                f"/repos/... path (no host, no /api/v1 prefix), which is routed "
+                f"as Forgejo. Detected owner/repo: {owner}/{repo}. {remedy}",
                 code=EXIT_CROSS_PLATFORM_URL_SHAPE_MISMATCH,
             )
 
