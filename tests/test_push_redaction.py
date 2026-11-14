@@ -181,6 +181,12 @@ _BOUND_ROWS = [
         ["SECRETAUTH", "VALUE12345"],
         id="authorization-cut-mid-keyword-with-no-line-break",
     ),
+    pytest.param(
+        "leaked abc\x07def here",
+        {"max_chars": 100, "known_secrets": ("abc\x07def",)},
+        ["abc\x07def", "abcdef"],
+        id="known-secret-containing-a-control-byte",
+    ),
 ]
 
 
