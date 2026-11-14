@@ -140,6 +140,7 @@ _LOCATION_ROWS = [
     ("https://u:pw@h.test/o/r.git", "To https://u@h.test/o/r.git", "To https://h.test/[REDACTED]"),
     ("https://u:pw@h.test/o/r.git", "To https://h.test/o/r.git", "To https://h.test/[REDACTED]"),
     ("/srv/cred-9/r.git", "To /srv/cred-9/r.git", "To [REDACTED]"),
+    ("https://faketoken9@h.test/o/r.git", "trace: connect https://faketoken9@h.test done", "trace: connect https://h.test done"),
     ("https://h.test/o/r.git", "abc1234 and opaque are not the location", "abc1234 and opaque are not the location"),
 ]
 

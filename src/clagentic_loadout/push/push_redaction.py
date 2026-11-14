@@ -213,21 +213,34 @@ def _location_forms(location: str) -> dict[str, str]:
     the rest; a location that is not a URL is masked whole."""
     split = _split_location(location)
     forms = {location}
+    authority_forms: set[str] = set()
     replacement = _REDACTED
+    authority_replacement = _REDACTED
     if split is not None:
         scheme, authority, rest = split
-        userinfo, _at, host = authority.rpartition("@")
+        userinfo, at, host = authority.rpartition("@")
         replacement = f"{scheme}://{host}/{_REDACTED}"
+        authority_replacement = f"{scheme}://{host}"
         user = userinfo.partition(":")[0]
         # git prints a URL with its password dropped but its user kept.
         forms.add(f"{scheme}://{user}@{host}{rest}")
         forms.add(f"{scheme}://{host}{rest}")
-    for form in tuple(forms):
-        forms.add(urllib.parse.unquote(form))
-        forms.add(urllib.parse.unquote_plus(form))
-    for form in tuple(forms):
-        forms.add(_strip_ansi_and_control_chars(form))
-    return {form: replacement for form in forms if form}
+        # A trace or diagnostic line can carry the bare authority with no
+        # path; the user part can itself be the credential.
+        if at:
+            authority_forms.update(
+                {f"{scheme}://{authority}", f"{scheme}://{user}@{host}", f"{scheme}://{host}"}
+            )
+    for group in (forms, authority_forms):
+        for form in tuple(group):
+            group.add(urllib.parse.unquote(form))
+            group.add(urllib.parse.unquote_plus(form))
+        for form in tuple(group):
+            group.add(_strip_ansi_and_control_chars(form))
+    resolved = {form: authority_replacement for form in authority_forms if form}
+    # A whole-location form wins over an authority form it equals.
+    resolved.update({form: replacement for form in forms if form})
+    return resolved
 
 
 def redact_remote_locations(text: str, locations: tuple[str, ...]) -> str:
