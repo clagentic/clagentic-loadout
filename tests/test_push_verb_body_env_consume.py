@@ -370,6 +370,29 @@ class TestConsumedOnceARemoteWriteIsAttempted:
         assert code == verb.EXIT_PR_FAILED
         assert not _still_staged(target_pr=42)
 
+    def test_consume_claims_under_the_root_the_peek_used(self, repo_with_remote, tmp_path):
+        """A staging env whose TMPDIR differs from the process TMPDIR: the
+        claim resolves the peek's root, not the default one."""
+        repo, _remote = repo_with_remote
+        branch = verb.git_coords.current_branch(repo)
+        identity_root = tmp_path / "identity" / "tmp"
+        identity_root.mkdir(parents=True)
+        env = {"TMPDIR": str(identity_root)}
+        body_env.stage_caller_body(
+            caller=_CALLER,
+            body_bytes=json.dumps({"body": _BODY}).encode("utf-8"),
+            create_branch=branch,
+            env=env,
+        )
+        staged = verb._StagedBody()
+        body = verb._read_body_env(
+            staged=staged, caller=_CALLER, create_branch=branch, stage_kwargs={"env": env}
+        )
+        assert body == _BODY
+        staged.consume()
+        assert not body_env.resolve_caller_body_path(caller=_CALLER, env=env).exists()
+        assert not staged.pending
+
     def test_second_invocation_cannot_claim_a_pair_already_claimed(
         self, repo_with_remote, monkeypatch
     ):
