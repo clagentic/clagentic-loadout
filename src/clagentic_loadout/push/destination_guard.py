@@ -237,6 +237,16 @@ def destinations_are_local(remote: str, *, push: bool, git_cwd: Path | None = No
     return _is_local(urls[0])
 
 
+def push_locations(remote: str, *, git_cwd: Path | None = None) -> tuple[str, ...]:
+    """Every location a push to *remote* can name in git's output: the push URLs
+    of a configured remote name, or *remote* itself when it is not a name. Empty
+    when a configured name does not resolve."""
+    configured = _git_lines(["remote"], git_cwd)
+    if configured is not None and remote in configured:
+        return tuple(_git_lines(["remote", "get-url", "--all", "--push", "--", remote], git_cwd) or ())
+    return (remote,)
+
+
 def check_push_destination(
     tracking_remote_name: str, *, anchor_url: str, git_cwd: Path | None = None
 ) -> None:
@@ -284,4 +294,5 @@ __all__ = [
     "check_fetch_destination",
     "check_push_destination",
     "destinations_are_local",
+    "push_locations",
 ]

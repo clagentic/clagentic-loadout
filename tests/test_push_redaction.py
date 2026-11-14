@@ -13,6 +13,7 @@ from clagentic_loadout.bounded_capture import TailBuffer
 from clagentic_loadout.push.push_redaction import (
     TRUNCATION_MARKER,
     redact_push_secrets,
+    redact_remote_locations,
     redact_then_bound,
 )
 from clagentic_loadout.push.verify_run import _tail
@@ -129,6 +130,24 @@ def test_ordinary_traceback_is_linear():
 
 
 # --- redact, then bound ----------------------------------------------------
+
+#: (location, text, expected). The whole location is replaced in every form git
+#: can print it; a URL keeps its scheme and host; nothing else is masked.
+_LOCATION_ROWS = [
+    ("https://h.test/o/r.git?opaque=abc1234", "To https://h.test/o/r.git?opaque=abc1234", "To https://h.test/[REDACTED]"),
+    ("https://h.test/o/r.git?sig=a%2Fb+c", "x https://h.test/o/r.git?sig=a/b c y", "x https://h.test/[REDACTED] y"),
+    ("https://h.test/o/r.git?sig=a%2Fb+c", "x https://h.test/o/r.git?sig=a/b+c y", "x https://h.test/[REDACTED] y"),
+    ("https://u:pw@h.test/o/r.git", "To https://u@h.test/o/r.git", "To https://h.test/[REDACTED]"),
+    ("https://u:pw@h.test/o/r.git", "To https://h.test/o/r.git", "To https://h.test/[REDACTED]"),
+    ("/srv/cred-9/r.git", "To /srv/cred-9/r.git", "To [REDACTED]"),
+    ("https://h.test/o/r.git", "abc1234 and opaque are not the location", "abc1234 and opaque are not the location"),
+]
+
+
+@pytest.mark.parametrize(("location", "text", "expected"), _LOCATION_ROWS)
+def test_redact_remote_locations_replaces_the_whole_location(location, text, expected):
+    assert redact_remote_locations(text, (location,)) == expected
+
 
 #: (text, bound kwargs, fragments that must not survive). Every row puts a cut
 #: inside a secret.

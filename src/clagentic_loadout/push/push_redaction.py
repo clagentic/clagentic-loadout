@@ -54,6 +54,7 @@ WHAT THIS REDACTS:
 from __future__ import annotations
 
 import re
+import urllib.parse
 
 _REDACTED = "[REDACTED]"
 
@@ -196,6 +197,59 @@ def redact_push_secrets(text: str, *, known_secrets: tuple[str, ...] = ()) -> st
     return redacted
 
 
+def _split_location(location: str) -> tuple[str, str, str] | None:
+    """(scheme, authority, rest) of a `scheme://authority...` *location*, or
+    None when it has no such shape."""
+    match = re.match(r"([A-Za-z][A-Za-z0-9+.-]*)://([^/?#]*)(.*)\Z", location, re.DOTALL)
+    if match is None:
+        return None
+    scheme, authority, rest = match.groups()
+    return scheme, authority, rest
+
+
+def _location_forms(location: str) -> dict[str, str]:
+    """Every text a *location* can take in git's output, each mapped to its
+    replacement. The replacement keeps the scheme and host of a URL and masks
+    the rest; a location that is not a URL is masked whole."""
+    split = _split_location(location)
+    forms = {location}
+    replacement = _REDACTED
+    if split is not None:
+        scheme, authority, rest = split
+        userinfo, _at, host = authority.rpartition("@")
+        replacement = f"{scheme}://{host}/{_REDACTED}"
+        user = userinfo.partition(":")[0]
+        # git prints a URL with its password dropped but its user kept.
+        forms.add(f"{scheme}://{user}@{host}{rest}")
+        forms.add(f"{scheme}://{host}{rest}")
+    for form in tuple(forms):
+        forms.add(urllib.parse.unquote(form))
+        forms.add(urllib.parse.unquote_plus(form))
+    for form in tuple(forms):
+        forms.add(_strip_ansi_and_control_chars(form))
+    return {form: replacement for form in forms if form}
+
+
+def redact_remote_locations(text: str, locations: tuple[str, ...]) -> str:
+    """*text* with every remote location in *locations* replaced verbatim.
+
+    A location can carry a credential outside its userinfo (a path segment, a
+    query value of any name or length), which no pattern can tell from an
+    ordinary path, so the whole location is matched as text: raw,
+    percent-decoded (`unquote` and `unquote_plus`), with its userinfo removed,
+    and with control characters stripped. A URL keeps its scheme and host; a
+    path is masked whole. No piece of a location is masked on its own."""
+    replacements: dict[str, str] = {}
+    for location in locations:
+        replacements.update(_location_forms(location))
+    if not replacements:
+        return text
+    # One alternation, longest form first: a form that is a prefix of another
+    # must not win, and a replacement is never rescanned for a shorter form.
+    pattern = re.compile("|".join(re.escape(form) for form in sorted(replacements, key=len, reverse=True)))
+    return pattern.sub(lambda match: replacements[match.group(0)], text)
+
+
 #: Prepended to a bounded tail when anything was cut. Category-only: it says
 #: output was dropped, never what or how much.
 TRUNCATION_MARKER = "...[truncated]\n"
@@ -254,5 +308,6 @@ def redact_then_bound(
 __all__ = [
     "TRUNCATION_MARKER",
     "redact_push_secrets",
+    "redact_remote_locations",
     "redact_then_bound",
 ]

@@ -46,6 +46,7 @@ did.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -96,6 +97,65 @@ def _make_repo_with_bare_remote(tmp_path: Path) -> tuple[Path, Path]:
     _git(["remote", "add", "origin", str(remote)], repo)
 
     return repo, remote
+
+
+def _drop_password(url: str) -> str:
+    """*url* as git prints it: the password of its userinfo dropped, the user kept."""
+    return re.sub(r"(//[^/:@]+):[^@/]*@", r"\1@", url)
+
+
+#: (remote URL, pieces a hook can echo on their own, credentials that must not
+#: appear). The pieces include the percent-decoded forms.
+_DRY_RUN_LOCATION_ROWS = [
+    pytest.param(
+        "https://git.example.test/owner-abc1234secret/repo.git",
+        ["owner-abc1234secret", "/owner-abc1234secret/repo.git"],
+        ["abc1234secret"],
+        id="path-segment",
+    ),
+    pytest.param(
+        "https://git.example.test/o/r.git?sig=Zx9Qv",
+        ["sig=Zx9Qv", "Zx9Qv", "?sig=Zx9Qv"],
+        ["Zx9Qv"],
+        id="sig-query",
+    ),
+    pytest.param(
+        "https://git.example.test/o/r.git?x-opaque-key=k3y-Val",
+        ["x-opaque-key=k3y-Val", "k3y-Val"],
+        ["k3y-Val"],
+        id="x-opaque-key-query",
+    ),
+    pytest.param(
+        "https://git.example.test/o/r.git?opaque=abc1234",
+        ["opaque=abc1234", "abc1234"],
+        ["abc1234"],
+        id="short-opaque-query",
+    ),
+    pytest.param(
+        "https://git.example.test/o/r.git?sig=a%2Fb%3Dc",
+        ["sig=a%2Fb%3Dc", "a%2Fb%3Dc", "a/b=c", "sig=a/b=c"],
+        ["a%2Fb%3Dc", "a/b=c"],
+        id="percent-encoded-query",
+    ),
+    pytest.param(
+        "https://git.example.test/o/r.git?sig=a+b%2Bc",
+        ["a+b%2Bc", "a b+c", "sig=a b+c"],
+        ["a+b%2Bc", "a b+c"],
+        id="plus-and-percent-query",
+    ),
+    pytest.param(
+        "https://user:pw-s3cret@git.example.test/o/r.git?opaque=abc1234",
+        ["user:pw-s3cret", "pw-s3cret", "abc1234", "git.example.test/o/r.git?opaque=abc1234"],
+        ["pw-s3cret", "abc1234"],
+        id="userinfo-and-query",
+    ),
+    pytest.param(
+        "https://tok-abc9@git.example.test/tail-xyz7/r.git",
+        ["tok-abc9", "tail-xyz7"],
+        ["tok-abc9", "tail-xyz7"],
+        id="user-only-userinfo-and-path",
+    ),
+]
 
 
 class TestGitPushWithToken:
@@ -258,6 +318,76 @@ class TestGitPushWithToken:
         captured = capsys.readouterr()
         assert secret_token not in captured.err
         assert secret_token not in captured.out
+
+    @pytest.mark.parametrize(("remote", "echoed", "credentials"), _DRY_RUN_LOCATION_ROWS)
+    def test_dry_run_transcript_carries_no_credential_from_the_remote_location(
+        self, remote, echoed, credentials, tmp_path, monkeypatch, capsys
+    ):
+        """A credential in a remote URL outside userinfo reaches neither stream
+        (git's own lines quote the URL; a pre-push hook echoes it whole or in
+        pieces), while git's own lines stay."""
+        fake_bin = tmp_path / "fakebin"
+        fake_bin.mkdir()
+        real_git = subprocess.run(["which", "git"], capture_output=True, text=True, check=True).stdout.strip()
+        hook_text = "\n".join([f"hook saw {remote}", *(f"hook saw {piece}" for piece in echoed)])
+        git_text = "\n".join([f"To {_drop_password(remote)}", " * [new branch]      feature -> feature"])
+        (tmp_path / "hook-out").write_text(hook_text + "\n")
+        (tmp_path / "git-out").write_text(git_text + "\n")
+        wrapper = fake_bin / "git"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            'for arg in "$@"; do\n'
+            '  if [ "$arg" = "push" ]; then\n'
+            f'    cat "{tmp_path / "hook-out"}"\n'
+            f'    cat "{tmp_path / "hook-out"}" 1>&2\n'
+            f'    cat "{tmp_path / "git-out"}" 1>&2\n'
+            "    exit 0\n"
+            "  fi\n"
+            "done\n"
+            f'exec "{real_git}" "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ.get('PATH', '')}")
+        repo, _remote = _make_repo_with_bare_remote(tmp_path)
+
+        transcript = git_push_with_token(remote, "feature", "unused-token-value", repo, dry_run=True)
+
+        captured = capsys.readouterr()
+        for stream in (transcript, captured.out, captured.err):
+            for credential in credentials:
+                assert credential not in stream
+            assert "hook saw" not in stream
+        assert "[new branch]" in transcript
+        assert "To https://git.example.test/[REDACTED]" in transcript
+
+    def test_dry_run_with_a_real_pre_push_hook_echoing_a_path_credential(self, tmp_path, capsys):
+        """The same guarantee against real git and a real hook: the remote's
+        path carries the credential, and the hook echoes the whole remote
+        and each component on both streams."""
+        repo, remote = _make_repo_with_bare_remote(tmp_path)
+        secret_dir = tmp_path / "cred-abc1234x"
+        secret_dir.mkdir()
+        secret_remote = secret_dir / "remote.git"
+        remote.rename(secret_remote)
+        _git(["remote", "set-url", "origin", str(secret_remote)], repo)
+        hook = repo / ".git" / "hooks" / "pre-push"
+        hook.write_text(
+            "#!/bin/sh\n"
+            'echo "hook: $2"\n'
+            'echo "hook: $2" 1>&2\n'
+            'echo "hook: cred-abc1234x"\n'
+            'echo "hook: cred-abc1234x" 1>&2\n'
+            "exit 0\n"
+        )
+        hook.chmod(0o755)
+
+        transcript = git_push_with_token("origin", "feature", "unused-token-value", repo, dry_run=True)
+
+        captured = capsys.readouterr()
+        for stream in (transcript, captured.out, captured.err):
+            assert "cred-abc1234x" not in stream
+            assert "hook:" not in stream
+        assert "[new branch]" in transcript
 
     def test_platform_mismatch_hint_included_on_auth_shaped_failure(self, tmp_path, monkeypatch):
         """A synthetic auth-shaped git stderr (via a wrapper 'git' that

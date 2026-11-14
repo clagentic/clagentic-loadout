@@ -108,7 +108,8 @@ the SAME `_credentialed_git_env` envelope, the SAME single
 a dry-run that used a second call site or skipped pre-flight would report
 success where a real push would refuse, which is a misleading affordance,
 worse than no affordance at all. On a dry-run, this function prints the
-full (redacted) stdout+stderr transcript to stderr UNCONDITIONALLY --
+transcript (git's own lines only, remote locations replaced, pre-push hook
+output withheld) to stderr UNCONDITIONALLY --
 including on the exit-0 case a real push's own success path never prints
 anything for, since a dry-run's only purpose is to surface that
 transcript to the caller.
@@ -188,7 +189,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from clagentic_loadout.push.destination_guard import destinations_are_local
+from clagentic_loadout.push.destination_guard import destinations_are_local, push_locations
 from clagentic_loadout.push.errors import GitPushError
 from clagentic_loadout.push.git_hermeticity import (
     GitVersionTooOldError,
@@ -209,7 +210,7 @@ from clagentic_loadout.push.push_failure_labels import (
     SUB_CAUSE_TRANSPORT,
     SUB_CAUSE_UNKNOWN,
 )
-from clagentic_loadout.push.push_redaction import redact_push_secrets
+from clagentic_loadout.push.push_redaction import redact_push_secrets, redact_remote_locations
 
 #: git-transport auth failure substrings that plausibly indicate a
 #: platform/credential mismatch rather than a dead credential.
@@ -876,12 +877,54 @@ def git_ls_remote_with_token(
     )
 
 
-def _redacted_transcript(result: subprocess.CompletedProcess, token: str) -> str:
-    """The raw push transcript, redacted: the one place git's push output is
-    formatted into text, reached only from the opt-in --dry-run path."""
+#: Shapes of git's OWN push output lines. A pre-push hook writes to the same
+#: streams and can echo the remote it is handed, whole or in pieces, which no
+#: filter can mask reliably; hook output is therefore never kept, and only a
+#: line that has one of these shapes is.
+_GIT_OWN_LINE_RE = re.compile(
+    r"^(?:"
+    r"To \S"
+    r"|\s*[ +\-*!=]\s*\[[^\]]+\]\s"
+    r"|\s*[ +\-*!=]\s+[0-9a-f]+\.\.\.?[0-9a-f]+\s"
+    r"|(?:error|fatal|hint|warning): "
+    r"|Everything up-to-date\Z"
+    r"|[Bb]ranch '"
+    r"|\d\d:\d\d:\d\d\.\d+ \S+\s+trace: "
+    r")"
+)
+
+#: What a "To <location>" line must reduce to once the remote locations are
+#: replaced; any other text after "To " is not a location git printed.
+_REPLACED_LOCATION_RE = re.compile(r"(?:[A-Za-z][A-Za-z0-9+.-]*://[^\s/]*/)?\[REDACTED\]/?\Z")
+
+
+def _git_own_lines(stderr: str, locations: tuple[str, ...]) -> list[str]:
+    """git's own lines of a push's stderr, each with every remote location
+    replaced. Hook output, which cannot be told apart from git's text in
+    general, is left out."""
+    kept: list[str] = []
+    for raw_line in stderr.splitlines():
+        if not _GIT_OWN_LINE_RE.match(raw_line):
+            continue
+        line = redact_remote_locations(raw_line, locations)
+        if line.startswith("To ") and not _REPLACED_LOCATION_RE.match(line[3:].strip()):
+            continue
+        kept.append(line)
+    return kept
+
+
+def _redacted_transcript(
+    result: subprocess.CompletedProcess, token: str, locations: tuple[str, ...]
+) -> str:
+    """The dry-run transcript: git's own push lines, with every remote location
+    replaced and the token masked. Pre-push hook output is withheld whole (its
+    text can quote the remote location in a form no pattern recognises), so
+    stdout, which git never writes on a push, is not part of it. The one place
+    git's push output is formatted into text, reached only from the opt-in
+    --dry-run path."""
+    own_lines = "\n".join(_git_own_lines(result.stderr, locations))
     return redact_push_secrets(
-        f"[dry-run exit={result.returncode}] stdout: {result.stdout}"
-        f" stderr: {result.stderr}",
+        f"[dry-run exit={result.returncode}] git output (pre-push hook output withheld): {own_lines}",
         known_secrets=(token,),
     )
 
@@ -982,7 +1025,9 @@ def git_push_with_token(
             # itself would have accepted the push. Redacted through the
             # SAME choke point every other field in this module uses
             # (push.push_redaction), never a second implementation.
-            dry_run_transcript = _redacted_transcript(result, token)
+            dry_run_transcript = _redacted_transcript(
+                result, token, push_locations(remote, git_cwd=git_cwd)
+            )
             print(f"push: --dry-run transcript -- {dry_run_transcript}", file=sys.stderr)
 
         if result.returncode != 0:
