@@ -120,9 +120,17 @@ def compute(
     code = _bucket(*totals["code"])
     over = test["net"] >= settings.floor_lines and test["net"] > settings.warn * max(code["net"], 0)
     ratio = _ratio_text(test["net"], code["net"])
-    verdict = (
-        f"over the {settings.warn}:1 budget; {_NO_BLOCK}" if over else f"within the {settings.warn}:1 budget"
-    )
+    if over:
+        verdict = f"over the {settings.warn}:1 budget; {_NO_BLOCK}"
+    elif test["net"] > settings.warn * max(code["net"], 0):
+        # Above the budget but not flagged: say why, so the line never reads as
+        # "within" next to a ratio that is not.
+        verdict = (
+            f"above the {settings.warn}:1 budget, but test growth is under the "
+            f"{settings.floor_lines}-line floor, so it is not flagged"
+        )
+    else:
+        verdict = f"within the {settings.warn}:1 budget"
     line = f"Net test:code ratio {ratio} (tests {_counts(test)}, code {_counts(code)}): {verdict}."
     result: dict[str, Any] = {
         "test": test,

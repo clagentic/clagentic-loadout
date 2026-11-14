@@ -20,28 +20,43 @@ from clagentic_loadout.review.policy_source import PROFILE_PATH
 from clagentic_loadout.review.repo_profile import parse_profile_document
 from tests._review_evaluate_support import commit_files, make_repo, run_git
 
-# test added, test removed, code added, code removed, budget, floor, ratio, over budget
+OVER_2 = "over the 2:1 budget; advisory only, it does not block"
+WITHIN_2 = "within the 2:1 budget"
+ABOVE_2_UNDER_100 = "above the 2:1 budget, but test growth is under the 100-line floor, so it is not flagged"
+
+# test added, test removed, code added, code removed, budget, floor, ratio, over budget,
+# the verdict the line ends with
 ARITHMETIC_ROWS = [
-    (300, 0, 100, 0, 2, 100, "3.0:1", True),
-    (3241, 5607, 400, 0, 2, 100, "-5.9:1", False),
-    (50, 0, 5, 0, 2, 100, "10.0:1", False),
-    (200, 0, 100, 100, 2, 100, "unbounded", True),
-    (200, 0, 100, 0, 2, 100, "2.0:1", False),
-    (201, 0, 100, 0, 2, 100, "2.0:1", True),
-    (150, 0, 0, 40, 2, 100, "unbounded", True),
-    (99, 0, 0, 0, 2, 100, "unbounded", False),
-    (100, 0, 0, 0, 2, 100, "unbounded", True),
-    (0, 0, 0, 0, 2, 100, "n/a", False),
-    (0, 400, 30, 0, 2, 100, "-13.3:1", False),
-    (500, 0, 100, 0, 5, 100, "5.0:1", False),
-    (500, 0, 100, 0, 2, 600, "5.0:1", False),
+    (300, 0, 100, 0, 2, 100, "3.0:1", True, OVER_2),
+    (3241, 5607, 400, 0, 2, 100, "-5.9:1", False, WITHIN_2),
+    (50, 0, 5, 0, 2, 100, "10.0:1", False, ABOVE_2_UNDER_100),
+    (200, 0, 100, 100, 2, 100, "unbounded", True, OVER_2),
+    (200, 0, 100, 0, 2, 100, "2.0:1", False, WITHIN_2),
+    (201, 0, 100, 0, 2, 100, "2.0:1", True, OVER_2),
+    (150, 0, 0, 40, 2, 100, "unbounded", True, OVER_2),
+    (99, 0, 0, 0, 2, 100, "unbounded", False, ABOVE_2_UNDER_100),
+    (100, 0, 0, 0, 2, 100, "unbounded", True, OVER_2),
+    (0, 0, 0, 0, 2, 100, "n/a", False, WITHIN_2),
+    (0, 400, 30, 0, 2, 100, "-13.3:1", False, WITHIN_2),
+    (500, 0, 100, 0, 5, 100, "5.0:1", False, "within the 5:1 budget"),
+    (
+        500, 0, 100, 0, 2, 600, "5.0:1", False,
+        "above the 2:1 budget, but test growth is under the 600-line floor, so it is not flagged",
+    ),
+    (
+        150, 0, 50, 0, 2, 200, "3.0:1", False,
+        "above the 2:1 budget, but test growth is under the 200-line floor, so it is not flagged",
+    ),
 ]
 
 
 @pytest.mark.parametrize(
-    ("t_add", "t_rem", "c_add", "c_rem", "budget", "floor", "ratio", "over"), ARITHMETIC_ROWS
+    ("t_add", "t_rem", "c_add", "c_rem", "budget", "floor", "ratio", "over", "verdict"),
+    ARITHMETIC_ROWS,
 )
-def test_the_ratio_and_the_over_budget_rule(t_add, t_rem, c_add, c_rem, budget, floor, ratio, over):
+def test_the_ratio_and_the_over_budget_rule(
+    t_add, t_rem, c_add, c_rem, budget, floor, ratio, over, verdict
+):
     result = cr.compute(
         [FileDelta("tests/a.py", t_add, t_rem), FileDelta("src/a.py", c_add, c_rem)],
         cr.RatioSettings(budget, floor),
@@ -52,6 +67,7 @@ def test_the_ratio_and_the_over_budget_rule(t_add, t_rem, c_add, c_rem, budget, 
     assert result["budget"] == budget
     assert result["test"]["net"] == t_add - t_rem and result["code"]["net"] == c_add - c_rem
     assert ("does not block" in result["line"]) is over
+    assert result["line"].endswith(f": {verdict}.")
 
 
 def test_documentation_counts_for_neither_side():
