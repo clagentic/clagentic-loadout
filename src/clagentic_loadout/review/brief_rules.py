@@ -36,6 +36,7 @@ def rules_section(
     role_note: str | None,
     step: str | None,
     declared_steps: tuple[str, ...],
+    steps_problem: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """``(section, items)``: the ``rules`` section of a brief and the rules it
     lists, for the role *resolution* and the optional *step*."""
@@ -43,6 +44,8 @@ def rules_section(
     notes: list[str] = []
     if role_note:
         notes.append(role_note)
+    if steps_problem:
+        notes.append(steps_problem)
     if step is not None and not step_declared:
         listed = ", ".join(declared_steps) if declared_steps else "none"
         notes.append(f"step {step!r} is not declared; declared steps: {listed}")

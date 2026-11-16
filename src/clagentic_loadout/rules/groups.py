@@ -345,14 +345,29 @@ def groups_for(groups: GroupsFile, repo_name: str, profile_class: str | None) ->
     return chosen
 
 
-def load_declared_steps(config_root: str | Path | None = None) -> tuple[str, ...]:
-    """The step names a deployment declares: the ``rules.steps`` list of the
-    user-level config file. Empty when absent or not a list of strings; the
-    product ships no step names of its own."""
+def read_declared_steps(
+    config_root: str | Path | None = None,
+) -> tuple[tuple[str, ...], str | None]:
+    """``(steps, problem)``: the step names a deployment declares, the
+    ``rules.steps`` list of the user-level config file, and a line naming why a
+    present value was not used. Never raises; the product ships no step names
+    of its own."""
     value = load_user_config_section(CONFIG_SECTION_RULES, config_root=config_root).get(
         CONFIG_KEY_STEPS
     )
-    return _optional_words(value) or ()
+    words = _optional_words(value)
+    if words is None and value not in (None, []):
+        return (), (
+            f"{CONFIG_SECTION_RULES}.{CONFIG_KEY_STEPS} in the user-level config file is not a "
+            "list of non-empty step names; no steps are declared"
+        )
+    return words or (), None
+
+
+def load_declared_steps(config_root: str | Path | None = None) -> tuple[str, ...]:
+    """The step names a deployment declares. Empty when absent or not a list of
+    strings."""
+    return read_declared_steps(config_root)[0]
 
 
 def rule_applies(
@@ -402,6 +417,7 @@ __all__ = [
     "bare_repo_name",
     "groups_for",
     "load_declared_steps",
+    "read_declared_steps",
     "load_groups_file",
     "parse_groups_document",
     "resolve_groups_location",

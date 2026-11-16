@@ -70,11 +70,10 @@ from clagentic_loadout.review.profile_rules import classes_in_effect, rule_state
 from clagentic_loadout.role_vocabulary import (
     CLASS_GATE,
     CLASS_SCOPE,
-    LEGACY_ALIASES,
-    ROLE_CLASSES,
     SOURCE_UNDECLARED,
     RoleResolution,
     RoleVocabularyError,
+    known_roles,
     load_role_classes,
     resolve_role,
     undeclared_resolution,
@@ -321,13 +320,15 @@ def _brief_rules(
         )
     except gr.GroupsFileError as exc:
         raise ProfileVerbError(str(exc), EXIT_IO_FAILED) from exc
+    declared_steps, steps_problem = gr.read_declared_steps(config_root)
     section, items = rules_section(
         found,
         resolution,
         role_declared=resolution.source != SOURCE_UNDECLARED,
         role_note=role_note,
         step=args.step,
-        declared_steps=gr.load_declared_steps(config_root),
+        declared_steps=declared_steps,
+        steps_problem=steps_problem,
     )
     return section, items, found.note
 
@@ -338,11 +339,14 @@ def _resolve_brief_role(
     """``(resolution, note)``: the role *word* resolved, or, for a word in no
     vocabulary, the undeclared resolution and a note naming the known roles.
     The brief reports an undeclared role; it never refuses it."""
-    overrides = load_role_classes(config_root)
+    try:
+        overrides = load_role_classes(config_root)
+    except RoleVocabularyError as exc:
+        raise ProfileVerbError(str(exc), EXIT_USAGE) from exc
     try:
         return resolve_role(word, overrides), None
     except RoleVocabularyError:
-        known = sorted({*ROLE_CLASSES, *LEGACY_ALIASES, *overrides})
+        known = known_roles(overrides)
         return undeclared_resolution(word), (
             f"role {word!r} is not declared; known roles: {', '.join(known)}"
         )

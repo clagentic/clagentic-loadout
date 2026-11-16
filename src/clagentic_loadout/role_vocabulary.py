@@ -134,8 +134,15 @@ def resolve_role(word: str, overrides: Mapping[str, str] | None = None) -> RoleR
     if word in LEGACY_ALIASES:
         role = LEGACY_ALIASES[word]
         return RoleResolution(word, role, deployment.get(role, ROLE_CLASSES[role]), SOURCE_ALIAS)
-    known = sorted({*ROLE_CLASSES, *LEGACY_ALIASES, *deployment})
-    raise RoleVocabularyError(f"role {word!r} is not known; known roles: {', '.join(known)}")
+    raise RoleVocabularyError(
+        f"role {word!r} is not known; known roles: {', '.join(known_roles(deployment))}"
+    )
+
+
+def known_roles(overrides: Mapping[str, str] | None = None) -> list[str]:
+    """Every role word accepted: the default vocabulary, the legacy aliases and
+    *overrides*, in sorted order."""
+    return sorted({*ROLE_CLASSES, *LEGACY_ALIASES, *(overrides or {})})
 
 
 def undeclared_resolution(word: str) -> RoleResolution:
@@ -165,6 +172,7 @@ __all__ = [
     "RoleResolution",
     "RoleVocabularyError",
     "SOURCE_UNDECLARED",
+    "known_roles",
     "load_role_classes",
     "parse_role_classes",
     "resolve_role",

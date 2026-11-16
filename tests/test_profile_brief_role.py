@@ -220,6 +220,25 @@ def test_an_undeclared_role_is_reported_naming_it_and_the_known_roles_never_refu
     assert "no-such-role" in note and "builder" in note
 
 
+@pytest.mark.parametrize(
+    ("config", "code_expected", "where", "needle"),
+    [
+        ("role_classes:\n  some-role: not-a-class\n", pv.EXIT_USAGE, "err", "role_classes"),
+        ("rules:\n  steps: just-a-string\n", pv.EXIT_OK, "notes", "rules.steps"),
+    ],
+)
+def test_a_malformed_config_section_never_ends_in_a_traceback(
+    tmp_path, capsys, config, code_expected, where, needle
+):
+    repo = profile_repo(tmp_path)
+    root = write_user_config(tmp_path / "cfg", config)
+
+    code, result, err = _run(capsys, "brief", "--role", "builder", "--repo-path", str(repo), config_root=root)
+
+    assert code == code_expected
+    assert needle in (err if where == "err" else " ".join(result["rules"]["notes"]))
+
+
 def test_a_missing_profile_exits_60_for_an_author_role(tmp_path, capsys):
     repo = profile_repo(tmp_path, None)
 
