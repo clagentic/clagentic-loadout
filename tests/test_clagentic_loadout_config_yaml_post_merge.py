@@ -24,17 +24,42 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from clagentic_loadout.doctor.checks import check_dead_foreign_post_merge_config
 from clagentic_loadout.merge.post_merge import validate_post_merge_steps
-from clagentic_loadout.merge.post_merge_config import load_post_merge_steps
+from clagentic_loadout.merge.post_merge_config import (
+    CONFIG_KEY_POST_MERGE_STEPS,
+    read_repo_merge_section,
+)
+from clagentic_loadout.repo_config import DEFAULT_CONFIG_RELATIVE_PATH
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: The operator-local config is gitignored, so it exists only in the
+#: operator's own checkout. It is read at this test tree's own root, never
+#: through the merge config resolver's parent-directory search: a worktree
+#: nested in the operator's checkout must not pick up the parent's file.
+REPO_CONFIG_PATH = REPO_ROOT / DEFAULT_CONFIG_RELATIVE_PATH
+
+requires_repo_config = pytest.mark.skipif(
+    not REPO_CONFIG_PATH.is_file(),
+    reason=(
+        f"{DEFAULT_CONFIG_RELATIVE_PATH} is absent at this tree's root "
+        "(operator-local, gitignored file)"
+    ),
+)
+
 
 def _load_repo_post_merge_steps() -> list[dict]:
-    return load_post_merge_steps(REPO_ROOT)
+    steps = read_repo_merge_section(REPO_CONFIG_PATH).get(CONFIG_KEY_POST_MERGE_STEPS)
+    if steps is None:
+        return []
+    validate_post_merge_steps(steps)
+    return steps
 
 
+@requires_repo_config
 class TestPostMergeStepsPresent:
     def test_post_merge_steps_present(self):
         steps = _load_repo_post_merge_steps()
@@ -64,6 +89,7 @@ class TestPostMergeStepsPresent:
         assert install_step.get("on_failure") == "fail"
 
 
+@requires_repo_config
 class TestInlineHomePrefix:
     """lr-e84ae1: the install step's cmd must carry an inline HOME=
     env-assignment prefix so the step self-bootstraps regardless of which
@@ -110,6 +136,7 @@ class TestInlineHomePrefix:
         )
 
 
+@requires_repo_config
 class TestPostMergeStepsWellFormed:
     """Validated against loadout's OWN post_merge_steps schema/parser
     (merge.post_merge.validate_post_merge_steps) -- the same parser
