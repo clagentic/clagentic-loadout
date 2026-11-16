@@ -261,7 +261,16 @@ gate never reads it.
 ```
 loadout-profile check [--repo-path DIR] [--ref REV]
 loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
+loadout-profile brief --role ROLE [--step STEP] [--repo-path DIR] [--ref REV] [--repo NAME]
+                      [--groups-file FILE]
 ```
+
+`brief` shapes the profile for the role reading it and lists the standing rules that apply to
+the repository, that role and that step; see [`loadout-profile`](verbs.md#loadout-profile--validate-a-repo-profile-draft-one-or-brief-a-role).
+`ROLE` is a word of the **brief and spec role vocabulary** (`project-orchestrator`, `planner`,
+`builder`, `reviewer`, and the others in [Roles and classes](verbs.md#roles-and-classes); `lead`
+is a legacy alias of `project-orchestrator`), not one of the credential roles that `--caller`
+takes, although the two lists share some words.
 
 `check` validates the profile with the same loader the review uses and prints one JSON object:
 the class, the rules the class carries, the overrides, how many denial entries the profile

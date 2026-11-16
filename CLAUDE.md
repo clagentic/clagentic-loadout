@@ -10,15 +10,19 @@ allowlists, write-path scoping, credential-file denial), a credential-provider s
 CLI conformance, and role-scoped verbs. Git-host operations (push, review, merge gate,
 api, release dispatch) are the largest current surface, not the definition — a
 capability an agent uses is in scope here by default, whether or not it touches git.
-Roles (builder / reviewer / security / merger / lead), never agent names.
+Roles (builder / reviewer / security / merger / lead), never agent names. These are the
+credential roles; the brief and spec verbs use a second vocabulary (project-orchestrator,
+planner, builder, ...) where `lead` is a legacy alias of project-orchestrator (docs/verbs.md,
+"Roles and classes"). No identifier is renamed.
 
 ## Hard rules
 
 1. **No internal identity in product code.** No agent names, no deployment or harness
    vocabulary (a deployment's own name for its agents or orchestrator, e.g. crew), no
    harness directory conventions (e.g. .crew/, .lore/), no operator org/host/path
-   hardcodes. Use generic terms: agent for the actor, roles (builder / reviewer /
-   security / merger / lead) for what it does. Namespaces, endpoints, registries, casts
+   hardcodes. Use generic terms: agent for the actor, roles (credential roles: builder /
+   reviewer / security / merger / lead; the brief and spec vocabulary is listed in
+   docs/verbs.md) for what it does. Namespaces, endpoints, registries, casts
    and any deployment-specific directory names arrive via config. `clagentic` appears
    only as brand, never as a hardcoded owner check. Enforced by
    `tests/test_anonymization_guard.py`.

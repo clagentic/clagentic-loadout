@@ -1540,7 +1540,8 @@ registry format and exit codes:
 ```
 loadout-profile check [--repo-path DIR] [--ref REV]
 loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
-loadout-profile brief --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
+loadout-profile brief --role ROLE [--step STEP] [--repo-path DIR] [--ref REV] [--repo NAME]
+                      [--groups-file FILE]
 ```
 
 The repo profile (`.clagentic/loadout/profile.yaml`) states a repository's class,
@@ -1570,9 +1571,36 @@ brief; every brief is filtered for those keys before it is printed. Group rules 
 groups file `loadout-rules` reads (`--groups-file`, else the environment variable or config
 setting named in [`loadout-rules`](#loadout-rules--the-group-rules-for-a-repository)); the
 repository name is `--repo`, else the name of the origin of `--repo-path`. With no groups file
-the brief says why in `group_rules_note`. Exit codes of `brief`: `0` ok, `1` usage (including a
-role no vocabulary knows), `60` no profile, `61` invalid profile, `62` the repository, revision
-or groups file could not be read. The verb is read-only and is not an input to any gate.
+the brief says why in `group_rules_note`. Exit codes of `brief`: `0` ok, `1` usage, `60` no
+profile, `61` invalid profile, `62` the repository, revision or groups file could not be read.
+The verb is read-only and is not an input to any gate.
+
+**The `rules` section.** Every brief, of every class including `gate`, carries `rules`: the group
+rules that apply to the repository (selected by jurisdiction exactly as `loadout-rules` selects
+them), narrowed to `--role` and the optional `--step`. `rules.items` lists each rule with its `id`,
+its `statement` as stored, `source`, `kind` (null when the record has none), `group`, `file`, any
+of `roles`, `steps`, `said_at` and `relayed` the record carries, and `not_understood`.
+`rules.applies_to` echoes the role and step and whether each is declared; `rules.note` says why
+there are no rules when the groups file is missing; `rules.notes` carries the role and step
+reports. The gate brief still carries no profile and no posture key.
+
+- A record without `roles` applies to every role; with `roles` it applies when the word asked, or
+  the role it resolves to, is listed.
+- A record without `steps` applies to every step; with `steps` it applies when `--step` is listed.
+  Without `--step` the steps are not filtered.
+- A role no vocabulary declares is reported in `rules.notes` (naming the known roles) and the brief
+  is shaped as `context` with `role_class` null; only records without `roles` are listed. It exits
+  `0`; it used to exit `1`.
+- A step is declared by the `rules.steps` list of the user-level config file (`rules: {steps:
+  [<step name>, ...]}`; the product ships none). An undeclared `--step` is reported in
+  `rules.notes`; only records without `steps` are listed. It exits `0`.
+- Nothing in the brief refuses, gates or changes the exit code because of a rule, its `kind`, a
+  role or a step.
+
+The brief and spec role vocabulary (the table under [Roles and classes](#roles-and-classes)) is
+not the credential-role list that `--caller`, the `roles:` config and merge authority use
+(`builder`, `reviewer`, `security`, `merger`, `lead`); `lead` appears in both, and in the first it
+is a legacy alias of `project-orchestrator`.
 
 ### `loadout-rules` — the group rules for a repository
 
@@ -1608,9 +1636,17 @@ groups:
     jurisdiction: [<glob over bare repository names>, ...]   # or:
     jurisdiction_class: <class>
     rules:
-      - {id: <rule id>, statement: <text>, source: <text>}
+      - {id: <rule id>, statement: <text>, source: <text>,
+         roles: [<role word>, ...], steps: [<step name>, ...],     # optional
+         kind: constraint | judgment, said_at: <text>, relayed: <text>}   # optional
     note: <text>                      # shown when the group has no rules
 ```
+
+A rule record may carry the optional keys `roles`, `steps`, `kind` (`constraint` or `judgment`),
+`said_at` and `relayed`; `loadout-rules` prints each that is present, unchanged, and does not
+filter on them (the role and step narrowing is `loadout-profile brief`). A key the reader does not
+know, a `kind` outside the two, or a value of the wrong shape is never an error: it is named in
+the rule's `not_understood` list and the record is otherwise read as if it were absent.
 
 **Selection.** A group with `jurisdiction` applies when a glob matches the bare name
 (case-insensitive). A group with `jurisdiction_class` applies when the repository's **profile**
@@ -1686,6 +1722,23 @@ resolution still works, and resolves to its role as an alias:
 
 `builder` and `reviewer` are in both vocabularies unchanged. The `roles:` section (role to verb
 set) keeps its meaning and its words.
+
+Two role lists exist, and they are different things. The **credential roles** (`builder`,
+`reviewer`, `security`, `merger`, `lead`) are what `--caller`, the `roles:` config, provisioning
+and merge authority take. The **brief and spec vocabulary** is the table above
+(`project-orchestrator`, `planner`, `builder`, ...), which `loadout-profile brief --role` and
+`loadout-spec new --role` read; in it `lead` is a legacy alias of `project-orchestrator`, while in
+the credential list `lead` remains a role of its own. No identifier is renamed.
+
+A deployment declares the steps a brief can be narrowed to in the `rules:` section of the same
+user-level config file, beside `groups_file`:
+
+```yaml
+rules:
+  steps: [<step name>, ...]
+```
+
+The product ships no step names; an empty or absent `steps` declares none.
 
 A deployment overrides a class, and gives a role of its own a class, in the `role_classes:` section
 of the **user-level** config file, never the repository's (a repository's own file must not steer
