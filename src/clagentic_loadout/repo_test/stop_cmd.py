@@ -95,7 +95,13 @@ def _command_groups(run_dir: Path, supervisor_pid: int) -> list[Mapping[str, Any
     return found
 
 
-def _end_group(pid: int) -> None:
+def _end_group(identity: Mapping[str, Any]) -> None:
+    """Kill the process group *identity* leads, if it is still that process: a pid
+    that no longer matches its recorded identity may belong to an unrelated process
+    and is never signalled."""
+    pid = identity["pid"]
+    if not liveness.is_alive(identity):
+        return
     try:
         os.killpg(pid, signal.SIGKILL)
     except ProcessLookupError:
@@ -139,9 +145,9 @@ def stop_run(root: Path, run_id: str) -> StopOutcome:
     # children are reparented and no longer name it. The supervisor goes first so it
     # cannot record a result of its own for a command that is being ended.
     commands = _command_groups(run_dir, supervisor_pid)
-    _end_group(supervisor_pid)
+    _end_group(supervisor)
     for command in commands:
-        _end_group(command["pid"])
+        _end_group(command)
 
     gone = [supervisor, *commands]
     deadline = time.monotonic() + _SETTLE_SECONDS

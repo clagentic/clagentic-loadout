@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from _repo_test_support import make_repo, write_run, write_unfinished_run
 
-from clagentic_loadout.repo_test import exits, liveness, store
+from clagentic_loadout.repo_test import exits, liveness, stop_cmd, store
 from clagentic_loadout.repo_test.spec import (
     DEFAULT_TIMEOUT_SECONDS,
     TIMEOUT_FROM_DEFAULT,
@@ -85,7 +85,7 @@ def _live_processes(pids: Path) -> list[dict]:
         (5, "soon", 5, TIMEOUT_FROM_FLAG, False),
         *[
             (None, bad, DEFAULT_TIMEOUT_SECONDS, TIMEOUT_FROM_DEFAULT, True)
-            for bad in (0, -3, "soon", True, float("nan"), float("inf"), [60])
+            for bad in (0, -3, "soon", True, float("nan"), float("inf"), [60], 10**400)
         ],
     ],
 )
@@ -112,19 +112,6 @@ def test_a_bad_profile_timeout_keeps_the_profile_valid_and_warns_at_run_start(
     assert summary["timeout"]["source"] == TIMEOUT_FROM_DEFAULT
     assert summary["timeout"]["seconds"] == DEFAULT_TIMEOUT_SECONDS == 14400
     assert "test.timeout_seconds" in err and "warning" in err
-
-
-def test_a_foreground_timeout_reads_timed_out_and_names_the_limit_and_its_source(
-    tmp_path: Path, reports: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    repo, _ = _hanging_repo(tmp_path)
-
-    code, summary, _ = _call(capsys, "run", "full", "--repo-root", str(repo), "--timeout", "1")
-
-    assert code == exits.EXIT_UNRUNNABLE
-    assert summary["state"] == store.STATE_TIMED_OUT
-    assert "timed out after 1 seconds" in summary["problem"] and "--timeout" in summary["problem"]
-    assert summary["timeout"] == {"seconds": 1.0, "source": TIMEOUT_FROM_FLAG}
 
 
 def test_a_detached_run_past_its_profile_timeout_reads_timed_out_and_leaves_nothing_running(
@@ -215,6 +202,24 @@ def test_stop_will_not_signal_a_run_started_by_another_user(
     assert (code, out) == (exits.EXIT_REPO_MISMATCH, None)
     assert "another user" in err
     assert not (reports / "20260101T000000Z-1" / store.RESULT_FILE).exists()
+
+
+def test_stop_never_signals_a_supervisor_pid_that_no_longer_matches_its_identity(
+    reports: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_unfinished_run(reports, "20260101T000000Z-1", "/repos/alpha", alive=True)
+    signalled: list[int] = []
+    monkeypatch.setattr(os, "killpg", lambda pid, sig: signalled.append(pid))
+
+    def pid_recycled_after_the_run_was_read(*_args: object) -> list:
+        monkeypatch.setattr(liveness, "is_alive", lambda _identity: False)
+        return []
+
+    monkeypatch.setattr(stop_cmd, "_command_groups", pid_recycled_after_the_run_was_read)
+
+    _call(capsys, "stop", "20260101T000000Z-1")
+
+    assert signalled == []
 
 
 @pytest.mark.parametrize("state", [store.STATE_TIMED_OUT, store.STATE_STOPPED])

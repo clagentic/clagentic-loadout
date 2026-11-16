@@ -302,12 +302,13 @@ class EffectiveTimeout:
 
 def is_positive_number(value: Any) -> bool:
     # bool is an int subclass; ``true`` is not a number of seconds.
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-        and value > 0
-    )
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    try:
+        # isfinite converts to float, which a huge int cannot do.
+        return math.isfinite(value) and value > 0
+    except OverflowError:
+        return False
 
 
 def resolve_timeout(flag: float | None, declared: Any) -> EffectiveTimeout:
