@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -220,6 +221,29 @@ def test_stop_never_signals_a_supervisor_pid_that_no_longer_matches_its_identity
     _call(capsys, "stop", "20260101T000000Z-1")
 
     assert signalled == []
+
+
+def test_stop_ends_a_supervisor_that_never_recorded_its_command_and_reports_it_unidentified(
+    reports: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(stop_cmd, "_SETTLE_SECONDS", 0.5)
+    write_unfinished_run(reports, "20260101T000000Z-1", "/repos/alpha", alive=False)
+    supervisor = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"], start_new_session=True)
+    try:
+        run_dir = reports / "20260101T000000Z-1"
+        provenance = json.loads((run_dir / store.PROVENANCE_FILE).read_text())
+        provenance[store.PROCESS_KEY] = {**liveness.capture_identity(supervisor.pid), "mode": "full"}
+        (run_dir / store.PROVENANCE_FILE).write_text(json.dumps(provenance))
+
+        code, out, err = _call(capsys, "stop", "20260101T000000Z-1")
+
+        assert (code, out) == (exits.EXIT_REPO_MISMATCH, None)
+        assert "could not be identified" in err
+        assert supervisor.wait(timeout=_WAIT) != 0
+        assert not (run_dir / store.RESULT_FILE).exists()
+    finally:
+        supervisor.kill()
+        supervisor.wait()
 
 
 @pytest.mark.parametrize("state", [store.STATE_TIMED_OUT, store.STATE_STOPPED])

@@ -78,24 +78,4 @@ def is_alive(identity: Mapping[str, Any]) -> bool:
     return True
 
 
-def child_identities(pid: int) -> list[dict[str, Any]]:
-    """The identities of the live direct children of *pid*, read from ``/proc``. Empty
-    where ``/proc`` cannot be listed."""
-    try:
-        entries = [entry for entry in os.listdir(_PROC) if entry.isdecimal()]
-    except OSError:
-        return []
-    found: list[dict[str, Any]] = []
-    for entry in entries:
-        try:
-            stat = (_PROC / entry / "stat").read_text()
-        except OSError:
-            continue
-        rest = stat.rpartition(")")[2].split()
-        # After the command name: state, then the parent pid.
-        if len(rest) > 1 and rest[1] == str(pid) and rest[0] not in _DEAD_STATES:
-            found.append(capture_identity(int(entry)))
-    return found
-
-
-__all__ = ["capture_identity", "child_identities", "is_alive"]
+__all__ = ["capture_identity", "is_alive"]

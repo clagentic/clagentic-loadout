@@ -6,9 +6,11 @@ supervisor's. The run then reads ``stopped``, with the time and the stopping use
 
 Only a process that is verified as the run's is signalled. The supervisor is checked
 by its recorded identity (pid, start ticks, boot id: ``repo_test.liveness``); the
-command by the identity its supervisor recorded in ``command-process.json`` or, when
-that was not yet written, by being a direct child of the supervisor. Either must also
-lead its own process group, so a recycled pid is never signalled. A process the
+command only by the identity its supervisor recorded in ``command-process.json``, and it
+must also lead its own process group, so a recycled pid is never signalled. No process
+is looked up by pid alone. When the supervisor is alive and has not yet written the
+record, stop waits for it within the settle window; if it never appears the supervisor
+is ended and stop reports that the command could not be identified. A process the
 command moved out of its group (a daemon) is not reached.
 
 A run that is not running (complete, unrunnable, interrupted, timed out or already
@@ -75,24 +77,20 @@ def _recorded_command(run_dir: Path) -> Mapping[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _command_groups(run_dir: Path, supervisor_pid: int) -> list[Mapping[str, Any]]:
-    """The identities of the commands the supervisor started that are still live and
-    lead their own process group."""
-    candidates = list(liveness.child_identities(supervisor_pid))
+def _command_groups(run_dir: Path, supervisor: Mapping[str, Any], deadline: float) -> list[Mapping[str, Any]]:
+    """The identity the supervisor recorded for its command, when that process is still
+    live and leads its own process group. While the supervisor is verified alive and
+    has not recorded yet, wait for the record until *deadline*."""
     recorded = _recorded_command(run_dir)
-    if recorded is not None:
-        candidates.append(recorded)
-    found: list[Mapping[str, Any]] = []
-    for identity in candidates:
-        pid = identity.get("pid")
-        if (
-            isinstance(pid, int)
-            and all(pid != seen["pid"] for seen in found)
-            and liveness.is_alive(identity)
-            and _leads_own_group(pid)
-        ):
-            found.append(identity)
-    return found
+    while recorded is None and liveness.is_alive(supervisor) and time.monotonic() < deadline:
+        time.sleep(_POLL_SECONDS)
+        recorded = _recorded_command(run_dir)
+    if recorded is None:
+        return []
+    pid = recorded.get("pid")
+    if isinstance(pid, int) and liveness.is_alive(recorded) and _leads_own_group(pid):
+        return [recorded]
+    return []
 
 
 def _end_group(identity: Mapping[str, Any]) -> None:
@@ -141,11 +139,16 @@ def stop_run(root: Path, run_id: str) -> StopOutcome:
     if not isinstance(supervisor_pid, int):
         raise StopRefused(f"run {run_id} records no process to stop", exits.EXIT_REPO_MISMATCH)
 
-    # The commands are found before the supervisor is ended: once it is gone its
-    # children are reparented and no longer name it. The supervisor goes first so it
-    # cannot record a result of its own for a command that is being ended.
-    commands = _command_groups(run_dir, supervisor_pid)
+    # The command is found by its recorded identity, waiting for the record while the
+    # supervisor is alive. The supervisor goes first so it cannot record a result of its
+    # own for a command that is being ended; the record is read once more after it is
+    # gone, in case it was written in between.
+    was_alive = liveness.is_alive(supervisor)
+    deadline = time.monotonic() + _SETTLE_SECONDS
+    commands = _command_groups(run_dir, supervisor, deadline)
     _end_group(supervisor)
+    if not commands:
+        commands = _command_groups(run_dir, supervisor, deadline)
     for command in commands:
         _end_group(command)
 
@@ -157,6 +160,13 @@ def stop_run(root: Path, run_id: str) -> StopOutcome:
         raise StopRefused(
             f"run {run_id}: its processes were signalled but are still running after "
             f"{_SETTLE_SECONDS:g} seconds",
+            exits.EXIT_REPO_MISMATCH,
+        )
+
+    if was_alive and _recorded_command(run_dir) is None:
+        raise StopRefused(
+            f"run {run_id}: its supervisor was ended but it never recorded its command, "
+            "so the command could not be identified and was not signalled",
             exits.EXIT_REPO_MISMATCH,
         )
 
