@@ -2,7 +2,8 @@
 
   loadout-profile check [--repo-path DIR] [--ref REV]
   loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
-  loadout-profile brief --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
+  loadout-profile brief --role ROLE [--step STEP] [--repo-path DIR] [--ref REV] [--repo NAME]
+                        [--groups-file FILE]
 
 ``brief`` prints the profile shaped for the role that will read it: for a role of
 the scope class (a planner) the class and group rules as acceptance-criteria
@@ -10,7 +11,12 @@ candidates, for a build role (a builder) what the build envelope carries, and fo
 a gate role only the statement that a gate reads policy from the merge base by
 its own path. Risk posture is never part of a brief. The role is any word of the
 role vocabulary (role_vocabulary), a legacy alias, or a role the deployment's
-``role_classes`` names.
+``role_classes`` names. A word in none of them is reported and shaped as context.
+
+Every brief, of any class, also carries a ``rules`` section: the group rules that
+apply to the repository, narrowed to the role and to the optional --step (a name
+from the ``rules.steps`` list of the user-level config file). The brief reports
+only; no role, step or rule changes the exit code.
 
 The profile is ``.clagentic/loadout/profile.yaml`` (see review.repo_profile).
 ``check`` reads it from the working tree, or from revision REV when given (the
@@ -27,7 +33,7 @@ Exit codes (the reserved range for this verb; git's own exit codes are never
 passed through):
 
   0   valid (check), or written / printed (init), or printed (brief)
-  1   usage error, including a role no vocabulary knows (brief)
+  1   usage error
   60  check, brief: there is no profile
   61  check, brief: the profile is invalid
   62  the repository, the revision, the file or the groups file could not be read or written
@@ -64,9 +70,14 @@ from clagentic_loadout.review.profile_rules import classes_in_effect, rule_state
 from clagentic_loadout.role_vocabulary import (
     CLASS_GATE,
     CLASS_SCOPE,
+    LEGACY_ALIASES,
+    ROLE_CLASSES,
+    SOURCE_UNDECLARED,
+    RoleResolution,
     RoleVocabularyError,
     load_role_classes,
     resolve_role,
+    undeclared_resolution,
 )
 
 EXIT_OK = 0
@@ -178,11 +189,24 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "never printed.",
     )
     add_common(brief)
-    brief.add_argument("--role", required=True, help="The role (or legacy role word) to shape for.")
+    brief.add_argument(
+        "--role",
+        required=True,
+        help="The role (or legacy role word) to shape for. A word no vocabulary declares is "
+        "reported, not refused.",
+    )
+    brief.add_argument(
+        "--step",
+        default=None,
+        help="The step the role is about to take, narrowing the rules listed to those that name "
+        "it or name no step. Steps are declared in the rules.steps list of the user-level "
+        "config file; an undeclared step is reported, not refused.",
+    )
     brief.add_argument(
         "--repo",
         default=None,
-        help="Repository name for group rules (default: the name of the origin of --repo-path).",
+        help="Repository name for the rules section (default: the name of the origin of "
+        "--repo-path).",
     )
     brief.add_argument(
         "--groups-file",
@@ -271,13 +295,19 @@ def _check(args: argparse.Namespace, now: dt.datetime | None = None) -> int:
     return EXIT_PROFILE_INVALID
 
 
-def _group_rules(
-    args: argparse.Namespace, profile: rp.RepoProfile, config_root: str | Path | None
-) -> tuple[list[dict[str, object]], str | None]:
-    """``(rules, note)``: the group rules that apply to the repository, and a
-    line saying why there are none when they could not be resolved."""
+def _brief_rules(
+    args: argparse.Namespace,
+    resolution: RoleResolution,
+    role_note: str | None,
+    known_class: str | None,
+    config_root: str | Path | None,
+) -> tuple[dict[str, object], list[dict[str, object]], str | None]:
+    """``(section, rules, note)``: the ``rules`` section of the brief, the rules
+    it lists, and a line saying why there are none when they could not be
+    resolved. *known_class* is the profile class when the profile was read."""
     # Imported here: rules.verb reads profiles through review.profile_brief,
     # which imports this module.
+    from clagentic_loadout.review.brief_rules import rules_section
     from clagentic_loadout.rules import groups as gr
     from clagentic_loadout.rules.applying import applying_group_rules
 
@@ -287,18 +317,39 @@ def _group_rules(
             args.repo_path,
             args.groups_file,
             config_root,
-            known_class=profile.repo_class,
+            known_class=known_class,
         )
     except gr.GroupsFileError as exc:
         raise ProfileVerbError(str(exc), EXIT_IO_FAILED) from exc
-    return found.rules, found.note
+    section, items = rules_section(
+        found,
+        resolution,
+        role_declared=resolution.source != SOURCE_UNDECLARED,
+        role_note=role_note,
+        step=args.step,
+        declared_steps=gr.load_declared_steps(config_root),
+    )
+    return section, items, found.note
+
+
+def _resolve_brief_role(
+    word: str, config_root: str | Path | None
+) -> tuple[RoleResolution, str | None]:
+    """``(resolution, note)``: the role *word* resolved, or, for a word in no
+    vocabulary, the undeclared resolution and a note naming the known roles.
+    The brief reports an undeclared role; it never refuses it."""
+    overrides = load_role_classes(config_root)
+    try:
+        return resolve_role(word, overrides), None
+    except RoleVocabularyError:
+        known = sorted({*ROLE_CLASSES, *LEGACY_ALIASES, *overrides})
+        return undeclared_resolution(word), (
+            f"role {word!r} is not declared; known roles: {', '.join(known)}"
+        )
 
 
 def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
-    try:
-        resolution = resolve_role(args.role, load_role_classes(config_root))
-    except RoleVocabularyError as exc:
-        raise ProfileVerbError(str(exc), EXIT_USAGE) from exc
+    resolution, role_note = _resolve_brief_role(args.role, config_root)
     reader, read_at, base = _reader(args)
     try:
         present = set(reader.list_paths(read_at))
@@ -313,7 +364,8 @@ def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
         # A gate's read of the profile is its own, at the merge base. The tree
         # is listed above so a --ref that does not exist is refused rather than
         # reported as read; without --ref a gate brief needs no tree at all.
-        print(json.dumps({"result": "brief", "at": base, **role_brief(None, resolution)}))
+        section, _, _ = _brief_rules(args, resolution, role_note, None, config_root)
+        print(json.dumps({"result": "brief", "at": base, **role_brief(None, resolution, rules=section)}))
         return EXIT_OK
     profile, state, problem = read_repo_profile(reader, read_at, present)
     if state == PROFILE_MISSING:
@@ -331,11 +383,14 @@ def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
             file=sys.stderr,
         )
         return EXIT_PROFILE_INVALID
-    rules: list[dict[str, object]] = []
-    note = None
-    if resolution.role_class == CLASS_SCOPE:
-        rules, note = _group_rules(args, profile, config_root)
-    result = role_brief(profile, resolution, group_rules=rules, group_note=note)
+    section, rules, note = _brief_rules(args, resolution, role_note, profile.repo_class, config_root)
+    result = role_brief(
+        profile,
+        resolution,
+        group_rules=rules if resolution.role_class == CLASS_SCOPE else (),
+        group_note=note,
+        rules=section,
+    )
     print(json.dumps({"result": "brief", "path": PROFILE_PATH, "at": base, **result}))
     return EXIT_OK
 

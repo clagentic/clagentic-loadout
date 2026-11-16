@@ -17,6 +17,15 @@ configures; it is never read from the repository under work. Its shape::
           - {id: <rule id>, statement: <text>, source: <text>}
         note: <text>                  # optional; shown when there are no rules
 
+A rule record may also carry, all optional: ``roles`` (a list of role words the
+rule is for), ``steps`` (a list of step names it is for), ``kind``
+(``constraint`` or ``judgment``), ``said_at`` and ``relayed`` (provenance text).
+A record without ``roles`` applies to every role, one without ``steps`` to every
+step. Any other key on a record, a ``kind`` outside the two, or a value of the
+wrong shape is kept apart and reported in the record's ``not_understood``; it
+never fails the read. The steps a deployment names are the ``rules.steps`` list
+of the user-level config file.
+
 The classes in the file are data from the configuration layer and may lead the
 profile schema: a class the profile schema does not admit is kept and flagged,
 never refused. The location comes from, in order, the ``--groups-file`` flag,
@@ -26,9 +35,10 @@ user-level config file. With none of them set there are no groups.
 
 from __future__ import annotations
 
+import datetime as dt
 import fnmatch
 import os
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -42,7 +52,11 @@ from clagentic_loadout.transport.provider_config import load_user_config_section
 GROUPS_FILE_ENV_VAR = "CLAGENTIC_LOADOUT_GROUPS_FILE"
 CONFIG_SECTION_RULES = "rules"
 CONFIG_KEY_GROUPS_FILE = "groups_file"
+CONFIG_KEY_STEPS = "steps"
 SCHEMA_VERSION = 1
+
+RULE_KINDS = ("constraint", "judgment")
+KNOWN_RULE_KEYS = frozenset({"id", "statement", "source", "roles", "steps", "kind", "said_at", "relayed"})
 
 FROM_FLAG = "flag"
 FROM_ENV = "env"
@@ -60,6 +74,12 @@ class GroupRule:
     id: str
     statement: str
     source: str
+    roles: tuple[str, ...] | None = None
+    steps: tuple[str, ...] | None = None
+    kind: str | None = None
+    said_at: str | None = None
+    relayed: str | bool | None = None
+    not_understood: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -157,6 +177,60 @@ def _string_list(value: Any, where: str, path: str) -> tuple[str, ...]:
     return tuple(v.strip() for v in value)
 
 
+def _optional_words(value: Any) -> tuple[str, ...] | None:
+    """A list of non-empty strings, or None when *value* is not one."""
+    if isinstance(value, list) and value and all(isinstance(v, str) and v.strip() for v in value):
+        return tuple(v.strip() for v in value)
+    return None
+
+
+def _optional_text(value: Any) -> str | None:
+    """Text for a provenance value; a YAML date is kept as its ISO form."""
+    if isinstance(value, (dt.date, dt.datetime)):
+        return value.isoformat()
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
+
+
+def _parse_rule_extras(item: dict[Any, Any]) -> dict[str, Any]:
+    """The optional keys of a rule record, and what could not be understood.
+    Nothing here raises: a key or value that is not understood is named in
+    ``not_understood`` and the record behaves as if it were absent."""
+    extras: dict[str, Any] = {}
+    unread: list[str] = []
+    for key in ("roles", "steps"):
+        if key in item:
+            words = _optional_words(item[key])
+            if words is None:
+                unread.append(f"{key} (not a non-empty list of strings)")
+            else:
+                extras[key] = words
+    if "kind" in item:
+        kind = item["kind"]
+        if isinstance(kind, str) and kind.strip() in RULE_KINDS:
+            extras["kind"] = kind.strip()
+        else:
+            unread.append(f"kind {kind!r} (not one of {', '.join(RULE_KINDS)})")
+    if "said_at" in item:
+        said_at = _optional_text(item["said_at"])
+        if said_at is None:
+            unread.append("said_at (not text or a date)")
+        else:
+            extras["said_at"] = said_at
+    if "relayed" in item:
+        relayed = item["relayed"]
+        if isinstance(relayed, bool):
+            extras["relayed"] = relayed
+        elif _optional_text(relayed) is not None:
+            extras["relayed"] = _optional_text(relayed)
+        else:
+            unread.append("relayed (not text or true/false)")
+    unread.extend(f"key {str(key)!r}" for key in item if key not in KNOWN_RULE_KEYS)
+    extras["not_understood"] = tuple(unread)
+    return extras
+
+
 def _parse_rule(item: Any, where: str, path: str) -> GroupRule:
     if not isinstance(item, dict):
         raise GroupsFileError(f"{path}: {where} must be a mapping with id, statement and source")
@@ -164,6 +238,7 @@ def _parse_rule(item: Any, where: str, path: str) -> GroupRule:
         id=_text(item.get("id"), f"{where}.id", path),
         statement=_text(item.get("statement"), f"{where}.statement", path),
         source=_text(item.get("source"), f"{where}.source", path, required=False),
+        **_parse_rule_extras(item),
     )
 
 
@@ -270,6 +345,38 @@ def groups_for(groups: GroupsFile, repo_name: str, profile_class: str | None) ->
     return chosen
 
 
+def load_declared_steps(config_root: str | Path | None = None) -> tuple[str, ...]:
+    """The step names a deployment declares: the ``rules.steps`` list of the
+    user-level config file. Empty when absent or not a list of strings; the
+    product ships no step names of its own."""
+    value = load_user_config_section(CONFIG_SECTION_RULES, config_root=config_root).get(
+        CONFIG_KEY_STEPS
+    )
+    return _optional_words(value) or ()
+
+
+def rule_applies(
+    roles: Collection[str] | None,
+    steps: Collection[str] | None,
+    *,
+    role_words: Collection[str] | None,
+    step: str | None,
+    step_declared: bool = True,
+) -> bool:
+    """The one matching rule for a rule record's ``roles`` and ``steps``.
+
+    A record without ``roles`` applies to every role; with them it applies when
+    one of *role_words* (the word asked and the role it resolves to) is listed.
+    *role_words* None means the role is not declared, so only a record without
+    ``roles`` applies. The step axis is the same, except that no *step* asked
+    means the step is not filtered."""
+    if roles is not None and not (role_words and set(role_words) & set(roles)):
+        return False
+    if step is not None and steps is not None and not (step_declared and step in steps):
+        return False
+    return True
+
+
 def schema_admits(class_name: str) -> bool:
     """Whether the repo profile schema admits *class_name*."""
     return class_name in PROFILE_CLASSES
@@ -277,8 +384,11 @@ def schema_admits(class_name: str) -> bool:
 
 __all__ = [
     "CONFIG_KEY_GROUPS_FILE",
+    "CONFIG_KEY_STEPS",
     "CONFIG_SECTION_RULES",
     "GROUPS_FILE_ENV_VAR",
+    "KNOWN_RULE_KEYS",
+    "RULE_KINDS",
     "ClassAssignment",
     "Group",
     "GroupRule",
@@ -291,9 +401,11 @@ __all__ = [
     "FROM_NONE",
     "bare_repo_name",
     "groups_for",
+    "load_declared_steps",
     "load_groups_file",
     "parse_groups_document",
     "resolve_groups_location",
     "resolve_rules_file_location",
+    "rule_applies",
     "schema_admits",
 ]

@@ -210,13 +210,14 @@ def test_a_deployment_roles_file_decides_the_shape_by_class_never_by_name(tmp_pa
     assert custom["deny"] == {"names": ["invented-name"], "hosts": ["host.example.test"], "users": []}
 
 
-def test_an_unknown_role_is_a_usage_error_naming_it(tmp_path, capsys):
+def test_an_undeclared_role_is_reported_naming_it_and_the_known_roles_never_refused(tmp_path, capsys):
     repo = profile_repo(tmp_path)
 
-    code, result, err = _run(capsys, "brief", "--role", "no-such-role", "--repo-path", str(repo))
+    code, result, _ = _run(capsys, "brief", "--role", "no-such-role", "--repo-path", str(repo))
 
-    assert code == pv.EXIT_USAGE and result is None
-    assert "no-such-role" in err and "builder" in err
+    assert code == pv.EXIT_OK and result["role_source"] == "undeclared"
+    note = result["rules"]["notes"][0]
+    assert "no-such-role" in note and "builder" in note
 
 
 def test_a_missing_profile_exits_60_for_an_author_role(tmp_path, capsys):

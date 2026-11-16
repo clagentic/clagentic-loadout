@@ -12,6 +12,7 @@ brief ends with an I/O failure, the spec draft records the reason and goes on.
 
 from __future__ import annotations
 
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,30 @@ def applying_group_rules(
     return ApplyingGroupRules(rules=rules, location=location)
 
 
+def select_rules(
+    rules: Sequence[dict[str, Any]],
+    *,
+    role_words: Collection[str] | None,
+    step: str | None,
+    step_declared: bool,
+) -> list[dict[str, Any]]:
+    """The *rules* (verb-output shape) that apply to the role and step asked.
+    *role_words* are the words a record's ``roles`` may name (None when the role
+    is not declared). A step that is not declared matches only records without
+    ``steps``; no *step* leaves the step axis unfiltered."""
+    return [
+        rule
+        for rule in rules
+        if gr.rule_applies(
+            rule.get("roles"),
+            rule.get("steps"),
+            role_words=role_words,
+            step=step,
+            step_declared=step_declared,
+        )
+    ]
+
+
 def format_rule_item(rule: dict[str, Any]) -> str:
     """One rule as a spec item: ``<group id>/<rule id>: <statement>``, with
     `` [source: <source>]`` appended when the rule has a source."""
@@ -82,5 +107,6 @@ __all__ = [
     "ApplyingGroupRules",
     "applying_group_rules",
     "format_rule_item",
+    "select_rules",
     "source_label",
 ]

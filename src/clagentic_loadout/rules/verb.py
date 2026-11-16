@@ -14,6 +14,10 @@ equals its class. With no profile the repository matches no class-selected group
 and the output says so. A class in the groups file that the profile schema does
 not admit is printed with a note, never refused.
 
+Each rule also carries the optional record keys it holds (roles, steps, kind,
+said_at, relayed) and ``not_understood``, which names any key or value the reader
+did not understand; this verb prints them and filters on none.
+
 With no groups file configured, or none at the configured path, the result is
 empty, says why, and the exit code is 0. The verb is read-only, binds no caller
 and mints no credential.
@@ -180,17 +184,29 @@ def build_result(
     }
 
 
+def _rule_entry(rule: gr.GroupRule, group_id: str, path: str) -> dict[str, Any]:
+    entry: dict[str, Any] = {
+        "id": rule.id,
+        "statement": rule.statement,
+        "source": rule.source or None,
+        "group": group_id,
+        "file": path,
+    }
+    # The optional keys appear only on a record that carries them.
+    for key in ("roles", "steps"):
+        words = getattr(rule, key)
+        if words is not None:
+            entry[key] = list(words)
+    for key in ("kind", "said_at", "relayed"):
+        value = getattr(rule, key)
+        if value is not None:
+            entry[key] = value
+    entry["not_understood"] = list(rule.not_understood)
+    return entry
+
+
 def _rule_entries(group: gr.Group, path: str) -> list[dict[str, Any]]:
-    return [
-        {
-            "id": rule.id,
-            "statement": rule.statement,
-            "source": rule.source or None,
-            "group": group.id,
-            "file": path,
-        }
-        for rule in group.rules
-    ]
+    return [_rule_entry(rule, group.id, path) for rule in group.rules]
 
 
 def _group_entry(group: gr.Group, selected_by: str, path: str) -> dict[str, Any]:
