@@ -12,7 +12,8 @@ Schema (strict: an unknown key makes the whole profile invalid)::
       paths: ["spec/**"]                                   # extra test-file globs
       ratio_warn: 2                                        # changeset ratio budget
       ratio_floor_lines: 100                               # changeset ratio floor
-      tiers:                                               # named runs, one argv each
+      timeout_seconds: 7200                                # run timeout, default 14400
+      tiers:                                              # named runs, one argv each
         integration: [python3, -m, pytest, "-m", integration, "--junitxml={junit}"]
 
 ``prepare`` is an optional argv, run once in the repository root before the
@@ -27,6 +28,12 @@ rule (review.test_files); it extends that rule and never replaces it.
 change (review.changeset_ratio). Both are kept as written and judged where they
 are used: a value that is not a positive integer falls back to its default with
 a warning naming the key, so a typo never invalidates the rest of the profile.
+
+``timeout_seconds`` is the longest a run's command may take before it is ended and
+the run reads ``timed_out``. It is handled like ``ratio_warn``: kept as written and
+judged where it is used (``resolve_timeout``), so a value that is not a positive
+number falls back to the built-in default of 14400 seconds with a warning naming the
+key. The ``--timeout`` flag of a run overrides it.
 
 ``report_format`` names how the commands of the block report their results, for
 every run mode and tier. ``junit`` (the default, and what a block without the key
@@ -50,6 +57,7 @@ carries ``{junit}`` under ``junit`` and may not use ``{base}``). ``clagentic-loa
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -75,6 +83,7 @@ KEY_RATIO_WARN = "ratio_warn"
 KEY_RATIO_FLOOR_LINES = "ratio_floor_lines"
 KEY_PREPARE = "prepare"
 KEY_REPORT_FORMAT = "report_format"
+KEY_TIMEOUT_SECONDS = "timeout_seconds"
 _ALLOWED_KEYS = (
     *MODES,
     KEY_PREPARE,
@@ -84,7 +93,19 @@ _ALLOWED_KEYS = (
     KEY_PATHS,
     KEY_RATIO_WARN,
     KEY_RATIO_FLOOR_LINES,
+    KEY_TIMEOUT_SECONDS,
 )
+
+# Above every observed full suite, so a healthy run never meets it.
+DEFAULT_TIMEOUT_SECONDS = 14400
+TIMEOUT_FROM_FLAG = "flag"
+TIMEOUT_FROM_PROFILE = "profile"
+TIMEOUT_FROM_DEFAULT = "default"
+_TIMEOUT_SOURCE_TEXT = {
+    TIMEOUT_FROM_FLAG: "the --timeout flag",
+    TIMEOUT_FROM_PROFILE: f"the profile's test.{KEY_TIMEOUT_SECONDS}",
+    TIMEOUT_FROM_DEFAULT: "the built-in default",
+}
 _MAX_PATH_GLOBS = 100
 
 TIER_NAME_RE = re.compile(r"\A[a-z][a-z0-9_-]{0,31}\Z")
@@ -118,6 +139,8 @@ class DeclaredTests:
     paths: tuple[str, ...] = ()
     ratio_warn: Any = None
     ratio_floor_lines: Any = None
+    # Kept as written; resolve_timeout judges it where a run uses it.
+    timeout_seconds: Any = None
     # None is the default format, junit; a value is one of REPORT_FORMATS.
     report_format: str | None = None
 
@@ -252,14 +275,65 @@ def parse_test_block(block: Any, where: str = "test") -> DeclaredTests:
         paths=_paths(block.get(KEY_PATHS), f"{where}.{KEY_PATHS}"),
         ratio_warn=block.get(KEY_RATIO_WARN),
         ratio_floor_lines=block.get(KEY_RATIO_FLOOR_LINES),
+        timeout_seconds=block.get(KEY_TIMEOUT_SECONDS),
         **commands,
     )
 
 
+@dataclass(frozen=True)
+class EffectiveTimeout:
+    """The timeout a run is held to, where it came from, and a warning when the
+    profile's value was unusable and the default applied instead."""
+
+    seconds: float
+    source: str
+    warning: str | None = None
+
+    @property
+    def source_text(self) -> str:
+        return _TIMEOUT_SOURCE_TEXT[self.source]
+
+    def as_record(self) -> dict[str, Any]:
+        record: dict[str, Any] = {"seconds": self.seconds, "source": self.source}
+        if self.warning is not None:
+            record["warning"] = self.warning
+        return record
+
+
+def is_positive_number(value: Any) -> bool:
+    # bool is an int subclass; ``true`` is not a number of seconds.
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def resolve_timeout(flag: float | None, declared: Any) -> EffectiveTimeout:
+    """The effective timeout: the flag, else the profile's ``timeout_seconds``, else
+    the default. A profile value that is not a positive number warns and falls back
+    to the default; it never makes a run refuse."""
+    if flag is not None:
+        return EffectiveTimeout(flag, TIMEOUT_FROM_FLAG)
+    if declared is None:
+        return EffectiveTimeout(DEFAULT_TIMEOUT_SECONDS, TIMEOUT_FROM_DEFAULT)
+    if is_positive_number(declared):
+        return EffectiveTimeout(declared, TIMEOUT_FROM_PROFILE)
+    warning = (
+        f"test.{KEY_TIMEOUT_SECONDS} must be a positive number of seconds, got {declared!r}; "
+        f"using {DEFAULT_TIMEOUT_SECONDS}"
+    )
+    return EffectiveTimeout(DEFAULT_TIMEOUT_SECONDS, TIMEOUT_FROM_DEFAULT, warning)
+
+
 __all__ = [
     "BASE_PLACEHOLDER",
+    "DEFAULT_TIMEOUT_SECONDS",
+    "EffectiveTimeout",
     "JUNIT_PLACEHOLDER",
     "KEY_BASE",
+    "KEY_TIMEOUT_SECONDS",
     "KEY_PATHS",
     "KEY_PREPARE",
     "KEY_RATIO_FLOOR_LINES",
@@ -278,5 +352,7 @@ __all__ = [
     "TIER_NAME_RE",
     "DeclaredTests",
     "TestBlockError",
+    "is_positive_number",
     "parse_test_block",
+    "resolve_timeout",
 ]

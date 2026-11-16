@@ -238,7 +238,7 @@ def test_a_missing_executable_is_unrunnable_and_names_it(
     assert "no-such-binary-here" in summary["problem"]
 
 
-def test_a_timeout_ends_the_command_and_records_an_unrunnable_run(
+def test_a_timeout_ends_the_command_and_records_a_timed_out_run(
     tmp_path: Path, reports: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = make_repo(
@@ -249,6 +249,7 @@ def test_a_timeout_ends_the_command_and_records_an_unrunnable_run(
     code, summary, _ = _run(capsys, "full", "--repo-root", str(repo), "--timeout", "0.5")
 
     assert code == exits.EXIT_UNRUNNABLE
+    assert summary["state"] == "timed_out"
     assert "timed out" in summary["problem"]
 
 

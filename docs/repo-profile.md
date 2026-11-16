@@ -78,7 +78,9 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
   below which a change is never over budget; both feed the advisory ratio
   ([verbs.md](verbs.md#testcode-ratio-loadout-changeset-ratio)) and are read from the merge
   base. A value that is not a positive integer falls back to its default with a warning naming
-  the key; it does not invalidate the profile.
+  the key; it does not invalidate the profile. `test.timeout_seconds` (positive number, default
+  14400) is how long a test run may take before it is ended and reads `timed_out`; it is
+  handled the same way (see [repo-test.md](repo-test.md#run-timeout)).
 
 - **`review`** holds `docs_only`, the docs allowlist (next section), `scanners`, the category
   of each scanner's hits, and `clearance`, the findings a reviewer may clear itself (below).
