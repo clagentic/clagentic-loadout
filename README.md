@@ -23,6 +23,11 @@ Each agent role — builder, reviewer, security, merger, lead — is issued a lo
 exact verbs it may run, and nothing else. Wrong actions aren't forbidden; they're
 unrepresentable.
 
+These five are the credential roles (`--caller`, the `roles:` config, provisioning, merge
+authority). The briefs and the spec use a second role vocabulary (`project-orchestrator`,
+`planner`, `builder`, and others), in which `lead` is a legacy alias of `project-orchestrator`.
+Nothing is renamed; see [Roles and classes](docs/verbs.md#roles-and-classes).
+
 ## Composes with
 
 clagentic: loadout integrates rather than owns: each of the following is a seam with a

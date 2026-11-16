@@ -15,6 +15,8 @@ What each role is shown depends on the role's class (role_vocabulary):
            not an input to it.
   others   the class, its rules and the path overrides, for context.
 
+Every class also carries the ``rules`` section built by review.brief_rules.
+
 Risk posture is read only by gates, from the merge base. No brief carries it;
 ``without_posture`` removes any such key from what is emitted, so a field added
 to the profile later cannot reach an author through this verb by accident.
@@ -119,17 +121,22 @@ def role_brief(
     *,
     group_rules: Sequence[dict[str, Any]] = (),
     group_note: str | None = None,
+    rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The brief for the role *resolution* names. *profile* may be None only
     for a gate role, which is not shown the profile. *group_rules* are the
     group rules that apply to the repository, in the verb-output shape of
-    rules.verb."""
+    rules.verb. *rules* is the ``rules`` section (review.brief_rules), emitted
+    for every class; a role in no vocabulary has no class and is shaped as
+    context."""
     out: dict[str, Any] = {
         "role": resolution.role,
         "role_word": resolution.word,
-        "role_class": resolution.role_class,
+        "role_class": resolution.role_class or None,
         "role_source": resolution.source,
     }
+    if rules is not None:
+        out["rules"] = rules
     if resolution.role_class == CLASS_GATE:
         out.update({"shaped_for": "gate", "gate_read": GATE_READ_NOTE})
         return without_posture(out)
