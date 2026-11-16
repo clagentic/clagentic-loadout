@@ -140,8 +140,8 @@ def start_detached(prepared: PreparedRun) -> dict[str, Any]:
 
 def _command_recorder(run_dir: Path) -> Callable[[int], None]:
     """A callback that records each command the supervisor starts, so `test stop`
-    can reach the command's own session. Best effort: stop falls back to the
-    supervisor's children when no record exists."""
+    can reach the command's own session. Best effort: when the write fails no
+    record exists, and stop then exits 78 rather than guessing at the command."""
 
     def record(pid: int) -> None:
         try:
