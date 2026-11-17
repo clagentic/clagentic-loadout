@@ -173,8 +173,9 @@ def raise_on_termination() -> Iterator[None]:
         yield
     finally:
         for number, old in previous.items():
-            if old is not None:
-                signal.signal(number, old)  # type: ignore[arg-type]
+            # signal.signal returns None for a handler not installed from Python;
+            # the default action is the closest restore.
+            signal.signal(number, signal.SIG_DFL if old is None else old)  # type: ignore[arg-type]
 
 
 __all__ = ["DEFAULT_SETTLE_SECONDS", "end_process_tree", "raise_on_termination"]
