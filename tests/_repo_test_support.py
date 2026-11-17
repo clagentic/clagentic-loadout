@@ -65,6 +65,19 @@ def wait_for_file(path: Path, seconds: float = 20.0) -> str:
     return path.read_text()
 
 
+def own_session_child_program(pidfile: Path) -> str:
+    """Python source for a command that starts a child in a session of its own (the
+    way the test verb starts its test runner), records the child's pid in *pidfile*
+    and then sleeps, so a group kill would miss the child."""
+    return (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
+        " start_new_session=True)\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n"
+    )
+
+
 def git(repo: Path, *args: str) -> str:
     done = subprocess.run([*_GIT, "-C", str(repo), *args], capture_output=True, text=True, check=True)
     return done.stdout.strip()

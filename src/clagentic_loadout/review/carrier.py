@@ -147,12 +147,9 @@ def _save_stderr(stderr: bytes | str | None, log_dir: Path | None, label: str) -
 
 def _kill_group(proc: "subprocess.Popen[bytes]") -> None:
     # The engine may start helpers in sessions of their own, which a group kill
-    # does not reach; the shared primitive ends those too.
-    if not end_process_tree(proc.pid):
-        # Something was not ours to signal, or survived; fall back to the direct
-        # child so a timeout never leaves it running.
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
+    # does not reach; the shared primitive ends those too, and itself falls back
+    # to the leader's group when it cannot finish.
+    end_process_tree(proc.pid)
 
 
 def run_in_process_group(

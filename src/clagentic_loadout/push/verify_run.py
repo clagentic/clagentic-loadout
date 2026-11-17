@@ -51,6 +51,10 @@ _DRAIN_SECONDS = 5
 #: held by a test that matches the verb's real line against this pattern.
 FORWARDED_LINE_RE = re.compile(rb"^clagentic-loadout test: run \S+ started\b")
 
+#: Added to a timed-out result's stderr tail when part of the check's process
+#: tree could not be ended.
+TREE_NOT_ENDED_LINE = "part of the check's process tree could not be ended"
+
 #: Longest forwarded line; a longer one is cut.
 _FORWARD_LINE_BYTES = 4096
 
@@ -196,6 +200,7 @@ def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
         proc, _CAPTURE_BYTES, stderr_buffer=_StderrTee(_CAPTURE_BYTES)
     )
     timed_out = False
+    tree_ended = True
     try:
         with raise_on_termination():
             proc.wait(timeout=entry.timeout_seconds)
@@ -203,7 +208,7 @@ def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
         timed_out = True
         # Not a group kill: a command that starts its own session (the test verb
         # starting its test runner) would survive one.
-        end_process_tree(proc.pid)
+        tree_ended = end_process_tree(proc.pid)
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_DRAIN_SECONDS)
     except BaseException:
@@ -214,11 +219,14 @@ def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
     # The bounded join keeps a daemonised descendant that still holds a pipe
     # from hanging the push.
     join_capture(readers, _DRAIN_SECONDS)
+    stderr_tail = _tail(err_buf)
+    if not tree_ended:
+        stderr_tail = f"{stderr_tail}\n{TREE_NOT_ENDED_LINE}" if stderr_tail else TREE_NOT_ENDED_LINE
     return VerifyResult(
         name=entry.name, argv=entry.argv,
         exit_code=None if timed_out else proc.returncode, timed_out=timed_out,
         timeout_seconds=entry.timeout_seconds,
-        stdout_tail=_tail(out_buf), stderr_tail=_tail(err_buf),
+        stdout_tail=_tail(out_buf), stderr_tail=stderr_tail,
         started=started, finished=utc_timestamp(),
     )
 

@@ -102,12 +102,13 @@ def run_command(
                     on_spawn(proc.pid)
                 exited, held, code = _await_exit(proc, timeout_seconds)
                 if not exited:
-                    end_process_tree(proc.pid)
+                    tree_ended = end_process_tree(proc.pid)
                     proc.wait()
                     stopped = True
-                    return CommandOutcome(
-                        None, f"timed out after {timeout_seconds} seconds", watcher.stop(), timed_out=True
-                    )
+                    problem = f"timed out after {timeout_seconds} seconds"
+                    if not tree_ended:
+                        problem += "; part of the command's process tree could not be ended"
+                    return CommandOutcome(None, problem, watcher.stop(), timed_out=True)
                 # The leader is still a zombie here, so this last sample reads only
                 # its own pid before it can be reused.
                 stopped = True

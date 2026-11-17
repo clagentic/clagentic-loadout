@@ -35,7 +35,7 @@ from clagentic_loadout.push.verify_run import (
     render_verification_section,
     run_verifications,
 )
-from tests._repo_test_support import pid_is_gone, wait_for_file
+from tests._repo_test_support import own_session_child_program, pid_is_gone, wait_for_file
 from tests._support.push_verb import (  # noqa: F401  (fixtures reused, not redefined)
     RecordingTokenProvider as _RecordingTokenProvider,
     RefusingTokenProvider as _RefusingTokenProvider,
@@ -266,16 +266,25 @@ class TestRunner:
         assert info.value.failed.timed_out
         assert "TIMEOUT" in str(info.value)
 
+    def test_timeout_says_so_when_the_process_tree_could_not_be_ended(self, tmp_path, monkeypatch):
+        from clagentic_loadout.push import verify_run
+
+        real = verify_run.end_process_tree
+
+        def refused(pid):
+            real(pid)
+            return False
+
+        monkeypatch.setattr(verify_run, "end_process_tree", refused)
+        entry = VerifyEntry("slow", (PY, "-c", "import time; time.sleep(30)"), 0.5)
+        with pytest.raises(VerificationFailedError) as info:
+            run_verifications((entry,), tmp_path)
+        assert "process tree could not be ended" in info.value.failed.stderr_tail
+
     def test_timeout_ends_a_child_that_started_its_own_session(self, tmp_path):
         # The test verb starts its test runner this way; a group kill misses it.
         pidfile = tmp_path / "child.pid"
-        code = (
-            "import subprocess, sys, time\n"
-            "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
-            " start_new_session=True)\n"
-            f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
-            "time.sleep(120)\n"
-        )
+        code = own_session_child_program(pidfile)
         entry = VerifyEntry("tree", (PY, "-c", code), 3)
         with pytest.raises(VerificationFailedError) as info:
             run_verifications((entry,), tmp_path)

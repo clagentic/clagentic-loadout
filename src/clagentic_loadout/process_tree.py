@@ -113,12 +113,17 @@ def end_process_tree(leader_pid: int, *, settle_seconds: float = DEFAULT_SETTLE_
     session, until none is alive. Call it while the leader is still running or
     unreaped, so its pid cannot belong to anyone else. Returns True when the tree
     is gone, False when a process was not ours to signal or was still alive after
-    *settle_seconds*."""
+    *settle_seconds*; before returning False it also SIGKILLs the leader's process
+    group once, so no caller needs a fallback of its own."""
     if leader_pid <= 1 or leader_pid == os.getpid():
         raise ValueError(f"refusing to end the process tree of pid {leader_pid}")
     if not _PROC.is_dir():
-        with contextlib.suppress(OSError):
+        try:
             os.killpg(leader_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
         return True
     known: dict[int, int] = {}
     deadline = time.monotonic() + settle_seconds
@@ -130,6 +135,10 @@ def end_process_tree(leader_pid: int, *, settle_seconds: float = DEFAULT_SETTLE_
         if not alive:
             return True
         if refused or time.monotonic() >= deadline:
+            # Last resort, so a caller that gets False still has the leader's
+            # own group ended.
+            with contextlib.suppress(OSError):
+                os.killpg(leader_pid, signal.SIGKILL)
             return False
         for proc in alive:
             try:
