@@ -1591,9 +1591,16 @@ reports. The gate brief still carries no profile and no posture key.
 - A role no vocabulary declares is reported in `rules.notes` (naming the known roles) and the brief
   is shaped as `context` with `role_class` null; only records without `roles` are listed. It exits
   `0`; it used to exit `1`.
-- A step is declared by the `rules.steps` list of the user-level config file (`rules: {steps:
-  [<step name>, ...]}`; the product ships none). An undeclared `--step` is reported in
-  `rules.notes`; only records without `steps` are listed. It exits `0`.
+- Seven steps are declared by default: `file`, `direct`, `scope`, `dispatch`, `review`, `merge`
+  and `hand-off`. The `rules.steps` list of the user-level config file (`rules: {steps: [<step
+  name>, ...]}`) adds to them, the way `role_classes` adds to the role vocabulary: the declared
+  steps are the built-in list, then each `rules.steps` entry not already in it. A `rules.steps`
+  that is not a list of non-empty strings is named in `rules.notes` and the built-in steps stay
+  declared.
+- `rules.declared_steps` lists every declared step with its `source` (`default` for a built-in
+  step, `deployment` for one added by `rules.steps`), and `rules.applies_to.step_source` is the
+  source of the `--step` asked (null when it is not declared or no step was asked). An undeclared
+  `--step` is reported in `rules.notes`; only records without `steps` are listed. It exits `0`.
 - Nothing in the brief refuses, gates or changes the exit code because of a rule, its `kind`, a
   role or a step.
 
