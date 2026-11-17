@@ -48,8 +48,9 @@ Seven checks, matching the task's numbered scope plus one added later
      by running it through every section owner this package already ships
      (wait.config, provisioning.roles, merge.post_merge_config,
      merge.pre_checks_config, merge.gate_config — lr-0a03c3 added the last
-     two: pre_checks, merge_requirements, required_reviewer_roles,
-     authorized_roles, all under the existing `merge:` section) rather than
+     two: pre_checks, required_reviewer_roles, authorized_roles, all under
+     the existing `merge:` section; the retired merge_requirements key is
+     reported as an advisory, never validated) rather than
      inventing a second schema — a malformed section is caught by the SAME
      loader/validator the verb that actually reads it at runtime would use,
      so doctor can never diverge from what "valid" means for that section.
@@ -138,9 +139,9 @@ from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
     InvalidMergeGateConfigError,
     load_authorized_roles,
-    load_merge_requirements,
 )
 from clagentic_loadout.merge.commit_files import resolve_commit
+from clagentic_loadout.merge.config_root import CONFIG_KEY_MERGE_REQUIREMENTS
 from clagentic_loadout.merge.repo_gate_runtime import (
     ignored_deployment_gate_warnings,
     load_repo_gate_at_base,
@@ -1123,7 +1124,6 @@ def check_repo_loadout_schema(
     unknown_gate_roles: list[str] = []
     unsatisfiable_gate_roles: list[str] = []
     try:
-        load_merge_requirements(repo_root, config_relative_path=config_relative_path)
         authorized_roles = load_authorized_roles(
             repo_root, config_relative_path=config_relative_path
         )
@@ -1217,6 +1217,9 @@ def check_repo_loadout_schema(
     passthrough_warning = _tracked_passthrough_warning(repo_root_path, config_path, raw)
     if passthrough_warning:
         summary += f"; WARN: {passthrough_warning}"
+    retired_notice = _retired_merge_requirements_notice(config_path, raw)
+    if retired_notice:
+        summary += f"; RETIRED: {retired_notice}"
     if gate_findings.role_resolution:
         summary += f"; reviewer role resolution: {_describe_role_resolution(gate_findings.role_resolution)}"
     if unknown_gate_roles:
@@ -1243,9 +1246,26 @@ def check_repo_loadout_schema(
             "unsatisfiable_gate_roles": unsatisfiable_gate_roles,
             "gate_warnings": list(gate_findings.warnings),
             "passthrough_tracked_warning": passthrough_warning,
+            "retired_keys": [CONFIG_KEY_MERGE_REQUIREMENTS] if retired_notice else [],
             "reviewer_role_resolution": list(gate_findings.role_resolution),
             "errors": errors,
         },
+    )
+
+
+
+def _retired_merge_requirements_notice(config_path: Path, raw: dict) -> str | None:
+    """The advisory for a config that still declares the retired
+    `merge.merge_requirements` key, or None. Never a failure: the value is not
+    read, so it is not validated either."""
+    merge_section = raw.get(CONFIG_SECTION_MERGE)
+    if not isinstance(merge_section, dict) or CONFIG_KEY_MERGE_REQUIREMENTS not in merge_section:
+        return None
+    return (
+        f"{config_path}: merge.{CONFIG_KEY_MERGE_REQUIREMENTS} is retired and no merge "
+        f"gate reads it. Replace per key: ci_pass -- the CI-status gate always runs in "
+        f"loadout-merge; tests_pass -- declare the test command under merge.pre_checks; "
+        f"max_changed_files -- pass --max-changed-files. Remove the key."
     )
 
 

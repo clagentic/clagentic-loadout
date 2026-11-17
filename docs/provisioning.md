@@ -228,9 +228,8 @@ These sections close that gap. `loadout-merge` enforces
 from the tracked `.clagentic/loadout/gate.yaml` as it exists at the PR's base
 commit rather than from this working-tree file (see
 [docs/merge-authority.md](merge-authority.md#where-the-gate-is-read-from) for
-which keys come from which source); `merge_requirements` and `authorized_roles`
-are schema and doctor validation only, and wiring them as flag defaults is a
-named follow-up.
+which keys come from which source); `authorized_roles` is schema and doctor
+validation only, and wiring it as a flag default is a named follow-up.
 
 **`required_reviewer_roles` absence is not symmetric with `authorized_roles`
 absence.** Once a repo's `merge:` section exists at all, omitting
@@ -278,8 +277,7 @@ gate is not actually an enforceable one.
    `required_reviewer_roles`, `authorized_roles`) REPLACES the (empty)
    default entirely when declared — mirrors `roles:`'s own "a role you omit
    is simply not provisioned" contract, consistent with
-   `provisioning.roles.load_role_verbs`. `merge_requirements` is a mapping of
-   independent keys; each declared key replaces only that key's own default.
+   `provisioning.roles.load_role_verbs`.
 3. **Role vocabulary only.** Every role string read by these sections
    (`required_reviewer_roles`, `authorized_roles`) is a bare role token —
    `builder`/`reviewer`/`security`/`merger`/`lead`, or any role name an
@@ -342,10 +340,6 @@ merge:
     - cmd: make lint
       description: "lint pass, no CI runner wired up"
       on_failure: fail
-  merge_requirements:
-    tests_pass: true
-    ci_pass: true
-    max_changed_files: 30
   required_reviewer_roles:
     - reviewer
   authorized_roles:
@@ -370,12 +364,14 @@ comments never needs to declare it at all. See its own bullet below for the
   identically since this reuses `merge.post_merge` verbatim; `detaches: true`
   combined with `on_failure: fail` is rejected the same way it is for
   `post_merge_steps`.
-- **`merge_requirements`** (`clagentic_loadout.merge.gate_config`) —
-  `tests_pass` / `ci_pass` (bool) declare whether those gates apply at all;
-  `max_changed_files` (positive int) is the diff-scope cap
-  (`merge.diff_scope.check_diff_scope`'s existing parameter, same value
-  `--max-changed-files` supplies today). Each key is independent; a partial
-  mapping keeps its own defaults for the keys it omits.
+- **Migration note: `merge_requirements` is retired.** No merge gate ever read
+  it, so it gated nothing. `loadout-doctor` reports a config that still
+  declares it as an advisory (never a failure) naming the file. Remove the key
+  and use the real mechanism for each of its keys: `ci_pass` -- the CI-status
+  gate always runs in `loadout-merge`; `tests_pass` -- declare the test command
+  under `merge.pre_checks`; `max_changed_files` -- pass `--max-changed-files`.
+  The key still counts as a `merge:` section marker when the merge verbs locate
+  the config file, so a config holding it resolves to the same root as before.
 - **`required_reviewer_roles`** — the release-gate reviewer-verdict
   roster (role names, resolved to logins via
   `merge.reviewer_login.resolve_reviewer_login`). `loadout-merge` requires

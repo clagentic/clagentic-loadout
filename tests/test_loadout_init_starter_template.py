@@ -33,7 +33,6 @@ from clagentic_loadout.loadout_init.starter_template import (
 )
 from clagentic_loadout.merge.gate_config import (
     load_authorized_roles,
-    load_merge_requirements,
     load_required_reviewer_roles,
 )
 from clagentic_loadout.merge.post_merge_config import load_post_merge_steps
@@ -141,10 +140,9 @@ class TestPackagedTemplateContent:
         assert "merger" in role_verbs
         assert "lead" in role_verbs
 
-    def test_merge_requirements_load_through_the_real_loader(self, initialized_repo):
-        requirements = load_merge_requirements(initialized_repo)
-        assert requirements["ci_pass"] is True
-        assert requirements["tests_pass"] is True
+    def test_template_declares_no_retired_merge_requirements(self):
+        raw = yaml.safe_load(starter_template_path().read_text(encoding="utf-8"))
+        assert "merge_requirements" not in raw["merge"]
 
     def test_required_reviewer_roles_load_through_the_real_loader(self, initialized_repo):
         assert load_required_reviewer_roles(initialized_repo) == ("reviewer", "security")

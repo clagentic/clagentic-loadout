@@ -382,8 +382,8 @@ Declare `required_reviewer_roles: []` for no reviewer gate. A repo that kept
 its gate keys in the deployment file must move them to the tracked gate file:
 until then they are ignored (with a warning) and only the flags apply.
 `merge.authorized_roles`
-and `merge.merge_requirements` are still read only by `loadout-doctor` and by a
-caller building its own invocation.
+is still read only by `loadout-doctor` and by a caller building its own
+invocation.
 
 ## 4. The built-in fallback: what it actually grants
 
@@ -784,7 +784,7 @@ earlier fence held open therefore operates on computed state.
   last part of, respectively.
 - [docs/provisioning.md](provisioning.md#merge-gate-config-homes) —
   the full `.clagentic/loadout/config.yaml` `merge:` section schema
-  (`pre_checks`, `merge_requirements`, `required_reviewer_roles`,
+  (`pre_checks`, `required_reviewer_roles`,
   `authorized_roles`) and the deployment-tier identity sections
   (`builder_identity`, `review.reviewer_logins`), including the design calls
   recorded for the repo-tier/deployment-tier split.
