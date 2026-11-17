@@ -2155,6 +2155,15 @@ push:
   code) — a deployment on Jira, Linear, or any other tracker supplies its own pattern.
   **Absent: the guard never runs at all**, on either surface, regardless of
   `task_id_guard_mode`.
+- **Where the pattern and mode are read from, in precedence order:** (1) the repo-local
+  `.clagentic/loadout/config.yaml` `push:` section, when it sets `task_id_guard_pattern`;
+  otherwise (2) the `push:` section of the user-level config,
+  `~/.config/clagentic/loadout/config.yaml`, with the same two keys. The user-level value
+  only fills an absence — a repo-local pattern always wins, and the mode is taken from the
+  SAME source as the pattern (never mixed). A checkout with no repo-local config of its own,
+  such as a nested worktree, therefore still gets the deployment's pattern from the
+  user-level file. With no pattern in either place the guard is a strict no-op. The
+  refusal and warning name the file the pattern came from and the key.
 - `task_id_guard_mode` (`off` | `warn` | `block`, optional) — enforcement mode, consulted
   ONLY once `task_id_guard_pattern` is set. `off`: pattern recorded but this surface stays
   inert (a legitimate configuration for a deployment that wants the pattern available for
@@ -2575,11 +2584,22 @@ config key and shared enforcement module (`clagentic_loadout.task_id_guard`)
 section above for the full key reference, the no-op-on-fresh-install behavior, and the
 adjacent opt-out). **With no pattern configured, this is a strict no-op**, identical to the
 push-time surface; once configured, the default mode is `block`, exit
-`EXIT_TASK_ID_GUARD_VIOLATION` (36). Read from the SAME `--repo-path` config root every
-other repo-tier gate key in this section resolves through. This is the merge-time backstop
+`EXIT_TASK_ID_GUARD_VIOLATION` (36). Read from the SAME two sources, in the same
+precedence, as the push-time check (the repo-local config under `--repo-path`, else the
+user-level config's `push:` section). This is the merge-time backstop
 for the same defect the push-time check catches earlier and more cheaply — a task-id-bearing
 subject on a real merge lands on the base branch **verbatim**, so this gate exists even
 though the push-time check should normally have caught it first.
+
+**The same guard also checks the PR title at merge time, under every merge method.** The
+PR title is passed to the merge call as the merge commit's subject (`merge_title`), so with
+a pattern configured `loadout-merge` runs the guard on it before merging, whether
+`--merge-method` is `merge`, `squash` or `rebase` — a PR opened or retitled by a path that
+never went through `loadout-push` is still checked. `block` refuses with exit
+`EXIT_TASK_ID_GUARD_VIOLATION` (36) before any merge call; `warn` prints the warning and
+the merge proceeds; `off` and an absent pattern do nothing. `--skip-title-check` and
+`--skip-commit-check` bypass the Conventional Commits grammar gates only, not this one. The
+PR body is never inspected.
 
 Forgejo's `Do` field accepts `merge` / `squash` / `rebase` (the same three
 caller-facing tokens GitHub's `merge_method` accepts — requesting the same

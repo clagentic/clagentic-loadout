@@ -656,6 +656,7 @@ from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH, find_git_t
 from clagentic_loadout.task_id_guard import (
     InvalidTaskIdGuardConfigError,
     TaskIdGuardViolation,
+    check_task_id_guard,
     load_task_id_guard_config,
 )
 from clagentic_loadout.push.errors import NamespaceDeniedError, RemoteResolutionError
@@ -751,12 +752,14 @@ EXIT_MERGE_READBACK_FAILED = 32
 #: transport.caller_binding's own module docstring for the full behavior
 #: change.
 EXIT_CALLER_INVOKER_MISMATCH = 33
-#: A branch commit subject introduced by the PR matched the deployment's own
+#: The PR title (the merge commit subject, any merge method) or a branch commit
+#: subject introduced by the PR matched the deployment's own
 #: configured task_id_guard_pattern in mode="block"
-#: (task_id_guard.TaskIdGuardViolation, lr-4005f5) -- ONLY reachable on a
-#: RESOLVED --merge-method='merge' repo (mirrors EXIT_COMMIT_SUBJECT_INVALID's
-#: own merge_method scoping exactly -- see merge.commit_subjects' own
-#: docstring) AND only once a repo has configured
+#: (task_id_guard.TaskIdGuardViolation, lr-4005f5). The branch-subject check is
+#: ONLY reachable on a RESOLVED --merge-method='merge' repo (mirrors
+#: EXIT_COMMIT_SUBJECT_INVALID's own merge_method scoping -- see
+#: merge.commit_subjects' own docstring); the PR-title check is not
+#: merge_method-scoped. Either only once a deployment has configured
 #: `push: task_id_guard_pattern:` (no configured pattern is a strict no-op;
 #: default mode once a pattern IS set is "block"). See docs/verbs.md's
 #: `loadout-merge` section for the full contract.
@@ -1287,10 +1290,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         f"--repo-path is given (see EXIT_MERGE_SHAPE_MISMATCH / merge.merge_shape). "
         f"On the SAME merge_method='merge' condition, an OPTIONAL, "
         f"deployment-configured task-id guard "
-        f"(.clagentic/loadout/config.yaml push.task_id_guard_pattern) is also "
-        f"checked against each branch commit subject -- a strict no-op with "
-        f"no pattern configured; once configured, default mode is BLOCK, "
-        f"exit {EXIT_TASK_ID_GUARD_VIOLATION}. See docs/verbs.md's "
+        f"(push.task_id_guard_pattern, read from the repo-local "
+        f".clagentic/loadout/config.yaml, else the user-level config) is also "
+        f"checked against each branch commit subject, and against the PR "
+        f"title (the merge commit subject) under EVERY merge method -- a "
+        f"strict no-op with no pattern configured; once configured, default "
+        f"mode is BLOCK, exit {EXIT_TASK_ID_GUARD_VIOLATION}. See docs/verbs.md's "
         f"`loadout-merge` section for the full contract.",
     )
     parser.add_argument(
@@ -2112,6 +2117,7 @@ def _run(
             merge_method=args.merge_method, skip=args.skip_commit_check,
             task_id_guard_pattern=task_id_guard_config.pattern,
             task_id_guard_mode=task_id_guard_config.mode,
+            task_id_guard_source=task_id_guard_config.source,
         )
     except CommitSubjectInvalidError as exc:
         _fail(str(exc), code=EXIT_COMMIT_SUBJECT_INVALID)
@@ -2119,6 +2125,26 @@ def _run(
         _fail(str(exc), code=EXIT_TASK_ID_GUARD_VIOLATION)
     for warning in guard_warnings:
         print(f"merge: WARNING -- {warning}", file=sys.stderr)
+
+    # TASK-ID GUARD, PR-title surface: the PR title is passed to the merge
+    # call as the merge commit's subject under EVERY merge method, so the
+    # configured pattern applies to it here regardless of merge_method (the
+    # branch-subject check above is merge-method-scoped; this one is not).
+    # Independent of --skip-title-check / --skip-commit-check, which bypass
+    # the Conventional Commits grammar only. The PR body's Task: trailer is
+    # never inspected.
+    try:
+        title_warning = check_task_id_guard(
+            pr_title,
+            field="PR title (becomes the merge commit subject)",
+            pattern=task_id_guard_config.pattern,
+            mode=task_id_guard_config.mode,
+            source=task_id_guard_config.source,
+        )
+    except TaskIdGuardViolation as exc:
+        _fail(str(exc), code=EXIT_TASK_ID_GUARD_VIOLATION)
+    if title_warning:
+        print(f"merge: WARNING -- {title_warning}", file=sys.stderr)
 
     # 8. CI-status gate. An empty result (zero HEAD-scoped commit-status
     # entries) is an EXPLICIT PASS -- no-runner-by-design is a legitimate
@@ -2424,7 +2450,8 @@ def _run(
         file=sys.stderr,
     )
     # lr-1953a8: merge_title=pr_title composes the merge commit's SUBJECT
-    # from the PR's own (already step-7-gated Conventional Commits) title,
+    # from the PR's own (already step-7-gated Conventional Commits, and
+    # task-id-guarded when a pattern is configured) title,
     # rather than each backend's own default (GitHub: "Merge pull request
     # #N from <owner>/<branch>"; Forgejo: an equivalent branch-ref-bearing
     # default) -- a <type>/<task-id>-<slug> branch name would otherwise put

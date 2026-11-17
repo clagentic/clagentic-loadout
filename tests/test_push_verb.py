@@ -37,6 +37,7 @@ import json
 import subprocess
 
 import pytest
+import yaml
 
 from clagentic_loadout.push import verb
 from clagentic_loadout.push.contention_check import ContentionVerdict
@@ -4443,6 +4444,77 @@ class TestTaskIdGuard:
             ],
             token_provider=provider,
             opener=opener,
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+
+    @staticmethod
+    def _write_user_level_guard(tmp_path, monkeypatch, *, pattern: str, mode: str | None = None):
+        user_root = tmp_path / "user-level-guard-root"
+        user_root.mkdir()
+        push_section: dict = {"task_id_guard_pattern": pattern}
+        if mode is not None:
+            push_section["task_id_guard_mode"] = mode
+        user_config = user_root / provider_config.USER_CONFIG_FILENAME
+        user_config.write_text(yaml.safe_dump({"push": push_section}), encoding="utf-8")
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", user_root)
+        return user_config
+
+    def test_user_level_pattern_blocks_title_with_no_repo_local_config(
+        self, repo_with_remote, monkeypatch, tmp_path, capsys
+    ):
+        """A checkout with no repo-local config (a nested worktree) is still
+        guarded by the user-level pattern, and the refusal names that file."""
+        repo, _remote = repo_with_remote
+        user_config = self._write_user_level_guard(
+            tmp_path, monkeypatch, pattern=_SYNTHETIC_GUARD_PATTERN
+        )
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: fix WIDGET-42 leak", "--body-stdin",
+            ],
+            token_provider=_RefusingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_TASK_ID_GUARD_VIOLATION
+        stderr = capsys.readouterr().err
+        assert "WIDGET-42" in stderr
+        assert str(user_config) in stderr
+
+    def test_user_level_pattern_blocks_branch_commit_subject(self, tmp_path, monkeypatch):
+        repo, _remote = _repo_with_directly_resolvable_remote(tmp_path)
+        self._write_user_level_guard(tmp_path, monkeypatch, pattern=_SYNTHETIC_GUARD_PATTERN)
+        _git(["commit", "--allow-empty", "-m", "fix: address WIDGET-42 leak"], repo)
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "github",
+                "--repo", "some-owner/some-repo",
+                "--title", "feat: t", "--body-stdin",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            stdin_text=json.dumps({"body": "some body"}),
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_TASK_ID_GUARD_VIOLATION
+
+    def test_repo_local_pattern_wins_over_user_level(
+        self, repo_with_remote, monkeypatch, tmp_path
+    ):
+        """The user-level pattern would refuse this title; the repo-local one
+        (and its off mode) governs instead."""
+        repo, _remote = repo_with_remote
+        _write_task_id_guard_config(repo, pattern=r"\bGADGET-\d+\b", mode="off")
+        self._write_user_level_guard(tmp_path, monkeypatch, pattern=_SYNTHETIC_GUARD_PATTERN)
+        code = _run_main(
+            [
+                "--repo-path", str(repo), "--platform", "forgejo",
+                "--title", "feat: fix WIDGET-42 leak", "--body-stdin",
+            ],
+            token_provider=_RecordingTokenProvider(),
+            opener=_forgejo_create_opener(),
             stdin_text=json.dumps({"body": "some body"}),
             monkeypatch=monkeypatch,
         )
