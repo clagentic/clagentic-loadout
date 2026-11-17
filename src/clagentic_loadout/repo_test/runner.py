@@ -17,6 +17,7 @@ from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
+from clagentic_loadout.process_tree import end_process_tree
 from clagentic_loadout.push.push_redaction import TRUNCATION_MARKER, redact_then_bound
 from clagentic_loadout.repo_test.process_uids import UidWatcher
 
@@ -101,17 +102,25 @@ def run_command(
                     on_spawn(proc.pid)
                 exited, held, code = _await_exit(proc, timeout_seconds)
                 if not exited:
-                    os.killpg(proc.pid, signal.SIGKILL)
+                    tree_ended = end_process_tree(proc.pid)
                     proc.wait()
                     stopped = True
-                    return CommandOutcome(
-                        None, f"timed out after {timeout_seconds} seconds", watcher.stop(), timed_out=True
-                    )
+                    problem = f"timed out after {timeout_seconds} seconds"
+                    if not tree_ended:
+                        problem += "; part of the command's process tree could not be ended"
+                    return CommandOutcome(None, problem, watcher.stop(), timed_out=True)
                 # The leader is still a zombie here, so this last sample reads only
                 # its own pid before it can be reused.
                 stopped = True
                 uids = watcher.stop(sample_leader_last=held)
                 code = proc.wait()
+            except BaseException:
+                # A termination signal, an interrupt or a failure while waiting:
+                # the command is in a session of its own, so it would outlive us.
+                if proc.poll() is None:
+                    end_process_tree(proc.pid)
+                    proc.wait()
+                raise
             finally:
                 if not stopped:
                     watcher.stop()

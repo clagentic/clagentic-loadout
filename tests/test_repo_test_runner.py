@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _repo_test_support import own_session_child_program, pid_is_gone, wait_for_file
 
 from clagentic_loadout.repo_test import runner
 from clagentic_loadout.repo_test.runner import run_command
@@ -44,6 +45,33 @@ def test_a_timeout_kills_the_command_and_returns_the_user_ids_seen(tmp_path: Pat
     assert outcome.exit_code is None
     assert "timed out after 0.5 seconds" in (outcome.problem or "")
     assert os.geteuid() in outcome.process_uids
+
+
+def test_a_timeout_says_so_when_the_process_tree_could_not_be_ended(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real = runner.end_process_tree
+
+    def refused(pid: int) -> bool:
+        real(pid)
+        return False
+
+    monkeypatch.setattr(runner, "end_process_tree", refused)
+
+    outcome = _run(tmp_path, [sys.executable, "-c", "import time; time.sleep(60)"], timeout=0.5)
+
+    assert outcome.timed_out
+    assert "process tree could not be ended" in (outcome.problem or "")
+
+
+def test_a_timeout_ends_a_child_the_command_started_in_its_own_session(tmp_path: Path) -> None:
+    pidfile = tmp_path / "child.pid"
+    code = own_session_child_program(pidfile)
+
+    outcome = _run(tmp_path, [sys.executable, "-c", code], timeout=3)
+
+    assert outcome.timed_out
+    assert pid_is_gone(int(wait_for_file(pidfile)))
 
 
 def test_a_command_that_is_not_found_is_reported_without_an_exit_code(tmp_path: Path) -> None:

@@ -11,8 +11,6 @@ from the per-chunk record instead of being a bare "timed out".
 from __future__ import annotations
 
 import contextlib
-import os
-import signal
 import subprocess
 import uuid
 from collections.abc import Callable, Sequence
@@ -20,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from clagentic_loadout.bounded_capture import join_capture, start_stdin_feed, start_tail_capture
+from clagentic_loadout.process_tree import end_process_tree
 from clagentic_loadout.review.atomic_io import (
     PRIVATE_FILE_MODE,
     ensure_private_dir,
@@ -146,14 +145,11 @@ def _save_stderr(stderr: bytes | str | None, log_dir: Path | None, label: str) -
     return str(path)
 
 
-def _kill_group(proc: "subprocess.Popen[bytes]") -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        # The group is already gone, or was never ours to signal; fall back
-        # to the direct child so a timeout never leaves it running.
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
+def _kill_group(proc: "subprocess.Popen[bytes]") -> bool:
+    # The engine may start helpers in sessions of their own, which a group kill
+    # does not reach; the shared primitive ends those too, and itself falls back
+    # to the leader's group when it cannot finish. False: part of the tree is left.
+    return end_process_tree(proc.pid)
 
 
 def run_in_process_group(
@@ -191,7 +187,7 @@ def run_in_process_group(
     try:
         proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        _kill_group(proc)
+        ended = _kill_group(proc)
         # A descendant that left the group can still hold a pipe open; report
         # what was captured rather than waiting on it. The wait also reaps the
         # direct child, which would otherwise stay a zombie for the life of
@@ -199,9 +195,12 @@ def run_in_process_group(
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_DRAIN_SECONDS)
         join_capture(readers, _DRAIN_SECONDS)
-        raise subprocess.TimeoutExpired(
+        expired = subprocess.TimeoutExpired(
             list(argv), timeout, output=out_buf.value(), stderr=err_buf.value()
-        ) from None
+        )
+        # Read back by run_engine; not a field of the exception type.
+        expired.tree_not_ended = not ended  # type: ignore[attr-defined]
+        raise expired from None
     except BaseException:
         _kill_group(proc)
         proc.wait()
@@ -242,11 +241,14 @@ def run_engine(
             cwd=str(cwd),
         )
     except subprocess.TimeoutExpired as exc:
+        detail = f"no reply within {timeout:g}s"
+        if getattr(exc, "tree_not_ended", False):
+            detail += "; part of the review process tree could not be ended"
         return EngineResult(
             kind=KIND_TIMEOUT,
             stderr_excerpt=tail_excerpt(exc.stderr),
             stdout_excerpt=tail_excerpt(exc.stdout),
-            detail=f"no reply within {timeout:g}s",
+            detail=detail,
             stderr_last_line=last_line(exc.stderr),
             stderr_file=_save_stderr(exc.stderr, log_dir, label),
         )

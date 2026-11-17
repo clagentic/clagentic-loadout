@@ -97,6 +97,28 @@ def test_stderr_and_stdout_returned_to_the_caller_are_bounded(tmp_path, monkeypa
     assert max(retained) <= 2 * carrier.STDERR_FILE_LIMIT + 64 * 1024
 
 
+@pytest.mark.parametrize(
+    ("ended", "expect_note"), [(True, False), (False, True)]
+)
+def test_a_timeout_says_when_part_of_the_process_tree_could_not_be_ended(
+    monkeypatch, tmp_path, ended, expect_note
+):
+    real_end = carrier.end_process_tree
+
+    def end_then_report(pid):
+        real_end(pid)
+        return ended
+
+    monkeypatch.setattr(carrier, "end_process_tree", end_then_report)
+
+    result = run_engine(
+        [sys.executable, "-c", "import time; time.sleep(60)"], "p", 1, cwd=tmp_path
+    )
+
+    assert result.kind == KIND_TIMEOUT
+    assert ("process tree could not be ended" in result.detail) is expect_note
+
+
 def test_a_timeout_still_reports_the_bounded_tail_it_captured(tmp_path):
     script = (
         "import sys, time\n"

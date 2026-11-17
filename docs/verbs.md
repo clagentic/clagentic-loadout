@@ -2258,6 +2258,15 @@ explicit `verify: null` (only an absent key means "not configured"). Output is c
 incrementally and only the bounded tail is kept, so memory stays flat however much a
 check prints.
 
+**Ending a check.** A check that times out, or is ended by an interrupt or a termination
+signal sent to the push, is ended with everything it started, including a process in a
+session of its own (a `clagentic-loadout test` check starts its test command that way), so
+no process of the check is left running. While a check runs, the line the test verb prints
+when it starts a run (`clagentic-loadout test: run <run id> started: ...`) is passed on to
+the push's stderr as it appears, so a check that is later ended still leaves the run id to
+read with `clagentic-loadout test report`. No other output of a check is passed on; the PR
+body keeps the same bounded, redacted tail as before.
+
 **`--skip-verify`** bypasses the run. It is never silent: it is logged to stderr and a
 `## Verification` section stating the checks were SKIPPED (with their names) is written
 into the PR body. With no `push.verify` configured it does nothing.

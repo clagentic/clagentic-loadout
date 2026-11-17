@@ -8,6 +8,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -45,6 +46,36 @@ sys.exit(1 if any(c[2] == "fail" for c in cases) else 0)
 _SEED_DATE = "2026-01-01T00:00:00+00:00"
 
 _GIT = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+
+
+def pid_is_gone(pid: int) -> bool:
+    """Whether *pid* is no longer a running process. A zombie that nothing has reaped
+    yet counts as gone: it runs nothing."""
+    identity = liveness.capture_identity(pid)
+    return identity["start_ticks"] is None or not liveness.is_alive(identity)
+
+
+def wait_for_file(path: Path, seconds: float = 20.0) -> str:
+    """The text of *path* once it exists and is not empty; fails the test when it
+    never is."""
+    deadline = time.monotonic() + seconds
+    while not (path.exists() and path.read_text()):
+        assert time.monotonic() < deadline, f"{path} was never written"
+        time.sleep(0.02)
+    return path.read_text()
+
+
+def own_session_child_program(pidfile: Path) -> str:
+    """Python source for a command that starts a child in a session of its own (the
+    way the test verb starts its test runner), records the child's pid in *pidfile*
+    and then sleeps, so a group kill would miss the child."""
+    return (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)'],"
+        " start_new_session=True)\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(120)\n"
+    )
 
 
 def git(repo: Path, *args: str) -> str:

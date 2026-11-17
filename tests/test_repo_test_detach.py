@@ -229,7 +229,7 @@ def test_detach_checks_synchronously_with_the_foreground_exit_codes_and_records_
     assert not reports.exists() or list(reports.iterdir()) == []
 
 
-def test_a_foreground_run_records_no_process_and_is_not_changed(
+def test_a_foreground_run_records_its_own_process_and_is_not_otherwise_changed(
     tmp_path: Path, reports: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     repo = make_repo(tmp_path / "repo")
@@ -237,8 +237,9 @@ def test_a_foreground_run_records_no_process_and_is_not_changed(
     code, summary, err = _call(capsys, "run", "full", "--repo-root", str(repo))
 
     assert code == exits.EXIT_OK
-    assert "run_dir" not in summary and "pid" not in summary
-    assert store.PROCESS_KEY not in json.loads((reports / summary["run_id"] / store.PROVENANCE_FILE).read_text())
+    assert "run_dir" not in summary and "pid" not in summary and store.PROCESS_KEY not in summary
+    recorded = json.loads((reports / summary["run_id"] / store.PROVENANCE_FILE).read_text())
+    assert recorded[store.PROCESS_KEY]["pid"] == os.getpid()
     assert "started:" in err and "finished (complete)" in err
 
 

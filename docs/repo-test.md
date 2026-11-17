@@ -201,9 +201,20 @@ from are recorded in the run's provenance and shown by `--summary` and in the pr
 as `timeout: {seconds, source}`, with `source` one of `flag`, `profile` or `default` (and a
 `warning` when the profile's value was unusable).
 
-A command that reaches the timeout is ended with its whole process group, and the run reads
+A command that reaches the timeout is ended with everything it started, including a process
+in a session of its own, and the run reads
 `timed_out` (terminal, `result.json` written): `problem` names the limit and its source, the
 exit code is `73`. Before this, a foreground run past `--timeout` read `unrunnable`.
+
+A foreground run that receives a termination signal (SIGTERM or SIGHUP) ends its command the same
+way, writes `result.json` with state `interrupted` and exits with `128` plus the signal number.
+A foreground run records its own process in `provenance.json`, as a detached run records its
+supervisor; one whose process dies without writing a result (SIGKILL, a host restart) therefore
+reads `interrupted`, with the same exit code as a detached interrupted run, instead of "has not
+finished". Its command is not ended in that case; the run id, printed on stderr at the start,
+still finds the run. Callers that run the verb in a pipeline, such as a `push.verify` check,
+see that line as soon as it is printed, and a check that times out has its whole process tree
+ended, including the test command.
 
 A tier run has `mode` `tier` and `tier` set to the tier name; every other run has `tier` null.
 Runs recorded before tiers existed have no `tier` field, and readers treat that as null. The
@@ -313,8 +324,9 @@ never needs a host-side kill. It takes a run id only (not `latest`, not a path).
   if none appears, `stop` ends the supervisor, exits `78` and says the command
   could not be identified, rather than signalling a process it cannot verify. The supervisor is
   ended first, so it cannot record a result of its own, then the command's group, then `stop`
-  waits (up to 5 seconds) for them to be gone. A process the command moved out of its group (a
-  daemon that starts its own session) is not reached.
+  waits (up to 5 seconds) for them to be gone. Each is ended with everything it started, found by
+  parent links and by the sessions and groups those processes lead; a process that daemonised, so
+  that it shares none of these with the tree, is not reached.
 - Only a verified process is signalled: the supervisor by its recorded identity (pid, start ticks
   and boot id, so a reused pid is never the run), the command by the same identity check and by
   leading its own process group. Only the user that owns the run directory may stop it.
@@ -363,14 +375,15 @@ clagentic-loadout test report <run-id> --wait 540
 
 ### States
 
-`test report RUN_ID` reads one of six states. `running`, `interrupted` and `stopped` exist only
-for detached runs; `timed_out` can be a foreground run's too.
+`test report RUN_ID` reads one of six states. `stopped` exists only for detached runs;
+`running` and `interrupted` read for a foreground run by its own recorded process, and
+`timed_out` can be a foreground run's too.
 
 | State | Meaning |
 |---|---|
-| `running` | The run has no `result.json` and its supervisor process is alive. `counts` is null. |
-| `interrupted` | The run has no `result.json` and its supervisor process is gone (killed, or the host restarted). `counts` is null, `problem` says so. |
-| `timed_out` | The command passed the run's [timeout](#run-timeout) and was ended with its process group. `counts` are zero, `problem` names the limit and where it came from. |
+| `running` | The run has no `result.json` and its recorded process (a detached run's supervisor, a foreground run's own process) is alive. `counts` is null. |
+| `interrupted` | The run has no `result.json` and its recorded process is gone (killed, or the host restarted), or a foreground run was ended by a termination signal. `counts` is null, `problem` says so. |
+| `timed_out` | The command passed the run's [timeout](#run-timeout) and was ended with its process tree. `counts` are zero, `problem` names the limit and where it came from. |
 | `stopped` | [`test stop`](#test-stop) ended the run. `counts` is null; `stopped_by` and `stopped_at` say who and when. |
 | `complete` | As before. |
 | `unrunnable` | As before. |

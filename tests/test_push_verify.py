@@ -20,7 +20,9 @@ from clagentic_loadout.push.verify_config import (
     VerifyEntry,
     load_verify_entries,
 )
+from clagentic_loadout.repo_test.verb import _describe_start
 from clagentic_loadout.push.verify_run import (
+    FORWARDED_LINE_RE,
     SECTION_BEGIN_MARKER,
     SECTION_END_MARKER,
     VerificationFailedError,
@@ -33,6 +35,7 @@ from clagentic_loadout.push.verify_run import (
     render_verification_section,
     run_verifications,
 )
+from tests._repo_test_support import own_session_child_program, pid_is_gone, wait_for_file
 from tests._support.push_verb import (  # noqa: F401  (fixtures reused, not redefined)
     RecordingTokenProvider as _RecordingTokenProvider,
     RefusingTokenProvider as _RefusingTokenProvider,
@@ -262,6 +265,68 @@ class TestRunner:
             run_verifications((entry,), tmp_path)
         assert info.value.failed.timed_out
         assert "TIMEOUT" in str(info.value)
+
+    def test_timeout_says_so_when_the_process_tree_could_not_be_ended(self, tmp_path, monkeypatch):
+        from clagentic_loadout.push import verify_run
+
+        real = verify_run.end_process_tree
+
+        def refused(pid):
+            real(pid)
+            return False
+
+        monkeypatch.setattr(verify_run, "end_process_tree", refused)
+        entry = VerifyEntry("slow", (PY, "-c", "import time; time.sleep(30)"), 0.5)
+        with pytest.raises(VerificationFailedError) as info:
+            run_verifications((entry,), tmp_path)
+        assert "process tree could not be ended" in info.value.failed.stderr_tail
+
+    def test_timeout_ends_a_child_that_started_its_own_session(self, tmp_path):
+        # The test verb starts its test runner this way; a group kill misses it.
+        pidfile = tmp_path / "child.pid"
+        code = own_session_child_program(pidfile)
+        entry = VerifyEntry("tree", (PY, "-c", code), 3)
+        with pytest.raises(VerificationFailedError) as info:
+            run_verifications((entry,), tmp_path)
+        assert info.value.failed.timed_out
+        assert pid_is_gone(int(wait_for_file(pidfile)))
+
+    def test_the_test_verbs_run_line_reaches_stderr_while_the_check_runs(self, tmp_path, monkeypatch):
+        line = _describe_start(
+            "20260101T000000Z-7", {"repo": {"name": "r", "path": "/r"}, "head_sha": "a" * 40, "dirty": False}, "started"
+        )
+        assert FORWARDED_LINE_RE.match(line.encode())
+        seen = tmp_path / "seen"
+
+        class Sink:
+            text = ""
+
+            def write(self, data):
+                self.text += data
+                if "run 20260101T000000Z-7 started" in self.text:
+                    seen.write_text("1")
+                return len(data)
+
+            def flush(self):
+                pass
+
+        sink = Sink()
+        monkeypatch.setattr(sys, "stderr", sink)
+        # The check ends 0 only once the push's stderr has shown the line, so a
+        # line held back until the check ended would fail it.
+        code = (
+            "import os, sys, time\n"
+            f"sys.stderr.write('other output\\n{line}\\n'); sys.stderr.flush()\n"
+            "for _ in range(1000):\n"
+            f"    if os.path.exists({str(seen)!r}): sys.exit(0)\n"
+            "    time.sleep(0.02)\n"
+            "sys.exit(5)\n"
+        )
+        (result,) = run_verifications((VerifyEntry("verb", (PY, "-c", code), 30),), tmp_path)
+        assert result.passed
+        assert "run 20260101T000000Z-7 started" in sink.text
+        assert "other output" not in sink.text
+        assert "other output" in result.stderr_tail and "started" in result.stderr_tail
 
     def test_missing_executable_is_a_failure(self, tmp_path):
         entry = VerifyEntry("ghost", ("definitely-not-a-real-binary-xyz",), 5)

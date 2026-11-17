@@ -20,17 +20,15 @@ does not reach it. The supervisor records each command it starts in
 from __future__ import annotations
 
 import json
-import os
-import signal
 import subprocess
 import sys
 from collections.abc import Callable
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from clagentic_loadout.process_tree import end_process_tree, raise_on_termination
 from clagentic_loadout.repo_test import exits, liveness, store
-from clagentic_loadout.repo_test.run_cmd import PreparedRun, RunRefused, finish_run
+from clagentic_loadout.repo_test.run_cmd import PreparedRun, RunRefused, finish_run, record_process
 from clagentic_loadout.repo_test.spec import REPORT_JUNIT, TIMEOUT_FROM_DEFAULT
 from clagentic_loadout.review.atomic_io import write_json_atomic
 
@@ -76,13 +74,6 @@ def _prepared_of(job: str) -> PreparedRun:
     )
 
 
-def _kill_session(pid: int) -> None:
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except OSError:
-        pass
-
-
 def start_detached(prepared: PreparedRun) -> dict[str, Any]:
     """Start the supervisor for *prepared* and record it. Returns the summary to
     print: the run is ``running``. Raises RunRefused when the supervisor cannot be
@@ -104,24 +95,12 @@ def start_detached(prepared: PreparedRun) -> dict[str, Any]:
         raise RunRefused(
             f"cannot start the detached run {prepared.run_id}: {exc}", exits.EXIT_UNRUNNABLE
         ) from exc
-    started_at = datetime.now(timezone.utc).isoformat()
-    process = {
-        **liveness.capture_identity(proc.pid),
-        "mode": prepared.mode,
-        "tier": prepared.tier,
-        "command": [*prepared.template, *prepared.files],
-        "started_at": started_at,
-    }
     try:
-        write_json_atomic(
-            prepared.run_dir / store.PROVENANCE_FILE, {**prepared.recorded, store.PROCESS_KEY: process}
-        )
-    except OSError as exc:
-        _kill_session(proc.pid)
-        raise RunRefused(
-            f"cannot record run {prepared.run_id} under {str(prepared.run_dir.parent)!r}: {exc}",
-            exits.EXIT_STORE_WRITE,
-        ) from exc
+        process = record_process(prepared, proc.pid)
+    except RunRefused:
+        end_process_tree(proc.pid)
+        raise
+    started_at = process["started_at"]
     recorded = prepared.recorded
     return {
         "run_id": prepared.run_id,
@@ -160,7 +139,8 @@ def main(argv: list[str] | None = None) -> int:
         return exits.EXIT_USAGE
     try:
         prepared = _prepared_of(args[0])
-        finish_run(prepared, on_command=_command_recorder(prepared.run_dir))
+        with raise_on_termination():
+            finish_run(prepared, on_command=_command_recorder(prepared.run_dir))
     except RunRefused as exc:
         print(f"clagentic-loadout test: {exc}", file=sys.stderr)
         return exc.code
