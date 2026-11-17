@@ -11,6 +11,10 @@ The supervisor is this module run with ``-m``. It does what a foreground run doe
 after its checks, through ``run_cmd.finish_run``: the same scratch directory, the
 same user-id sampling of the command's session and the same report verification,
 so a detached run is held to the trust checks a foreground run is.
+
+The test command runs in a session of its own, so ending the supervisor's session
+does not reach it. The supervisor records each command it starts in
+``command-process.json`` (pid, start ticks, boot id) for ``test stop``.
 """
 
 from __future__ import annotations
@@ -20,13 +24,14 @@ import os
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from clagentic_loadout.repo_test import exits, liveness, store
 from clagentic_loadout.repo_test.run_cmd import PreparedRun, RunRefused, finish_run
-from clagentic_loadout.repo_test.spec import REPORT_JUNIT
+from clagentic_loadout.repo_test.spec import REPORT_JUNIT, TIMEOUT_FROM_DEFAULT
 from clagentic_loadout.review.atomic_io import write_json_atomic
 
 _SUPERVISOR_MODULE = "clagentic_loadout.repo_test.detach"
@@ -45,6 +50,7 @@ def _job_of(prepared: PreparedRun) -> str:
             "prepare": list(prepared.prepare) if prepared.prepare else None,
             "base_sha": prepared.base_sha,
             "timeout_seconds": prepared.timeout_seconds,
+            "timeout_source": prepared.timeout_source,
             "report_format": prepared.report_format,
         }
     )
@@ -63,6 +69,7 @@ def _prepared_of(job: str) -> PreparedRun:
         prepare=tuple(data["prepare"]) if data.get("prepare") else None,
         base_sha=data["base_sha"],
         timeout_seconds=data["timeout_seconds"],
+        timeout_source=data.get("timeout_source") or TIMEOUT_FROM_DEFAULT,
         report_format=data.get("report_format") or REPORT_JUNIT,
         # The supervisor prints no summary, so it has no use for the provenance.
         recorded={},
@@ -127,7 +134,22 @@ def start_detached(prepared: PreparedRun) -> dict[str, Any]:
         "pid": proc.pid,
         "started_at": started_at,
         "run_dir": str(prepared.run_dir),
+        "timeout": recorded.get("timeout"),
     }
+
+
+def _command_recorder(run_dir: Path) -> Callable[[int], None]:
+    """A callback that records each command the supervisor starts, so `test stop`
+    can reach the command's own session. Best effort: when the write fails no
+    record exists, and stop then exits 78 rather than guessing at the command."""
+
+    def record(pid: int) -> None:
+        try:
+            write_json_atomic(run_dir / store.COMMAND_FILE, liveness.capture_identity(pid))
+        except OSError:
+            pass
+
+    return record
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -137,7 +159,8 @@ def main(argv: list[str] | None = None) -> int:
         print("repo_test.detach: expects one job argument", file=sys.stderr)
         return exits.EXIT_USAGE
     try:
-        finish_run(_prepared_of(args[0]))
+        prepared = _prepared_of(args[0])
+        finish_run(prepared, on_command=_command_recorder(prepared.run_dir))
     except RunRefused as exc:
         print(f"clagentic-loadout test: {exc}", file=sys.stderr)
         return exc.code

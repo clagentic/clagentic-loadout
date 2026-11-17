@@ -8,15 +8,18 @@ in the run and never returned, so none of these can be mistaken for it.
   70  run: the tests failed (a failing test, or a non-zero command exit)
   71  run: the repository has no valid profile
   72  run: the profile does not declare what this run needs (names the key)
-  73  run: the command could not run, or left no readable JUnit report
-  74  run: the run could not be recorded under the reports root
+  73  run: the command could not run, passed its timeout (state timed_out), or left
+      no readable JUnit report
+  74  run: the run could not be recorded under the reports root; stop: the stopped
+      record could not be written
   75  report: the reports root is missing, or holds no matching run
-  76  report: the run id is malformed, or no such run exists
+  76  report, stop: the run id is malformed, or no such run exists
   77  report: no run matches --sha (names what exists), or the prefix is ambiguous
   78  refused: a repository mismatch (run --expect-repo/--expect-head, report
       --repo on an explicit run id, `latest` with no repository to scope to
       and several on record, --diff across repositories), --diff across unlike
-      tiers, or an unrunnable run, which has no results to list or compare.
+      tiers, or an unrunnable run, which has no results to list or compare; stop: a
+      run started by another user, or processes still running after being signalled.
       Reused rather than extended: every one of these is a refusal to act
       on a run or tree that is not the one the caller named, and the range 70-79
       has no free code while 80 and up belong to other verbs.

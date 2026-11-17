@@ -23,6 +23,11 @@ functions here open nothing for write and create nothing.
 The reports root is, in order: the ``CLAGENTIC_LOADOUT_TEST_REPORTS_DIR``
 environment variable, the user-level ``test.reports_dir`` setting, then
 ``<user config root>/state/test-reports``.
+
+A run can also end ``timed_out`` (its command passed the effective timeout; written by
+the run itself) or ``stopped`` (``clagentic-loadout test stop``; see
+``repo_test.stop_cmd``). Both are terminal and carry no test results, so like
+``interrupted`` they are never what ``latest`` or ``--sha`` selects.
 """
 
 from __future__ import annotations
@@ -60,10 +65,18 @@ STATE_COMPLETE = "complete"
 STATE_UNRUNNABLE = "unrunnable"
 STATE_RUNNING = "running"
 STATE_INTERRUPTED = "interrupted"
+STATE_TIMED_OUT = "timed_out"
+STATE_STOPPED = "stopped"
+# States of a run that ended without test results of its own: `latest` and `--sha`
+# never select one.
+NO_RESULT_STATES = frozenset({STATE_INTERRUPTED, STATE_TIMED_OUT, STATE_STOPPED})
 # States after which a run never changes.
-TERMINAL_STATES = frozenset({STATE_COMPLETE, STATE_UNRUNNABLE, STATE_INTERRUPTED})
+TERMINAL_STATES = frozenset({STATE_COMPLETE, STATE_UNRUNNABLE}) | NO_RESULT_STATES
 
 PROCESS_KEY = "process"
+# The identity of the test command a detached run started, written by its supervisor
+# so `test stop` can reach the command's own session.
+COMMAND_FILE = "command-process.json"
 _RESULT_SCHEMA = 1
 
 _MAX_RECORD_BYTES = 8 * 1024 * 1024
@@ -216,6 +229,23 @@ def _unfinished_result(run_id: str, process: Mapping[str, Any], state: str, prob
     }
 
 
+def record_end(
+    run_dir: Path, run_id: str, process: Mapping[str, Any], state: str, problem: str, **extra: Any
+) -> RunRecord:
+    """Write the ``result.json`` of a detached run that ended without one, as *state*
+    (stopped on request), and read it back. When a result is already there the run
+    ended by itself first and that result is returned unchanged. Raises OSError when
+    the record cannot be written."""
+    result_path = run_dir / RESULT_FILE
+    if not result_path.exists():
+        write_json_atomic(
+            result_path, {**_unfinished_result(run_id, process, state, problem), **extra}
+        )
+    provenance_path = run_dir / PROVENANCE_FILE
+    provenance = _read_json_object(provenance_path, run_id) if provenance_path.is_file() else {}
+    return RunRecord(run_id, _read_json_object(result_path, run_id), provenance)
+
+
 def _open_unfinished(
     candidate: Path,
     run_id: str,
@@ -319,9 +349,13 @@ __all__ = [
     "STREAM_FILE",
     "RUN_ID_RE",
     "PROCESS_KEY",
+    "COMMAND_FILE",
+    "NO_RESULT_STATES",
     "STATE_COMPLETE",
     "STATE_INTERRUPTED",
     "STATE_RUNNING",
+    "STATE_STOPPED",
+    "STATE_TIMED_OUT",
     "STATE_UNRUNNABLE",
     "TERMINAL_STATES",
     "FUTURE_TOLERANCE",
@@ -333,6 +367,7 @@ __all__ = [
     "list_runs",
     "load_run",
     "new_run_id",
+    "record_end",
     "reports_root",
     "run_id_time",
     "run_sort_key",

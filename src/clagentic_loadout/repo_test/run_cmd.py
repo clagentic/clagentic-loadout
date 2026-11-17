@@ -35,7 +35,10 @@ from clagentic_loadout.repo_test.spec import (
     REPORT_GO_TEST_JSON,
     REPORT_JUNIT,
     TIER_NAME_RE,
+    TIMEOUT_FROM_DEFAULT,
     DeclaredTests,
+    EffectiveTimeout,
+    resolve_timeout,
 )
 from clagentic_loadout.review.atomic_io import ensure_private_dir, write_json_atomic
 from clagentic_loadout.review.policy_source import (
@@ -166,6 +169,8 @@ class PreparedRun:
     recorded: Mapping[str, Any]
     prepare: tuple[str, ...] | None = None
     report_format: str = REPORT_JUNIT
+    # Where timeout_seconds came from (spec.TIMEOUT_FROM_*), for the timed-out problem text.
+    timeout_source: str = TIMEOUT_FROM_DEFAULT
 
 
 def prepare_run(
@@ -228,7 +233,8 @@ def prepare_run(
             )
     files = _resolve_files(root, paths) if mode == MODE_FILES else []
 
-    recorded = provenance.collect(root, base_sha)
+    timeout = resolve_timeout(timeout_seconds, declared.timeout_seconds)
+    recorded = {**provenance.collect(root, base_sha), "timeout": timeout.as_record()}
     check_expectation(recorded, expect_repo, expect_head)
 
     reports = store.reports_root(env)
@@ -249,10 +255,11 @@ def prepare_run(
         template=tuple(template),
         files=tuple(files),
         base_sha=base_sha,
-        timeout_seconds=timeout_seconds,
+        timeout_seconds=timeout.seconds,
         recorded=recorded,
         prepare=declared.prepare,
         report_format=declared.format,
+        timeout_source=timeout.source,
     )
 
 
@@ -268,12 +275,20 @@ def _prepare_problem(prepare: Sequence[str], outcome: CommandOutcome) -> str | N
     return None
 
 
+def _timed_out_problem(what: str, prepared: PreparedRun) -> str:
+    """The problem text of a run that passed its timeout, naming the limit and its source."""
+    source = EffectiveTimeout(prepared.timeout_seconds or 0, prepared.timeout_source).source_text
+    return f"{what} timed out after {prepared.timeout_seconds:g} seconds, the limit from {source}"
+
+
 def finish_run(
     prepared: PreparedRun,
     on_start: Callable[[str, Mapping[str, Any]], None] | None = None,
+    on_command: Callable[[int], None] | None = None,
 ) -> RunOutcome:
     """Run the command of a prepared run and record its result. *on_start* is called
-    with the run id and its provenance just before the command starts. Raises
+    with the run id and its provenance just before the command starts; *on_command*
+    with the pid of each command (prepare step or tests) as it starts. Raises
     RunRefused when the scratch directory or the result cannot be recorded; the
     caller still reports the run as finished in that case."""
     run_id, run_dir, root = prepared.run_id, prepared.run_dir, prepared.root
@@ -299,19 +314,33 @@ def finish_run(
     cleanup_problem: str | None = None
     prepare_record: dict[str, Any] | None = None
     prepare_failed = False
+    timed_out = False
     outcome = CommandOutcome(None, None)
     try:
         problem = None
         if prepared.prepare:
-            prepare_outcome = run_command(list(prepared.prepare), root, run_dir / store.PREPARE_LOG_FILE, timeout_seconds)
+            prepare_outcome = run_command(
+                list(prepared.prepare), root, run_dir / store.PREPARE_LOG_FILE, timeout_seconds, on_spawn=on_command
+            )
             prepare_record = {"command": list(prepared.prepare), "exit_code": prepare_outcome.exit_code}
             problem = _prepare_problem(prepared.prepare, prepare_outcome)
             prepare_failed = problem is not None
+            if prepare_outcome.timed_out:
+                timed_out = True
+                problem = f"{_timed_out_problem('the prepare step', prepared)}; the tests were not run"
         if not prepare_failed:
             outcome = run_command(
-                argv, root, log_path, timeout_seconds, stdout_path=stream_path if go_stream else None
+                argv,
+                root,
+                log_path,
+                timeout_seconds,
+                stdout_path=stream_path if go_stream else None,
+                on_spawn=on_command,
             )
             problem = outcome.problem
+            if outcome.timed_out:
+                timed_out = True
+                problem = _timed_out_problem("the command", prepared)
         if not prepare_failed and problem is None and go_stream:
             # The stream is the runner's own capture of the command's standard
             # output, so there is no report file whose owner has to be verified.
@@ -336,7 +365,11 @@ def finish_run(
     if cleanup_problem is not None:
         problem = f"{problem}; {cleanup_problem}" if problem else cleanup_problem
 
-    if junit is None:
+    if timed_out:
+        # A run ended at its limit has no results to trust, but is not unrunnable:
+        # reading `timed_out` says the limit, not the command, was the cause.
+        state, code = store.STATE_TIMED_OUT, exits.EXIT_UNRUNNABLE
+    elif junit is None:
         state, code = store.STATE_UNRUNNABLE, exits.EXIT_UNRUNNABLE
     else:
         state = store.STATE_COMPLETE
@@ -385,7 +418,12 @@ def finish_run(
 
     # The tail is printed to stderr by the foreground verb, not in the JSON summary.
     printed = {key: value for key, value in record.items() if key not in ("failing_ids", "failure_log_tail")}
-    printed.update(repo=recorded.get("repo"), head_sha=recorded.get("head_sha"), dirty=recorded.get("dirty"))
+    printed.update(
+        repo=recorded.get("repo"),
+        head_sha=recorded.get("head_sha"),
+        dirty=recorded.get("dirty"),
+        timeout=recorded.get("timeout"),
+    )
     printed["failing_id_count"] = len(record["failing_ids"])
     return RunOutcome(exit_code=code, summary=printed, failure_log_tail=tail)
 
