@@ -23,7 +23,6 @@ import pytest
 import yaml
 
 from clagentic_loadout.merge import verb
-from clagentic_loadout.transport import provider_config
 from clagentic_loadout.merge.verdict import build_verdict_block
 from tests._gate_repo import git, seed_base_commit
 from tests._support.merge_verb import (
@@ -1085,90 +1084,30 @@ class TestTaskIdGuardCommitSubjectGate:
         assert code == verb.EXIT_COMMIT_SUBJECT_INVALID
 
 
-#: (merge method, configured user-level push section or None, PR title,
-#: expected exit, merge call expected, warning expected)
-_PR_TITLE_GUARD_ROWS = [
-    pytest.param(
-        "merge", {"task_id_guard_pattern": _SYNTHETIC_GUARD_PATTERN},
-        "feat: fix WIDGET-42 leak", verb.EXIT_TASK_ID_GUARD_VIOLATION, False, False,
-        id="merge-block-refuses",
-    ),
-    pytest.param(
-        "squash", {"task_id_guard_pattern": _SYNTHETIC_GUARD_PATTERN},
-        "feat: fix WIDGET-42 leak", verb.EXIT_TASK_ID_GUARD_VIOLATION, False, False,
-        id="squash-block-refuses",
-    ),
-    pytest.param(
-        "squash",
-        {"task_id_guard_pattern": _SYNTHETIC_GUARD_PATTERN, "task_id_guard_mode": "warn"},
-        "feat: fix WIDGET-42 leak", verb.EXIT_OK, True, True,
-        id="squash-warn-proceeds",
-    ),
-    pytest.param(
-        "merge",
-        {"task_id_guard_pattern": _SYNTHETIC_GUARD_PATTERN, "task_id_guard_mode": "off"},
-        "feat: fix WIDGET-42 leak", verb.EXIT_OK, True, False,
-        id="mode-off-is-inert",
-    ),
-    pytest.param(
-        "squash", {"task_id_guard_pattern": _SYNTHETIC_GUARD_PATTERN},
-        "feat: add a thing", verb.EXIT_OK, True, False,
-        id="non-matching-title-merges",
-    ),
-    pytest.param(
-        "squash", None, "feat: fix WIDGET-42 leak", verb.EXIT_OK, True, False,
-        id="no-pattern-anywhere-is-a-no-op",
-    ),
-]
+#: merge methods under which a PR title matching a repo-local block pattern
+#: must NOT be read for task ids (the title check is not a merge-time surface).
+_PR_TITLE_NOT_READ_ROWS = ["squash", "merge"]
 
 
-class TestTaskIdGuardPrTitleGate:
-    """The PR title becomes the merge commit subject under every merge method,
-    so the configured task-id guard checks it before the merge call. The
-    pattern here comes from the user-level config (pointed at a tmp root), the
-    second of the guard's two sources."""
-
-    @pytest.mark.parametrize(
-        "merge_method, user_push, title, want_code, want_merge_call, want_warning",
-        _PR_TITLE_GUARD_ROWS,
-    )
-    def test_pr_title_table(
-        self, tmp_path, monkeypatch, capsys,
-        merge_method, user_push, title, want_code, want_merge_call, want_warning,
-    ):
-        user_root = tmp_path / "user-config-root"
-        user_root.mkdir()
-        if user_push is not None:
-            (user_root / "config.yaml").write_text(
-                yaml.safe_dump({"push": user_push}), encoding="utf-8"
-            )
-        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", user_root)
-
-        merge_calls = []
-        base_opener = _make_opener(pr_info={"head": {"sha": _FULL_SHA}, "title": title})
-
-        def _recording_opener(req, timeout=15):
-            if req.get_method() == "POST" and req.full_url.endswith("/merge"):
-                merge_calls.append(req.full_url)
-            return base_opener(req, timeout)
-
+class TestTaskIdGuardIgnoresPrTitle:
+    @pytest.mark.parametrize("merge_method", _PR_TITLE_NOT_READ_ROWS)
+    def test_matching_pr_title_is_not_refused(self, tmp_path, capsys, merge_method):
+        _write_task_id_guard_config(tmp_path, pattern=_SYNTHETIC_GUARD_PATTERN)
+        argv = _base_args(**{"--merge-method": merge_method, "--repo-path": str(tmp_path)})
+        argv.append("--skip-post-merge")
         code = verb.main(
-            _base_args(**{"--merge-method": merge_method}),
+            argv,
             token_provider=_RecordingTokenProvider(),
             authority_provider=_AllowingAuthorityProvider(),
-            opener=_recording_opener,
+            opener=_make_opener(
+                pr_info=_pr_info_with_base(tmp_path, title="feat: fix WIDGET-42 leak"),
+                branch_commits=[
+                    {"sha": "c" * 40, "commit": {"message": "feat(auth): add the gate"}},
+                ],
+            ),
         )
-
-        assert code == want_code
-        assert bool(merge_calls) is want_merge_call
-        stderr = capsys.readouterr().err
-        if want_code == verb.EXIT_TASK_ID_GUARD_VIOLATION or want_warning:
-            assert "PR title" in stderr
-            assert "WIDGET-42" in stderr
-            assert str(user_root / "config.yaml") in stderr
-            assert "task_id_guard_pattern" in stderr
-        else:
-            assert "WIDGET-42" not in stderr
+        assert code == verb.EXIT_OK
+        assert "WIDGET-42" not in capsys.readouterr().err
 
 
 class TestPostMergeReadback:

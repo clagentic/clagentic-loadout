@@ -165,13 +165,9 @@ push:
 
   # task_id_guard_pattern: OPTIONAL, ABSENT BY DEFAULT -- with no pattern
   # configured, this guard is a strict no-op on BOTH loadout-push (PR title +
-  # branch commit subjects) and loadout-merge (the PR title, under every merge
-  # method, plus branch commit subjects on a real, non-squash merge) --
-  # nothing is inspected, nothing is blocked, behavior is byte-identical to
-  # before this feature existed. The pattern and mode are read from this file
-  # first; when this file sets no pattern they come from the `push:` section
-  # of the user-level config (~/.config/clagentic/loadout/config.yaml), so a
-  # checkout with no repo-local config is still guarded. Set this to
+  # branch commit subjects) and loadout-merge (branch commit subjects on a
+  # real, non-squash merge) -- nothing is inspected, nothing is blocked,
+  # behavior is byte-identical to before this feature existed. Set this to
   # YOUR OWN internal work-item-tracker shape (this package assumes none) to
   # catch an internal identifier before it reaches a PR title or a
   # non-squash branch commit subject -- both become PERMANENT public history

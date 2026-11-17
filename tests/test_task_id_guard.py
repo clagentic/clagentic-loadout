@@ -59,6 +59,24 @@ class TestConfigNoOpByDefault:
         cfg = load_task_id_guard_config(tmp_path)
         assert cfg.pattern is None
 
+    def test_user_level_only_pattern_is_not_a_guard_source(self, tmp_path, monkeypatch):
+        """The guard reads the repo-local config only: a pattern set solely in
+        the user-level config resolves to the no-op default."""
+        from clagentic_loadout.transport import provider_config
+
+        user_root = tmp_path / "user-config-root"
+        user_root.mkdir()
+        (user_root / provider_config.USER_CONFIG_FILENAME).write_text(
+            yaml.safe_dump({"push": {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", user_root)
+        for repo_root in (None, tmp_path):
+            cfg = load_task_id_guard_config(repo_root)
+            assert cfg.pattern is None
+            assert cfg.mode == MODE_OFF
+            assert cfg.source == "default"
+
 
 class TestConfigExplicitOptIn:
     def test_pattern_configured_defaults_to_block_mode(self, tmp_path):
@@ -94,96 +112,6 @@ class TestConfigExplicitOptIn:
         )
         cfg = load_task_id_guard_config(tmp_path)
         assert cfg.mode == MODE_OFF
-
-
-_OTHER_PATTERN = r"\bGADGET-\d+\b"
-
-#: Row marker: load with no repo root at all (distinct from a repo root with no config).
-_NO_REPO_ROOT = object()
-
-#: (repo-local push section or None (or _NO_REPO_ROOT), user-level push section or None,
-#: expected pattern, expected mode, expected source is the user-level file)
-_PRECEDENCE_ROWS = [
-    pytest.param(None, None, None, MODE_OFF, False, id="nothing-anywhere-is-a-no-op"),
-    pytest.param(
-        None, {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN},
-        _SYNTHETIC_PATTERN, MODE_BLOCK, True, id="user-level-only-fills-the-absence",
-    ),
-    pytest.param(
-        {"scratch_patterns": ["a-*"]}, {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN},
-        _SYNTHETIC_PATTERN, MODE_BLOCK, True, id="repo-local-without-a-pattern-falls-through",
-    ),
-    pytest.param(
-        {CONFIG_KEY_TASK_ID_PATTERN: _OTHER_PATTERN, CONFIG_KEY_TASK_ID_MODE: MODE_WARN},
-        {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN, CONFIG_KEY_TASK_ID_MODE: MODE_BLOCK},
-        _OTHER_PATTERN, MODE_WARN, False, id="repo-local-pattern-and-mode-win",
-    ),
-    pytest.param(
-        {CONFIG_KEY_TASK_ID_PATTERN: _OTHER_PATTERN},
-        {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN, CONFIG_KEY_TASK_ID_MODE: MODE_WARN},
-        _OTHER_PATTERN, MODE_BLOCK, False, id="mode-never-mixed-across-sources",
-    ),
-    pytest.param(
-        None, {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN, CONFIG_KEY_TASK_ID_MODE: MODE_WARN},
-        _SYNTHETIC_PATTERN, MODE_WARN, True, id="user-level-mode-is-honored",
-    ),
-    pytest.param(
-        _NO_REPO_ROOT, {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN},
-        _SYNTHETIC_PATTERN, MODE_BLOCK, True, id="user-level-works-with-no-repo-root",
-    ),
-]
-
-
-class TestConfigUserLevelFallback:
-    @pytest.mark.parametrize(
-        "repo_push, user_push, want_pattern, want_mode, want_user_source", _PRECEDENCE_ROWS
-    )
-    def test_precedence_table(
-        self, tmp_path, repo_push, user_push, want_pattern, want_mode, want_user_source
-    ):
-        user_root = tmp_path / "user-config-root"
-        user_root.mkdir()
-        if repo_push is _NO_REPO_ROOT:
-            repo_root = None
-        else:
-            repo_root = tmp_path / "repo"
-            repo_root.mkdir()
-        if repo_push is not None and repo_push is not _NO_REPO_ROOT:
-            _write_config(repo_root, {"push": repo_push})
-        if user_push is not None:
-            (user_root / "config.yaml").write_text(
-                yaml.safe_dump({"push": user_push}), encoding="utf-8"
-            )
-
-        cfg = load_task_id_guard_config(repo_root, config_root=user_root)
-
-        assert cfg.pattern == want_pattern
-        assert cfg.mode == want_mode
-        if want_pattern is None:
-            assert cfg.source == "default"
-        elif want_user_source:
-            assert cfg.source == str(user_root / "config.yaml")
-        else:
-            assert cfg.source == str(repo_root / ".clagentic" / "loadout" / "config.yaml")
-
-    def test_invalid_user_level_pattern_names_the_user_level_file(self, tmp_path):
-        (tmp_path / "config.yaml").write_text(
-            yaml.safe_dump({"push": {CONFIG_KEY_TASK_ID_PATTERN: "["}}), encoding="utf-8"
-        )
-        with pytest.raises(InvalidTaskIdGuardConfigError, match="config.yaml"):
-            load_task_id_guard_config(None, config_root=tmp_path)
-
-    def test_violation_message_names_the_actual_source(self):
-        with pytest.raises(TaskIdGuardViolation) as exc_info:
-            check_task_id_guard(
-                "feat: WIDGET-9 leak",
-                field="PR title",
-                pattern=_SYNTHETIC_PATTERN,
-                mode=MODE_BLOCK,
-                source="/synthetic/user-root/config.yaml",
-            )
-        assert "/synthetic/user-root/config.yaml" in str(exc_info.value)
-        assert ".clagentic/loadout/config.yaml" not in str(exc_info.value)
 
 
 class TestConfigMalformedRaises:
