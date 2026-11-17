@@ -834,8 +834,9 @@ def _default_opener():
     return redirect_guard.no_redirect_opener()
 
 
-def _auth_headers(token: str, *, content_type: str | None = None) -> dict[str, str]:
-    headers = {"Authorization": f"token {token}"}
+def _auth_headers(token: str | None, *, content_type: str | None = None) -> dict[str, str]:
+    # token None is the anonymous read: no Authorization header at all.
+    headers = {} if token is None else {"Authorization": f"token {token}"}
     if content_type is not None:
         headers["Content-Type"] = content_type
     return headers
@@ -845,12 +846,16 @@ def build_request(
     git_host_base: str,
     method: str,
     path: str,
-    token: str,
+    token: str | None,
     *,
     body_bytes: bytes | None = None,
     extra_headers: dict[str, str] | None = None,
 ) -> urllib.request.Request:
     """Build the urllib Request for one git-host API call.
+
+    A token of None builds an anonymous request that carries no
+    Authorization header (the --anonymous-fallback read of a public GitHub
+    repository).
 
     Content-Type ownership: when a JSON body is being sent and the caller
     has not already supplied their own Content-Type in extra_headers, this
@@ -932,7 +937,7 @@ def request(
     git_host_base: str,
     method: str,
     path: str,
-    token: str,
+    token: str | None,
     *,
     body_bytes: bytes | None = None,
     extra_headers: dict[str, str] | None = None,
@@ -1696,6 +1701,21 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "error. Without this flag the call behaves exactly as before.",
     )
     parser.add_argument(
+        "--anonymous-fallback",
+        action="store_true",
+        help="OPT-IN, GET of an absolute GitHub API URL only: when the "
+        "credential provider cannot mint a token for the target repository "
+        "(for example a public repository outside the provider's "
+        "installation), read it anonymously instead of failing. The "
+        "anonymous request carries no Authorization header and no "
+        "credential of any kind; one line on stderr says the read is "
+        "anonymous and why. A mint that succeeds is used exactly as "
+        "before. Ignored for POST/PATCH/PUT/DELETE, for a Forgejo target "
+        "and with --paginate: those fail on a mint failure as without the "
+        "flag. If the anonymous read also fails, the error names the host, "
+        "the owner/repo, the mint failure and the anonymous HTTP status.",
+    )
+    parser.add_argument(
         "--git-host-base-url",
         default=None,
         help=f"Forgejo API base URL (default: ${GIT_HOST_BASE_URL_ENV_VAR} env "
@@ -2102,6 +2122,41 @@ def _paginate_comments(
             f"failed: {exc}",
             code=EXIT_PAGINATION_FAILED,
         )
+
+
+def _anonymous_get(
+    url: str, repo: str | None, mint_failure: str, *, opener
+) -> tuple[int, bytes]:
+    """Read a GitHub URL with no credential after the mint failed.
+
+    The request is built with token None, so it carries no Authorization
+    header, and the only way a credential could ride along is a header this
+    module never sets. A non-2xx answer or a transport failure exits
+    EXIT_CURL_FAILED naming the resolved host, the owner/repo, the mint
+    failure and the anonymous HTTP status.
+    """
+    host = urllib.parse.urlsplit(url).netloc
+    scope = repo if repo is not None else "(no owner/repo in PATH)"
+    print(
+        f"git-host-api: anonymous read of {scope} on {host}, no credential sent: "
+        f"token resolution failed ({mint_failure})",
+        file=sys.stderr,
+    )
+    try:
+        status, raw = request("", "GET", url, None, opener=opener)
+    except GitHostApiError as exc:
+        _fail(
+            f"anonymous read of {scope} on {host} FAILED -- {exc}. "
+            f"Token resolution had failed first: {mint_failure}",
+            code=exc.code,
+        )
+    if not 200 <= status < 300:
+        _fail(
+            f"anonymous read of {scope} on {host} FAILED with HTTP {status}. "
+            f"Token resolution had failed first: {mint_failure}",
+            code=EXIT_CURL_FAILED,
+        )
+    return status, raw
 
 
 def bind_caller(
@@ -2619,10 +2674,29 @@ def _run(
         if token_provider is not None
         else resolve_platform_provider(target_platform)
     )
+    # The seam reports every mint failure as one CredentialProviderError whose
+    # only distinguishing detail is provider-specific text, so a retry keyed
+    # on "not accessible" would mean parsing that text. The anonymous read is
+    # therefore an explicit opt-in (--anonymous-fallback), and the failure
+    # message names it for a GitHub GET.
+    anonymous_eligible = (
+        method == "GET" and target_platform == PLATFORM_GITHUB and not args.paginate
+    )
+    mint_failure: str | None = None
+    token: str | None = None
     try:
         token = _resolve_token(caller, active_provider, repo=call_repo)
     except CredentialProviderError as exc:
-        _fail(f"token resolution FAILED -- {exc}", code=EXIT_TOKEN_FETCH_FAILED)
+        if anonymous_eligible and args.anonymous_fallback:
+            mint_failure = " ".join(str(exc).split())
+        else:
+            hint = (
+                " For a public repository outside the credential provider's "
+                "reach, add --anonymous-fallback to read it without a credential."
+                if anonymous_eligible
+                else ""
+            )
+            _fail(f"token resolution FAILED -- {exc}{hint}", code=EXIT_TOKEN_FETCH_FAILED)
 
     # A GitHub target's path_arg IS the full URL -- git_host_base is empty so
     # request()'s f"{git_host_base}{path}" join reduces to the URL itself,
@@ -2782,11 +2856,14 @@ def _run(
 
     pre_post_utc = datetime.now(timezone.utc) if is_comment_post and args.verify_comment else None
 
-    status, raw = request(
-        git_host_base, method, path_arg, token,
-        body_bytes=post_body_bytes,
-        opener=opener,
-    )
+    if mint_failure is not None:
+        status, raw = _anonymous_get(path_arg, call_repo, mint_failure, opener=opener)
+    else:
+        status, raw = request(
+            git_host_base, method, path_arg, token,
+            body_bytes=post_body_bytes,
+            opener=opener,
+        )
 
     if method not in _WRITE_METHODS or method == "GET":
         # Read-only calls stream the response straight to stdout, exactly

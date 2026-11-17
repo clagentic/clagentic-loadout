@@ -64,6 +64,24 @@ answers `302` to pre-signed storage):
 loadout-git-host-api --caller <role> GET https://api.github.com/repos/<owner>/<repo>/actions/jobs/<job-id>/logs
 ```
 
+**`--anonymous-fallback` — read a public GitHub repository outside the
+credential provider's reach:** the GitHub read path mints a token scoped to the
+target repository, and for a public repository outside the provider's
+installation the mint is refused even though the API serves the content
+without credentials. With the opt-in flag, a `GET` of an absolute GitHub API
+URL whose mint fails is read anonymously instead: the request carries no
+`Authorization` header and no credential of any kind, and stderr gets one line
+saying the read is anonymous and why. A mint that succeeds is used exactly as
+before. The flag is ignored for `POST`/`PATCH`/`PUT`/`DELETE`, for a Forgejo
+target and with `--paginate`; those fail on a mint failure as without the
+flag, and the failure message for a GitHub `GET` names the flag. If the
+anonymous read also fails, exit `10` with the resolved host, the owner/repo,
+the mint failure and the anonymous HTTP status.
+
+```
+loadout-git-host-api --caller <role> --anonymous-fallback GET https://api.github.com/repos/<owner>/<repo>/contents/<path>
+```
+
 **`--paginate` — read every comment on a PR or issue:**
 a bare `GET` of a comments listing returns only the host's first page; on
 GitHub that is the oldest 30 comments, so the newest verdict on a long PR is

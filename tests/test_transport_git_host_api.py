@@ -3683,3 +3683,96 @@ class TestMainDeleteOwnCommentEndToEnd:
             known_bad_owners=frozenset({"bad-owner"}),
         )
         assert rc == git_host_api.EXIT_OWNER_REPO_NOT_FOUND
+
+
+# ---------------------------------------------------------------------------
+# --anonymous-fallback: public GitHub read outside the provider's reach
+# ---------------------------------------------------------------------------
+
+_MINT_REFUSED = "mint refused: repository not accessible to the installation"
+_GH_REPO_URL = "https://api.github.com/repos/some-owner/some-repo/contents/f.txt"
+
+
+class _MintRefusingProvider:
+    def resolve_token(self, role: str, *, repo: str | None = None) -> str:
+        raise CredentialProviderError(_MINT_REFUSED)
+
+
+def _recording_opener(answer):
+    """Opener recording every built request; `answer` is a status int (an
+    HTTPError for >=300) or a (status, body) tuple."""
+    log = []
+
+    def opener(req, timeout=15):
+        log.append(req)
+        if isinstance(answer, tuple):
+            return _FakeResponse(*answer)
+        raise urllib.error.HTTPError(req.full_url, answer, "err", {}, io.BytesIO(b"nope"))
+
+    opener.log = log
+    return opener
+
+
+# (id, argv tail, provider, answer, expected rc, requests made,
+#  Authorization expected on the request, stderr fragments, stdout)
+_ANON_ROWS = [
+    ("anon-get-ok", ["--anonymous-fallback", "GET", _GH_REPO_URL], _MintRefusingProvider(),
+     (200, b"file-body"), git_host_api.EXIT_OK, 1, None,
+     ["anonymous read", "no credential sent", _MINT_REFUSED], "file-body"),
+    ("no-flag-fails-and-names-flag", ["GET", _GH_REPO_URL], _MintRefusingProvider(),
+     (200, b"x"), git_host_api.EXIT_TOKEN_FETCH_FAILED, 0, None,
+     ["--anonymous-fallback"], ""),
+    ("mint-ok-token-sent-no-anon", ["--anonymous-fallback", "GET", _GH_REPO_URL],
+     _PlatformRecordingProvider("gh-reader-tok"), (200, b"in-install"),
+     git_host_api.EXIT_OK, 1, "token gh-reader-tok", [], "in-install"),
+    ("anon-http-error-reports-all", ["--anonymous-fallback", "GET", _GH_REPO_URL],
+     _MintRefusingProvider(), 404, git_host_api.EXIT_CURL_FAILED, 1, None,
+     ["api.github.com", "some-owner/some-repo", _MINT_REFUSED, "HTTP 404"], ""),
+    ("forgejo-get-unchanged", ["--anonymous-fallback", "GET", "/api/v1/repos/o/r/pulls/1"],
+     _MintRefusingProvider(), (200, b"x"), git_host_api.EXIT_TOKEN_FETCH_FAILED, 0, None,
+     [_MINT_REFUSED], ""),
+    ("paginate-unchanged", ["--anonymous-fallback", "--paginate", "GET",
+                            "https://api.github.com/repos/o/r/issues/1/comments"],
+     _MintRefusingProvider(), (200, b"[]"), git_host_api.EXIT_TOKEN_FETCH_FAILED, 0, None,
+     [_MINT_REFUSED], ""),
+]
+
+
+class TestAnonymousFallback:
+    @pytest.mark.parametrize(
+        "argv,provider,answer,rc_expected,n_requests,auth,stderr_has,stdout",
+        [row[1:] for row in _ANON_ROWS],
+        ids=[row[0] for row in _ANON_ROWS],
+    )
+    def test_rows(
+        self, argv, provider, answer, rc_expected, n_requests, auth, stderr_has, stdout, capsys
+    ):
+        opener = _recording_opener(answer)
+        rc = git_host_api.main(["--caller", "agent-echo", *argv], token_provider=provider, opener=opener)
+        out = capsys.readouterr()
+        assert rc == rc_expected
+        assert len(opener.log) == n_requests
+        for req in opener.log:
+            assert req.get_header("Authorization") == auth
+            if auth is None:
+                assert req.header_items() == []
+        for fragment in stderr_has:
+            assert fragment in out.err
+        if auth is not None:
+            assert "anonymous" not in out.err
+        assert out.out == stdout
+
+    @pytest.mark.parametrize("method", ["POST", "PATCH", "PUT", "DELETE"])
+    def test_write_never_goes_anonymous(self, method, monkeypatch, capsys):
+        monkeypatch.setattr(
+            "sys.stdin", type("S", (), {"buffer": io.BytesIO(b'{"body":"x"}')})()
+        )
+        opener = _recording_opener((200, b"{}"))
+        rc = git_host_api.main(
+            ["--caller", "agent-echo", "--anonymous-fallback", "--body-stdin", method,
+             "https://api.github.com/repos/some-owner/some-repo/issues"],
+            token_provider=_MintRefusingProvider(), opener=opener,
+        )
+        assert rc == git_host_api.EXIT_TOKEN_FETCH_FAILED
+        assert opener.log == []
+        assert "anonymous" not in capsys.readouterr().err.replace("--anonymous-fallback", "")
