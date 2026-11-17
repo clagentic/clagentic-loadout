@@ -5,6 +5,7 @@ strict fast-forward, the net diff between them. Mocked HTTP throughout."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -236,3 +237,39 @@ class TestForgejoBaseMerged:
 
         with pytest.raises(AcquireFetchError, match="HTTP 500"):
             _merged(_forgejo(opener))
+
+
+_LARGE_RANGE = json.loads(
+    (Path(__file__).parent / "real_payloads" / "forgejo_compare_large.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+class TestCapturedLargeRange:
+    """A range of 1007 commits captured from a live host: total_commits equalled an
+    independent count of the same range, far past any page-size default, so the
+    count is read as stated."""
+
+    def test_the_stated_count_equals_the_independent_count(self):
+        assert _LARGE_RANGE["response"]["total_commits"] == _LARGE_RANGE["capture"]["independent_count"]
+        assert _LARGE_RANGE["response"]["total_commits"] > 1000
+
+    @pytest.mark.parametrize(
+        ("at_since", "between", "expected"),
+        [(400, 607, False), (500, 600, True)],
+        ids=["pr-only-range", "range-holds-base-commits"],
+    )
+    def test_the_captured_count_decides_the_base_merge_read(self, at_since, between, expected):
+        total = _LARGE_RANGE["response"]["total_commits"]
+        opener = _forgejo_count_opener(at_head=total, at_since=at_since, between=between)
+
+        assert _merged(_forgejo(opener)) is expected
+
+    def test_a_pr_only_large_range_is_a_fast_forward_with_its_diff(self):
+        total = _LARGE_RANGE["response"]["total_commits"]
+
+        span = _range(_forgejo(_forgejo_opener(forward=total, backward=0)))
+
+        assert span.fast_forward is True
+        assert span.diff_text == _DIFF
