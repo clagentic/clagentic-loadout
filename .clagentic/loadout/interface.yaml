@@ -51,7 +51,7 @@ verbs:
   - name: loadout-spec
     exit_codes: {ok: 0, usage: 1, store_unusable: 3, not_found: 50, stored_invalid: 51, draft_invalid: 52, refused: 53, profile_invalid: 54, io_failed: 55}
   - name: loadout-stage-body
-    exit_codes: {ok: 0, usage: 1, body_stdin_empty: 2, body_file_unreadable: 3, stage_verify_failed: 4, caller_invoker_mismatch: 5}
+    exit_codes: {ok: 0, usage: 1, body_stdin_empty: 2, body_file_unreadable: 3, stage_verify_failed: 4, caller_invoker_mismatch: 5, body_draft_unreadable: 6}
 
 schemas:
   - common.json
