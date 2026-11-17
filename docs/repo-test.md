@@ -308,8 +308,9 @@ never needs a host-side kill. It takes a run id only (not `latest`, not a path).
   session of its own, so ending the supervisor's session alone would leave it running; the
   supervisor therefore records each command it starts in `command-process.json` in the run
   directory (pid, start ticks, boot id), and `stop` reaches the command only by that record. When
-  the supervisor is alive and has not yet written the record, `stop` waits for it (within the 5
-  seconds below); if it never appears, `stop` ends the supervisor, exits `78` and says the command
+  the supervisor is alive and the record is absent or names a process that is no longer running
+  (a prepare step that has exited), `stop` waits for a live record (within the 5 seconds below);
+  if none appears, `stop` ends the supervisor, exits `78` and says the command
   could not be identified, rather than signalling a process it cannot verify. The supervisor is
   ended first, so it cannot record a result of its own, then the command's group, then `stop`
   waits (up to 5 seconds) for them to be gone. A process the command moved out of its group (a

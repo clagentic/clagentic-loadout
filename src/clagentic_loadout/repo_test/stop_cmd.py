@@ -8,8 +8,9 @@ Only a process that is verified as the run's is signalled. The supervisor is che
 by its recorded identity (pid, start ticks, boot id: ``repo_test.liveness``); the
 command only by the identity its supervisor recorded in ``command-process.json``, and it
 must also lead its own process group, so a recycled pid is never signalled. No process
-is looked up by pid alone. When the supervisor is alive and has not yet written the
-record, stop waits for it within the settle window; if it never appears the supervisor
+is looked up by pid alone. When the supervisor is alive and the record is absent or
+names a process that has exited, stop waits within the settle window for a live record;
+if none appears the supervisor
 is ended and stop reports that the command could not be identified. A process the
 command moved out of its group (a daemon) is not reached.
 
@@ -79,18 +80,22 @@ def _recorded_command(run_dir: Path) -> Mapping[str, Any] | None:
 
 def _command_groups(run_dir: Path, supervisor: Mapping[str, Any], deadline: float) -> list[Mapping[str, Any]]:
     """The identity the supervisor recorded for its command, when that process is still
-    live and leads its own process group. While the supervisor is verified alive and
-    has not recorded yet, wait for the record until *deadline*."""
+    live and leads its own process group. The record names the last command the
+    supervisor started, including a prepare step that has since exited, so a record
+    that is not live is treated as not yet written for the current command: while the
+    supervisor is verified alive, wait for a live record until *deadline*."""
     recorded = _recorded_command(run_dir)
-    while recorded is None and liveness.is_alive(supervisor) and time.monotonic() < deadline:
+    while not _is_live_group_leader(recorded) and liveness.is_alive(supervisor) and time.monotonic() < deadline:
         time.sleep(_POLL_SECONDS)
         recorded = _recorded_command(run_dir)
+    return [recorded] if recorded is not None and _is_live_group_leader(recorded) else []
+
+
+def _is_live_group_leader(recorded: Mapping[str, Any] | None) -> bool:
     if recorded is None:
-        return []
+        return False
     pid = recorded.get("pid")
-    if isinstance(pid, int) and liveness.is_alive(recorded) and _leads_own_group(pid):
-        return [recorded]
-    return []
+    return isinstance(pid, int) and liveness.is_alive(recorded) and _leads_own_group(pid)
 
 
 def _end_group(identity: Mapping[str, Any]) -> None:
@@ -163,9 +168,9 @@ def stop_run(root: Path, run_id: str) -> StopOutcome:
             exits.EXIT_REPO_MISMATCH,
         )
 
-    if was_alive and _recorded_command(run_dir) is None:
+    if was_alive and not commands:
         raise StopRefused(
-            f"run {run_id}: its supervisor was ended but it never recorded its command, "
+            f"run {run_id}: its supervisor was ended but it never recorded a live command, "
             "so the command could not be identified and was not signalled",
             exits.EXIT_REPO_MISMATCH,
         )

@@ -223,8 +223,9 @@ def test_stop_never_signals_a_supervisor_pid_that_no_longer_matches_its_identity
     assert signalled == []
 
 
+@pytest.mark.parametrize("stale_record", [False, True], ids=["no-record", "dead-recorded-command"])
 def test_stop_ends_a_supervisor_that_never_recorded_its_command_and_reports_it_unidentified(
-    reports: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    reports: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch, stale_record: bool
 ) -> None:
     monkeypatch.setattr(stop_cmd, "_SETTLE_SECONDS", 0.5)
     write_unfinished_run(reports, "20260101T000000Z-1", "/repos/alpha", alive=False)
@@ -234,6 +235,12 @@ def test_stop_ends_a_supervisor_that_never_recorded_its_command_and_reports_it_u
         provenance = json.loads((run_dir / store.PROVENANCE_FILE).read_text())
         provenance[store.PROCESS_KEY] = {**liveness.capture_identity(supervisor.pid), "mode": "full"}
         (run_dir / store.PROVENANCE_FILE).write_text(json.dumps(provenance))
+        if stale_record:
+            # A prepare step that has exited: the record names a process that is gone.
+            prepare = subprocess.Popen([sys.executable, "-c", "pass"], start_new_session=True)
+            identity = liveness.capture_identity(prepare.pid)
+            prepare.wait()
+            (run_dir / store.COMMAND_FILE).write_text(json.dumps(identity))
 
         code, out, err = _call(capsys, "stop", "20260101T000000Z-1")
 
