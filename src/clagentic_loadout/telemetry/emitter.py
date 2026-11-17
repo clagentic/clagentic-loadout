@@ -35,6 +35,9 @@ Public surface:
         # outside loadout (CLAUDE.md hard rule 2).
     emit_agent_run(record, *, sink=None) -> bool
     build_agent_run_record(...) -> dict   # construction helper, no I/O
+    emit_ci_call(*, operation, caller, platform, repo, run_id, head_sha,
+                  http_status, outcome, ts=None, sink=None) -> bool
+        # One record per `ci` verb call (re-run or cancel of a CI run).
     emit_followup_events(task_id, agent_name, followups, *, ts=None,
                           sink=None) -> int
         # lr-7a6e: generic ingest for envelope-out.json's followups[].
@@ -70,6 +73,7 @@ DISPATCH_HEARTBEAT_SCHEMA = "telemetry-dispatch-heartbeat.json"
 DISPATCH_RESUME_ACK_SCHEMA = "telemetry-dispatch-resume-ack.json"
 AGENT_RUN_SCHEMA = "telemetry-agent-run.json"
 FOLLOWUP_EVENT_SCHEMA = "telemetry-followup-event.json"
+CI_CALL_SCHEMA = "telemetry-ci-call.json"
 
 TRACE_EVENT_KINDS = ("envelope_in", "envelope_out")
 DISPATCH_STATUSES = ("in_flight", "completed", "failed", "refused", "timed_out")
@@ -418,8 +422,46 @@ def emit_followup_events(
     return delivered
 
 
+def emit_ci_call(
+    *,
+    operation: str,
+    caller: str,
+    platform: str,
+    repo: str,
+    run_id: int,
+    head_sha: str | None,
+    http_status: int,
+    outcome: str,
+    ts: str | None = None,
+    sink: TelemetrySink | None = None,
+) -> bool:
+    """Emit one telemetry-ci-call/v1 record for a `ci` verb call.
+
+    Sent for every call, successful or not. With the default sink (none)
+    nothing is written. The record never carries a credential.
+
+    Returns:
+        True if the sink durably delivered the record, False otherwise.
+    """
+    record: dict[str, Any] = {
+        "schema": "telemetry-ci-call/v1",
+        "verb": "ci",
+        "operation": operation,
+        "caller": caller,
+        "platform": platform,
+        "repo": repo,
+        "run_id": run_id,
+        "head_sha": head_sha or None,
+        "http_status": http_status,
+        "outcome": outcome,
+        "ts": ts or _now_iso(),
+    }
+    return _emit(record, CI_CALL_SCHEMA, sink)
+
+
 __all__ = [
     "AGENT_RUN_SCHEMA",
+    "CI_CALL_SCHEMA",
     "DISPATCH_HEARTBEAT_SCHEMA",
     "DISPATCH_RECORD_SCHEMA",
     "DISPATCH_RESUME_ACK_SCHEMA",
@@ -430,6 +472,7 @@ __all__ = [
     "TelemetryValidationError",
     "build_agent_run_record",
     "emit_agent_run",
+    "emit_ci_call",
     "emit_dispatch_heartbeat",
     "emit_dispatch_record",
     "emit_dispatch_resume_ack",
