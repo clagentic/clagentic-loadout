@@ -46,22 +46,11 @@ REPLACE-NOT-MERGE (design call #2, consistent with `provisioning.roles`):
 repo that declares either REPLACES the (empty) default entirely, mirroring
 `roles:`'s own "omitted role is simply not provisioned" contract. There is
 no partial-override/merge semantics anywhere in this module.
-`merge_requirements` is a single mapping of independent boolean/int keys
-(`tests_pass`, `ci_pass`, `max_changed_files`) — each key present REPLACES
-that key's own default; keys omitted from a partially-declared
-`merge_requirements` mapping keep THEIR OWN default (this mirrors how a
-mapping of independent settings, not a list, naturally composes — there is
-no "the whole section is missing vs. present" ambiguity to resolve the way a
-list-valued section has, since a caller reads each key independently).
-
-`ci_pass` maps directly onto `merge.ci_status`'s already-shipped CI-status
-gate (empty-evidence-is-a-pass, non-empty gates on combined_state) — this
-key is a DECLARATION that the gate should run for this repo at all, not a
-reimplementation of the gate itself; `tests_pass` and `max_changed_files`
-are equally declarative (a caller wires `tests_pass` to its own test-run
-step, `max_changed_files` feeds `merge.diff_scope.check_diff_scope`'s
-existing `max_changed_files` parameter directly, same as `--max-changed-files`
-does today).
+The former `merge_requirements` mapping (`tests_pass`, `ci_pass`,
+`max_changed_files`) was retired because no merge gate read it: the CI-status
+gate always runs, a test command belongs under `merge.pre_checks`, and the
+diff cap is `--max-changed-files`. The key stays a merge-section marker in
+`merge.config_root`, and doctor reports it as retired.
 
 GATE KEYS COME FROM A TRACKED FILE AT THE PR BASE COMMIT. `loadout-merge`
 never reads `required_reviewer_roles`, `required_scanners` or `pre_checks`
@@ -77,8 +66,8 @@ SCOPE NOTE: this module ships the repo-config READ side. `merge.verb` now
 consumes `required_reviewer_roles` as a FLOOR beneath `--required-reviewer`
 (required = union of the two), and `required_scanners`, through
 `merge.repo_gate_runtime`, which owns the fallback and escape-hatch policy
-described under BLAST RADIUS below. `authorized_roles` and `merge_requirements`
-are still read only by doctor and by a caller building its own invocation.
+described under BLAST RADIUS below. `authorized_roles` is still read only by
+doctor and by a caller building its own invocation.
 
 ABSENCE SEMANTICS (lr-638945 hardening — read this before relying on either
 key's default): `required_reviewer_roles` and `authorized_roles` sit in the
@@ -152,21 +141,6 @@ from clagentic_loadout.merge.config_root import (
 from clagentic_loadout.merge.post_merge_config import CONFIG_SECTION_MERGE
 from clagentic_loadout.repo_config import DEFAULT_CONFIG_RELATIVE_PATH
 
-#: Key within the `merge:` section holding the merge-requirements mapping
-#: (tests_pass / ci_pass / max_changed_files).
-CONFIG_KEY_MERGE_REQUIREMENTS = "merge_requirements"
-#: Key within `merge_requirements` — require a clean local test run.
-REQUIREMENT_KEY_TESTS_PASS = "tests_pass"
-#: Key within `merge_requirements` — require green CI (see merge.ci_status).
-REQUIREMENT_KEY_CI_PASS = "ci_pass"
-#: Key within `merge_requirements` — the diff-scope cap (see
-#: merge.diff_scope.DEFAULT_MAX_CHANGED_FILES for the built-in fallback a
-#: caller that finds no config-declared value here should use instead).
-REQUIREMENT_KEY_MAX_CHANGED_FILES = "max_changed_files"
-_VALID_REQUIREMENT_KEYS = frozenset(
-    {REQUIREMENT_KEY_TESTS_PASS, REQUIREMENT_KEY_CI_PASS, REQUIREMENT_KEY_MAX_CHANGED_FILES}
-)
-
 #: Key within the `merge:` section holding the list of ROLE names (never
 #: agent names) required to have posted a clean reviewer verdict before a
 #: merge is authorized -- the release-gate class. Feeds merge.verb's existing
@@ -204,8 +178,7 @@ _EVALUATOR_KEYS = (EVALUATOR_KEY_ALLOW_DEGRADED, EVALUATOR_KEY_REQUIRE_EVALUATED
 
 class InvalidMergeGateConfigError(ValueError):
     """Raised when a repo's `merge:` gate-declaration keys
-    (`merge_requirements`, `required_reviewer_roles`, `authorized_roles`) are
-    malformed. Always reports the RESOLVED config path and offending value
+    (`required_reviewer_roles`, `authorized_roles`) are malformed. Always reports the RESOLVED config path and offending value
     (conformance rule 4), never a stale guess."""
 
 
@@ -364,70 +337,6 @@ def _validate_role_list(
         # never silently miss the exact-match lookup that consumes it.
         roles.append(entry.strip())
     return tuple(roles)
-
-
-def load_merge_requirements(
-    repo_root: str | Path | None,
-    *,
-    config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
-) -> dict:
-    """Resolve the `merge: merge_requirements:` mapping for a repo.
-
-    Returns `{}` (no requirements declared -- every gate a caller might
-    apply from this mapping is simply not requested) when *repo_root* is
-    None, the config file is absent, the `merge:` section is absent, or the
-    `merge_requirements` key is absent within it.
-
-    A present mapping is validated key-by-key: `tests_pass`/`ci_pass` must
-    be bool, `max_changed_files` must be a positive int. Unknown keys are
-    rejected (resolved-values error naming the bad key and the known-good
-    set) rather than silently ignored -- a typo'd requirement key must never
-    silently fail to gate anything.
-
-    Raises:
-        InvalidMergeGateConfigError: malformed YAML, non-mapping `merge:` or
-            `merge_requirements` section, an unknown key, or a key with the
-            wrong type.
-    """
-    if repo_root is None:
-        return {}
-    config_path, merge_section = _read_merge_section(
-        repo_root, config_relative_path=config_relative_path
-    )
-    requirements = merge_section.get(CONFIG_KEY_MERGE_REQUIREMENTS)
-    if requirements is None:
-        return {}
-    if not isinstance(requirements, dict):
-        raise InvalidMergeGateConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_MERGE_REQUIREMENTS} "
-            f"must be a mapping, got {type(requirements).__name__}."
-        )
-
-    unknown = sorted(set(requirements) - _VALID_REQUIREMENT_KEYS)
-    if unknown:
-        raise InvalidMergeGateConfigError(
-            f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_MERGE_REQUIREMENTS} "
-            f"has unknown key(s) {unknown!r}. Known keys: "
-            f"{sorted(_VALID_REQUIREMENT_KEYS)!r}."
-        )
-
-    for bool_key in (REQUIREMENT_KEY_TESTS_PASS, REQUIREMENT_KEY_CI_PASS):
-        if bool_key in requirements and not isinstance(requirements[bool_key], bool):
-            raise InvalidMergeGateConfigError(
-                f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_MERGE_REQUIREMENTS}."
-                f"{bool_key} must be a boolean, got {requirements[bool_key]!r}."
-            )
-
-    if REQUIREMENT_KEY_MAX_CHANGED_FILES in requirements:
-        max_files = requirements[REQUIREMENT_KEY_MAX_CHANGED_FILES]
-        if not isinstance(max_files, int) or isinstance(max_files, bool) or max_files < 1:
-            raise InvalidMergeGateConfigError(
-                f"{config_path}: {CONFIG_SECTION_MERGE}.{CONFIG_KEY_MERGE_REQUIREMENTS}."
-                f"{REQUIREMENT_KEY_MAX_CHANGED_FILES} must be a positive integer, "
-                f"got {max_files!r}."
-            )
-
-    return dict(requirements)
 
 
 def load_required_reviewer_roles(
@@ -739,14 +648,10 @@ __all__ = [
     "CONFIG_KEY_CI_STRICT",
     "CONFIG_KEY_EVALUATOR",
     "CONFIG_KEY_REQUIRED_CI_CHECKS",
-    "CONFIG_KEY_MERGE_REQUIREMENTS",
     "CONFIG_KEY_REQUIRED_REVIEWER_ROLES",
     "CONFIG_KEY_REQUIRED_SCANNERS",
     "CONFIG_SECTION_MERGE",
     "DEFAULT_CONFIG_RELATIVE_PATH",
-    "REQUIREMENT_KEY_CI_PASS",
-    "REQUIREMENT_KEY_MAX_CHANGED_FILES",
-    "REQUIREMENT_KEY_TESTS_PASS",
     "STRICT_EVALUATOR_GATE",
     "EvaluatorGate",
     "InvalidMergeGateConfigError",
@@ -755,7 +660,6 @@ __all__ = [
     "ci_gate_from_section",
     "ci_strict_from_section",
     "load_authorized_roles",
-    "load_merge_requirements",
     "load_required_reviewer_roles",
     "load_repo_gate_declarations",
     "load_required_scanners",

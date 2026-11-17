@@ -209,11 +209,10 @@ mapping. A leftover file is ignored and reported as a completeness item.
 
 ### What is configured elsewhere
 
-`merge_requirements` and `authorized_roles` are not profile keys, and nothing about them is
-removed. They are configured in the `merge:` section of the loadout config (`config.yaml`),
-loaded by the merge gate configuration module; see
-[merge-authority.md](merge-authority.md) for who reads them. Today they are read only by
-`loadout-doctor` (and by a caller building its own invocation).
+`authorized_roles` is not a profile key, and nothing about it is removed. It is configured in
+the `merge:` section of the loadout config (`config.yaml`), loaded by the merge gate
+configuration module; see [merge-authority.md](merge-authority.md) for who reads it. Today it
+is read only by `loadout-doctor` (and by a caller building its own invocation).
 
 ## What review does with it
 

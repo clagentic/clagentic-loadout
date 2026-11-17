@@ -78,12 +78,10 @@ def test_a_declared_wrapper_config_supplies_steps_and_the_tree_sync_runs_in_the_
     )
 
     steps = post_merge_config.load_post_merge_steps(repo.path)
-    requirements = gate_config.load_merge_requirements(repo.path)
     sync = post_merge_config.resolve_sync_tree_after_merge(repo.path)
     working_tree = post_merge_config.resolve_git_working_tree(repo.path)
 
     assert steps == STEPS["post_merge_steps"]
-    assert requirements == REQUIREMENTS["merge_requirements"]
     assert sync is False
     assert working_tree.resolve() == repo.path.resolve()
     require_confirmed_tree_for_steps(_binding(), str(repo.path))
@@ -262,7 +260,7 @@ def test_gate_keys_and_requirements_above_the_tree_are_refused_like_steps(tmp_pa
     _, repo = _wrapper_layout(tmp_path, layout)
 
     with pytest.raises(gate_config.InvalidMergeGateConfigError):
-        gate_config.load_merge_requirements(repo.path)
+        gate_config.load_authorized_roles(repo.path)
 
 
 # --- a repo-level config silent on the merge section does not void the wrapper ------
@@ -391,7 +389,6 @@ READERS = {
     "resolve_require_model_attestation": lambda p: post_merge_config.resolve_require_model_attestation(p),
     "resolve_model_attestation_denylist": lambda p: post_merge_config.resolve_model_attestation_denylist(p),
     "resolve_post_merge_step_timeout_seconds": lambda p: post_merge_config.resolve_post_merge_step_timeout_seconds(p),
-    "load_merge_requirements": lambda p: gate_config.load_merge_requirements(p),
     "load_required_reviewer_roles": lambda p: gate_config.load_required_reviewer_roles(p),
     "load_authorized_roles": lambda p: gate_config.load_authorized_roles(p),
     "load_required_scanners": lambda p: gate_config.load_required_scanners(p),

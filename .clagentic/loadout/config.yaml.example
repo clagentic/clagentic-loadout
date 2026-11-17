@@ -56,18 +56,6 @@ roles:
 # credential -- those live in the deployment-tier user config instead).
 # ---------------------------------------------------------------------------
 merge:
-  # merge_requirements: each key REPLACES its own default when present;
-  # a key you omit keeps its own built-in default. No implicit default is
-  # applied to a key you never mention.
-  merge_requirements:
-    # ci_pass: on/off toggle for the CI-status gate. Set explicitly --
-    # there is no silent default here on purpose: pick true (this repo has
-    # CI and it must be green before merge) or false (this repo has no CI,
-    # or CI is intentionally not a merge gate).
-    ci_pass: true
-    tests_pass: true
-    # max_changed_files: 30
-
   # required_reviewer_roles: roles whose clean reviewer verdict is required
   # before a merge is authorized. Role vocabulary only. Once this merge:
   # section exists at all, this key is REQUIRED -- omitting it is a

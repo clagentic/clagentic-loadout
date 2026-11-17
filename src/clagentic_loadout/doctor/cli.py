@@ -60,7 +60,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "attestation source presence when github_app.callers is "
             "declared, and "
             "(inside a repo) per-repo .clagentic/loadout/config.yaml schema "
-            "-- including merge.pre_checks / merge_requirements / "
+            "-- including merge.pre_checks / "
             "required_reviewer_roles / authorized_roles -- "
             "(WARNs on a legacy .loadout/ dir; a merge: section "
             "present but omitting required_reviewer_roles entirely is a "

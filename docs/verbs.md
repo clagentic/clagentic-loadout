@@ -2840,14 +2840,14 @@ tree. `--authorized-role` and
 default — a caller (a dispatch/lead layer) re-supplies them on every
 invocation. `merge.pre_checks_config` and `merge.gate_config` now give a
 repo a `.clagentic/loadout/config.yaml` `merge:` section home for that
-same declaration (`merge_requirements`, `required_reviewer_roles`,
+same declaration (`required_reviewer_roles`,
 `authorized_roles`) plus the pre-merge-check gate link (`pre_checks` —
 see "Pre-merge checks" below for the ACTUAL gate-chain wiring).
 `push.identity_config` and `review.login_config` add matching
 deployment-tier homes for the identity half (`builder_identity`,
 `review.reviewer_logins`). Wiring `merge.verb`'s own flag DEFAULTS to
-read `merge_requirements`/`authorized_roles` remains a named follow-up —
-those two keys are schema + `loadout-doctor` validation only.
+read `authorized_roles` remains a named follow-up —
+that key is schema + `loadout-doctor` validation only.
 
 **Pre-merge checks (`merge.pre_checks_config` / `merge.post_merge`):**
 an OPTIONAL, repo-declared `merge: pre_checks:` list (SAME
@@ -3364,7 +3364,7 @@ the platform's configured host:
   consistency check uses the same parser and the same rule.
 
 **Which config file is read.** Every merge-verb reader of the deployment file (`post_merge_steps`
-and `post_merge_steps` presence, the fallback gate keys, `merge_requirements`,
+and `post_merge_steps` presence, the fallback gate keys, the retired `merge_requirements` marker,
 `merge.git_working_tree`, `sync_tree_after_merge`, the step timeout, the enforcement flags and
 the `pre_checks` readers) resolves the file through one resolver:
 
@@ -3868,8 +3868,9 @@ define, always reporting RESOLVED values rather than a guess:
    `merge.post_merge_config.load_post_merge_steps`,
    `merge.pre_checks_config.load_pre_checks`, and `merge.gate_config`'s three
    loaders — the last two cover `merge.pre_checks`,
-   `merge_requirements`/`required_reviewer_roles`/`authorized_roles`, all
-   under the existing `merge:` section, see
+   `required_reviewer_roles`/`authorized_roles`, all
+   under the existing `merge:` section (a retired `merge_requirements` key is
+   reported as an advisory), see
    [docs/provisioning.md](provisioning.md)'s "Merge-gate config homes"
    section) — never a second, doctor-only schema that could drift from what
    "valid" means to the real consumer. Also flags a `credentials:` section

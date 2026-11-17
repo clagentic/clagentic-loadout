@@ -2,9 +2,8 @@
 (lr-0a03c3).
 
 Covers the repo-local `.clagentic/loadout/config.yaml` `merge:` gate-
-declaration keys: `merge_requirements` (tests_pass/ci_pass/max_changed_files),
-`required_reviewer_roles`, `authorized_roles`. All three are repo-tier
-(committed, public-safe, role-vocabulary-only) config homes for values that
+declaration keys: `required_reviewer_roles`, `authorized_roles`. Both are
+repo-tier (committed, public-safe, role-vocabulary-only) config homes for values that
 were previously CLI-flag-only on `merge.verb`.
 """
 
@@ -15,14 +14,12 @@ import yaml
 
 from clagentic_loadout.merge.gate_config import (
     CONFIG_KEY_AUTHORIZED_ROLES,
-    CONFIG_KEY_MERGE_REQUIREMENTS,
     CONFIG_KEY_REQUIRED_REVIEWER_ROLES,
     CONFIG_SECTION_MERGE,
     DEFAULT_CONFIG_RELATIVE_PATH,
     InvalidMergeGateConfigError,
     RequiredReviewerRolesNotDeclaredError,
     load_authorized_roles,
-    load_merge_requirements,
     load_required_reviewer_roles,
 )
 
@@ -33,94 +30,11 @@ def _write_config(tmp_path, content: dict) -> None:
     (config_dir / "config.yaml").write_text(yaml.safe_dump(content), encoding="utf-8")
 
 
-class TestMergeRequirementsAbsence:
-    def test_no_repo_root_returns_empty(self):
-        assert load_merge_requirements(None) == {}
-
-    def test_no_config_file_returns_empty(self, tmp_path):
-        assert load_merge_requirements(tmp_path) == {}
-
-    def test_no_merge_section_returns_empty(self, tmp_path):
-        _write_config(tmp_path, {"wait": {}})
-        assert load_merge_requirements(tmp_path) == {}
-
-    def test_merge_section_with_no_requirements_key_returns_empty(self, tmp_path):
-        _write_config(tmp_path, {"merge": {"post_merge_steps": []}})
-        assert load_merge_requirements(tmp_path) == {}
-
-
-class TestMergeRequirementsPresent:
-    def test_full_mapping_parsed(self, tmp_path):
-        _write_config(
-            tmp_path,
-            {
-                "merge": {
-                    "merge_requirements": {
-                        "tests_pass": True,
-                        "ci_pass": False,
-                        "max_changed_files": 25,
-                    }
-                }
-            },
-        )
-        reqs = load_merge_requirements(tmp_path)
-        assert reqs == {"tests_pass": True, "ci_pass": False, "max_changed_files": 25}
-
-    def test_partial_mapping_keeps_only_declared_keys(self, tmp_path):
-        _write_config(tmp_path, {"merge": {"merge_requirements": {"ci_pass": True}}})
-        assert load_merge_requirements(tmp_path) == {"ci_pass": True}
-
-
-class TestMergeRequirementsMalformed:
-    def test_non_mapping_requirements_raises(self, tmp_path):
-        _write_config(tmp_path, {"merge": {"merge_requirements": ["tests_pass"]}})
-        with pytest.raises(InvalidMergeGateConfigError, match="must be a mapping"):
-            load_merge_requirements(tmp_path)
-
-    def test_unknown_key_raises(self, tmp_path):
-        _write_config(
-            tmp_path, {"merge": {"merge_requirements": {"tests_pas": True}}}
-        )
-        with pytest.raises(InvalidMergeGateConfigError, match="unknown key"):
-            load_merge_requirements(tmp_path)
-
-    def test_non_bool_tests_pass_raises(self, tmp_path):
-        _write_config(tmp_path, {"merge": {"merge_requirements": {"tests_pass": "yes"}}})
-        with pytest.raises(InvalidMergeGateConfigError, match="must be a boolean"):
-            load_merge_requirements(tmp_path)
-
-    def test_non_bool_ci_pass_raises(self, tmp_path):
-        _write_config(tmp_path, {"merge": {"merge_requirements": {"ci_pass": 1}}})
-        with pytest.raises(InvalidMergeGateConfigError, match="must be a boolean"):
-            load_merge_requirements(tmp_path)
-
-    def test_zero_max_changed_files_raises(self, tmp_path):
-        _write_config(
-            tmp_path, {"merge": {"merge_requirements": {"max_changed_files": 0}}}
-        )
-        with pytest.raises(InvalidMergeGateConfigError, match="positive integer"):
-            load_merge_requirements(tmp_path)
-
-    def test_bool_max_changed_files_rejected(self, tmp_path):
-        # bool is a subclass of int in Python -- must not silently pass as
-        # a valid max_changed_files value.
-        _write_config(
-            tmp_path, {"merge": {"merge_requirements": {"max_changed_files": True}}}
-        )
-        with pytest.raises(InvalidMergeGateConfigError, match="positive integer"):
-            load_merge_requirements(tmp_path)
-
-    def test_non_int_max_changed_files_raises(self, tmp_path):
-        _write_config(
-            tmp_path, {"merge": {"merge_requirements": {"max_changed_files": "50"}}}
-        )
-        with pytest.raises(InvalidMergeGateConfigError, match="positive integer"):
-            load_merge_requirements(tmp_path)
-
+class TestMergeSectionShape:
     def test_non_mapping_merge_section_raises(self, tmp_path):
         _write_config(tmp_path, {"merge": ["bad"]})
         with pytest.raises(InvalidMergeGateConfigError, match="must be a mapping"):
-            load_merge_requirements(tmp_path)
+            load_authorized_roles(tmp_path)
 
 
 class TestRequiredReviewerRoles:
@@ -210,13 +124,11 @@ class TestSharedSectionCoexistence:
                 "merge": {
                     "pre_checks": [{"cmd": "make lint"}],
                     "post_merge_steps": [{"cmd": "scripts/install.sh"}],
-                    "merge_requirements": {"tests_pass": True},
                     "required_reviewer_roles": ["reviewer"],
                     "authorized_roles": ["merger"],
                 }
             },
         )
-        assert load_merge_requirements(tmp_path) == {"tests_pass": True}
         assert load_required_reviewer_roles(tmp_path) == ("reviewer",)
         assert load_authorized_roles(tmp_path) == ("merger",)
 
@@ -238,7 +150,6 @@ class TestConstants:
         assert CONFIG_SECTION_MERGE == "merge"
 
     def test_requirement_keys(self):
-        assert CONFIG_KEY_MERGE_REQUIREMENTS == "merge_requirements"
         assert CONFIG_KEY_REQUIRED_REVIEWER_ROLES == "required_reviewer_roles"
         assert CONFIG_KEY_AUTHORIZED_ROLES == "authorized_roles"
 

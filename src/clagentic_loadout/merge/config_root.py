@@ -2,8 +2,8 @@
 ``--repo-path``.
 
 Every merge-verb reader of the deployment config (post_merge_steps and its
-siblings, the fallback gate keys, merge_requirements, the working-tree
-declaration, the timeout and flag resolvers, the pre_checks readers) resolves
+siblings, the fallback gate keys, the retired merge_requirements marker, the
+working-tree declaration, the timeout and flag resolvers, the pre_checks readers) resolves
 its file through `resolve_merge_config_path` / `resolve_merge_config_root`
 here, which apply `repo_config.resolve_bound_config_root` with this verb's
 vocabulary. Rules in that function: a config at the git tree wins when its merge
@@ -39,8 +39,12 @@ class MergeConfigRootRefusedError(PostMergeConfigError):
     host and owner/name, never the remote's URL text."""
 
 
+#: A retired `merge:` key no gate reads. It stays a merge-section marker so a
+#: config that still holds it resolves to the same root as before; doctor reports it.
+CONFIG_KEY_MERGE_REQUIREMENTS = "merge_requirements"
+
+
 def _vocabulary() -> dict:
-    from clagentic_loadout.merge.gate_config import CONFIG_KEY_MERGE_REQUIREMENTS
     from clagentic_loadout.merge.post_merge_config import (
         CONFIG_KEY_GIT_WORKING_TREE,
         CONFIG_KEY_POST_MERGE_STEPS,
@@ -103,6 +107,7 @@ def resolve_merge_config_path(
 
 
 __all__ = [
+    "CONFIG_KEY_MERGE_REQUIREMENTS",
     "MergeConfigRootRefusedError",
     "resolve_merge_config_path",
     "resolve_merge_config_root",

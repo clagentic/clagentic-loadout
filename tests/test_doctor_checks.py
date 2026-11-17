@@ -697,13 +697,19 @@ class TestCheckRepoLoadoutSchema:
             for err in result.resolved["errors"]
         )
 
-    def test_malformed_merge_requirements_fails(self, tmp_path):
+    def test_retired_merge_requirements_is_an_advisory_not_a_failure(self, tmp_path):
         _write_loadout_config(
             tmp_path, "merge:\n  merge_requirements:\n    tests_pass: not-a-bool\n"
         )
         result = check_repo_loadout_schema(tmp_path)
-        assert result.ok is False
-        assert any("merge (gate declaration):" in err for err in result.resolved["errors"])
+        assert result.ok is True
+        assert result.resolved["errors"] == []
+        assert result.resolved["retired_keys"] == ["merge_requirements"]
+        assert "RETIRED" in result.summary
+        assert "config.yaml" in result.summary
+        assert "no merge gate reads it" in result.summary
+        for replacement in ("CI-status gate", "merge.pre_checks", "--max-changed-files"):
+            assert replacement in result.summary
 
     def test_malformed_required_reviewer_roles_fails(self, tmp_path):
         _write_loadout_config(tmp_path, "merge:\n  sync_tree_after_merge: false\n")

@@ -58,9 +58,6 @@ A clean, commented, role-keyed starter config — the copy source
 - `roles:` — five seed roles: builder/reviewer/security/merger/lead — see
   "Keeping the gate satisfiable" below for why `security` is included;
   `docs/provisioning.md`'s own reference mapping documents the same set.
-- `merge.merge_requirements` — `ci_pass`/`tests_pass` both `true` by
-  default (a repo copying this template is assumed to have CI until told
-  otherwise — see the elicitation step below for the on/off conversation).
 - `merge.required_reviewer_roles: [reviewer, security]` and
   `merge.authorized_roles: [merger]` — role vocabulary placeholders, never
   agent names. Every role named here has a matching, non-empty verb set
@@ -110,7 +107,6 @@ own step 2 for the full conversation shape:
 
 | Key | Tier | Elicited how |
 |---|---|---|
-| `merge.merge_requirements.ci_pass` | repo | on/off, asked explicitly — no implicit default (`gate_config.REQUIREMENT_KEY_CI_PASS`, replace-not-merge per key) |
 | `merge.required_reviewer_roles` | repo | role vocabulary only — confirm/rename the template's `reviewer`/`security` placeholders |
 | `merge.authorized_roles` | repo | role vocabulary only — confirm/rename the template's `merger` placeholder |
 | `merge.pre_checks` | repo | optional; only added if the repo wants pre-merge validation commands |
