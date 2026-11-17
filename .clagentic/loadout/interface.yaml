@@ -6,7 +6,7 @@ schema_version: 1
 
 verbs:
   - name: clagentic-loadout
-    exit_codes: {umbrella_usage: 64, ok: 0, usage: 1, check_failed: 120, profile_invalid: 121, not_declared: 122, store_write: 123, run_not_found: 124, report_unreadable: 125}
+    exit_codes: {umbrella_usage: 64, ok: 0, usage: 1, check_failed: 120, profile_invalid: 121, not_declared: 122, store_write: 123, run_not_found: 124, report_unreadable: 125, test_ok: 0, test_usage: 1, test_tests_failed: 70, test_profile: 71, test_not_declared: 72, test_unrunnable: 73, test_store_write: 74, test_no_runs: 75, test_bad_run_id: 76, test_sha_no_match: 77, test_diff_refused: 78, test_settings: 79, test_still_running: 79}
   - name: loadout-acquire
     exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, fetch_failed: 5, scratch_write_failed: 6, caller_invoker_mismatch: 7}
   - name: loadout-changeset
