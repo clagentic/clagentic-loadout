@@ -32,6 +32,7 @@ Coverage:
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import urllib.error
@@ -456,6 +457,8 @@ def _redirect_opener(first_code, location, hop):
             )
         if isinstance(hop, tuple):
             return _FakeResponse(*hop)
+        if isinstance(hop, Exception):
+            raise hop
         raise urllib.error.HTTPError(req.full_url, hop, "Redirect", {"Location": "https://x.example.net/n?s=1"}, io.BytesIO(b""))
 
     opener.log = log
@@ -495,6 +498,15 @@ class TestGetRedirectOneHop:
             ("https://[bad/l?sig=SECRETSIG123", (200, b""), "could not be parsed"),
             ("/relative?sig=SECRETSIG123", (200, b""), "not an https"),
             (_HOP_URL, 302, "redirected again"),
+            (f"https://blob.example.net/a b?{_SIGNED_QUERY}", (200, b""), "whitespace or control"),
+            (f"https://blob.example.net/a\r\nX: y?{_SIGNED_QUERY}", (200, b""), "whitespace or control"),
+            (f"https://blob.example.net/a\x00b?{_SIGNED_QUERY}", (200, b""), "whitespace or control"),
+            (
+                _HOP_URL,
+                http.client.InvalidURL(f"URL can't contain control characters. {_HOP_URL!r}"),
+                "redirect target failed (InvalidURL)",
+            ),
+            (_HOP_URL, RuntimeError(f"boom {_HOP_URL}"), "redirect target failed (RuntimeError)"),
         ],
     )
     def test_refused_closed_with_reason_and_no_location(
@@ -508,7 +520,7 @@ class TestGetRedirectOneHop:
         out = capsys.readouterr()
         assert rc == git_host_api.EXIT_CURL_FAILED
         assert reason in out.err
-        assert len(opener.log) == (2 if hop == 302 else 1)
+        assert len(opener.log) == (2 if hop == 302 or isinstance(hop, Exception) else 1)
         assert "SECRETSIG123" not in out.err + out.out
         assert "blob.example.net" not in out.err + out.out
 

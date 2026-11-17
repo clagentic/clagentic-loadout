@@ -897,21 +897,32 @@ def _follow_get_redirect_once(
         _redirect_refused(method, path, exc.code, "the Location could not be parsed")
     if parts.scheme != "https" or not parts.netloc:
         _redirect_refused(method, path, exc.code, "the Location is not an https URL")
+    # http.client rejects whitespace/control characters in a request target with
+    # an InvalidURL whose text quotes the path and query, so refuse them before
+    # the request is built.
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in location):
+        _redirect_refused(
+            method, path, exc.code, "the Location contains whitespace or control characters"
+        )
 
-    hop = urllib.request.Request(location, method="GET")
     try:
-        with urlopen(hop, timeout=timeout) as resp:
-            return (getattr(resp, "status", None) or resp.getcode()), resp.read()
-    except urllib.error.HTTPError as hop_exc:
-        if 300 <= hop_exc.code < 400:
-            _redirect_refused(
-                method, path, hop_exc.code, "the redirect target redirected again"
-            )
-        return hop_exc.code, hop_exc.read()
-    except (urllib.error.URLError, TimeoutError, OSError) as hop_exc:
-        # The exception text can embed the target URL, so only its type is named.
+        hop = urllib.request.Request(location, method="GET")
+        try:
+            with urlopen(hop, timeout=timeout) as resp:
+                return (getattr(resp, "status", None) or resp.getcode()), resp.read()
+        except urllib.error.HTTPError as hop_exc:
+            if 300 <= hop_exc.code < 400:
+                _redirect_refused(
+                    method, path, hop_exc.code, "the redirect target redirected again"
+                )
+            return hop_exc.code, hop_exc.read()
+    except GitHostApiError:
+        raise
+    except Exception as hop_exc:  # noqa: BLE001 - fail closed on any hop error
+        # Any exception's text can embed the target URL (and so a pre-signed
+        # signature), so only its type is named.
         _fail(
-            f"git-host API {method} {path} redirect target unreachable "
+            f"git-host API {method} {path} redirect target failed "
             f"({type(hop_exc).__name__})",
             code=EXIT_CURL_FAILED,
         )
