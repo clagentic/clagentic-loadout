@@ -1,6 +1,6 @@
 ---
 name: loadout-init
-description: Guided, LLM-invocable setup of a repo's .clagentic/loadout/config.yaml. Copies the clean starter template (clagentic_loadout.loadout_init.starter_template), then runs interactive elicitation with the operator to fill in the merge pieces (post_merge_steps deployment values, ci_pass on/off, required_reviewer_roles/authorized_roles/pre_checks), then validates with loadout-doctor. NOT a silent scaffold -- every deployment-specific value is elicited, never templated from another deployment's real config. Reach for this whenever a repo has no .clagentic/loadout/config.yaml (or only the legacy .loadout/config.yaml) and needs one set up correctly instead of hand-authored.
+description: Guided, LLM-invocable setup of a repo's .clagentic/loadout/config.yaml. Copies the clean starter template (clagentic_loadout.loadout_init.starter_template), then runs interactive elicitation with the operator to fill in the merge pieces (post_merge_steps deployment values, required_reviewer_roles/authorized_roles/pre_checks), then validates with loadout-doctor. NOT a silent scaffold -- every deployment-specific value is elicited, never templated from another deployment's real config. Reach for this whenever a repo has no .clagentic/loadout/config.yaml (or only the legacy .loadout/config.yaml) and needs one set up correctly instead of hand-authored.
 version: 1.0.0
 user_invocable: true
 triggers:
@@ -80,7 +80,7 @@ URL. `security` ships with a real verb set (`git-host-api`, `review-post`)
 and is already named in `required_reviewer_roles` -- a prior fix addressed a
 live incident where an earlier template version left `security` out of
 `roles:` while still requiring it as a reviewer, an unsatisfiable gate step
-2b below would otherwise reproduce (see "Elicit the merge pieces" step b).
+2a below would otherwise reproduce (see "Elicit the merge pieces" step a).
 
 This step is NOT the finish line. The file that lands is a starting point;
 step 2 elicits the pieces that make it real for THIS repo.
@@ -89,23 +89,10 @@ step 2 elicits the pieces that make it real for THIS repo.
 
 Work through each of these with the operator as an actual conversation, not
 a form to auto-fill. Do not invent a default for any of these on the
-operator's behalf; a repo's own conventions (branch prefixes, whether it
-even runs CI) determine every answer here.
+operator's behalf; a repo's own conventions (branch prefixes, reviewer
+roles) determine every answer here.
 
-**a. `merge.merge_requirements.ci_pass` -- on or off, no implicit default.**
-Ask: "Does this repo have CI, and should a merge require it to be green?"
-- `true` -- this repo has CI and it gates merges.
-- `false` -- this repo has no CI (or CI is intentionally not a gate here).
-  Precedent: this repo (`clagentic-loadout`) itself is `ci_pass: false`
-  (`.clagentic/loadout/config.yaml`, ratified 2026-07-13) -- CI genuinely
-  does not exist here and is not going to be stood up. That precedent does
-  NOT transfer automatically to another repo; ask fresh every time.
-Per-key replace-not-merge semantics
-(`clagentic_loadout.merge.gate_config.REQUIREMENT_KEY_CI_PASS`): whichever
-value you set REPLACES the template's own `ci_pass` default; leaving
-`tests_pass`/`max_changed_files` alone keeps THEIR defaults untouched.
-
-**b. `merge.required_reviewer_roles` / `merge.pre_checks` /
+**a. `merge.required_reviewer_roles` / `merge.pre_checks` /
 `merge.authorized_roles` -- role vocabulary only.**
 Ask which roles this repo actually uses for review and merge authority
 (the template ships `reviewer` **and** `security` as required-reviewer
@@ -127,9 +114,9 @@ declaration behind, and don't leave a gate role with nothing backing it.
 `pre_checks` (commands run before a merge is authorized, same
 `cmd`/`description`/`on_failure` shape as `post_merge_steps`) is optional --
 only add it if the repo actually wants pre-merge validation commands beyond
-CI + reviewer verdicts.
+reviewer verdicts.
 
-**c. `merge.post_merge_steps` -- deployment values, ALWAYS elicited, NEVER
+**b. `merge.post_merge_steps` -- deployment values, ALWAYS elicited, NEVER
 templated.**
 If this repo wants post-merge automation (e.g. a self-install step), ask
 for the real values THIS deployment needs -- `HOME`, the forge base URL,
@@ -142,7 +129,7 @@ post-merge automation need, leave the section commented out/absent -- that
 is a fully valid, common shape.
 
 Edit `<repo_root>/.clagentic/loadout/config.yaml` directly with the
-elicited values once the operator has answered each of a/b/c.
+elicited values once the operator has answered each of a/b.
 
 ### 3. Validate
 
