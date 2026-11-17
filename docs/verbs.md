@@ -358,8 +358,8 @@ satisfy any expected value. Omit `--head-sha` only for a genuinely
 SHA-less, non-verdict comment whose later read never supplies an expected
 SHA either.
 `--body-stdin` (explicit marker for the default stdin-body behavior, kept
-only to mirror every other body-ingesting verb's own flag name) — stdin is
-the SOLE content-input path; **no verb in this package accepts a
+only to mirror every other body-ingesting verb's own flag name) — stdin, or
+the computed draft below, are the only content sources; **no verb in this package accepts a
 caller-supplied filesystem path for PR-body content** (a prior
 `--body-file <path>` flag on this verb and on `loadout-push` was removed
 after a security audit found the analogous flag on `loadout-push` bypassed
@@ -367,6 +367,32 @@ the identity-stamp mechanism entirely — see that verb's own section below).
 Body content is validated with the same `validate_body_stdin_content` every
 other body-ingesting verb in this package uses, BEFORE anything is staged —
 malformed content is refused here, not later at `--body-env` read time.
+
+**The draft form: one literal command, no pipe, redirect or env assignment.**
+`--body-draft` takes no value. It stages the body JSON the caller already wrote
+to a draft file at a path this verb computes, never one the caller supplies:
+`<TMPDIR>/clagentic-loadout/draft.<caller>.json`, in the same staging directory
+as the staged body (the identity-bound directory when an identity provider is
+configured). `--show-draft-path` prints that absolute path and exits 0 without
+touching any file:
+
+```
+loadout-stage-body --caller <role> --show-draft-path
+# /<TMPDIR>/clagentic-loadout/draft.<role>.json   (write {"body":"..."} here)
+
+loadout-stage-body --caller <role> --target-pr <pr-number> [--head-sha <sha>] --body-draft
+loadout-stage-body --caller <role> --create-branch <branch-name> --body-draft
+```
+
+The staged body and stamp are byte-identical to what `--body-stdin` stages for
+the same bytes; stdin is never read. The draft is opened without following
+symlinks and must be a regular file whose directory resolves to the computed
+staging directory. It is removed after a verified stage, so it is read once; on
+any failure it stays in place. Exit `6` — the draft is absent, is a symlink or
+not a regular file, sits behind a redirected staging directory, or could not be
+removed after the stage; nothing is staged for a read failure. Content that
+fails validation exits `2` with the draft left for the caller to fix.
+`--body-draft` with `--body-stdin` exits `1`. Code `3` stays retired.
 
 **Verdict-intent is derived automatically, never a separate flag to set:**
 this verb inspects the staged JSON body itself for a top-level

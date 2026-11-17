@@ -368,6 +368,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -645,6 +646,86 @@ def _resolve_staging_dir(*, env: dict[str, str] | None = None) -> Path:
     active_env = env if env is not None else os.environ
     tmp_root = active_env.get(_TMPDIR_ENV_VAR) or tempfile.gettempdir()
     return Path(tmp_root) / _BODY_ENV_SUBDIR
+
+
+class BodyDraftError(BodyEnvError):
+    """The draft file `loadout-stage-body --body-draft` reads is absent, is
+    not a plain regular file, or sits behind a redirected staging directory.
+    A `BodyEnvError` subclass so a verb can map it to its own exit code."""
+
+
+def resolve_caller_draft_path(*, caller: str, env: dict[str, str] | None = None) -> Path:
+    """Resolve the draft path a caller writes a body to before running
+    `loadout-stage-body --body-draft`: `<TMPDIR>/clagentic-loadout/
+    draft.<caller>.json`, in the same staging directory (and so the same
+    identity-bound directory, via *env*) as `resolve_caller_body_path`.
+
+    Computed here, never typed by the caller, so the draft form takes no
+    filesystem path for body content just as `--body-stdin` takes none."""
+    safe_caller = _validate_caller_or_raise(caller)
+    return _resolve_staging_dir(env=env) / f"draft.{safe_caller}.json"
+
+
+def read_caller_draft_bytes(*, caller: str, env: dict[str, str] | None = None) -> tuple[Path, bytes]:
+    """Read the draft at `resolve_caller_draft_path` and return its path and
+    bytes. The draft is not consumed here: the caller removes it with
+    `remove_caller_draft` once the body is staged, so a failed stage leaves
+    it in place to fix.
+
+    Validates this verb's own read input, nothing else: the staging
+    directory's realpath must equal the computed one (no redirected
+    directory), and the draft is opened without following a symlink and must
+    be a regular file. Raises `BodyDraftError` naming the resolved path and
+    the reason."""
+    draft_path = resolve_caller_draft_path(caller=caller, env=env)
+    expected_dir = Path(os.path.realpath(draft_path.parent.parent)) / _BODY_ENV_SUBDIR
+    actual_dir = Path(os.path.realpath(draft_path.parent))
+    if actual_dir != expected_dir:
+        raise BodyDraftError(
+            f"--body-draft: the staging directory {str(draft_path.parent)!r} "
+            f"resolves to {str(actual_dir)!r}, not {str(expected_dir)!r}; "
+            f"refusing to read the draft at {str(draft_path)!r}."
+        )
+    # O_NONBLOCK so a FIFO planted at the path cannot hang the open; the
+    # fstat below rejects anything that is not a regular file.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(str(draft_path), flags)
+    except OSError as exc:
+        raise BodyDraftError(
+            f"--body-draft: could not open the draft at {str(draft_path)!r} "
+            f"(opened without following symlinks): {exc.strerror or exc}. "
+            f"Write the body JSON to that exact path first "
+            f"(`loadout-stage-body --caller {caller} --show-draft-path` prints it)."
+        ) from exc
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise BodyDraftError(
+                f"--body-draft: the draft at {str(draft_path)!r} is not a regular file."
+            )
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            return draft_path, handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def remove_caller_draft(*, caller: str, env: dict[str, str] | None = None) -> None:
+    """Remove the caller's draft after a verified stage so it is read once.
+    An already-absent draft is fine (the staging sweep may have reaped an
+    old one); any other failure raises `BodyDraftError`."""
+    draft_path = resolve_caller_draft_path(caller=caller, env=env)
+    try:
+        draft_path.unlink()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        raise BodyDraftError(
+            f"--body-draft: the body was staged but the draft at "
+            f"{str(draft_path)!r} could not be removed: {exc.strerror or exc}. "
+            f"Remove it before staging again."
+        ) from exc
 
 
 def sweep_abandoned_pairs(

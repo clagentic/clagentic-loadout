@@ -112,10 +112,19 @@ security defect (`push.verb`'s prior `--body-file` bypassed the identity
 stamp entirely, which is what made it dangerous), but because the operator
 directive governing this redesign is unconditional: no verb in this
 package accepts a caller-supplied filesystem path for PR-body content, full
-stop, so there is exactly one ingestion shape (stdin) to reason about
-across every body-ingesting verb, not two. stdin remains the sole content
-path; the STAGING LOCATION was always, and remains, fully computed by this
+stop. The STAGING LOCATION was always, and remains, fully computed by this
 module (`resolve_caller_body_path`) — never caller-chosen.
+
+COMPUTED-DRAFT SOURCE (lr-4cf664): stdin is no longer the only content
+source. `--body-draft` (a bare switch, no value) reads a draft file at a path
+this module computes (`resolve_caller_draft_path`:
+`<staging dir>/draft.<caller>.json`, the staging directory the staged body
+uses), so a caller can stage with one literal command, no pipe and no
+redirect. This keeps the directive's rule: the caller supplies content, never
+a path. The draft is opened without following symlinks, must be a regular
+file in the computed directory, and is removed after a verified stage so it
+is read once; on any failure it stays in place. `--show-draft-path` prints
+the computed path.
 
 Host-agnostic by construction (lr-becdef seq 3's requirement, carried
 forward): `transport.body_env` has no platform branch at all — the SAME
@@ -150,9 +159,13 @@ from clagentic_loadout.transport.caller_binding import CallerBindingError, bind_
 from clagentic_loadout.transport.seam_binding import staging_kwargs
 from clagentic_loadout.transport.body_env import (
     BODY_ENV_NOT_EPHEMERAL_NOTE,
+    BodyDraftError,
     BodyEnvError,
     _resolve_caller_stamp_path,
+    read_caller_draft_bytes,
+    remove_caller_draft,
     resolve_caller_body_path,
+    resolve_caller_draft_path,
     stage_caller_body,
 )
 from clagentic_loadout.transport.git_host_api import (
@@ -198,6 +211,10 @@ EXIT_STAGE_VERIFY_FAILED = 4
 #: actor holds, or the identity provider refused. Never raised when
 #: `identity.provider` is unset (this verb binds nothing then).
 EXIT_CALLER_INVOKER_MISMATCH = 5
+#: --body-draft: the computed draft file is absent, is a symlink or not a
+#: regular file, sits behind a redirected staging directory, or could not be
+#: removed after a verified stage. Nothing is staged for a read failure.
+EXIT_BODY_DRAFT_UNREADABLE = 6
 
 
 class StageBodyVerbError(Exception):
@@ -229,7 +246,9 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "or --create-branch (the branch that will open a NEW PR, "
             "push's create path) is required. Reads the body from stdin "
             "(bare, or --body-stdin, same flag name every other "
-            "body-ingesting verb in this package uses) -- no caller-"
+            "body-ingesting verb in this package uses) or, with "
+            "--body-draft, from the draft file this verb computes "
+            "(--show-draft-path prints it) -- no caller-"
             "supplied filesystem path is accepted for body content on any "
             "verb in this package; writes no network request, mints no "
             "credential -- this is a pure local filesystem staging step. "
@@ -251,6 +270,12 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "    loadout-stage-body --caller builder --create-branch feat/my-branch\n"
             "\n"
             "  loadout-push --caller builder --title 'feat: add x' --body-env\n"
+            "\n"
+            "Example (draft form, no pipe or redirect):\n"
+            "  loadout-stage-body --caller builder --show-draft-path\n"
+            "  (write {\"body\":\"...\"} to the path it prints, then)\n"
+            "  loadout-stage-body --caller builder --create-branch feat/my-branch "
+            "--body-draft\n"
         ),
     )
     parser.add_argument(
@@ -307,10 +332,30 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "kept as an explicit flag only to mirror every other body-"
         "ingesting verb's own --body-stdin flag name in this package.",
     )
+    parser.add_argument(
+        "--body-draft",
+        action="store_true",
+        dest="body_draft",
+        help="Stage the body from the draft file this verb computes: "
+        "<TMPDIR>/clagentic-loadout/draft.<caller>.json, in the same staging "
+        "directory as the staged body (the identity-bound directory when an "
+        "identity provider is configured). Takes no value and reads no "
+        "stdin; write the body JSON to that path first. The draft is removed "
+        "after a verified stage and left in place on any failure. "
+        "Cannot be combined with --body-stdin.",
+    )
+    parser.add_argument(
+        "--show-draft-path",
+        action="store_true",
+        dest="show_draft_path",
+        help="Print the absolute draft path --body-draft reads for --caller, "
+        "then exit 0. Touches no file. Cannot be combined with --body-stdin "
+        "or --body-draft.",
+    )
     return parser
 
 
-def _run(args: argparse.Namespace, *, body_bytes: bytes) -> int:
+def _validate_caller(args: argparse.Namespace) -> None:
     if not _SAFE_CALLER_RE.match(args.caller):
         _fail(
             f"--caller {args.caller!r} contains invalid characters (only "
@@ -318,6 +363,34 @@ def _run(args: argparse.Namespace, *, body_bytes: bytes) -> int:
             f"traversal).",
             code=EXIT_USAGE,
         )
+
+
+def _bind(args: argparse.Namespace) -> tuple[dict, dict]:
+    """Bind like every other caller-bound verb, but only when an identity
+    provider is configured: unset, nothing here changes. Returns the path
+    kwargs and the stage kwargs."""
+    try:
+        bound = bind_configured_provider(args.caller, caller_explicit=True)
+    except (AttestationError, CallerBindingError) as exc:
+        _fail(f"identity binding FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
+    path_kwargs = staging_kwargs(bound[1]) if bound is not None else {}
+    stage_kwargs = dict(path_kwargs)
+    if path_kwargs:
+        stage_kwargs["stager_identity"] = {"actor": bound[1].actor, "jti": bound[1].jti}
+    return path_kwargs, stage_kwargs
+
+
+def _show_draft_path(args: argparse.Namespace) -> int:
+    _validate_caller(args)
+    path_kwargs, _ = _bind(args)
+    print(resolve_caller_draft_path(caller=args.caller, **path_kwargs))
+    return EXIT_OK
+
+
+def _run(args: argparse.Namespace, *, body_bytes: bytes | None) -> int:
+    """*body_bytes* is the stdin content, or None for the --body-draft form
+    (the draft is read below, after the identity-bound directory is known)."""
+    _validate_caller(args)
 
     # lr-e1e2fb: --target-pr and --create-branch are mutually exclusive --
     # exactly one binds the staged body's identity stamp. Checked BEFORE
@@ -335,21 +408,20 @@ def _run(args: argparse.Namespace, *, body_bytes: bytes) -> int:
             code=EXIT_USAGE,
         )
 
+    bound_kwargs: tuple[dict, dict] | None = None
+    if body_bytes is None:
+        bound_kwargs = _bind(args)
+        try:
+            _, body_bytes = read_caller_draft_bytes(caller=args.caller, **bound_kwargs[0])
+        except BodyDraftError as exc:
+            _fail(str(exc), code=EXIT_BODY_DRAFT_UNREADABLE)
+
     try:
         validate_body_stdin_content(body_bytes)
     except GitHostApiError as exc:
         _fail(str(exc), code=EXIT_BODY_STDIN_EMPTY)
 
-    # Binds like every other caller-bound verb, but only when an identity
-    # provider is configured: unset, nothing here changes.
-    try:
-        bound = bind_configured_provider(args.caller, caller_explicit=True)
-    except (AttestationError, CallerBindingError) as exc:
-        _fail(f"identity binding FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
-    path_kwargs = staging_kwargs(bound[1]) if bound is not None else {}
-    stage_kwargs = dict(path_kwargs)
-    if path_kwargs:
-        stage_kwargs["stager_identity"] = {"actor": bound[1].actor, "jti": bound[1].jti}
+    path_kwargs, stage_kwargs = bound_kwargs if bound_kwargs is not None else _bind(args)
 
     try:
         stage_caller_body(
@@ -408,6 +480,14 @@ def _run(args: argparse.Namespace, *, body_bytes: bytes) -> int:
                 code=EXIT_STAGE_VERIFY_FAILED,
             )
 
+    if args.body_draft:
+        # Only after the verified stage above: a failed stage leaves the
+        # draft in place for the caller to fix.
+        try:
+            remove_caller_draft(caller=args.caller, **path_kwargs)
+        except BodyDraftError as exc:
+            _fail(str(exc), code=EXIT_BODY_DRAFT_UNREADABLE)
+
     binding_label = (
         f"target_pr={args.target_pr}" if args.target_pr is not None
         else f"create_branch={args.create_branch!r}"
@@ -439,12 +519,28 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:
         return exc.code if isinstance(exc.code, int) else EXIT_USAGE
 
-    # stdin is the SOLE content-input path (lr-e1e2fb: no caller-supplied
-    # filesystem path is accepted anywhere in this package for PR-body
-    # content) -- bare stdin or --body-stdin are the same shape.
-    body_bytes = sys.stdin.buffer.read()
+    if args.body_draft and args.body_stdin:
+        print(
+            "loadout-stage-body: --body-draft and --body-stdin cannot be "
+            "combined: pick one body source.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
+    if args.show_draft_path and (args.body_draft or args.body_stdin):
+        print(
+            "loadout-stage-body: --show-draft-path cannot be combined with "
+            "--body-draft or --body-stdin.",
+            file=sys.stderr,
+        )
+        return EXIT_USAGE
 
     try:
+        if args.show_draft_path:
+            return _show_draft_path(args)
+        # Content comes from stdin (bare or --body-stdin) or from the
+        # computed draft path (--body-draft); never from a caller-supplied
+        # filesystem path.
+        body_bytes = None if args.body_draft else sys.stdin.buffer.read()
         return _run(args, body_bytes=body_bytes)
     except StageBodyVerbError as exc:
         print(f"loadout-stage-body: {exc}", file=sys.stderr)
