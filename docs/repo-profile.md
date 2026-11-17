@@ -273,6 +273,10 @@ the repository, that role and that step; see [`loadout-profile`](verbs.md#loadou
 `builder`, `reviewer`, and the others in [Roles and classes](verbs.md#roles-and-classes); `lead`
 is a legacy alias of `project-orchestrator`), not one of the credential roles that `--caller`
 takes, although the two lists share some words.
+`STEP` is one of the seven built-in steps (`file`, `direct`, `scope`, `dispatch`, `review`,
+`merge`, `hand-off`) or one the user config's `rules.steps` adds to them, the way `role_classes`
+adds to the role vocabulary. The brief's `rules` section names each declared step's source
+(`default` or `deployment`) and the source of the step asked.
 
 `check` validates the profile with the same loader the review uses and prints one JSON object:
 the class, the rules the class carries, the overrides, how many denial entries the profile

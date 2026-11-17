@@ -23,8 +23,9 @@ rule is for), ``steps`` (a list of step names it is for), ``kind``
 A record without ``roles`` applies to every role, one without ``steps`` to every
 step. Any other key on a record, a ``kind`` outside the two, or a value of the
 wrong shape is kept apart and reported in the record's ``not_understood``; it
-never fails the read. The steps a deployment names are the ``rules.steps`` list
-of the user-level config file.
+never fails the read. The declared steps are the built-in ``DEFAULT_STEPS``
+followed by each entry of the ``rules.steps`` list of the user-level config file
+that is not already among them.
 
 The classes in the file are data from the configuration layer and may lead the
 profile schema: a class the profile schema does not admit is kept and flagged,
@@ -47,6 +48,7 @@ import yaml
 
 from clagentic_loadout.review.policy_reader import MAX_POLICY_BYTES
 from clagentic_loadout.review.repo_profile import CLASSES as PROFILE_CLASSES
+from clagentic_loadout.role_vocabulary import SOURCE_DEFAULT, SOURCE_DEPLOYMENT
 from clagentic_loadout.transport.provider_config import load_user_config_section
 
 GROUPS_FILE_ENV_VAR = "CLAGENTIC_LOADOUT_GROUPS_FILE"
@@ -54,6 +56,10 @@ CONFIG_SECTION_RULES = "rules"
 CONFIG_KEY_GROUPS_FILE = "groups_file"
 CONFIG_KEY_STEPS = "steps"
 SCHEMA_VERSION = 1
+
+# The step vocabulary every deployment starts with; rules.steps in the user
+# config adds to it, the way role_classes adds to the role vocabulary.
+DEFAULT_STEPS = ("file", "direct", "scope", "dispatch", "review", "merge", "hand-off")
 
 RULE_KINDS = ("constraint", "judgment")
 KNOWN_RULE_KEYS = frozenset({"id", "statement", "source", "roles", "steps", "kind", "said_at", "relayed"})
@@ -347,27 +353,31 @@ def groups_for(groups: GroupsFile, repo_name: str, profile_class: str | None) ->
 
 def read_declared_steps(
     config_root: str | Path | None = None,
-) -> tuple[tuple[str, ...], str | None]:
-    """``(steps, problem)``: the step names a deployment declares, the
-    ``rules.steps`` list of the user-level config file, and a line naming why a
-    present value was not used. Never raises; the product ships no step names
-    of its own."""
+) -> tuple[dict[str, str], str | None]:
+    """``(steps, problem)``: the declared steps, each mapped to its source
+    (``default`` or ``deployment``), and a line naming why a present
+    ``rules.steps`` value was not used. The built-in steps come first, then each
+    ``rules.steps`` entry of the user-level config file that is not already
+    declared. Never raises: a malformed ``rules.steps`` is reported in the
+    problem and the built-in steps stay declared."""
+    steps = dict.fromkeys(DEFAULT_STEPS, SOURCE_DEFAULT)
     value = load_user_config_section(CONFIG_SECTION_RULES, config_root=config_root).get(
         CONFIG_KEY_STEPS
     )
     words = _optional_words(value)
     if words is None and value not in (None, []):
-        return (), (
+        return steps, (
             f"{CONFIG_SECTION_RULES}.{CONFIG_KEY_STEPS} in the user-level config file is not a "
-            "list of non-empty step names; no steps are declared"
+            "list of non-empty step names; only the built-in steps are declared"
         )
-    return words or (), None
+    for word in words or ():
+        steps.setdefault(word, SOURCE_DEPLOYMENT)
+    return steps, None
 
 
 def load_declared_steps(config_root: str | Path | None = None) -> tuple[str, ...]:
-    """The step names a deployment declares. Empty when absent or not a list of
-    strings."""
-    return read_declared_steps(config_root)[0]
+    """The declared step names: the built-in steps, then the deployment's."""
+    return tuple(read_declared_steps(config_root)[0])
 
 
 def rule_applies(
@@ -401,6 +411,7 @@ __all__ = [
     "CONFIG_KEY_GROUPS_FILE",
     "CONFIG_KEY_STEPS",
     "CONFIG_SECTION_RULES",
+    "DEFAULT_STEPS",
     "GROUPS_FILE_ENV_VAR",
     "KNOWN_RULE_KEYS",
     "RULE_KINDS",

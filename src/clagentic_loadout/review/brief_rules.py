@@ -14,6 +14,7 @@ from, plus any of the optional record keys it holds and ``not_understood``.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from clagentic_loadout.role_vocabulary import RoleResolution
@@ -35,11 +36,12 @@ def rules_section(
     role_declared: bool,
     role_note: str | None,
     step: str | None,
-    declared_steps: tuple[str, ...],
+    declared_steps: Mapping[str, str],
     steps_problem: str | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """``(section, items)``: the ``rules`` section of a brief and the rules it
-    lists, for the role *resolution* and the optional *step*."""
+    lists, for the role *resolution* and the optional *step*. *declared_steps*
+    maps each declared step to its source (default or deployment)."""
     step_declared = step is None or step in declared_steps
     notes: list[str] = []
     if role_note:
@@ -64,7 +66,9 @@ def rules_section(
             "role_declared": role_declared,
             "step": step,
             "step_declared": step_declared if step is not None else None,
+            "step_source": declared_steps.get(step) if step is not None else None,
         },
+        "declared_steps": [{"step": s, "source": src} for s, src in declared_steps.items()],
         "groups_file": found.location.path if found.location else None,
         "groups_file_from": found.location.origin if found.location else None,
         "note": found.note,

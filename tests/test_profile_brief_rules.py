@@ -24,6 +24,7 @@ groups:
       - {id: r-alpha-s1, statement: Alpha at step one., roles: [role-alpha], steps: [step-one], kind: judgment}
       - {id: r-beta, statement: Beta rule., roles: [role-beta]}
       - {id: r-s2, statement: Step two rule., steps: [step-two]}
+      - {id: r-dispatch, statement: Dispatch rule., steps: [dispatch]}
       - {id: r-po, statement: Orchestrator rule., roles: [project-orchestrator]}
       - {id: odd-key, statement: Has an odd key., colour: red}
       - {id: odd-kind, statement: Has an odd kind., kind: maybe}
@@ -65,13 +66,15 @@ def _brief(capsys, world, role, step=None):
 SELECTION = [
     ("role-alpha", "step-one", ALWAYS | {"r-alpha", "r-alpha-s1"}),
     ("role-alpha", "step-two", ALWAYS | {"r-alpha", "r-s2"}),
-    ("role-alpha", None, ALWAYS | {"r-alpha", "r-alpha-s1", "r-s2"}),
+    ("role-alpha", None, ALWAYS | {"r-alpha", "r-alpha-s1", "r-s2", "r-dispatch"}),
     ("role-beta", "step-one", ALWAYS | {"r-beta"}),
     ("role-gate", "step-two", ALWAYS | {"r-s2"}),
-    ("lead", None, ALWAYS | {"r-po", "r-s2"}),
-    ("planner", None, ALWAYS | {"r-s2"}),
-    ("role-zed", None, ALWAYS | {"r-s2"}),
+    ("lead", None, ALWAYS | {"r-po", "r-s2", "r-dispatch"}),
+    ("planner", None, ALWAYS | {"r-s2", "r-dispatch"}),
+    ("role-zed", None, ALWAYS | {"r-s2", "r-dispatch"}),
     ("role-alpha", "step-zed", ALWAYS | {"r-alpha"}),
+    ("role-beta", "dispatch", ALWAYS | {"r-beta", "r-dispatch"}),
+    ("role-beta", "hand-off", ALWAYS | {"r-beta"}),
 ]
 
 
@@ -81,6 +84,44 @@ def test_the_rules_section_lists_only_records_for_the_role_and_step(capsys, worl
 
     assert code == 0
     assert {item["id"] for item in result["rules"]["items"]} == expected
+
+
+DEFAULT_ONLY = ["file", "direct", "scope", "dispatch", "review", "merge", "hand-off"]
+MALFORMED = "only the built-in steps are declared"
+STEP_SOURCES = [
+    # (user config, step asked, declared, source of the asked step, note fragment, extra declared step)
+    ("", "dispatch", True, "default", None, None),
+    ("rules:\n  steps: [step-one]\n", "step-one", True, "deployment", None, "step-one"),
+    ("rules:\n  steps: [step-one, merge]\n", "merge", True, "default", None, "step-one"),
+    ("rules:\n  steps: [step-one]\n", "step-zed", False, None, "step 'step-zed' is not declared", "step-one"),
+    ("rules:\n  steps: [step-one, 3]\n", "hand-off", True, "default", MALFORMED, None),
+    ("rules:\n  steps: nope\n", "step-one", False, None, MALFORMED, None),
+]
+
+
+@pytest.mark.parametrize(("config", "step", "declared", "source", "note", "extra"), STEP_SOURCES)
+def test_the_brief_declares_the_built_in_steps_and_names_each_steps_source(
+    capsys, world, config, step, declared, source, note, extra
+):
+    repo, groups, _ = world
+    cfg = write_user_config(repo.parent / "cfg-steps", config)
+
+    code, result = _json(
+        capsys, pv.main,
+        ["brief", "--role", "planner", "--repo-path", str(repo), "--groups-file", str(groups),
+         "--step", step],
+        config_root=cfg,
+    )
+
+    section = result["rules"]
+    assert code == 0
+    assert section["applies_to"]["step_declared"] is declared
+    assert section["applies_to"]["step_source"] == source
+    assert [d["step"] for d in section["declared_steps"]] == DEFAULT_ONLY + ([extra] if extra else [])
+    assert {d["source"] for d in section["declared_steps"][: len(DEFAULT_ONLY)]} == {"default"}
+    assert (note is None) or any(note in n for n in section["notes"])
+    assert ("r-dispatch" in {i["id"] for i in section["items"]}) is (step == "dispatch")
+    assert ALWAYS <= {i["id"] for i in section["items"]}
 
 
 def test_an_undeclared_role_and_step_are_reported_and_the_profile_facts_remain(capsys, world):
