@@ -119,7 +119,6 @@ def check_branch_commit_subjects(
     skip: bool = False,
     task_id_guard_pattern: str | None = None,
     task_id_guard_mode: str = "off",
-    task_id_guard_source: str | None = None,
 ) -> list[str]:
     """Assert every branch commit subject introduced by the PR (base..head)
     conforms to Conventional Commits grammar -- the SAME predicate
@@ -190,7 +189,6 @@ def check_branch_commit_subjects(
             field=f"branch commit subject ({sha})",
             pattern=task_id_guard_pattern,
             mode=task_id_guard_mode,
-            source=task_id_guard_source,
         )
         if warning:
             warnings.append(warning)

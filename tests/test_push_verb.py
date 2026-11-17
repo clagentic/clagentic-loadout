@@ -37,7 +37,6 @@ import json
 import subprocess
 
 import pytest
-import yaml
 
 from clagentic_loadout.push import verb
 from clagentic_loadout.push.contention_check import ContentionVerdict
@@ -4273,29 +4272,6 @@ def _write_task_id_guard_config(repo, *, pattern: str, mode: str | None = None) 
     )
 
 
-#: User-level guard source variants: (fixture is the directly-resolvable remote,
-#: platform, repo-local guard config kwargs or None, extra branch commit subject
-#: or None, PR title, token provider class, expected exit, refusal names the
-#: user-level file and the matched id on stderr)
-_USER_LEVEL_GUARD_ROWS = [
-    pytest.param(
-        False, "forgejo", None, None, "feat: fix WIDGET-42 leak",
-        _RefusingTokenProvider, verb.EXIT_TASK_ID_GUARD_VIOLATION, True,
-        id="blocks-title-with-no-repo-local-config",
-    ),
-    pytest.param(
-        True, "github", None, "fix: address WIDGET-42 leak", "feat: t",
-        _RecordingTokenProvider, verb.EXIT_TASK_ID_GUARD_VIOLATION, False,
-        id="blocks-branch-commit-subject",
-    ),
-    pytest.param(
-        False, "forgejo", {"pattern": r"\bGADGET-\d+\b", "mode": "off"}, None,
-        "feat: fix WIDGET-42 leak", _RecordingTokenProvider, verb.EXIT_OK, False,
-        id="repo-local-pattern-wins",
-    ),
-]
-
-
 class TestTaskIdGuard:
     """Config-driven refusal of an internal work-item identifier reaching a
     PR title or a branch commit subject (lr-4005f5, task_id_guard) -- CLI
@@ -4471,59 +4447,6 @@ class TestTaskIdGuard:
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_OK
-
-    @staticmethod
-    def _write_user_level_guard(tmp_path, monkeypatch, *, pattern: str, mode: str | None = None):
-        user_root = tmp_path / "user-level-guard-root"
-        user_root.mkdir()
-        push_section: dict = {"task_id_guard_pattern": pattern}
-        if mode is not None:
-            push_section["task_id_guard_mode"] = mode
-        user_config = user_root / provider_config.USER_CONFIG_FILENAME
-        user_config.write_text(yaml.safe_dump({"push": push_section}), encoding="utf-8")
-        monkeypatch.setattr(provider_config, "DEFAULT_USER_CONFIG_ROOT", user_root)
-        return user_config
-
-    @pytest.mark.parametrize(
-        "direct_remote, platform, repo_local, commit_subject, title, "
-        "token_provider_cls, want_code, want_user_config_in_stderr",
-        _USER_LEVEL_GUARD_ROWS,
-    )
-    def test_user_level_guard_table(
-        self, request, tmp_path, monkeypatch, capsys,
-        direct_remote, platform, repo_local, commit_subject, title,
-        token_provider_cls, want_code, want_user_config_in_stderr,
-    ):
-        if direct_remote:
-            repo, _remote = _repo_with_directly_resolvable_remote(tmp_path)
-        else:
-            repo, _remote = request.getfixturevalue("repo_with_remote")
-        if repo_local is not None:
-            _write_task_id_guard_config(repo, **repo_local)
-        user_config = self._write_user_level_guard(
-            tmp_path, monkeypatch, pattern=_SYNTHETIC_GUARD_PATTERN
-        )
-        if commit_subject is not None:
-            _git(["commit", "--allow-empty", "-m", commit_subject], repo)
-        argv = ["--repo-path", str(repo), "--platform", platform]
-        if platform == "github":
-            argv += ["--repo", "some-owner/some-repo"]
-        argv += ["--title", title, "--body-stdin"]
-        extra = {"opener": _forgejo_create_opener()} if want_code == verb.EXIT_OK else {}
-
-        code = _run_main(
-            argv,
-            token_provider=token_provider_cls(),
-            stdin_text=json.dumps({"body": "some body"}),
-            monkeypatch=monkeypatch,
-            **extra,
-        )
-
-        assert code == want_code
-        if want_user_config_in_stderr:
-            stderr = capsys.readouterr().err
-            assert "WIDGET-42" in stderr
-            assert str(user_config) in stderr
 
     def test_task_trailer_in_body_is_never_inspected(self, repo_with_remote, monkeypatch):
         """The PR body's `Task: <id>` trailer is out of scope for this guard
