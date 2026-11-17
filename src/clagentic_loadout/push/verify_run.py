@@ -5,11 +5,13 @@ Pure mechanism: takes already-loaded `VerifyEntry` values (see
 `push.verify_config`) and a working directory, returns `VerifyResult`s. It
 knows nothing about PRs, platforms, or the push verb's exit codes.
 
-Every command runs as an argument list with no shell, stdin closed, in its
-own process group so a timeout kills the whole tree (a build tool's children
-included) rather than orphaning it. Captured output is reduced to a bounded
-tail and passed through the push redaction choke point before it can reach a
-PR body or an error message.
+Every command runs as an argument list with no shell and stdin closed, in a
+session of its own. A timeout (or an interrupt of the push) ends the whole tree
+it started, including a command that moved into a session of its own, through
+`process_tree.end_process_tree`, rather than orphaning it. Captured output is
+reduced to a bounded tail and passed through the push redaction choke point
+before it can reach a PR body or an error message; the test verb's line naming
+its run is also passed on to the push's stderr as it arrives.
 """
 
 from __future__ import annotations
@@ -17,8 +19,8 @@ from __future__ import annotations
 import contextlib
 import os
 import re
-import signal
 import subprocess
+import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,7 @@ from clagentic_loadout.bounded_capture import (
     join_capture,
     start_tail_capture,
 )
+from clagentic_loadout.process_tree import end_process_tree, raise_on_termination
 from clagentic_loadout.push.push_redaction import redact_then_bound
 from clagentic_loadout.push.verify_config import VerifyEntry
 from clagentic_loadout.verdict_record.record import utc_timestamp
@@ -40,8 +43,16 @@ OUTPUT_TAIL_CHARS = 2000
 #: OUTPUT_TAIL_CHARS characters at the widest UTF-8 encoding.
 _CAPTURE_BYTES = OUTPUT_TAIL_CHARS * 4
 
-#: Seconds to wait for the pipe readers after the process group is killed.
+#: Seconds to wait for the pipe readers after the command's process tree is killed.
 _DRAIN_SECONDS = 5
+
+#: The line the test verb prints to stderr when a run starts; the run id in it
+#: is what finds that run later. A text contract with the verb's own output,
+#: held by a test that matches the verb's real line against this pattern.
+FORWARDED_LINE_RE = re.compile(rb"^clagentic-loadout test: run \S+ started\b")
+
+#: Longest forwarded line; a longer one is cut.
+_FORWARD_LINE_BYTES = 4096
 
 #: Heading of the PR-body section; one constant so the writer and any reader
 #: agree on the exact text.
@@ -128,6 +139,29 @@ def describe_command(argv: tuple[str, ...]) -> str:
     return shown if hidden <= 0 else f"{shown} (+{hidden} argument(s) not shown)"
 
 
+class _StderrTee(TailBuffer):
+    """The stderr tail buffer, which also passes each line of the test verb that
+    names a run on to this process's stderr as it arrives. A check that outlives
+    its timeout is ended, and the run id is then the only way to find what it
+    recorded; waiting for the check to finish would never show it. Only lines
+    matching FORWARDED_LINE_RE are forwarded, redacted, so the rest of a check's
+    output reaches nothing but the bounded tail."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__(limit)
+        self._partial = bytearray()
+
+    def append(self, chunk: bytes) -> None:
+        super().append(chunk)
+        *lines, rest = (self._partial + chunk).split(b"\n")
+        self._partial = bytearray(rest[:_FORWARD_LINE_BYTES])
+        for line in lines:
+            if FORWARDED_LINE_RE.match(line):
+                text = redact_then_bound(line.decode("utf-8", errors="replace"), max_chars=_FORWARD_LINE_BYTES)
+                with contextlib.suppress(OSError, ValueError):
+                    print(text, file=sys.stderr, flush=True)
+
+
 def _tail(buffer: TailBuffer) -> str:
     return redact_then_bound(
         buffer.value().decode("utf-8", errors="replace"),
@@ -158,19 +192,22 @@ def run_verify_entry(entry: VerifyEntry, cwd: Path) -> VerifyResult:
             started=started, finished=utc_timestamp(),
         )
 
-    out_buf, err_buf, readers = start_tail_capture(proc, _CAPTURE_BYTES)
+    out_buf, err_buf, readers = start_tail_capture(
+        proc, _CAPTURE_BYTES, stderr_buffer=_StderrTee(_CAPTURE_BYTES)
+    )
     timed_out = False
     try:
-        proc.wait(timeout=entry.timeout_seconds)
+        with raise_on_termination():
+            proc.wait(timeout=entry.timeout_seconds)
     except subprocess.TimeoutExpired:
         timed_out = True
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
+        # Not a group kill: a command that starts its own session (the test verb
+        # starting its test runner) would survive one.
+        end_process_tree(proc.pid)
         with contextlib.suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=_DRAIN_SECONDS)
     except BaseException:
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(proc.pid, signal.SIGKILL)
+        end_process_tree(proc.pid)
         proc.wait()
         raise
 

@@ -7,14 +7,16 @@ JSON summary to print. Nothing here prints or exits; verb.py does.
 
 from __future__ import annotations
 
+import contextlib
 import os
+import signal
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from clagentic_loadout.repo_test import exits, provenance, store
+from clagentic_loadout.repo_test import exits, liveness, provenance, store
 from clagentic_loadout.repo_test.go_test_json import GoStreamError, parse_go_stream
 from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, JunitSummary, parse_junit
 from clagentic_loadout.repo_test.repo_match import SHA_ARG_RE, repo_label, repo_matches
@@ -281,6 +283,42 @@ def _timed_out_problem(what: str, prepared: PreparedRun) -> str:
     return f"{what} timed out after {prepared.timeout_seconds:g} seconds, the limit from {source}"
 
 
+def _ended_early_problem(exc: BaseException) -> str:
+    """The problem text of a run whose process was ended before it could finish."""
+    code = exc.code if isinstance(exc, SystemExit) else None
+    if isinstance(code, int) and code > 128:
+        try:
+            return f"the run was ended by signal {code - 128} ({signal.Signals(code - 128).name}) before it finished"
+        except ValueError:
+            return f"the run was ended by signal {code - 128} before it finished"
+    return f"the run ended early ({type(exc).__name__}) before it finished"
+
+
+def record_process(prepared: PreparedRun, pid: int) -> dict[str, Any]:
+    """Record *pid* as the process of the run in its provenance: pid, start ticks and
+    boot id, so a reader can tell the run still going from one whose process died
+    (see ``store.load_run``). A detached run records its supervisor, a foreground run
+    its own process. Returns what was recorded. Raises RunRefused when it cannot be
+    written."""
+    process = {
+        **liveness.capture_identity(pid),
+        "mode": prepared.mode,
+        "tier": prepared.tier,
+        "command": [*prepared.template, *prepared.files],
+        "started_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        write_json_atomic(
+            prepared.run_dir / store.PROVENANCE_FILE, {**prepared.recorded, store.PROCESS_KEY: process}
+        )
+    except OSError as exc:
+        raise RunRefused(
+            f"cannot record run {prepared.run_id} under {str(prepared.run_dir.parent)!r}: {exc}",
+            exits.EXIT_STORE_WRITE,
+        ) from exc
+    return process
+
+
 def finish_run(
     prepared: PreparedRun,
     on_start: Callable[[str, Mapping[str, Any]], None] | None = None,
@@ -360,6 +398,19 @@ def finish_run(
                 problem = f"{exc} (the command {describe_exit(outcome.exit_code)})"
             except JunitError as exc:
                 problem = f"{exc} (the command {describe_exit(outcome.exit_code)})"
+    except BaseException as exc:
+        # The runner has already ended the command's tree. Without a result the run
+        # would read as running until its process is gone and then as interrupted;
+        # writing it now says so at once and says why.
+        with contextlib.suppress(OSError, store.StoreError):
+            store.record_end(
+                run_dir,
+                run_id,
+                {"mode": mode, "tier": tier, "command": [*template, *files], "started_at": started.isoformat()},
+                store.STATE_INTERRUPTED,
+                _ended_early_problem(exc),
+            )
+        raise
     finally:
         cleanup_problem = remove_scratch(scratch)
     if cleanup_problem is not None:
@@ -459,6 +510,7 @@ def execute_run(
         expect_repo=expect_repo,
         expect_head=expect_head,
     )
+    record_process(prepared, os.getpid())
     return finish_run(prepared, on_start)
 
 
@@ -470,4 +522,5 @@ __all__ = [
     "finish_run",
     "load_declared_tests",
     "prepare_run",
+    "record_process",
 ]

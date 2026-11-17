@@ -3,15 +3,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 import pytest
-from _repo_test_support import make_repo, write_run, write_unfinished_run
+from _repo_test_support import make_repo, pid_is_gone, wait_for_file, write_run, write_unfinished_run
 
 from clagentic_loadout.repo_test import exits, liveness, stop_cmd, store
 from clagentic_loadout.repo_test.spec import (
@@ -154,6 +156,61 @@ def test_stop_ends_the_supervisor_and_the_command_session_and_the_run_reads_stop
     before = (reports / started["run_id"] / store.RESULT_FILE).read_bytes()
     assert _call(capsys, "stop", started["run_id"])[0] == exits.EXIT_OK
     assert (reports / started["run_id"] / store.RESULT_FILE).read_bytes() == before
+
+
+def _start_foreground(tmp_path: Path, reports: Path) -> tuple[subprocess.Popen[bytes], Path, list[int]]:
+    """A foreground run of the hanging repository in a child process, once its command
+    is running: the run, its directory, and the pids of the command and its child."""
+    repo, pids = _hanging_repo(tmp_path)
+    verb = subprocess.Popen(
+        [sys.executable, "-m", "clagentic_loadout.repo_test.verb", "run", "full", "--repo-root", str(repo)],
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    command_pids = [int(pid) for pid in wait_for_file(pids).split()]
+    run_dir = max(reports.iterdir(), key=lambda path: path.name)
+    return verb, run_dir, command_pids
+
+
+def test_a_foreground_run_that_is_terminated_ends_its_command_and_records_a_terminal_state(
+    tmp_path: Path, reports: Path
+) -> None:
+    verb, run_dir, command_pids = _start_foreground(tmp_path, reports)
+    try:
+        os.kill(verb.pid, signal.SIGTERM)
+        _, err = verb.communicate(timeout=_WAIT)
+    finally:
+        for pid in command_pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+    assert verb.returncode == 128 + signal.SIGTERM
+    assert b"finished (interrupted)" in err
+    assert all(pid_is_gone(pid) for pid in command_pids)
+    result = json.loads((run_dir / store.RESULT_FILE).read_text())
+    assert result["state"] == store.STATE_INTERRUPTED and "SIGTERM" in result["problem"]
+
+
+def test_a_foreground_run_whose_process_was_killed_reads_interrupted_like_a_detached_one(
+    tmp_path: Path, reports: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    write_unfinished_run(reports, "20260101T000000Z-1", "/repos/alpha", alive=False)
+    detached_code, detached, _ = _call(capsys, "report", "20260101T000000Z-1")
+    verb, run_dir, command_pids = _start_foreground(tmp_path, reports)
+    # SIGKILL runs no cleanup: the run has no result, and its recorded process is gone.
+    os.kill(verb.pid, signal.SIGKILL)
+    verb.communicate(timeout=_WAIT)
+    try:
+        code, summary, _ = _call(capsys, "report", run_dir.name)
+    finally:
+        for pid in command_pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+
+    assert (code, summary["state"]) == (detached_code, detached["state"]) == (exits.EXIT_OK, store.STATE_INTERRUPTED)
+    assert code != exits.EXIT_BAD_RUN_ID
 
 
 @pytest.mark.parametrize("state", [store.STATE_COMPLETE, store.STATE_UNRUNNABLE, store.STATE_TIMED_OUT, store.STATE_STOPPED])

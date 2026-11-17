@@ -11,8 +11,9 @@ must also lead its own process group, so a recycled pid is never signalled. No p
 is looked up by pid alone. When the supervisor is alive and the record is absent or
 names a process that has exited, stop waits within the settle window for a live record;
 if none appears the supervisor
-is ended and stop reports that the command could not be identified. A process the
-command moved out of its group (a daemon) is not reached.
+is ended and stop reports that the command could not be identified. Each process is
+ended with everything it started (``process_tree.end_process_tree``); a process that
+daemonised, sharing no session or group with the tree, is not reached.
 
 A run that is not running (complete, unrunnable, interrupted, timed out or already
 stopped) is reported as it stands and nothing is changed or signalled. Only the user
@@ -24,7 +25,6 @@ from __future__ import annotations
 import json
 import os
 import pwd
-import signal
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from clagentic_loadout.process_tree import end_process_tree
 from clagentic_loadout.repo_test import exits, liveness, store
 from clagentic_loadout.repo_test.store import RunRecord, StoreError
 
@@ -99,20 +100,14 @@ def _is_live_group_leader(recorded: Mapping[str, Any] | None) -> bool:
 
 
 def _end_group(identity: Mapping[str, Any]) -> None:
-    """Kill the process group *identity* leads, if it is still that process: a pid
-    that no longer matches its recorded identity may belong to an unrelated process
-    and is never signalled."""
-    pid = identity["pid"]
+    """End the process *identity* names and everything it started, if it is still
+    that process: a pid that no longer matches its recorded identity may belong to
+    an unrelated process and is never signalled. A process that is not this user's
+    to signal is left alive and the caller's check that the run's processes are gone
+    refuses the stop."""
     if not liveness.is_alive(identity):
         return
-    try:
-        os.killpg(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    except PermissionError as exc:
-        raise StopRefused(
-            f"process {pid} of this run is not yours to signal: {exc}", exits.EXIT_REPO_MISMATCH
-        ) from exc
+    end_process_tree(identity["pid"])
 
 
 def _gone(identities: list[Mapping[str, Any]]) -> bool:
@@ -171,7 +166,7 @@ def stop_run(root: Path, run_id: str) -> StopOutcome:
     if was_alive and not commands:
         raise StopRefused(
             f"run {run_id}: its supervisor was ended but it never recorded a live command, "
-            "so the command could not be identified and was not signalled",
+            "so the command could not be identified; only what the supervisor itself started was ended",
             exits.EXIT_REPO_MISMATCH,
         )
 

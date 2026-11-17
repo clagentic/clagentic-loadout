@@ -44,9 +44,12 @@ class TailBuffer:
 
 
 def _drain(stream, buffer: TailBuffer) -> None:
+    # read1 returns what has arrived; read(n) on a buffered pipe waits for n bytes
+    # or EOF, which would hold every line back from a watcher until the child ends.
+    read = getattr(stream, "read1", stream.read)
     try:
         while True:
-            chunk = stream.read(_READ_CHUNK)
+            chunk = read(_READ_CHUNK)
             if not chunk:
                 return
             buffer.append(chunk)
@@ -57,13 +60,19 @@ def _drain(stream, buffer: TailBuffer) -> None:
 
 
 def start_tail_capture(
-    proc: "subprocess.Popen[bytes]", limit: int, *, stderr_limit: int | None = None
+    proc: "subprocess.Popen[bytes]",
+    limit: int,
+    *,
+    stderr_limit: int | None = None,
+    stderr_buffer: TailBuffer | None = None,
 ) -> tuple[TailBuffer, TailBuffer, list[threading.Thread]]:
     """Start draining proc.stdout and proc.stderr; returns (stdout, stderr,
     threads). Both pipes must have been opened with subprocess.PIPE. *limit*
-    bounds stdout, and stderr too unless *stderr_limit* gives it its own."""
+    bounds stdout, and stderr too unless *stderr_limit* gives it its own.
+    *stderr_buffer* replaces the stderr buffer, for a caller that watches the
+    stream as it arrives (a TailBuffer subclass)."""
     out_buf = TailBuffer(limit)
-    err_buf = TailBuffer(limit if stderr_limit is None else stderr_limit)
+    err_buf = stderr_buffer or TailBuffer(limit if stderr_limit is None else stderr_limit)
     threads = [
         threading.Thread(target=_drain, args=(proc.stdout, out_buf), daemon=True),
         threading.Thread(target=_drain, args=(proc.stderr, err_buf), daemon=True),

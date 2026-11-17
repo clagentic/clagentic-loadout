@@ -11,8 +11,6 @@ from the per-chunk record instead of being a bare "timed out".
 from __future__ import annotations
 
 import contextlib
-import os
-import signal
 import subprocess
 import uuid
 from collections.abc import Callable, Sequence
@@ -20,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from clagentic_loadout.bounded_capture import join_capture, start_stdin_feed, start_tail_capture
+from clagentic_loadout.process_tree import end_process_tree
 from clagentic_loadout.review.atomic_io import (
     PRIVATE_FILE_MODE,
     ensure_private_dir,
@@ -147,11 +146,11 @@ def _save_stderr(stderr: bytes | str | None, log_dir: Path | None, label: str) -
 
 
 def _kill_group(proc: "subprocess.Popen[bytes]") -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError):
-        # The group is already gone, or was never ours to signal; fall back
-        # to the direct child so a timeout never leaves it running.
+    # The engine may start helpers in sessions of their own, which a group kill
+    # does not reach; the shared primitive ends those too.
+    if not end_process_tree(proc.pid):
+        # Something was not ours to signal, or survived; fall back to the direct
+        # child so a timeout never leaves it running.
         with contextlib.suppress(ProcessLookupError):
             proc.kill()
 

@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout._version import get_version
+from clagentic_loadout.process_tree import raise_on_termination
 from clagentic_loadout.repo_test import exits, report_cmd, store
 from clagentic_loadout.repo_test.report_cmd import LATEST, ReportRefused
 from clagentic_loadout.repo_test.detach import start_detached
@@ -300,17 +301,25 @@ def _run(args: argparse.Namespace) -> int:
         print(_describe_start(run_id, recorded, "started"), file=sys.stderr, flush=True)
 
     try:
-        outcome = execute_run(
-            mode=args.mode,
-            paths=paths,
-            repo_root=args.repo_root,
-            base=args.base,
-            timeout_seconds=args.timeout,
-            tier=tier,
-            expect_repo=args.expect_repo,
-            expect_head=args.expect_head,
-            on_start=announce,
-        )
+        with raise_on_termination():
+            outcome = execute_run(
+                mode=args.mode,
+                paths=paths,
+                repo_root=args.repo_root,
+                base=args.base,
+                timeout_seconds=args.timeout,
+                tier=tier,
+                expect_repo=args.expect_repo,
+                expect_head=args.expect_head,
+                on_start=announce,
+            )
+    except SystemExit:
+        # A termination signal: the run is already recorded as interrupted, and the
+        # pair of start and finish lines is closed before the exit.
+        if started:
+            run_id, recorded = started[0]
+            print(_describe_start(run_id, recorded, "finished (interrupted)"), file=sys.stderr, flush=True)
+        raise
     except RunRefused as exc:
         print(f"{_PROG}: {exc}", file=sys.stderr)
         if started:
