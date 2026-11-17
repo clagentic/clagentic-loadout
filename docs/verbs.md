@@ -46,6 +46,24 @@ repo, and `<resolved base>/api/v1/repos/<owner>/<repo>/...` for Forgejo.
 When the resolved base host is itself a GitHub host, no `/api/v1` form is
 suggested on it; the message names the full GitHub URL only.
 
+**GET redirects — one hop, no credential:** a `GET` whose response is a
+301, 302, 303, 307 or 308 follows exactly one redirect, and only to an
+`https` `Location`. The hop is a new request built from the `Location`
+alone: it carries no `Authorization` header, no cookie and none of the first
+request's headers, and it goes through the same no-redirect opener, so a
+second redirect is refused. The target's status and body are returned as a
+direct `GET`'s would be, and a non-JSON body is printed verbatim. A
+non-`https`, missing or unparsable `Location`, or a second redirect, exits
+`10` with the reason on stderr. The `Location` and its query string are never
+printed, because a pre-signed URL carries a signature. A `POST`, `PATCH`,
+`PUT` or `DELETE` that receives any redirect is refused (exit `10`) with no
+second request. Example, reading a GitHub Actions job log (the logs endpoint
+answers `302` to pre-signed storage):
+
+```
+loadout-git-host-api --caller <role> GET https://api.github.com/repos/<owner>/<repo>/actions/jobs/<job-id>/logs
+```
+
 **`--paginate` — read every comment on a PR or issue:**
 a bare `GET` of a comments listing returns only the host's first page; on
 GitHub that is the oldest 30 comments, so the newest verdict on a long PR is

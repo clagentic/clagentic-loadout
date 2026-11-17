@@ -434,6 +434,123 @@ class TestRedirectHardening:
         assert result is None
 
 
+_SIGNED_QUERY = "sig=SECRETSIG123&exp=99"
+_HOP_URL = f"https://blob.example.net/logs/1.txt?{_SIGNED_QUERY}"
+_GET_TARGETS = [
+    ("forgejo", "/api/v1/repos/o/r/actions/jobs/1/logs", "gh-unused"),
+    ("github", "https://api.github.com/repos/o/r/actions/jobs/1/logs", "gh-reader-tok"),
+]
+
+
+def _redirect_opener(first_code, location, hop):
+    """Fake no-redirect opener: the first request answers a 3xx, the second
+    answers `hop` (an int status for a 3xx/error, or a (status, body) tuple)."""
+    log = []
+
+    def opener(req, timeout=15):
+        log.append(req)
+        if len(log) == 1:
+            headers = {} if location is None else {"Location": location}
+            raise urllib.error.HTTPError(
+                req.full_url, first_code, "Redirect", headers, io.BytesIO(b"")
+            )
+        if isinstance(hop, tuple):
+            return _FakeResponse(*hop)
+        raise urllib.error.HTTPError(req.full_url, hop, "Redirect", {"Location": "https://x.example.net/n?s=1"}, io.BytesIO(b""))
+
+    opener.log = log
+    return opener
+
+
+class TestGetRedirectOneHop:
+    """A GET follows one redirect as a fresh, credential-free request; a write
+    method keeps refusing every redirect."""
+
+    @pytest.mark.parametrize("code", [301, 302, 303, 307, 308])
+    @pytest.mark.parametrize("kind,path,tok", _GET_TARGETS)
+    def test_followed_with_a_fresh_header_less_request(self, code, kind, path, tok, capsys):
+        opener = _redirect_opener(code, _HOP_URL, (200, b"FAILED tests/test_x.py::test_y\n"))
+        rc = git_host_api.main(
+            ["--caller", "agent-echo", "GET", path],
+            token_provider=_PlatformRecordingProvider(tok), opener=opener,
+        )
+        out = capsys.readouterr()
+        assert rc == git_host_api.EXIT_OK
+        assert len(opener.log) == 2
+        first, hop = opener.log
+        assert first.get_header("Authorization") is not None
+        assert hop.full_url == _HOP_URL
+        assert hop.get_method() == "GET"
+        assert hop.header_items() == []
+        assert out.out == "FAILED tests/test_x.py::test_y\n"
+        assert _SIGNED_QUERY not in out.err and _SIGNED_QUERY not in out.out
+
+    @pytest.mark.parametrize("kind,path,tok", _GET_TARGETS)
+    @pytest.mark.parametrize(
+        "location,hop,reason",
+        [
+            ("http://blob.example.net/l?sig=SECRETSIG123", (200, b""), "not an https"),
+            (None, (200, b""), "no Location"),
+            ("", (200, b""), "no Location"),
+            ("https://[bad/l?sig=SECRETSIG123", (200, b""), "could not be parsed"),
+            ("/relative?sig=SECRETSIG123", (200, b""), "not an https"),
+            (_HOP_URL, 302, "redirected again"),
+        ],
+    )
+    def test_refused_closed_with_reason_and_no_location(
+        self, kind, path, tok, location, hop, reason, capsys
+    ):
+        opener = _redirect_opener(302, location, hop)
+        rc = git_host_api.main(
+            ["--caller", "agent-echo", "GET", path],
+            token_provider=_PlatformRecordingProvider(tok), opener=opener,
+        )
+        out = capsys.readouterr()
+        assert rc == git_host_api.EXIT_CURL_FAILED
+        assert reason in out.err
+        assert len(opener.log) == (2 if hop == 302 else 1)
+        assert "SECRETSIG123" not in out.err + out.out
+        assert "blob.example.net" not in out.err + out.out
+
+    def test_hop_error_status_is_returned_like_a_direct_get(self):
+        def opener(req, timeout=15):
+            if "blob" in req.full_url:
+                raise urllib.error.HTTPError(req.full_url, 403, "Forbidden", {}, io.BytesIO(b"expired"))
+            raise urllib.error.HTTPError(
+                req.full_url, 302, "Found", {"Location": _HOP_URL}, io.BytesIO(b"")
+            )
+
+        status, body = git_host_api.request(
+            "http://git-host.example.com", "GET", "/p", "tok", opener=opener
+        )
+        assert (status, body) == (403, b"expired")
+
+    def test_hop_network_failure_does_not_name_the_target(self):
+        def opener(req, timeout=15):
+            if "blob" in req.full_url:
+                raise urllib.error.URLError(f"cannot reach {req.full_url}")
+            raise urllib.error.HTTPError(
+                req.full_url, 302, "Found", {"Location": _HOP_URL}, io.BytesIO(b"")
+            )
+
+        with pytest.raises(git_host_api.GitHostApiError) as exc_info:
+            git_host_api.request("http://git-host.example.com", "GET", "/p", "tok", opener=opener)
+        assert exc_info.value.code == git_host_api.EXIT_CURL_FAILED
+        assert "SECRETSIG123" not in str(exc_info.value)
+
+    @pytest.mark.parametrize("method", ["POST", "PATCH", "PUT", "DELETE"])
+    def test_write_methods_make_one_request_and_refuse(self, method):
+        opener = _redirect_opener(307, _HOP_URL, (200, b"{}"))
+        with pytest.raises(git_host_api.GitHostApiError) as exc_info:
+            git_host_api.request(
+                "http://git-host.example.com", method, "/api/v1/repos/o/r/x", "tok",
+                body_bytes=b"{}", opener=opener,
+            )
+        assert exc_info.value.code == git_host_api.EXIT_CURL_FAILED
+        assert len(opener.log) == 1
+        assert "SECRETSIG123" not in str(exc_info.value)
+
+
 # ---------------------------------------------------------------------------
 # verify_comment_on_pr -- freshness-anchored readback
 # ---------------------------------------------------------------------------

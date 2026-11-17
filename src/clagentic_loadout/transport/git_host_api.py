@@ -867,6 +867,56 @@ def build_request(
     return urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
 
 
+def _redirect_refused(method: str, path: str, status: int, reason: str) -> None:
+    """Fail closed on a redirect. The message names the reason but never the
+    Location, whose query may carry a pre-signed signature."""
+    _fail(
+        f"git-host API {method} {path} received HTTP {status} (redirect) -- "
+        f"refused to follow: {reason}.",
+        code=EXIT_CURL_FAILED,
+    )
+
+
+def _follow_get_redirect_once(
+    method: str, path: str, exc: urllib.error.HTTPError, *, urlopen, timeout: int
+) -> tuple[int, bytes]:
+    """Follow ONE redirect of a GET, as a brand-new request.
+
+    The hop is built from the Location alone: no Authorization, no cookie and
+    none of the first request's headers are copied, so no credential can reach
+    the target by construction (a pre-signed blob URL needs none). It goes
+    through the same no-redirect opener, so a second 3xx is refused. The
+    target's status and body are returned as a direct GET's would be.
+    """
+    location = exc.headers.get("Location") if exc.headers is not None else None
+    if not location:
+        _redirect_refused(method, path, exc.code, "the response carried no Location")
+    try:
+        parts = urllib.parse.urlsplit(location)
+    except ValueError:
+        _redirect_refused(method, path, exc.code, "the Location could not be parsed")
+    if parts.scheme != "https" or not parts.netloc:
+        _redirect_refused(method, path, exc.code, "the Location is not an https URL")
+
+    hop = urllib.request.Request(location, method="GET")
+    try:
+        with urlopen(hop, timeout=timeout) as resp:
+            return (getattr(resp, "status", None) or resp.getcode()), resp.read()
+    except urllib.error.HTTPError as hop_exc:
+        if 300 <= hop_exc.code < 400:
+            _redirect_refused(
+                method, path, hop_exc.code, "the redirect target redirected again"
+            )
+        return hop_exc.code, hop_exc.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as hop_exc:
+        # The exception text can embed the target URL, so only its type is named.
+        _fail(
+            f"git-host API {method} {path} redirect target unreachable "
+            f"({type(hop_exc).__name__})",
+            code=EXIT_CURL_FAILED,
+        )
+
+
 def request(
     git_host_base: str,
     method: str,
@@ -894,7 +944,9 @@ def request(
     injected, this builds its own no-redirect opener (see _NoRedirectHandler) rather than
     calling urllib.request.urlopen directly -- urlopen's default redirect
     handler would replay the Authorization header (the live bearer token)
-    to whatever host a 3xx Location names.
+    to whatever host a 3xx Location names. A GET that receives a 3xx follows
+    exactly one https Location as a new, header-less request (see
+    _follow_get_redirect_once); a write method refuses every 3xx.
     """
     req = build_request(
         git_host_base, method, path, token, body_bytes=body_bytes, extra_headers=extra_headers
@@ -910,11 +962,16 @@ def request(
         if 300 <= exc.code < 400:
             # A 3xx here means _NoRedirectHandler refused to follow it (see
             # above) -- this is a redirect refusal, not an ordinary HTTP
-            # error response. Always fail closed, for GET too: a redirect
-            # must never be treated as a completed call whose body a caller
-            # goes on to parse, and its Location is never named here so it
-            # cannot leak into a log alongside a request that carried the
-            # live bearer token.
+            # error response. A GET takes exactly one credential-free hop
+            # (see _follow_get_redirect_once); every other method fails
+            # closed. A redirect is never treated as a completed call whose
+            # body a caller goes on to parse, and its Location is never named
+            # in any message so a pre-signed URL's signature cannot leak into
+            # a log.
+            if method == "GET":
+                return _follow_get_redirect_once(
+                    method, path, exc, urlopen=urlopen, timeout=timeout
+                )
             _fail(
                 f"git-host API {method} {path} received HTTP {exc.code} "
                 f"(redirect) -- refused to follow; a redirect could replay "
@@ -1446,7 +1503,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "heredoc-staged state note: this tool composes the body "
             "in-process. PATH may also be an absolute GitHub API URL (e.g. "
             "https://api.github.com/...), in which case the reader's GitHub "
-            "token is used and no git-host base is prepended. A DELETE to "
+            "token is used and no git-host base is prepended. A GET that "
+            "receives a redirect (301/302/303/307/308) follows exactly one "
+            "https Location as a NEW request with no Authorization header, "
+            "cookie or caller header (a pre-signed blob URL needs none); a "
+            "non-https or missing Location, or a second redirect, exits 10, "
+            "and the Location is never printed. A POST/PATCH/PUT/DELETE "
+            "refuses every redirect. A DELETE to "
             "issues/comments/<id> requires --delete-own-comment: belt-and-"
             "suspenders self-delete that GETs the comment first and refuses "
             "unless the caller's own bot login authored it and its body "
@@ -1462,6 +1525,10 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "--verify-comment --pr-sha abc123 POST "
             "/api/v1/repos/some-owner/some-repo/issues/42/comments\n"
             "  loadout-git-host-api GET https://api.github.com/repos/some-owner/some-repo/pulls/42/reviews\n"
+            "\n"
+            "Read a job log (the logs endpoint answers 302 to pre-signed storage;\n"
+            "the one hop is followed without credentials):\n"
+            "  loadout-git-host-api GET https://api.github.com/repos/some-owner/some-repo/actions/jobs/12345/logs\n"
             "\n"
             "Reviewer route -- tool-owned verdict fence, NO backticks cross the shell:\n"
             "  echo '{\"body\":\"LGTM, no issues found.\",\"review_status\":\"clean\"}' | \\\n"
