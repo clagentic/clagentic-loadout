@@ -98,7 +98,10 @@ class TestConfigExplicitOptIn:
 
 _OTHER_PATTERN = r"\bGADGET-\d+\b"
 
-#: (repo-local push section or None, user-level push section or None,
+#: Row marker: load with no repo root at all (distinct from a repo root with no config).
+_NO_REPO_ROOT = object()
+
+#: (repo-local push section or None (or _NO_REPO_ROOT), user-level push section or None,
 #: expected pattern, expected mode, expected source is the user-level file)
 _PRECEDENCE_ROWS = [
     pytest.param(None, None, None, MODE_OFF, False, id="nothing-anywhere-is-a-no-op"),
@@ -124,6 +127,10 @@ _PRECEDENCE_ROWS = [
         None, {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN, CONFIG_KEY_TASK_ID_MODE: MODE_WARN},
         _SYNTHETIC_PATTERN, MODE_WARN, True, id="user-level-mode-is-honored",
     ),
+    pytest.param(
+        _NO_REPO_ROOT, {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN},
+        _SYNTHETIC_PATTERN, MODE_BLOCK, True, id="user-level-works-with-no-repo-root",
+    ),
 ]
 
 
@@ -134,11 +141,14 @@ class TestConfigUserLevelFallback:
     def test_precedence_table(
         self, tmp_path, repo_push, user_push, want_pattern, want_mode, want_user_source
     ):
-        repo_root = tmp_path / "repo"
-        repo_root.mkdir()
         user_root = tmp_path / "user-config-root"
         user_root.mkdir()
-        if repo_push is not None:
+        if repo_push is _NO_REPO_ROOT:
+            repo_root = None
+        else:
+            repo_root = tmp_path / "repo"
+            repo_root.mkdir()
+        if repo_push is not None and repo_push is not _NO_REPO_ROOT:
             _write_config(repo_root, {"push": repo_push})
         if user_push is not None:
             (user_root / "config.yaml").write_text(
@@ -155,13 +165,6 @@ class TestConfigUserLevelFallback:
             assert cfg.source == str(user_root / "config.yaml")
         else:
             assert cfg.source == str(repo_root / ".clagentic" / "loadout" / "config.yaml")
-
-    def test_user_level_works_with_no_repo_root(self, tmp_path):
-        (tmp_path / "config.yaml").write_text(
-            yaml.safe_dump({"push": {CONFIG_KEY_TASK_ID_PATTERN: _SYNTHETIC_PATTERN}}),
-            encoding="utf-8",
-        )
-        assert load_task_id_guard_config(None, config_root=tmp_path).pattern == _SYNTHETIC_PATTERN
 
     def test_invalid_user_level_pattern_names_the_user_level_file(self, tmp_path):
         (tmp_path / "config.yaml").write_text(
