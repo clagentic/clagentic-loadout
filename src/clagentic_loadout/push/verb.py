@@ -1150,7 +1150,11 @@ def _run_task_id_guard_title_check(args: argparse.Namespace, *, project_root: Pa
         return
     config = load_task_id_guard_config(project_root)
     warning = check_task_id_guard(
-        args.title, field="PR title", pattern=config.pattern, mode=config.mode
+        args.title,
+        field="PR title",
+        pattern=config.pattern,
+        mode=config.mode,
+        source=config.source,
     )
     if warning:
         print(f"push: WARNING -- {warning}", file=sys.stderr)
@@ -1361,6 +1365,7 @@ def _run_task_id_guard_commit_check(
             field=f"branch commit subject ({sha})",
             pattern=config.pattern,
             mode=config.mode,
+            source=config.source,
         )
         if warning:
             print(f"push: WARNING -- {warning}", file=sys.stderr)

@@ -13,9 +13,11 @@ NOT A HARDCODED lr-XXXXXX GUARD (hard constraint — CLAUDE.md rule 1 "no
 internal identity in product code," rule 6 "task_id is an opaque work-item
 reference with a CONFIGURABLE PATTERN, loadout does not assume any particular
 tracker"): the forbidden-pattern set is resolved EXCLUSIVELY through
-TaskIdGuardConfig, loaded from the SAME `.clagentic/loadout/config.yaml`
+TaskIdGuardConfig, loaded from the repo-local `.clagentic/loadout/config.yaml`
 seam every other section owner in this package reads through
-(repo_config.resolve_repo_config_path). There is no source-literal pattern
+(repo_config.resolve_repo_config_path), falling back to the user-level
+config's `push:` section when the repo-local file sets no pattern (see
+load_task_id_guard_config). There is no source-literal pattern
 anywhere in this module. A deployment on a DIFFERENT tracker convention
 (JIRA-1234, PROJ-5678, anything) configures its own regex; a deployment that
 never configures one gets a strict NO-OP (see NO-OP BY DEFAULT below).
@@ -76,6 +78,7 @@ from clagentic_loadout.repo_config import (
     DEFAULT_CONFIG_RELATIVE_PATH,
     resolve_repo_config_path,
 )
+from clagentic_loadout.transport import provider_config
 
 #: Top-level section key. Shared with every other push:-owning module
 #: (push.contention_config, push.cleanliness_config) — one sectioned file,
@@ -141,16 +144,23 @@ def load_task_id_guard_config(
     repo_root: str | Path | None = None,
     *,
     config_relative_path: str = DEFAULT_CONFIG_RELATIVE_PATH,
+    config_root: str | Path | None = None,
 ) -> TaskIdGuardConfig:
     """Resolve the task-id-guard configuration for a repo.
 
-    Reads `<repo_root>/<config_relative_path>` (default
-    `.clagentic/loadout/config.yaml`), expecting a `push:` top-level section
-    holding `task_id_guard_pattern` (a regex string) and, optionally,
+    TWO SOURCES, in precedence order: (1) the repo-local
+    `<repo_root>/<config_relative_path>` (default
+    `.clagentic/loadout/config.yaml`) when its `push:` section sets
+    `task_id_guard_pattern`; else (2) the `push:` section of the user-level
+    config (`<config_root>/config.yaml`, default the user config root), so a
+    checkout with no repo-local config -- a nested worktree, for one -- gets
+    the deployment's pattern. The user-level value only fills an absence; a
+    repo-local pattern always wins. Mode comes from the SAME source as the
+    pattern, never mixed across the two. Each `push:` section holds
+    `task_id_guard_pattern` (a regex string) and, optionally,
     `task_id_guard_mode` (one of "off"/"warn"/"block").
 
-    ABSENCE SEMANTICS: no repo_root, no config file, no `push:` section, or
-    no `task_id_guard_pattern` key -> `_default_config()`
+    ABSENCE SEMANTICS: no pattern in either source -> `_default_config()`
     (pattern=None, mode="off") -- the guard is a strict no-op. This is the
     hard acceptance criterion "no configured pattern means the guard is a
     no-op, it must never fail closed on an unconfigured deployment."
@@ -168,14 +178,27 @@ def load_task_id_guard_config(
             task_id_guard_pattern is not a non-empty valid-regex string, or
             task_id_guard_mode is not one of "off"/"warn"/"block".
     """
+    repo_config = _load_repo_local_config(repo_root, config_relative_path)
+    if repo_config is not None:
+        return repo_config
+    return _load_user_level_config(config_root)
+
+
+def _load_repo_local_config(
+    repo_root: str | Path | None, config_relative_path: str
+) -> TaskIdGuardConfig | None:
+    """The repo-local source: a resolved config when the repo's own file sets
+    task_id_guard_pattern, None when it does not (no repo_root, no file, no
+    push section, or no pattern key) so the caller falls through to the
+    user-level source."""
     if repo_root is None:
-        return _default_config()
+        return None
 
     config_path = resolve_repo_config_path(
         repo_root, config_relative_path=config_relative_path
     )
     if not config_path.exists():
-        return _default_config()
+        return None
 
     try:
         raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
@@ -185,12 +208,38 @@ def load_task_id_guard_config(
         ) from exc
 
     if not isinstance(raw, dict):
-        return _default_config()
+        return None
 
     push_section = raw.get(CONFIG_SECTION_PUSH)
     if not isinstance(push_section, dict) or CONFIG_KEY_TASK_ID_PATTERN not in push_section:
-        return _default_config()
+        return None
+    return _resolve_push_section(push_section, str(config_path))
 
+
+def _load_user_level_config(config_root: str | Path | None) -> TaskIdGuardConfig:
+    """The user-level source: the `push:` section of
+    <config_root>/config.yaml. Fills an absence only -- the repo-local file
+    never reaches here when it sets a pattern. Absent section or key is the
+    strict no-op default."""
+    push_section = provider_config.load_user_config_section(
+        CONFIG_SECTION_PUSH, config_root=config_root
+    )
+    if CONFIG_KEY_TASK_ID_PATTERN not in push_section:
+        return _default_config()
+    root = (
+        Path(config_root)
+        if config_root is not None
+        else provider_config.DEFAULT_USER_CONFIG_ROOT
+    )
+    return _resolve_push_section(
+        push_section, str(root / provider_config.USER_CONFIG_FILENAME)
+    )
+
+
+def _resolve_push_section(push_section: dict, config_path: str) -> TaskIdGuardConfig:
+    """Validate a push section that carries task_id_guard_pattern and resolve
+    pattern and mode from it. *config_path* names the file in every error and
+    becomes the config's source."""
     raw_pattern = push_section[CONFIG_KEY_TASK_ID_PATTERN]
     if not isinstance(raw_pattern, str) or not raw_pattern:
         raise InvalidTaskIdGuardConfigError(
@@ -214,10 +263,20 @@ def load_task_id_guard_config(
             f"must be one of {sorted(_VALID_MODES)!r}, got {raw_mode!r}."
         )
 
-    return TaskIdGuardConfig(pattern=raw_pattern, mode=raw_mode, source=str(config_path))
+    return TaskIdGuardConfig(pattern=raw_pattern, mode=raw_mode, source=config_path)
 
 
-def _format_violation(*, field: str, value: str, matched: str) -> str:
+def _describe_source(source: str | None) -> str:
+    """Name the config file a pattern came from; a caller that never learned
+    the source still gets an accurate statement of where the key can live."""
+    if source is None or source == "default":
+        return "the repo-local or user-level loadout config"
+    return f"`{source}`"
+
+
+def _format_violation(
+    *, field: str, value: str, matched: str, source: str | None = None
+) -> str:
     """Build the TaskIdGuardViolation message. Names the offending field,
     the full offending value, the exact matched substring, and the config
     key that enabled the check (so the docs are reachable from the refusal
@@ -234,7 +293,7 @@ def _format_violation(*, field: str, value: str, matched: str) -> str:
         f"opaque work-item reference belongs in the PR body's 'Task: <id>' "
         f"trailer instead (never a title or commit subject) -- see "
         f"--task-id on the push verb.\n"
-        f"Enabled by: `.clagentic/loadout/config.yaml` "
+        f"Enabled by: {_describe_source(source)} "
         f"`{CONFIG_SECTION_PUSH}.{CONFIG_KEY_TASK_ID_PATTERN}` "
         f"(mode `{CONFIG_SECTION_PUSH}.{CONFIG_KEY_TASK_ID_MODE}`, default "
         f"{DEFAULT_MODE_WHEN_PATTERN_CONFIGURED!r} once a pattern is set). "
@@ -249,7 +308,8 @@ def check_task_id_guard(
     field: str,
     pattern: str | None,
     mode: str,
-) -> None:
+    source: str | None = None,
+) -> str | None:
     """Check *value* (a PR title, or a single commit subject -- first line
     only) against *pattern*.
 
@@ -280,7 +340,9 @@ def check_task_id_guard(
     if match is None:
         return None
 
-    message = _format_violation(field=field, value=value, matched=match.group(0))
+    message = _format_violation(
+        field=field, value=value, matched=match.group(0), source=source
+    )
 
     if mode == MODE_BLOCK:
         raise TaskIdGuardViolation(
