@@ -24,6 +24,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 from clagentic_loadout.interface.diff import diff_documents
 from clagentic_loadout.interface.model import INTERFACE_PATH, InterfaceDoc, parse_interface_text
 
@@ -70,13 +72,51 @@ def module_exit_codes(module_file: Path) -> dict[str, int]:
     return codes
 
 
+#: Verbs the umbrella script routes to (``clagentic-loadout <verb>``) that keep their
+#: exit codes in a module of their own: (module under the package, prefix put on each
+#: of its meanings). They are declared on the umbrella script's entry, so their codes
+#: are read from these modules as well. The prefix keeps two verbs that name a
+#: different code alike (``not_declared`` is 122 for checks and 72 for test) apart in
+#: the one table; checks' codes were declared first and carry none.
+UMBRELLA_VERB_EXIT_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
+    "clagentic-loadout": (
+        ("repo_checks/exits.py", ""),
+        ("repo_test/exits.py", "test_"),
+    ),
+}
+
+
+def merge_exit_tables(sources: list[tuple[str, dict[str, int]]]) -> dict[str, int]:
+    """One table from several modules' ``(label, codes)``.
+
+    The same name carrying two different values is refused, naming both modules,
+    because a plain merge would let the later one overwrite the first unseen.
+    """
+    merged: dict[str, int] = {}
+    owner: dict[str, str] = {}
+    for label, codes in sources:
+        for name, value in codes.items():
+            if name in merged and merged[name] != value:
+                raise AssertionError(
+                    f"exit code name {name} is {merged[name]} in {owner[name]} "
+                    f"and {value} in {label}"
+                )
+            merged[name] = value
+            owner.setdefault(name, label)
+    return merged
+
+
 def code_exit_tables() -> dict[str, dict[str, int]]:
     tables: dict[str, dict[str, int]] = {}
     for script, target in console_scripts().items():
         module = target.split(":", 1)[0]
         module_file = ROOT / "src" / Path(*module.split(".")).with_suffix(".py")
         assert module_file.is_file(), f"{script} runs {module}, which is not a file under src/"
-        tables[script] = module_exit_codes(module_file)
+        sources = [(module, module_exit_codes(module_file))]
+        for extra, prefix in UMBRELLA_VERB_EXIT_MODULES.get(script, ()):
+            codes = module_exit_codes(PACKAGE / extra)
+            sources.append((extra, {prefix + name: value for name, value in codes.items()}))
+        tables[script] = merge_exit_tables(sources)
     return tables
 
 
@@ -161,6 +201,16 @@ def test_the_exit_code_reader_takes_literals_and_skips_aliases(tmp_path):
     )
 
     assert module_exit_codes(module) == {"ok": 0, "bad_thing": 7}
+
+
+def test_merging_two_modules_refuses_a_name_with_two_values():
+    clash = [("a.py", {"ok": 0, "gone": 5}), ("b.py", {"ok": 0, "gone": 6})]
+
+    with pytest.raises(AssertionError) as raised:
+        merge_exit_tables(clash)
+
+    assert "gone is 5 in a.py and 6 in b.py" in str(raised.value)
+    assert merge_exit_tables([("a.py", {"ok": 0}), ("b.py", {"ok": 0, "x": 2})]) == {"ok": 0, "x": 2}
 
 
 def test_a_file_compared_with_itself_is_not_a_breaking_change():

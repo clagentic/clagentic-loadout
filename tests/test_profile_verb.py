@@ -52,6 +52,20 @@ def test_check_prints_the_statements_of_each_class_in_effect_beside_the_top_leve
     assert not any("tool_one" in item for item in result["class_rules"]["released-tool"])
 
 
+def test_check_lists_the_declared_lint_and_build_names_and_refuses_a_malformed_block(tmp_path, capsys):
+    repo = make_repo(tmp_path)
+    (repo / PROFILE_PATH).parent.mkdir(parents=True)
+    (repo / PROFILE_PATH).write_text(
+        "class: internal\nlint:\n  a: {argv: [x]}\n  b: {argv: [y]}\nbuild:\n  c: {argv: [z]}\n", encoding="utf-8"
+    )
+    _, result, _ = _run(capsys, "check", "--repo-path", str(repo))
+    assert (result["lint"], result["build"]) == (["a", "b"], ["c"])
+
+    (repo / PROFILE_PATH).write_text("class: internal\nlint:\n  a: {argv: x}\n", encoding="utf-8")
+    code, result, err = _run(capsys, "check", "--repo-path", str(repo))
+    assert code == pv.EXIT_PROFILE_INVALID and "lint.a.argv" in result["problem"] and "lint.a.argv" in err
+
+
 def test_check_without_a_ref_reads_the_working_tree_and_with_a_ref_the_revision(tmp_path, capsys):
     repo = make_repo(tmp_path)
     commit_files(repo, {PROFILE_PATH: "class: internal\n"})

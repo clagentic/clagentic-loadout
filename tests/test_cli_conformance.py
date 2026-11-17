@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -43,6 +44,7 @@ from clagentic_loadout.provisioning import cli as provisioning_cli
 from clagentic_loadout.push import verb as push_verb
 from clagentic_loadout.release import detector as release_detector
 from clagentic_loadout.release import dispatch as release_dispatch
+from clagentic_loadout.repo_checks import verb as checks_verb
 from clagentic_loadout.repo_test import verb as test_verb
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.review import profile_verb
@@ -83,6 +85,8 @@ _ARGPARSE_VERBS = [
     ("provision-allowlist", provisioning_cli.main, "--version"),
     ("doctor", doctor_cli.main, "--version"),
     ("test", test_verb.main, "--version"),
+    ("lint", partial(checks_verb.main, block="lint"), "--version"),
+    ("build", partial(checks_verb.main, block="build"), "--version"),
     ("record", record_verb.main, "--version"),
     ("spec", spec_verb.main, "--version"),
     ("interface", interface_verb.main, "--version"),
@@ -189,7 +193,7 @@ def test_umbrella_help_exits_ok_and_lists_verbs(capsys) -> None:
     rc = umbrella_main(["--help"])
     assert rc == 0
     out = capsys.readouterr().out
-    for expected in ("push", "merge", "review", "reviewer-login", "git-host-api", "stage-body", "provision-allowlist", "doctor", "test", "record", "spec", "interface", "update", "release dispatch", "release detect", "wait poll", "wait scoped-test"):
+    for expected in ("push", "merge", "review", "reviewer-login", "git-host-api", "stage-body", "provision-allowlist", "doctor", "test", "lint", "build", "record", "spec", "interface", "update", "release dispatch", "release detect", "wait poll", "wait scoped-test"):
         assert expected in out, f"umbrella --help missing verb listing for {expected!r}"
 
 
@@ -242,6 +246,12 @@ def test_umbrella_unknown_grouped_subverb_reports_reserved_exit_code(capsys) -> 
         ["test", "report"],
         ["test", "list"],
         ["test", "stop"],
+        ["lint"],
+        ["lint", "run"],
+        ["lint", "report"],
+        ["build"],
+        ["build", "run"],
+        ["build", "report"],
         ["record"],
         ["record", "show"],
         ["record", "list"],

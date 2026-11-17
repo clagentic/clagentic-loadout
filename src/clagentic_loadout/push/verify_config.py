@@ -28,6 +28,7 @@ through with `env_passthrough`.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,15 +68,12 @@ class VerifyEntry:
 _ENV_NAME_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
-def _parse_entry(raw: object, index: int, config_path: Path) -> VerifyEntry:
-    where = f"{config_path}: {CONFIG_SECTION_PUSH}.{CONFIG_KEY_VERIFY}[{index}]"
-    if not isinstance(raw, dict):
-        raise InvalidVerifyConfigError(f"{where} must be a mapping, got {raw!r}.")
-
-    name = raw.get("name")
-    if not isinstance(name, str) or not name.strip():
-        raise InvalidVerifyConfigError(f"{where}.name must be a non-empty string, got {name!r}.")
-
+def parse_command_fields(raw: Mapping[str, object], name: str, where: str) -> VerifyEntry:
+    """The command of one declared entry: its `argv`, `timeout_seconds` and
+    `env_passthrough`, validated. *name* is the entry's already-checked name and
+    *where* the key path every error message leads with. Shared by every block
+    that declares commands in this entry shape (`push.verify`, and the profile's
+    `lint` and `build` blocks), so they cannot drift apart."""
     argv = raw.get("argv")
     if (
         not isinstance(argv, list)
@@ -107,6 +105,18 @@ def _parse_entry(raw: object, index: int, config_path: Path) -> VerifyEntry:
         name=name.strip(), argv=tuple(argv), timeout_seconds=float(timeout),
         env_passthrough=tuple(passthrough),
     )
+
+
+def _parse_entry(raw: object, index: int, config_path: Path) -> VerifyEntry:
+    where = f"{config_path}: {CONFIG_SECTION_PUSH}.{CONFIG_KEY_VERIFY}[{index}]"
+    if not isinstance(raw, dict):
+        raise InvalidVerifyConfigError(f"{where} must be a mapping, got {raw!r}.")
+
+    name = raw.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise InvalidVerifyConfigError(f"{where}.name must be a non-empty string, got {name!r}.")
+
+    return parse_command_fields(raw, name, where)
 
 
 def load_verify_entries(
@@ -168,4 +178,5 @@ __all__ = [
     "InvalidVerifyConfigError",
     "VerifyEntry",
     "load_verify_entries",
+    "parse_command_fields",
 ]

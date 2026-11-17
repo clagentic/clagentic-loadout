@@ -242,6 +242,8 @@ def _describe(profile: rp.RepoProfile) -> dict[str, object]:
         "paths": [{"glob": glob, "class": value} for glob, value in profile.paths],
         "deny": {kind: len(getattr(profile.deny, kind)) for kind in rp.DENY_KINDS},
         "tool_packages": list(profile.tool_packages),
+        "lint": [entry.name for entry in profile.lint],
+        "build": [entry.name for entry in profile.build],
     }
 
 

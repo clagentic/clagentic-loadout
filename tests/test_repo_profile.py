@@ -75,6 +75,13 @@ def test_the_later_matching_override_wins_and_unmatched_paths_keep_the_class():
         ("class: internal\ntool_packages: [a.b]\n", "tool_packages[0]"),
         ("- class\n", "must be a mapping"),
         ("null\n", "must be a mapping"),
+        ("class: internal\nlint: [a]\n", "lint must be a mapping"),
+        ("class: internal\nbuild:\n  a: x\n", "build.a must be a mapping"),
+        ("class: internal\nlint:\n  a: {}\n", "lint.a.argv"),
+        ("class: internal\nbuild:\n  a: {argv: [x, 1]}\n", "build.a.argv"),
+        ("class: internal\nlint:\n  a: {argv: [x], timeout_seconds: -1}\n", "lint.a.timeout_seconds"),
+        ("class: internal\nbuild:\n  a: {argv: [x], env_passthrough: [a-b]}\n", "build.a.env_passthrough"),
+        ("class: internal\nlint:\n  a: {argv: [x], cwd: sub}\n", "lint.a.cwd"),
     ],
 )
 def test_anything_outside_the_documented_shape_is_refused_naming_the_key_path(document, key_path):
@@ -117,6 +124,23 @@ def test_a_field_under_a_class_that_never_applies_is_refused_naming_the_key(docu
 )
 def test_a_field_is_accepted_where_its_class_is_in_effect_or_it_is_empty(document):
     assert rp.parse_profile_document(yaml.safe_load(document)) is not None
+
+
+def test_the_lint_and_build_blocks_keep_their_order_and_the_push_verify_entry_shape():
+    profile = _parse(
+        """\
+        class: internal
+        lint:
+          second: {argv: [b, --x]}
+          first: {argv: [a], timeout_seconds: 5, env_passthrough: [CI]}
+        build: {}
+        """
+    )
+    assert [e.name for e in profile.lint] == ["second", "first"]
+    assert profile.lint[0].argv == ("b", "--x") and profile.lint[0].timeout_seconds == 600.0
+    assert (profile.lint[1].timeout_seconds, profile.lint[1].env_passthrough) == (5.0, ("CI",))
+    assert profile.build == ()
+    assert _parse("class: internal\n").lint == ()
 
 
 def test_a_denial_entry_may_not_span_lines_or_run_long():
