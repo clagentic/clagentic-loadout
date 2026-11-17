@@ -914,6 +914,7 @@ inline; this table is the at-a-glance index.
 | --- | --- | --- |
 | envelope-out.json | 2 | Added optional `followups[]`. |
 | common.json | 2 | Added the `followup` fragment. |
+| telemetry-ci-call.json | 1 | New schema — one record per `clagentic-loadout ci` call (re-run or cancel of a CI run), emitted through the configured sink. |
 | telemetry-dispatch-heartbeat.json | 1 | New schema — dispatch-liveness heartbeat. Sibling to telemetry-dispatch-record.json, does not modify it. |
 | telemetry-dispatch-resume-ack.json | 1 | New schema — dispatch-resume liveness ack. Sibling to telemetry-dispatch-record.json, does not modify it. |
 

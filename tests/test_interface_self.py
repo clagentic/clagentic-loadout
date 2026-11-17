@@ -82,6 +82,7 @@ UMBRELLA_VERB_EXIT_MODULES: dict[str, tuple[tuple[str, str], ...]] = {
     "clagentic-loadout": (
         ("repo_checks/exits.py", ""),
         ("repo_test/exits.py", "test_"),
+        ("ci/exits.py", "ci_"),
     ),
 }
 

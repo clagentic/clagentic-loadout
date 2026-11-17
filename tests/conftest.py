@@ -133,6 +133,7 @@ import tempfile
 import pytest
 
 from clagentic_loadout.acquire import verb as acquire_verb
+from clagentic_loadout.ci import verb as ci_verb
 from clagentic_loadout.merge import close_verb as merge_close_verb
 from clagentic_loadout.merge import post_merge_verb as merge_post_merge_verb
 from clagentic_loadout.merge import verb as merge_verb
@@ -225,6 +226,7 @@ _WRAPPED_VERB_MODULES: tuple[tuple[object, str], ...] = (
     (merge_verb, "--role"),
     (merge_close_verb, "--role"),
     (merge_post_merge_verb, "--role"),
+    (ci_verb, "--caller"),
 )
 
 

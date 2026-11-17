@@ -83,6 +83,7 @@ KNOWN_VERBS: tuple[str, ...] = (
     "scoped-test-wait",
     "doctor",
     "ruling",
+    "ci",
 )
 
 #: Reference/default role -> verb-set mapping for the seed roles named in
@@ -93,7 +94,7 @@ KNOWN_VERBS: tuple[str, ...] = (
 DEFAULT_ROLE_VERBS: dict[str, tuple[str, ...]] = {
     "builder": ("push",),
     "reviewer": ("git-host-api", "review-post", "stage-body"),
-    "merger": ("merge", "push", "release-dispatch", "release-detect", "ruling"),
+    "merger": ("merge", "push", "release-dispatch", "release-detect", "ruling", "ci"),
     "lead": ("git-host-api",),
 }
 
