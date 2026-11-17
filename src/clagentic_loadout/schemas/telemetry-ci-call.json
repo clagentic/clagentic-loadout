@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/clagentic/clagentic-loadout/v1/schemas/telemetry-ci-call.json",
+  "title": "Telemetry CI call",
+  "description": "contract_revision: 1 (new schema). One record per `clagentic-loadout ci` call (a re-run of a CI run, a re-run of its failed jobs, or a cancel), emitted whether the call succeeded or not, to whatever sink the deployment has configured. It carries the caller role, the platform, the repository, the run id, the head commit of the run as read before the call, the HTTP status the host answered with and the UTC time. It never carries a credential. Recording is all it does: it takes no part in deciding whether a call is allowed. additionalProperties:false, mechanical whitelist.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "verb", "operation", "caller", "platform", "repo", "run_id", "head_sha", "http_status", "outcome", "ts"],
+  "properties": {
+    "schema": { "const": "telemetry-ci-call/v1" },
+    "verb": {
+      "const": "ci",
+      "description": "The verb that made the call."
+    },
+    "operation": {
+      "enum": ["rerun", "rerun-failed-jobs", "cancel"],
+      "description": "rerun: run the whole CI run again. rerun-failed-jobs: run only the failed jobs of the CI run again. cancel: cancel a queued or running CI run."
+    },
+    "caller": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The role the call was made as (the role whose credential was used)."
+    },
+    "platform": {
+      "enum": ["github", "forgejo"],
+      "description": "The git host the call was made against."
+    },
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "owner/name of the repository the run belongs to."
+    },
+    "run_id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The run the call named."
+    },
+    "head_sha": {
+      "type": ["string", "null"],
+      "description": "The commit the run was started for, read from the run before the call. null when the run could not be read."
+    },
+    "http_status": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The HTTP status the host answered the operation with. 0 when no request was made or none was answered."
+    },
+    "outcome": {
+      "enum": ["ok", "not_supported", "token_failed", "not_found", "forbidden", "state_refused", "host_error"],
+      "description": "ok: the host accepted the operation. not_supported: the platform offers no such operation, so no request was made. token_failed: no credential could be resolved, so no request was made. not_found, forbidden, state_refused (409 or 422): the host's answer. host_error: any other answer, or no answer."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 UTC timestamp when the call completed."
+    }
+  }
+}

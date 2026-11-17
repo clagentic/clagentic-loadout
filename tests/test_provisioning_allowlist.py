@@ -49,7 +49,8 @@ def test_multi_verb_role_gets_exactly_its_own_entries_no_leakage() -> None:
 def test_every_known_verb_has_a_console_script_mapping() -> None:
     for verb in KNOWN_VERBS:
         assert verb in VERB_CONSOLE_SCRIPTS
-        assert VERB_CONSOLE_SCRIPTS[verb].startswith("loadout-")
+        # An umbrella-only verb (ci) is invoked as `clagentic-loadout <verb>`.
+        assert VERB_CONSOLE_SCRIPTS[verb].startswith(("loadout-", "clagentic-loadout "))
 
 
 def test_unknown_verb_raises() -> None:

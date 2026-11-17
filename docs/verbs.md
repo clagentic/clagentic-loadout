@@ -3495,6 +3495,59 @@ verb's own invocation.
 Exit codes: `0` OK, `1` usage error, `2` token-fetch failed, `4` wrong
 platform, `20` namespace denied, `21` authority denied, `26` close failed.
 
+### `clagentic-loadout ci` — re-run or cancel one CI run
+
+`clagentic_loadout.ci`. Recovers a pull request stuck at the merge gate by a CI
+infrastructure fault, without a human and without a no-change push. It acts on
+one run of one repository with the credential of the calling role, and adds no
+other write capability: no push, no comment, no workflow dispatch, no setting
+change.
+
+```
+clagentic-loadout ci rerun  --caller ROLE --platform github|forgejo --repo OWNER/NAME --run ID [--failed-jobs]
+clagentic-loadout ci cancel --caller ROLE --platform github|forgejo --repo OWNER/NAME --run ID
+```
+
+The caller names the operation; the verb never picks one. `ci rerun` runs the
+whole run again, `ci rerun --failed-jobs` only its failed jobs, `ci cancel`
+stops a run that is queued or running. One request is made and it is not
+retried. The verb does not refuse because the run's commit has moved, because
+the run was re-run before, or for any reason of its own; the host's answer is
+reported as the host gave it.
+
+**A run stuck queued or in progress** (for example with zero jobs) cannot be
+re-run. Cancel it with `ci cancel`, then re-run it with `ci rerun` once it reads
+completed. Those are two calls and two records.
+
+| Operation | GitHub | Forgejo |
+| --- | --- | --- |
+| `rerun` | `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun` (201) | not supported |
+| `rerun --failed-jobs` | `POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs` (201) | not supported |
+| `cancel` | `POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel` (202) | `POST /api/v1/repos/{owner}/{repo}/actions/runs/{run_id}/cancel` (204) |
+
+The Forgejo column was read from the swagger document that Forgejo serves
+(`/swagger.v1.json`): it has a cancel endpoint and no endpoint that re-runs a run
+or its failed jobs, so those exit with the not-supported code. The commit a run
+was started for is read before the call (`head_sha` on GitHub, `commit_sha` on
+Forgejo) and printed with the run id on success.
+
+**Who may use it.** The verb label is `ci` in the role-to-verb mapping. By
+default only the `merger` role holds it; a repository's `roles:` section can move
+it. The credential is the one the credential provider issues for `--caller`, and
+`--caller` is bound to the attested invoking identity like every other verb.
+
+**Recording.** Every call is recorded through the telemetry sink
+(`telemetry-ci-call/v1`): verb, operation, caller, platform, repository, run id,
+the run's head commit, the HTTP status, an outcome and the UTC time. A call that
+never reaches the host, for a missing operation or credential, is recorded with
+status `0`. With the default sink (`none`) nothing is written and the call is the
+same. The record never carries a credential.
+
+Exit codes: `0` OK, `1` usage error, `100` no credential, `101` `--caller` is not
+the attested identity, `102` the platform offers no such operation, `103` run not
+found (404), `104` forbidden (403; the message names the role), `105` the run is
+not in a state that allows it (409, 422), `106` any other host answer or none.
+
 ### `loadout-post-merge` — standalone post-merge re-run for an already-merged PR
 
 `clagentic_loadout.merge.post_merge_verb`. Closes a gap `loadout-merge`

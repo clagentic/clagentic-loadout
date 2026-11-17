@@ -54,6 +54,9 @@ VERB_CONSOLE_SCRIPTS: dict[str, str] = {
     "scoped-test-wait": "loadout-scoped-test-wait",
     "doctor": "loadout-doctor",
     "ruling": "loadout-ruling",
+    # An umbrella verb with no console script of its own; the two entries it
+    # yields match `clagentic-loadout ci rerun` and `clagentic-loadout ci cancel`.
+    "ci": "clagentic-loadout ci",
 }
 
 assert set(VERB_CONSOLE_SCRIPTS) == set(KNOWN_VERBS), (

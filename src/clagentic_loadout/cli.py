@@ -195,6 +195,18 @@ def _rules_main(argv: list[str]) -> int:
     return rules_main(argv)
 
 
+def _ci_rerun_main(argv: list[str]) -> int:
+    from clagentic_loadout.ci.verb import rerun_main
+
+    return rerun_main(argv)
+
+
+def _ci_cancel_main(argv: list[str]) -> int:
+    from clagentic_loadout.ci.verb import cancel_main
+
+    return cancel_main(argv)
+
+
 #: verb name -> (one-line summary, entry-point callable taking the verb's
 #: own argv and returning its process exit code). A verb with a
 #: single-word name (push, merge) dispatches directly; a verb with a
@@ -263,6 +275,13 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
 
 #: Parent verb name -> {subverb name: (summary, callable)}.
 _GROUPED_VERBS: dict[str, dict[str, tuple[str, Callable[[list[str]], int]]]] = {
+    "ci": {
+        "rerun": (
+            "Re-run a CI run, or only its failed jobs (--failed-jobs).",
+            _ci_rerun_main,
+        ),
+        "cancel": ("Cancel a CI run that is queued or running.", _ci_cancel_main),
+    },
     "release": {
         "dispatch": ("Fire a signed 'task shipped' release event.", _release_dispatch_main),
         "detect": ("Scan a v*-tag commit range and dispatch per-task.", _release_detect_main),
