@@ -70,6 +70,14 @@ def module_exit_codes(module_file: Path) -> dict[str, int]:
     return codes
 
 
+#: Verbs the umbrella script routes to (``clagentic-loadout <verb>``) that keep their
+#: exit codes in a module of their own. They are declared on the umbrella script's
+#: entry, so their codes are read from these modules as well.
+UMBRELLA_VERB_EXIT_MODULES: dict[str, tuple[str, ...]] = {
+    "clagentic-loadout": ("repo_checks/exits.py",),
+}
+
+
 def code_exit_tables() -> dict[str, dict[str, int]]:
     tables: dict[str, dict[str, int]] = {}
     for script, target in console_scripts().items():
@@ -77,6 +85,8 @@ def code_exit_tables() -> dict[str, dict[str, int]]:
         module_file = ROOT / "src" / Path(*module.split(".")).with_suffix(".py")
         assert module_file.is_file(), f"{script} runs {module}, which is not a file under src/"
         tables[script] = module_exit_codes(module_file)
+        for extra in UMBRELLA_VERB_EXIT_MODULES.get(script, ()):
+            tables[script].update(module_exit_codes(PACKAGE / extra))
     return tables
 
 

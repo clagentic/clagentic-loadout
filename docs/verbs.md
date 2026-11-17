@@ -3630,6 +3630,64 @@ loadout-identity verify TOKEN [--dir DIR | --peer-id ID] [--now SECONDS]
 Exit codes: `0` ok, `1` usage, `90`-`111` one per refusal kind. Full reference:
 [identity.md](identity.md).
 
+### `clagentic-loadout lint` and `build` — run the declared lint and build commands
+
+```
+clagentic-loadout lint  run [--repo-root DIR] [--only NAME]
+clagentic-loadout lint  report RUN_ID
+clagentic-loadout build run [--repo-root DIR] [--only NAME]
+clagentic-loadout build report RUN_ID
+```
+
+Two verbs, one code path: the block name (`lint` or `build`) is the only difference. `run` reads
+the repo profile's `lint:` or `build:` block ([repo-profile.md](repo-profile.md)), an ordered
+mapping of a check name to `{argv, timeout_seconds, env_passthrough}`, and runs the entries in
+the order written through the runner `loadout-push` uses for `push.verify`: each `argv` is run
+with no shell, stdin closed, in the repository root, under the same environment allowlist plus
+the entry's `env_passthrough`, and its whole process tree is ended on a timeout. The run is in
+the foreground and stops at the first entry that fails, times out or cannot start. There is no
+per-language logic: only the declared argv runs.
+
+```
+$ clagentic-loadout lint run
+clagentic-loadout lint: run 20261117T090000Z-4242
+  ruff: pass (exit 0)
+  mypy: FAIL (exit 1)
+clagentic-loadout lint: run 20261117T090000Z-4242 failed; not run: eslint
+```
+
+`run` prints the run id and one line per entry to stdout; the repository, head and dirty flag go
+to stderr, with the end of a failing entry's output. `--only NAME` runs that entry alone; an
+unknown name is a usage error that lists the declared names. A profile with no such block, or an
+empty one, runs nothing and exits `122`, naming the profile path and the block. A malformed block
+exits `121` before anything runs, with the key path in the message.
+
+`report RUN_ID` prints the recorded run as JSON: `run_id`, `block`, `state` (`passed`, `failed` or
+`interrupted`), `repo`, `head_sha`, `dirty`, `started_at`, `finished_at`, `only`, `declared`,
+`not_run`, and for each entry that ran its `name`, `argv`, `exit_code` (`null` on a timeout or a
+start failure), `timed_out`, `timeout_seconds`, `start_error` and the redacted, size-capped tails
+`stdout_tail` and `stderr_tail`. Runs are kept under `CLAGENTIC_LOADOUT_CHECK_REPORTS_DIR`, else
+the user-level `checks.reports_dir`, else `<user config root>/state/check-reports`.
+
+Sample blocks (the entries are ordinary commands; an install step is the first entry):
+
+```yaml
+# Go
+lint:  {vet: {argv: [go, vet, ./...]}}
+build: {compile: {argv: [go, build, ./...]}}
+# Node
+lint:  {eslint: {argv: [npx, eslint, .]}}
+build: {install: {argv: [npm, ci]}, bundle: {argv: [npm, run, build]}}
+# Python
+lint:  {ruff: {argv: [ruff, check, .]}}
+build: {wheel: {argv: [python3, -m, build]}}
+```
+
+Exit codes: `0` ok, `1` usage, `120` a check failed, timed out or could not start, `121` invalid
+profile or block, `122` nothing declared, `123` the run could not be recorded, `124` bad, unknown
+or other-verb run id, `125` the recorded run cannot be read. A command's own exit code is
+recorded in the report and never returned.
+
 ### `clagentic-loadout update` — install a release through the verified venv switch
 
 Installs the release built from a source checkout into the self-managed

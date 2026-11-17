@@ -31,6 +31,11 @@ tool_packages: [some_tool]      # optional; internal only
 test:                           # optional; the commands `clagentic-loadout test run` uses
   full: [python3, -m, pytest, "--junitxml={junit}"]
   paths: ["spec/**"]            # extra globs that count as test files
+lint:                           # optional; the commands `clagentic-loadout lint run` uses
+  ruff: {argv: [ruff, check, .]}
+build:                          # optional; the commands `clagentic-loadout build run` uses
+  install: {argv: [npm, ci], timeout_seconds: 900}
+  compile: {argv: [npm, run, build], env_passthrough: [CI]}
 review:                         # optional; read only by gates, from the merge base
   docs_only:
     paths: ["docs/**/*.md"]     # files that may count as documentation
@@ -81,6 +86,18 @@ least one `internal` path. Both are valid in a profile whose classes are mixed.
   the key; it does not invalidate the profile. `test.timeout_seconds` (positive number, default
   14400) is how long a test run may take before it is ended and reads `timed_out`; it is
   handled the same way (see [repo-test.md](repo-test.md#run-timeout)).
+
+- **`lint`** and **`build`** each declare an ordered mapping of a check name to a command, in the
+  entry shape of `push.verify`: `argv` (a list of strings, run with no shell), `timeout_seconds`
+  (positive number, default 600) and `env_passthrough` (names of environment variables to hand
+  the command on top of the built-in allowlist). `clagentic-loadout lint run` and
+  `clagentic-loadout build run` run the entries in the order written, in the repository root, and
+  stop at the first one that fails ([verbs.md](verbs.md#clagentic-loadout-lint-and-build--run-the-declared-lint-and-build-commands)).
+  A step a build needs first, such as `npm ci`, is simply the first entry. Only the declared
+  argv runs; nothing is detected or defaulted. A block that is not a mapping, an entry with no
+  `argv`, a non-string `argv` element, an unknown entry key, or a bad `timeout_seconds` or
+  `env_passthrough` makes the profile invalid, and the error names the key path
+  (for example `build.compile.argv`). `loadout-profile check` lists the declared names.
 
 - **`review`** holds `docs_only`, the docs allowlist (next section), `scanners`, the category
   of each scanner's hits, and `clearance`, the findings a reviewer may clear itself (below).

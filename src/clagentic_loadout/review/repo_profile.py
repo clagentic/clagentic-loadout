@@ -31,6 +31,10 @@ with no internal path)::
                                     # through their top level; no check flags it
     test: {full: [...]}             # optional; the commands ``clagentic-loadout
                                     # test run`` uses (see repo_test.spec)
+    lint:                           # optional; the commands ``clagentic-loadout lint run``
+      ruff: {argv: [ruff, check, .]}  # runs, in order (see repo_checks.spec)
+    build:                          # optional; ``clagentic-loadout build run``, same shape
+      compile: {argv: [make], timeout_seconds: 900}
     review:                         # optional; read only by gates, from the merge base
       docs_only:                    # absent means nothing is docs-only
         paths: ["docs/**/*.md"]     # globs whose files may be documentation
@@ -60,6 +64,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
+from clagentic_loadout.push.verify_config import VerifyEntry
+from clagentic_loadout.repo_checks.spec import KEY_BUILD, KEY_LINT, ChecksBlockError, parse_checks_block
 from clagentic_loadout.repo_test.spec import DeclaredTests, TestBlockError, parse_test_block
 from clagentic_loadout.review.clearance_policy import (
     KEY_CLEARANCE,
@@ -182,6 +188,9 @@ class RepoProfile:
     scanner_categories: tuple[tuple[str, str], ...] = ()
     #: ``review.clearance``; the empty policy classifies no finding as process record.
     clearance: ClearancePolicy = field(default_factory=ClearancePolicy)
+    #: The ``lint`` and ``build`` blocks, in declared order; empty when not declared.
+    lint: tuple[VerifyEntry, ...] = ()
+    build: tuple[VerifyEntry, ...] = ()
 
     def posture_values(self) -> dict[str, Any]:
         return dict(self.posture)
@@ -276,7 +285,9 @@ def parse_profile_document(doc: Any) -> RepoProfile:
     half-applied."""
     if not isinstance(doc, dict):
         raise ProfileFormatError("the profile must be a mapping with a class")
-    allowed = ("class", "paths", "deny", "tool_packages", "test", "review", *POSTURE_KEY_ORDER)
+    allowed = (
+        "class", "paths", "deny", "tool_packages", "test", KEY_LINT, KEY_BUILD, "review", *POSTURE_KEY_ORDER
+    )
     unknown = sorted(str(k) for k in doc if k not in allowed)
     if unknown:
         raise ProfileFormatError(f"unknown or misplaced key: {', '.join(unknown)}")
@@ -289,6 +300,11 @@ def parse_profile_document(doc: Any) -> RepoProfile:
     try:
         declared_tests = parse_test_block(doc.get("test"))
     except TestBlockError as exc:
+        raise ProfileFormatError(str(exc)) from exc
+    try:
+        lint = parse_checks_block(doc.get(KEY_LINT), KEY_LINT)
+        build = parse_checks_block(doc.get(KEY_BUILD), KEY_BUILD)
+    except ChecksBlockError as exc:
         raise ProfileFormatError(str(exc)) from exc
     try:
         docs_only = parse_review_block(doc.get("review"))
@@ -322,6 +338,8 @@ def parse_profile_document(doc: Any) -> RepoProfile:
         docs_only=docs_only,
         scanner_categories=scanner_categories,
         clearance=clearance,
+        lint=lint,
+        build=build,
     )
 
 

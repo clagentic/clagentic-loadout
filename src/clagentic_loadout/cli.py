@@ -147,6 +147,18 @@ def _test_main(argv: list[str]) -> int:
     return test_main(argv)
 
 
+def _lint_main(argv: list[str]) -> int:
+    from clagentic_loadout.repo_checks.verb import main as checks_main
+
+    return checks_main(argv, block="lint")
+
+
+def _build_main(argv: list[str]) -> int:
+    from clagentic_loadout.repo_checks.verb import main as checks_main
+
+    return checks_main(argv, block="build")
+
+
 def _record_main(argv: list[str]) -> int:
     from clagentic_loadout.verdict_record.verb import main as record_main
 
@@ -227,6 +239,14 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
     "test": (
         "Run a repo's declared tests (run); read results by run id (report).",
         _test_main,
+    ),
+    "lint": (
+        "Run a repo's declared lint commands (run); read results by run id (report).",
+        _lint_main,
+    ),
+    "build": (
+        "Run a repo's declared build commands (run); read results by run id (report).",
+        _build_main,
     ),
     "record": ("Read the verdict records gates left for a commit (show, list) and the review records kept by comment id (review).", _record_main),
     "spec": ("Create, seal and read the standard spec (new, seal, show).", _spec_main),
