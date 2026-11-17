@@ -16,6 +16,8 @@ clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout SECONDS] [
 clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout SECONDS] [--detach]
 clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
                               [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
+clagentic-loadout test list [--repo R] [--limit N]
+clagentic-loadout test stop RUN_ID
 ```
 
 ## Declaring the commands
@@ -169,11 +171,11 @@ the run is then refused (for example the result cannot be recorded): it reads
 | Code | Meaning |
 |---|---|
 | `0` | Every test passed. |
-| `1` | Usage error (including a bad path or an unresolvable `--base`). |
+| `1` | Usage error (including a bad path, an unresolvable `--base` or a `--timeout` that is not above zero). |
 | `70` | The tests failed: a failing test, or a non-zero command exit. |
 | `71` | The repository has no valid profile. |
 | `72` | The profile does not declare what this run needs; the message names the key. |
-| `73` | The command could not run (not found, timed out) or left no readable JUnit report. |
+| `73` | The command could not run (not found), passed its timeout (the run reads `timed_out`), or left no readable JUnit report. |
 | `74` | The run could not be recorded under the reports root. |
 | `78` | Refused: the tree is not the repository or commit given by `--expect-repo` / `--expect-head`. |
 
@@ -182,6 +184,26 @@ With `--detach`, the table applies to the checks that run before the start (`1`,
 exit code is `0`. See "Detached runs".
 
 The command's own exit code is recorded in the run and is never this verb's exit code.
+
+### Run timeout
+
+Every run, of any mode or tier, foreground or detached, has an effective timeout, the longest
+its command (and its `prepare` step, each on its own) may take:
+
+1. `--timeout SECONDS`, a number above zero;
+2. else the profile's `test.timeout_seconds`, a positive number;
+3. else the built-in default of **14400** seconds (4 hours), above every observed full suite.
+
+A `test.timeout_seconds` that is not a positive number (zero, negative, text, a boolean, not
+finite) does not invalidate the profile, as with `ratio_warn`: the default applies and a warning
+naming the key is printed to stderr at the start of the run. The effective value and where it came
+from are recorded in the run's provenance and shown by `--summary` and in the printed run summary
+as `timeout: {seconds, source}`, with `source` one of `flag`, `profile` or `default` (and a
+`warning` when the profile's value was unusable).
+
+A command that reaches the timeout is ended with its whole process group, and the run reads
+`timed_out` (terminal, `result.json` written): `problem` names the limit and its source, the
+exit code is `73`. Before this, a foreground run past `--timeout` read `unrunnable`.
 
 A tier run has `mode` `tier` and `tier` set to the tier name; every other run has `tier` null.
 Runs recorded before tiers existed have no `tier` field, and readers treat that as null. The
@@ -210,7 +232,7 @@ below).
   match it exits `77` and lists the runs that exist; a run on a dirty tree, or one that
   recorded no commit ("commit unknown"), is never selected. `--sha` cannot be combined with
   an explicit run id.
-- **`--summary`** (default): JSON with the run id, `state` (`complete`, `unrunnable`, or for a detached run `running` or `interrupted`), mode,
+- **`--summary`** (default): JSON with the run id, `state` (`complete`, `unrunnable`, `timed_out`, or for a detached run `running`, `interrupted` or `stopped`), `timeout` (`seconds` and `source`, null for a run recorded before it existed), mode,
   `tier` (the tier name for a tier run, else null), counts, `id_scheme` (the failing-id scheme the run
   was recorded with; null for a run recorded before it existed, and `id_basis` is added when the record
   has one), the repository, `head_sha`, `dirty`, `base_sha` and `commit_known`. An `unrunnable`
@@ -269,13 +291,48 @@ most `N` runs (default 20). Each object has `run_id`, `state`, `mode`, `tier`, `
 `dirty`, `started_at`, `finished_at`, `command_exit_code`, `counts` (null until a run is
 complete) and `date_mark`.
 
-Unlike `latest`, it lists every state: `complete`, `unrunnable`, and for a detached run
-`running` and `interrupted`. A run dated later than now, or whose date cannot be read, is not
+Unlike `latest`, it lists every state: `complete`, `unrunnable`, `timed_out`, and for a detached
+run `running`, `interrupted` and `stopped`. A run dated later than now, or whose date cannot be read, is not
 hidden: its `date_mark` is `future-dated` or `undatable` (else null), so a run that `latest`
 skips can still be found by id. Scoping follows `report`: `--repo` names a repository (path,
 name or remote URL); without it the list is scoped to the git repository of the current
 directory, and refused (exit `78`) when that is none and several repositories are on record.
 Exit `75` when there is no reports root or no matching run, `1` for a bad `--limit`.
+
+## `test stop`
+
+`clagentic-loadout test stop RUN_ID` ends a detached run that is still `running`, so a hung run
+never needs a host-side kill. It takes a run id only (not `latest`, not a path).
+
+- It ends the run's supervisor, and the test command's own process group. The command runs in a
+  session of its own, so ending the supervisor's session alone would leave it running; the
+  supervisor therefore records each command it starts in `command-process.json` in the run
+  directory (pid, start ticks, boot id), and `stop` reaches the command only by that record. When
+  the supervisor is alive and the record is absent or names a process that is no longer running
+  (a prepare step that has exited), `stop` waits for a live record (within the 5 seconds below);
+  if none appears, `stop` ends the supervisor, exits `78` and says the command
+  could not be identified, rather than signalling a process it cannot verify. The supervisor is
+  ended first, so it cannot record a result of its own, then the command's group, then `stop`
+  waits (up to 5 seconds) for them to be gone. A process the command moved out of its group (a
+  daemon that starts its own session) is not reached.
+- Only a verified process is signalled: the supervisor by its recorded identity (pid, start ticks
+  and boot id, so a reused pid is never the run), the command by the same identity check and by
+  leading its own process group. Only the user that owns the run directory may stop it.
+- The run then reads `stopped`: `result.json` carries `state: stopped`, `problem`, `finished_at`,
+  `stopped_by` (the stopping user) and `stopped_at`, and `counts` is null. The run summary is
+  printed to stdout and the exit is `0`. If the run finished by itself just before, that result
+  stands and is printed.
+- A run that is not running (`complete`, `unrunnable`, `interrupted`, `timed_out` or `stopped`)
+  is printed as it stands, nothing is changed or signalled, and the exit is `0`. `stop` is safe to
+  repeat. A foreground run has no supervisor to stop; it ends with its caller.
+
+| Code | Meaning |
+|---|---|
+| `0` | The run was stopped, or was not running; its summary was printed. |
+| `1` | Usage error. |
+| `74` | The processes were ended but the `stopped` record could not be written. |
+| `76` | The run id is malformed, or no such run exists (a foreground run still in progress has no record to stop). |
+| `78` | Refused: the run was started by another user, its processes were still running after being signalled, or its command was never recorded and so could not be identified (the supervisor was ended). |
 
 ## Detached runs
 
@@ -306,30 +363,35 @@ clagentic-loadout test report <run-id> --wait 540
 
 ### States
 
-`test report RUN_ID` reads one of four states. The first two exist only for detached runs.
+`test report RUN_ID` reads one of six states. `running`, `interrupted` and `stopped` exist only
+for detached runs; `timed_out` can be a foreground run's too.
 
 | State | Meaning |
 |---|---|
 | `running` | The run has no `result.json` and its supervisor process is alive. `counts` is null. |
 | `interrupted` | The run has no `result.json` and its supervisor process is gone (killed, or the host restarted). `counts` is null, `problem` says so. |
+| `timed_out` | The command passed the run's [timeout](#run-timeout) and was ended with its process group. `counts` are zero, `problem` names the limit and where it came from. |
+| `stopped` | [`test stop`](#test-stop) ended the run. `counts` is null; `stopped_by` and `stopped_at` say who and when. |
 | `complete` | As before. |
 | `unrunnable` | As before. |
 
 An interrupted read is written once as `result.json` (atomically), so every later read gives the
 same answer, including its `finished_at`. It is written only into a run directory owned by the
 reader. `interrupted` is terminal. The command a killed supervisor started may still be running
-in its own session; loadout does not stop it.
+in its own session; `test stop` does not reach it, because a run whose supervisor is gone is
+already terminal.
 
-`--summary` of a running or interrupted run prints that state and exits `0`. `--failing-ids`,
-`--failures` and `--diff` of a running run exit `79` and name the state; of an interrupted run they exit `78`,
-like an unrunnable run. `latest` and `--sha` are unchanged: they select finished runs, and an
-interrupted run, which has no result, is never selected by them, so what they pick does not
-depend on whether anyone has read the interrupted run yet. Read it by its run id.
+`--summary` of a running, interrupted, timed-out or stopped run prints that state and exits `0`.
+`--failing-ids`, `--failures` and `--diff` of a running run exit `79` and name the state; of an
+interrupted, timed-out or stopped run they exit `78`, like an unrunnable run. `latest` and `--sha`
+are unchanged: they select finished runs, and an interrupted, timed-out or stopped run, which has
+no result, is never selected by them, so what they pick does not depend on whether anyone has
+read it yet. Read it by its run id.
 
 ### `--wait SECONDS`
 
 `test report RUN_ID --wait SECONDS` re-reads the run about twice a second until it is terminal
-(`complete`, `unrunnable` or `interrupted`) or `SECONDS` have passed, then prints what it would
+(`complete`, `unrunnable`, `interrupted`, `timed_out` or `stopped`) or `SECONDS` have passed, then prints what it would
 have printed without `--wait`. It exits `79` only when the run is still running at the end of
 the wait; any other exit code is the one `test report` gives without `--wait`. `SECONDS` is a
 number of zero or more, and is capped only by the caller; for an agent whose tool calls are
@@ -345,7 +407,8 @@ clagentic-loadout test report <run-id> --summary                  # state, count
 
 No call is open for more than the `--wait` given. Repeat the second line until its exit code is
 not `79`; `complete` with `failed: 0` and `dirty: false` at the expected `head_sha` is a passing
-run. `interrupted` means the run must be started again.
+run. `interrupted`, `timed_out` and `stopped` mean the run must be started again. A hung run is
+ended with `clagentic-loadout test stop <run-id>`; it also ends by itself at its timeout.
 
 ## The optional permission rule
 

@@ -7,6 +7,7 @@ and read the results by run id.
   clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
                                 [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
   clagentic-loadout test list [--repo R] [--limit N]
+  clagentic-loadout test stop RUN_ID
 
 The exit codes are in ``repo_test.exits``; a test command's own exit code is
 recorded in the run and never returned. ``run`` and ``report`` print JSON
@@ -36,7 +37,8 @@ from clagentic_loadout.repo_test.report_cmd import LATEST, ReportRefused
 from clagentic_loadout.repo_test.detach import start_detached
 from clagentic_loadout.repo_test.run_cmd import RunRefused, execute_run, prepare_run
 from clagentic_loadout.repo_test.store import RunRecord
-from clagentic_loadout.repo_test.spec import MODE_TIER, RUN_MODES
+from clagentic_loadout.repo_test.spec import MODE_TIER, RUN_MODES, is_positive_number
+from clagentic_loadout.repo_test.stop_cmd import StopRefused, stop_run
 
 _PROG = "clagentic-loadout test"
 
@@ -51,7 +53,10 @@ _EXIT_CODES_TEXT = (
     "74 run could not be recorded, 75 no reports root or no matching run, 76 bad or unknown "
     "run id, 77 no run for --sha, 78 refused (not the expected repository or commit, a repository "
     "to scope `latest` to is ambiguous, different repositories, unlike tiers, or a run without results), "
-    "79 report: the run is still running (--wait timed out, or `latest` found only a running run)."
+    "79 report: the run is still running (--wait timed out, or `latest` found only a running run). "
+    "`run` exits 73 when the command timed out (the run reads timed_out). `stop` exits 0 when the run "
+    "was stopped or was already not running, 76 for a bad or unknown run id, 78 when the run is "
+    "another user's or its processes could not be ended, 74 when the stop could not be recorded."
 )
 
 _TOP_HELP = f"""{_PROG} -- run the tests a repository declares, and read the results by run id.
@@ -63,12 +68,14 @@ Usage: {_PROG} run full|impacted [--repo-root DIR] [--base REV] [--timeout SECON
        {_PROG} report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
                                     [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
        {_PROG} list [--repo R] [--limit N]
+       {_PROG} stop RUN_ID
        {_PROG} --help | --version
 
 Commands:
   run     Run the profile's declared tests and record the run.
   report  Read a recorded run by id (read-only).
   list    List a repository's recorded runs, newest first (read-only).
+  stop    End a running detached run and its test command; the run reads `stopped`.
 
 Run `{_PROG} <command> --help` for a command's own arguments.
 {_EXIT_CODES_TEXT}"""
@@ -111,9 +118,10 @@ def _run_parser() -> argparse.ArgumentParser:
     )
     run.add_argument(
         "--timeout",
-        type=float,
+        type=_timeout_seconds,
         default=None,
-        help="Seconds after which the command and its child processes are killed.",
+        help="Seconds after which the command and its child processes are killed and the run "
+        "reads timed_out. Overrides the profile's test.timeout_seconds; with neither, 14400.",
     )
     run.add_argument(
         "--expect-repo",
@@ -160,8 +168,8 @@ def _report_parser() -> argparse.ArgumentParser:
         metavar="SECONDS",
         type=_seconds,
         default=None,
-        help="Wait up to this many seconds for the run to end (complete, unrunnable or "
-        "interrupted) before printing. Exit 79 when it is still running after that.",
+        help="Wait up to this many seconds for the run to end (complete, unrunnable, "
+        "interrupted, timed_out or stopped) before printing. Exit 79 when it is still running after that.",
     )
     shape = report.add_mutually_exclusive_group()
     shape.add_argument("--summary", action="store_true", help="Print the run summary (default).")
@@ -210,6 +218,30 @@ def _list_parser() -> argparse.ArgumentParser:
     return listing
 
 
+def _stop_parser() -> argparse.ArgumentParser:
+    stop = _new_parser(
+        "stop",
+        "End a run that is still running, started detached by you: its supervisor and the test "
+        "command's process group. The run then reads `stopped`, with the time and the stopping "
+        "user, and the run summary is printed. A run that is not running (complete, unrunnable, "
+        "interrupted, timed_out or stopped) is printed as it is, unchanged, and the exit is 0. "
+        "Exits: 0 stopped or already ended, 76 bad or unknown run id, 78 the run is another "
+        "user's or its processes could not be ended, 74 the stop could not be recorded.",
+    )
+    stop.add_argument("run_id", help="The run to stop, as printed by `run --detach`.")
+    return stop
+
+
+def _timeout_seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds") from None
+    if not is_positive_number(value):
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number of seconds above zero")
+    return value
+
+
 def _positive_int(text: str) -> int:
     try:
         value = int(text)
@@ -244,6 +276,13 @@ def _describe_start(run_id: str, recorded: Mapping[str, Any], phase: str) -> str
     )
 
 
+def _warn_about_timeout(recorded: Mapping[str, Any]) -> None:
+    timeout = recorded.get("timeout")
+    warning = timeout.get("warning") if isinstance(timeout, dict) else None
+    if warning:
+        print(f"{_PROG}: warning: {warning}", file=sys.stderr)
+
+
 def _run(args: argparse.Namespace) -> int:
     paths, tier = list(args.paths), None
     if args.mode == MODE_TIER:
@@ -257,6 +296,7 @@ def _run(args: argparse.Namespace) -> int:
 
     def announce(run_id: str, recorded: Mapping[str, Any]) -> None:
         started.append((run_id, recorded))
+        _warn_about_timeout(recorded)
         print(_describe_start(run_id, recorded, "started"), file=sys.stderr, flush=True)
 
     try:
@@ -310,7 +350,20 @@ def _run_detached(args: argparse.Namespace, paths: list[str], tier: str | None) 
         print(f"{_PROG}: {exc}", file=sys.stderr)
         return exc.code
     _print_json(summary)
+    _warn_about_timeout(prepared.recorded)
     print(_describe_start(summary["run_id"], summary, "started (detached)"), file=sys.stderr)
+    return exits.EXIT_OK
+
+
+def _stop(args: argparse.Namespace) -> int:
+    try:
+        outcome = stop_run(store.reports_root(), args.run_id)
+    except StopRefused as exc:
+        print(f"{_PROG}: {exc}", file=sys.stderr)
+        return exc.code
+    _print_json(report_cmd.summary_of(outcome.run))
+    what = "stopped" if outcome.ended_now else f"not running (state {outcome.run.state}); nothing changed"
+    print(f"{_PROG}: run {outcome.run.run_id} {what}", file=sys.stderr)
     return exits.EXIT_OK
 
 
@@ -421,7 +474,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{_PROG} {get_version()}")
         return exits.EXIT_OK
     command, rest = argv[0], argv[1:]
-    builders = {"run": _run_parser, "report": _report_parser, "list": _list_parser}
+    builders = {"run": _run_parser, "report": _report_parser, "list": _list_parser, "stop": _stop_parser}
     if command not in builders:
         print(
             f"{_PROG}: unknown command {command!r}. Known commands: {', '.join(builders)}. "
@@ -446,6 +499,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run(args)
     if command == "list":
         return _list(args)
+    if command == "stop":
+        return _stop(args)
     return _report(args)
 
 

@@ -10,7 +10,8 @@ see ``repo_test.store``).
 Selecting a run:
 
   * ``<run-id>`` is untrusted input and must match the run id grammar.
-  * ``latest`` is the newest finished run, or an exit 79 refusal naming the
+  * ``latest`` is the newest finished run (never an interrupted, timed-out or stopped
+    one), or an exit 79 refusal naming the
     running run when the repository has only runs still in progress;
     ``--repo`` narrows it to one
     repository (a path, the repository's name, or its remote URL). Without
@@ -166,9 +167,9 @@ def _load_runs(
         runs = store.list_runs(root, include_unfinished=True)
     except StoreError as exc:
         raise ReportRefused(str(exc), exits.EXIT_NO_RUNS) from exc
-    # An interrupted run ended without a result, so it is never the answer to
-    # `latest` or `--sha`; it is read by its run id.
-    runs = [run for run in runs if run.state != store.STATE_INTERRUPTED]
+    # An interrupted, timed-out or stopped run ended without a result, so it is never
+    # the answer to `latest` or `--sha`; it is read by its run id.
+    runs = [run for run in runs if run.state not in store.NO_RESULT_STATES]
     finished = [run for run in runs if run.state != store.STATE_RUNNING]
     running = [run for run in runs if run.state == store.STATE_RUNNING]
     top: str | None = None
@@ -294,7 +295,12 @@ def summary_of(run: RunRecord) -> dict[str, Any]:
         "dirty": run.dirty,
         "base_sha": run.provenance.get("base_sha"),
         "commit_known": run.head_sha is not None,
+        "timeout": run.provenance.get("timeout"),
     }
+    for key in ("stopped_by", "stopped_at"):
+        # Optional: only a stopped run has them, so other records read as before.
+        if isinstance(result.get(key), str):
+            summary[key] = result[key]
     id_basis = result.get("id_basis")
     if isinstance(id_basis, str) and id_basis:
         summary["id_basis"] = id_basis

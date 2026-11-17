@@ -12,7 +12,7 @@ import os
 import signal
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +30,8 @@ class CommandOutcome:
     problem: str | None
     # User ids the command's session was seen running as.
     process_uids: frozenset[int] = frozenset()
+    # True when the command was ended for passing its timeout.
+    timed_out: bool = False
 
 
 _EXIT_POLL = 0.002
@@ -73,10 +75,12 @@ def run_command(
     log_path: Path,
     timeout_seconds: float | None,
     stdout_path: Path | None = None,
+    on_spawn: Callable[[int], None] | None = None,
 ) -> CommandOutcome:
     """Run *argv*. Its combined output goes to *log_path*; when *stdout_path* is
     given, its standard output goes there instead and only its standard error is
-    left in the log."""
+    left in the log. *on_spawn* is called with the command's pid (also its process
+    group and session id) once it has started."""
     try:
         with open(log_path, "wb") as log, (
             open(stdout_path, "wb") if stdout_path is not None else nullcontext(None)
@@ -93,12 +97,16 @@ def run_command(
             watcher.start()
             stopped = False
             try:
+                if on_spawn is not None:
+                    on_spawn(proc.pid)
                 exited, held, code = _await_exit(proc, timeout_seconds)
                 if not exited:
                     os.killpg(proc.pid, signal.SIGKILL)
                     proc.wait()
                     stopped = True
-                    return CommandOutcome(None, f"timed out after {timeout_seconds} seconds", watcher.stop())
+                    return CommandOutcome(
+                        None, f"timed out after {timeout_seconds} seconds", watcher.stop(), timed_out=True
+                    )
                 # The leader is still a zombie here, so this last sample reads only
                 # its own pid before it can be reused.
                 stopped = True
