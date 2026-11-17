@@ -13,7 +13,7 @@ import pytest
 import yaml
 
 from clagentic_loadout.push import verb
-from clagentic_loadout.transport import body_env
+from clagentic_loadout.transport import body_env, stage_body_verb
 from tests._support.push_verb import (  # noqa: F401  (isolate_user_config_root is an autouse fixture)
     RecordingTokenProvider as _RecordingTokenProvider,
     RefusingTokenProvider as _RefusingTokenProvider,
@@ -122,6 +122,30 @@ class TestPreRemoteRefusalKeepsStagedBody:
             [*argv, "--repo", "some-owner/some-repo"],
             token_provider=_RecordingTokenProvider(),
             opener=github_opener,
+            monkeypatch=monkeypatch,
+        )
+        assert code == verb.EXIT_OK
+        assert sent[0]["body"] == _BODY
+        assert not _still_staged(create_branch=branch)
+
+    def test_body_staged_by_draft_form_is_consumed_by_push(
+        self, repo_with_remote, monkeypatch
+    ):
+        repo, _remote = repo_with_remote
+        branch = verb.git_coords.current_branch(repo)
+        draft = body_env.resolve_caller_draft_path(caller=_CALLER)
+        draft.parent.mkdir(parents=True, exist_ok=True)
+        draft.write_bytes(json.dumps({"body": _BODY}).encode("utf-8"))
+        assert stage_body_verb.main(
+            ["--caller", _CALLER, "--create-branch", branch, "--body-draft"]
+        ) == stage_body_verb.EXIT_OK
+        assert not draft.exists()
+
+        sent: list = []
+        code = _run_main(
+            ["--repo-path", str(repo), "--platform", "forgejo", "--title", "feat: t", "--body-env"],
+            token_provider=_RecordingTokenProvider(),
+            opener=_capturing_opener(sent),
             monkeypatch=monkeypatch,
         )
         assert code == verb.EXIT_OK

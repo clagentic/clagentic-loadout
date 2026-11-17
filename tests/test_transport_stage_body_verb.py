@@ -213,6 +213,153 @@ class TestStagesBodyAndStamp:
         assert charlie_body == b'{"body": "charlie body"}'
 
 
+_DRAFT_BODY = b'{"body": "from a draft", "review_status": "clean"}'
+
+
+def _write_draft(caller="reviewer", content=_DRAFT_BODY, env=None):
+    path = body_env.resolve_caller_draft_path(caller=caller, env=env)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
+    return path
+
+
+def _no_staged_files(root):
+    return not [p for p in root.rglob("*") if p.name.startswith("body.")]
+
+
+class _StdinMustNotBeRead:
+    def read(self):
+        raise AssertionError("stdin must not be read for --body-draft")
+
+
+class TestBodyDraft:
+    """--body-draft / --show-draft-path: the computed-draft content source."""
+
+    @pytest.mark.parametrize(
+        "binding,head_sha",
+        [
+            (["--target-pr", "42"], None),
+            (["--target-pr", "42"], "abc123"),
+            (["--create-branch", "feat/x"], None),
+        ],
+        ids=["target-pr", "target-pr-head-sha", "create-branch"],
+    )
+    def test_stages_like_stdin_and_removes_draft(self, binding, head_sha, monkeypatch, tmp_path):
+        argv = ["--caller", "reviewer", *binding]
+        if head_sha:
+            argv += ["--head-sha", head_sha]
+
+        monkeypatch.setattr("sys.stdin.buffer.read", lambda: _DRAFT_BODY)
+        assert stage_body_verb.main(argv) == stage_body_verb.EXIT_OK
+        body_path = body_env.resolve_caller_body_path(caller="reviewer")
+        stamp_path = body_env._resolve_caller_stamp_path(caller="reviewer")
+        via_stdin = (body_path.read_bytes(), json.loads(stamp_path.read_text(encoding="utf-8")))
+        body_path.unlink()
+        stamp_path.unlink()
+
+        monkeypatch.setattr("sys.stdin", _StdinMustNotBeRead())
+        draft = _write_draft()
+        assert stage_body_verb.main([*argv, "--body-draft"]) == stage_body_verb.EXIT_OK
+        via_draft = (body_path.read_bytes(), json.loads(stamp_path.read_text(encoding="utf-8")))
+
+        assert via_draft[0] == via_stdin[0]
+        for key in ("target_pr", "create_branch", "head_sha", "carries_review_status"):
+            assert via_draft[1][key] == via_stdin[1][key]
+        assert not draft.exists()
+
+    def test_reads_the_identity_bound_directory(self, monkeypatch, tmp_path):
+        bound_root = tmp_path / "identity" / "tmp"
+        bound_root.mkdir(parents=True)
+        env = {"TMPDIR": str(bound_root)}
+
+        class _Identity:
+            actor = "some-actor"
+            jti = "some-jti"
+
+        monkeypatch.setattr(
+            stage_body_verb, "bind_configured_provider", lambda *a, **k: ("x", _Identity())
+        )
+        monkeypatch.setattr(stage_body_verb, "staging_kwargs", lambda _identity: {"env": env})
+        draft = _write_draft(env=env)
+
+        rc = stage_body_verb.main(
+            ["--caller", "reviewer", "--target-pr", "1", "--body-draft"]
+        )
+        assert rc == stage_body_verb.EXIT_OK
+        assert body_env.resolve_caller_body_path(caller="reviewer", env=env).read_bytes() == _DRAFT_BODY
+        assert not draft.exists()
+        assert not (tmp_path / "clagentic-loadout").exists()
+
+    @pytest.mark.parametrize(
+        "make",
+        ["absent", "symlink-inside", "symlink-outside", "directory", "fifo", "dir-symlink"],
+    )
+    def test_unreadable_draft_is_refused_and_stages_nothing(self, make, tmp_path, capsys):
+        staging = tmp_path / "clagentic-loadout"
+        draft = staging / "draft.reviewer.json"
+        if make == "dir-symlink":
+            elsewhere = tmp_path / "elsewhere"
+            elsewhere.mkdir()
+            (elsewhere / "draft.reviewer.json").write_bytes(_DRAFT_BODY)
+            staging.symlink_to(elsewhere, target_is_directory=True)
+        elif make != "absent":
+            staging.mkdir()
+            if make == "symlink-inside":
+                (staging / "real.json").write_bytes(_DRAFT_BODY)
+                draft.symlink_to(staging / "real.json")
+            elif make == "symlink-outside":
+                outside = tmp_path / "outside.json"
+                outside.write_bytes(_DRAFT_BODY)
+                draft.symlink_to(outside)
+            elif make == "directory":
+                draft.mkdir()
+            else:
+                os.mkfifo(draft)
+
+        rc = stage_body_verb.main(
+            ["--caller", "reviewer", "--target-pr", "1", "--body-draft"]
+        )
+        assert rc == stage_body_verb.EXIT_BODY_DRAFT_UNREADABLE
+        assert str(draft) in capsys.readouterr().err
+        assert _no_staged_files(tmp_path)
+
+    @pytest.mark.parametrize(
+        "content",
+        [b"", b"not json", b'{"not_body": "x"}'],
+        ids=["empty", "invalid-json", "missing-body"],
+    )
+    def test_invalid_content_is_refused_and_draft_stays(self, content, tmp_path):
+        draft = _write_draft(content=content)
+        rc = stage_body_verb.main(
+            ["--caller", "reviewer", "--target-pr", "1", "--body-draft"]
+        )
+        assert rc == stage_body_verb.EXIT_BODY_STDIN_EMPTY
+        assert draft.read_bytes() == content
+        assert _no_staged_files(tmp_path)
+
+    def test_with_body_stdin_is_usage_error_before_any_io(self, monkeypatch, tmp_path, capsys):
+        monkeypatch.setattr("sys.stdin", _StdinMustNotBeRead())
+        draft = _write_draft()
+        rc = stage_body_verb.main(
+            ["--caller", "reviewer", "--target-pr", "1", "--body-draft", "--body-stdin"]
+        )
+        assert rc == stage_body_verb.EXIT_USAGE
+        err = capsys.readouterr().err
+        assert "--body-draft" in err and "--body-stdin" in err
+        assert draft.exists()
+        assert _no_staged_files(tmp_path)
+
+    def test_show_draft_path_prints_the_path_draft_reads_and_creates_nothing(
+        self, tmp_path, capsys
+    ):
+        rc = stage_body_verb.main(["--caller", "reviewer", "--show-draft-path"])
+        assert rc == stage_body_verb.EXIT_OK
+        printed = capsys.readouterr().out.strip()
+        assert printed == str(body_env.resolve_caller_draft_path(caller="reviewer"))
+        assert os.path.isabs(printed)
+        assert not any(tmp_path.iterdir())
+
+
 class TestEndToEndWithReadSide:
     """The exact regression this task fixes: stage via loadout-stage-body,
     then read via the lr-becdef read-and-consume + identity-stamp API.

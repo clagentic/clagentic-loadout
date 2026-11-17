@@ -129,6 +129,27 @@ def test_verb_version_exits_ok_and_prints_package_version(label: str, verb_main,
     )
 
 
+@pytest.mark.parametrize(
+    "needle",
+    ["--body-draft", "--show-draft-path", "draft.<caller>.json"],
+)
+def test_stage_body_help_documents_draft_form(needle: str, capsys) -> None:
+    assert stage_body_verb.main(["--help"]) == 0
+    assert needle in capsys.readouterr().out
+
+
+def test_stage_body_draft_exit_code_is_new_and_retired_code_stays_reserved() -> None:
+    used = {
+        stage_body_verb.EXIT_OK,
+        stage_body_verb.EXIT_USAGE,
+        stage_body_verb.EXIT_BODY_STDIN_EMPTY,
+        stage_body_verb.EXIT_STAGE_VERIFY_FAILED,
+        stage_body_verb.EXIT_CALLER_INVOKER_MISMATCH,
+    }
+    assert stage_body_verb.EXIT_BODY_DRAFT_UNREADABLE not in used
+    assert stage_body_verb.EXIT_BODY_DRAFT_UNREADABLE != stage_body_verb.EXIT_BODY_FILE_UNREADABLE
+
+
 def test_wait_poll_help_exits_ok(capsys) -> None:
     with pytest.raises(SystemExit) as exc_info:
         wait_cli.poll_wait_main(["--help"])

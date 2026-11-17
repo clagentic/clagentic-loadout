@@ -1307,6 +1307,11 @@ then invoke the reading verb with a constant argv.**
    caller's own `--caller` value is the only thing that varies the
    resolved location, and that value never appears as a raw filesystem
    path anywhere in the invoking harness's own commands.
+   A caller that cannot pipe or redirect can instead write the body JSON to the
+   draft path `loadout-stage-body --caller <role> --show-draft-path` prints and
+   stage it with the bare `--body-draft` switch (no value, no stdin); the draft
+   path is computed by this package in the same staging directory, and the
+   draft is removed after a verified stage. See docs/verbs.md.
 2. **Read.** Invoke the reading verb (`loadout-git-host-api`,
    `loadout-review-post`, or `loadout-push`) with a CONSTANT-SHAPE argv
    that includes `--body-env` (a bare switch, no value) and the SAME
