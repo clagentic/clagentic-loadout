@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
@@ -33,6 +34,7 @@ _GIT_HOST_BASE = "http://git-host.example.com"
 _OWNER = "some-owner"
 _REPO = "some-repo"
 _PR = 42
+_PAYLOADS = Path(__file__).parent / "real_payloads"
 
 
 class _FakeResponse:
@@ -236,6 +238,24 @@ def test_acquired_range_base_is_merge_base_and_policy_base_is_base_sha(
     assert acquired.base_sha == expected_range_base
     assert acquired.policy_base_sha == expected_policy_base
     assert acquired.head_sha == "d" * 40
+
+
+def test_a_captured_open_pr_with_a_moved_base_reads_policy_at_the_live_base_tip():
+    # Captured from a live host: the PR's payload base.sha equalled the live tip of
+    # its base branch although the branch had moved past the PR's merge_base, so the
+    # payload is a trustworthy source of the live tip.
+    captured = json.loads(
+        (_PAYLOADS / "forgejo_pull_moved_base.json").read_text(encoding="utf-8")
+    )
+    live_tip = captured["live_base_branch"]["commit"]["id"]
+    pull = captured["pull"]
+    assert pull["merge_base"] != live_tip
+    opener = _make_opener(pr_info_body=json.dumps(pull).encode("utf-8"))
+
+    acquired = fetch_pr_content(_GIT_HOST_BASE, "tok", _OWNER, _REPO, _PR, opener=opener)
+
+    assert acquired.policy_base_sha == live_tip
+    assert acquired.base_sha == pull["merge_base"]
 
 
 class TestForgejoAcquireBackend:

@@ -1,0 +1,32 @@
+{
+  "capture": {
+    "forgejo_version": "16.0.2+gitea-1.22.0",
+    "route": "GET /api/v1/repos/{owner}/{repo}/compare/{base}...{head}",
+    "independent_route": "GET /api/v1/repos/{owner}/{repo}/commits?sha={head}&not={base}&limit=1&page=N",
+    "independent_count": 1007,
+    "independent_count_note": "page 1007 holds a commit, page 1008 is an empty list: the range holds exactly 1007 commits. The count is read with a page size of one, so no page-size default applies.",
+    "trimmed": "The live response is about 2.6 MB because it lists every commit; only total_commits and the first listed commit are kept, with owner, repo, host, users and emails replaced by placeholders and the commit message shortened."
+  },
+  "base": "92ca46d6620457805ad60a0cb1299eb946d3785a",
+  "head": "82e3391de5e3242202415b95982a571c5276a317",
+  "response": {
+    "total_commits": 1007,
+    "commits": [
+      {
+        "url": "http://git-host.example.invalid:3000/api/v1/repos/some-owner/some-repo/git/commits/82e3391de5e3242202415b95982a571c5276a317",
+        "sha": "82e3391de5e3242202415b95982a571c5276a317",
+        "created": "2026-11-14T16:09:09Z",
+        "html_url": "http://git-host.example.invalid:3000/some-owner/some-repo/commit/82e3391de5e3242202415b95982a571c5276a317",
+        "commit": {
+          "author": {"name": "author-a", "email": "author-a@example.invalid", "date": "2026-11-14T16:09:09Z"},
+          "committer": {"name": "author-a", "email": "author-a@example.invalid", "date": "2026-11-14T16:09:09Z"},
+          "message": "fix: a captured commit\n"
+        },
+        "parents": [
+          {"sha": "85ab80519710db2c1f02c3621af3d3979099bf5c"},
+          {"sha": "a0d8c713fd10407918629dbdcf39b973e25f27f5"}
+        ]
+      }
+    ]
+  }
+}

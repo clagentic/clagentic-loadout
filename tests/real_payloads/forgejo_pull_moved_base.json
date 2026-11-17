@@ -1,0 +1,35 @@
+{
+  "capture": {
+    "forgejo_version": "16.0.2+gitea-1.22.0",
+    "pull_route": "GET /api/v1/repos/{owner}/{repo}/pulls/{index}",
+    "branch_route": "GET /api/v1/repos/{owner}/{repo}/branches/{base.ref}",
+    "note": "An open PR last synced months before the capture; its base branch has moved since, so merge_base is an old commit. Nested repository objects are dropped; owner, repo, host, users and emails are placeholders and the title is neutral.",
+    "payload_base_sha_equals_live_tip": true
+  },
+  "pull": {
+    "number": 31,
+    "user": {"login": "author-a"},
+    "title": "A captured open pull request",
+    "body": "",
+    "state": "open",
+    "merged": false,
+    "mergeable": false,
+    "base": {
+      "label": "main",
+      "ref": "main",
+      "sha": "93475af4d95c03ff98428c7ae59d9393604f8dc1"
+    },
+    "head": {
+      "label": "feature",
+      "ref": "feature",
+      "sha": "95ab6b5a5622af83081e8ffe5f4bbe5873cb44a4"
+    },
+    "merge_base": "d3c3cd9284b4ae48d825d4e283e1d1cc330a6c34",
+    "created_at": "2026-05-22T16:13:00Z",
+    "updated_at": "2026-05-22T16:17:24Z"
+  },
+  "live_base_branch": {
+    "name": "main",
+    "commit": {"id": "93475af4d95c03ff98428c7ae59d9393604f8dc1", "timestamp": "2026-09-29T19:28:28Z"}
+  }
+}
