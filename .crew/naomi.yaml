@@ -38,21 +38,8 @@ schema_version: 1
 #
 merge_allowed: true
 
-# -----------------------------------------------------------------------
-# merge_requirements  (optional — additional merge gates)
-# -----------------------------------------------------------------------
-# Extra conditions NAOMI checks before merging. The default is:
-#   tests_pass: true (NAOMI requires a clean test run)
-#   ci_pass:    true (require green CI — set to false if you have no CI)
-#
-# ci_pass: false — this repo has NO CI and CI is 100% denied; it will never
-# be stood up (operator decision, 2026-07-13, ratified). Loadout's own
-# test suite (tests_pass) is THE gate for this repo — do not reintroduce a
-# CI requirement here without a new operator decision.
-merge_requirements:
-  tests_pass: true
-  ci_pass: false
-  # max_files_changed: 50   # Escalate if a PR touches more than N files
+# This repo has NO CI and CI is 100% denied (operator decision 2026-07-13, ratified).
+# The full test suite is the merge gate. Do not reintroduce a CI requirement without a new operator decision.
 
 # -----------------------------------------------------------------------
 # reviewer_required  (optional — PEACHES review gate)
