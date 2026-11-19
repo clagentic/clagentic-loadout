@@ -225,6 +225,64 @@
         }
       }
     },
+    "removal_ledger": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "base_sha", "head_sha", "items"],
+      "description": "OPTIONAL, additive. One line for each test case, public symbol or command-line verb the change removes, computed between a base and a head commit when the draft is created, each with a disposition the author of the spec fills before the spec is sealed: replaced by a named test or symbol, moved to a repository and task, or retired by a cited decision. Reported only; an empty disposition is listed at seal, in the review input and on the merge attestation and never refuses anything. An absent section is a spec sealed before this section existed, or one drafted without a revision to compare.",
+      "properties": {
+        "source": {"type": ["string", "null"], "description": "How the section was computed; null when it could not be."},
+        "note": {"type": ["string", "null"], "description": "Why the section is empty or incomplete, when it is."},
+        "base_sha": {"type": ["string", "null"], "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$", "description": "The commit the removals are measured from."},
+        "head_sha": {"type": ["string", "null"], "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$", "description": "The commit the removals are measured to."},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["item", "kind", "disposition"],
+            "properties": {
+              "item": {"type": "string", "minLength": 1, "description": "'<path>::<name>' for a test case or public symbol, or a bare verb name."},
+              "kind": {"type": "string", "enum": ["test", "symbol", "verb"]},
+              "disposition": {
+                "description": "null until the author fills it with exactly one of the three shapes.",
+                "oneOf": [
+                  {"type": "null"},
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "replacement"],
+                    "properties": {
+                      "kind": {"const": "replaced_by"},
+                      "replacement": {"type": "string", "minLength": 1, "description": "The test or symbol that now carries the behaviour."}
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "repo", "task"],
+                    "properties": {
+                      "kind": {"const": "moved_to"},
+                      "repo": {"type": "string", "minLength": 1},
+                      "task": {"type": "string", "minLength": 1}
+                    }
+                  },
+                  {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["kind", "decision"],
+                    "properties": {
+                      "kind": {"const": "retired_by"},
+                      "decision": {"type": "string", "minLength": 1, "description": "The decision that retires the behaviour."}
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
     "test_plan": {
       "type": "object",
       "additionalProperties": false,

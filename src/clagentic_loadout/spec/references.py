@@ -257,6 +257,45 @@ def js_exported(source: str) -> set[str]:
     return set(JsModule(source).exports)
 
 
+def python_test_cases(source: str) -> set[str]:
+    """The test cases *source* defines: a top-level function whose name starts with
+    ``test`` (as ``name``), and a method starting with ``test`` of a top-level class
+    whose name starts with ``Test`` (as ``Class::name``)."""
+    found: set[str] = set()
+    for node in _python_tree(source).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+            found.add(node.name)
+        elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+            found.update(
+                f"{node.name}::{member.name}"
+                for member in node.body
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name.startswith("test")
+            )
+    return found
+
+
+def js_test_titles(source: str) -> list[str]:
+    """The title of each ``test(`` or ``it(`` call in *source* whose first argument
+    is a single string literal, in source order and once per call. A call on an
+    object (``re.test(x)``) is not one, and nesting in ``describe`` is not tracked."""
+    module = JsModule(source)
+    tokens = module.tokens
+    titles: list[str] = []
+    for index, token in enumerate(tokens):
+        if token.kind != "id" or token.value not in ("test", "it") or module._after_dot(index):
+            continue
+        opener, title, closer = (module._at(index + step) for step in (1, 2, 3))
+        if (
+            _is(opener, "punct", "(")
+            and title is not None
+            and title.kind == "str"
+            and title.value is not None
+            and (_is(closer, "punct", ",") or _is(closer, "punct", ")"))
+        ):
+            titles.append(title.value)
+    return titles
+
+
 def defines(language: str, source: str, name: str) -> bool:
     """Whether *source* defines *name*: a top-level ``def`` or ``class`` in Python;
     an exported or declared name in JavaScript."""
@@ -317,6 +356,8 @@ __all__ = [
     "SourceUnparsed",
     "defines",
     "js_exported",
+    "js_test_titles",
+    "python_test_cases",
     "python_top_level",
     "reference_lines",
 ]
