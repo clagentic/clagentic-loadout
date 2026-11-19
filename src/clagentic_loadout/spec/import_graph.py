@@ -26,7 +26,7 @@ from __future__ import annotations
 import ast
 from collections import defaultdict
 from collections.abc import Collection, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 PYTHON_SUFFIX = ".py"
 _INIT = "__init__"
@@ -37,11 +37,13 @@ class ImportGraph:
     """``importers`` maps a path to the paths that import it. ``unparsed`` lists
     the sources that are not valid Python and ``unread`` the Python paths in the
     tree with no source supplied; neither contributes an edge, so a list that
-    could have held them is incomplete."""
+    could have held them is incomplete. ``unparsed_reasons`` gives, for a builder
+    that knows it, why a source in ``unparsed`` could not be parsed."""
 
     importers: Mapping[str, frozenset[str]]
     unparsed: tuple[str, ...]
     unread: tuple[str, ...] = ()
+    unparsed_reasons: Mapping[str, str] = field(default_factory=dict)
 
 
 def _split(path: str) -> tuple[list[str], str]:

@@ -3975,7 +3975,7 @@ The published contract is `schemas/spec.schema.json`
 | `class_rules` | `{source, note, class, rules, paths}`: the repository class, the rule statements of each class in effect, and the per-path overrides. | the repo profile |
 | `group_rules` | `{source, note, items}`: the group rules that apply to the repository, items as strings. | the groups file |
 | `consumers` | `{source, note, items}`, each item `{consumer, disposition}` | no source yet |
-| `impact` | `{source, note, head_sha, languages_covered, cap, skipped_files, items}`, optional: the importers and importing tests of each `--path`. See [The impact section](#the-impact-section). | `new --path`, from the tree at `--ref` |
+| `impact` | `{source, note, head_sha, languages_covered, cap, skipped_files, items}`, optional: the importers and importing tests of each `--path`, for Python and JavaScript. See [The impact section](#the-impact-section). | `new --path`, from the tree at `--ref` |
 | `test_plan` | `{source, note, declared, plan}`: the commands the profile's `test` block declares, and the author's plan. | profile + authored |
 | `verification_evidence_owed` | `{gate, note}` entries naming the verdict records that must exist. | authored |
 | `rulings_already_made` | Decisions the build must not reopen. | authored |
@@ -4018,11 +4018,13 @@ map, the reason), for the author to fill or leave. No field of a spec carries a 
 files of the same repository that import it and the test files that import it. It is computed from
 the tree at `--ref` (default `HEAD`), which is resolved to one commit once; the tree is listed with
 `git ls-tree` and every file read with `git show` at that commit, so the working tree is never
-consulted. The section is built by one function, `spec.impact.compute_impact`, over one import
-graph, `spec.import_graph.build_import_graph`. No network call is made and nothing is stored.
+consulted. The section is built by one function, `spec.impact.compute_impact`, over one graph type,
+`spec.import_graph.ImportGraph`, which one builder per language fills:
+`spec.import_graph.build_import_graph` (Python) and `spec.js_imports.build_js_import_graph`
+(JavaScript). No network call is made and nothing is stored.
 
 Shape: `{source, note, head_sha, languages_covered, cap, skipped_files, items}`. `head_sha` is the
-commit the section was computed at and `languages_covered` is `["python"]`. Each item is
+commit the section was computed at and `languages_covered` is `["python", "javascript"]`. Each item is
 `{path, language, status, importers, importing_tests, note}`; `importers` and `importing_tests` are
 `{files, more}`: up to `cap` paths (25, the constant `spec.impact.IMPORTER_CAP`, applied to each list
 separately) and the count of the rest. A file that imports nothing named reads `none found` in
@@ -4030,21 +4032,36 @@ separately) and the count of the rest. A file that imports nothing named reads `
 
 Limits:
 
-- Python only, parsed with the standard library `ast`: `import a.b`, `from a import b` (a name or a
+- Python, parsed with the standard library `ast`: `import a.b`, `from a import b` (a name or a
   submodule) and relative imports resolved against the package layout (a directory with
   `__init__.py` is a package; a directory without one is also reachable by its path from the
   repository root). Imports inside functions and `try` blocks count; dynamic imports
   (`importlib`, `__import__`) and string references do not.
+- JavaScript (`.js .jsx .mjs .cjs`), read by a standard-library tokenizer that skips comments,
+  strings, template literals (with nested `${}`) and regular-expression literals. An import makes an
+  edge only with a plain string literal specifier (a template literal with no substitution counts):
+  `import x from 'a'`, `import 'a'`, `export { x } from 'a'`, `export * from 'a'`, `require('a')`
+  and `import('a')`. A variable, a concatenation or a template with a substitution adds none.
+  Only relative specifiers (`./` or `../`) resolve, from the importing file's directory; the first
+  path present in the tree wins, in this order: the exact path, the path plus `.js`, `.jsx`, `.mjs`,
+  `.cjs`, then `<path>/index` plus the same four (a specifier ending in `/` tries the index only). A
+  bare specifier (a package name, `node:`), an absolute path, `.` or `..` alone, a path outside the
+  tree and one that matches no file add no edge. TypeScript, `package.json` `exports`/`imports`
+  maps, path aliases and `node_modules` are not read. A `/` after `)`, `]`, `}` or an operand is
+  division, so a regular expression literal straight after `)` is not recognised. A JavaScript file
+  is imported only by JavaScript files, and a Python file only by Python files.
 - A file in another language has `status: not_computed`, its language named in `language` and
-  `note`. An extension that is not recognised says so rather than naming a language. A glob that
-  matches no file has `status: no_match`.
-- A test file is one under a `test` or `tests` directory, named `test_*` or `*_test`, or
-  `conftest.py`. Everything else that imports the path is an importer.
-- A file-import graph only: no call graph, and nothing outside the repository. Python files that
-  cannot be read (over 512 KiB, not UTF-8) or parsed add no import, so a list may be short by
-  them: they are counted in `skipped_files` and named in the optional `skipped_paths` (up to the
-  cap). A requested path that is itself one of them is `status: not_computed`, with the reason in
-  `note`, never `none found`.
+  `note`, with the covered languages listed. An extension that is not recognised says so rather than
+  naming a language. A glob that matches no file has `status: no_match`.
+- A test file is one under a `test` or `tests` directory; a Python file named `test_*` or `*_test`,
+  or `conftest.py`; a JavaScript file under a `__tests__` directory or named `*.test.<ext>` or
+  `*.spec.<ext>`. Everything else that imports the path is an importer.
+- A file-import graph only: no call graph, and nothing outside the repository. Source files that
+  cannot be read (over 512 KiB, not UTF-8) or parsed (for JavaScript: an unterminated string,
+  comment, template or regular expression) add no import, so a list may be short by them: they are
+  counted in `skipped_files` and named in the optional `skipped_paths` (up to the cap). A requested
+  path that is itself one of them is `status: not_computed`, with the reason in `note`, never
+  `none found`.
 - A relative import is resolved from the importing file's own directory, with or without
   `__init__.py`. `import a.b.c` also records an edge to the `__init__.py` of `a` and `a.b` when they
   exist in the tree.

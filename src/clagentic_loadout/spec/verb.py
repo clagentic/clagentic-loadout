@@ -190,7 +190,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         metavar="GLOB",
         help="A glob over the files the change touches; the consumers section is filled from the "
         "consumer map for it, and the impact section lists the files and tests that import each "
-        "match at --ref (Python only). May be repeated.",
+        "match at --ref (Python, and JavaScript: .js .jsx .mjs .cjs). May be repeated.",
     )
     new.add_argument(
         "--element",
