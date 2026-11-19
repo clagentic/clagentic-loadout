@@ -195,12 +195,13 @@ def _resume_key(
     docs_note: str = "",
     pass_index: int = 0,
     call_sites_note: str = "",
+    removed_note: str = "",
 ) -> str:
     """The resume key of one pass. Pass 0 is keyed exactly as the single pass
     always was, so a cache built before passes existed stays valid; every later
     pass adds its index, so it samples on its own instead of replaying pass 0.
-    A call-sites note is bound only when there is one, so a run with none keeps
-    the key it always had."""
+    A call-sites note and a removed-behaviour note are each bound only when there
+    is one, so a run with none keeps the key it always had."""
     digest = hashlib.sha256()
     for part in (
         PIPELINE_VERSION,
@@ -216,6 +217,7 @@ def _resume_key(
         str(profile.defect_class),
         *((f"pass-{pass_index}",) if pass_index else ()),
         *((call_sites_note,) if call_sites_note else ()),
+        *((removed_note,) if removed_note else ()),
     ):
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
@@ -494,6 +496,7 @@ class _PassPlan:
     resume_note: str
     resume_rules: str
     call_sites_note: str = ""
+    removed_note: str = ""
 
 
 def _run_pass(
@@ -509,6 +512,7 @@ def _run_pass(
     key = _resume_key(
         chunks, profile, plan.head_sha, plan.resume_note, plan.resume_rules, plan.docs_note,
         pass_index=pass_index, call_sites_note=plan.call_sites_note,
+        removed_note=plan.removed_note,
     )
     state_dir = run_dir / f"state-{key}"
     try:
@@ -595,6 +599,7 @@ def _run_pass(
                     class_rules=plan.class_rules[chunk.index],
                     docs_note=plan.docs_note,
                     call_sites_note=plan.call_sites_note,
+                    removed_note=plan.removed_note,
                 )
             finally:
                 discard_chunk_workdir(chunk_cwd)
@@ -691,6 +696,8 @@ def run_review(
     evaluation: EvaluationContext | None = None,
     changeset: ChangesetInput | None = None,
     call_sites_note: str = "",
+    removed_note: str = "",
+    removed_behaviour: dict[str, Any] | None = None,
 ) -> RunOutcome:
     """Drive one invocation of the review pipeline for *acquired*. With
     *delta*, *acquired* already holds the delta diff and each chunk is framed
@@ -704,7 +711,10 @@ def run_review(
     does not; it is classified by the base profile's docs allowlist and the
     classification is recorded in the result. *call_sites_note* is the note
     quoting the spec's undisposed call sites (review.spec_review); it is put in
-    every chunk prompt and bound into the resume key, and "" changes neither."""
+    every chunk prompt and bound into the resume key, and "" changes neither.
+    *removed_note* is the section listing the behaviour the change removes
+    (review.spec_review.render_removed_note), treated the same way;
+    *removed_behaviour*, when given, is carried in the result as ``removed_behaviour``."""
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, status: str, **fields: Any) -> None:
@@ -773,6 +783,7 @@ def run_review(
         resume_note="\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else "",
         resume_rules="\0".join(class_rules[chunk.index] for chunk in chunks),
         call_sites_note=call_sites_note,
+        removed_note=removed_note,
     )
     # A delta review accounts for the findings a prior review left open, which is
     # one judgment of one pass; the passes are for a full review.
@@ -912,6 +923,7 @@ def run_review(
             "carried_count": len(carried),
             KEY_CLASS_RULES: _class_rules_summary(records),
             **({KEY_CHANGESET: changeset_block} if changeset_block is not None else {}),
+            **({"removed_behaviour": removed_behaviour} if removed_behaviour is not None else {}),
             **(
                 _accounting_fields(prior_open, len(kept) + len(left_open), resolved)
                 if delta is not None

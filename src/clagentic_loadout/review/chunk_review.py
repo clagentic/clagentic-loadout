@@ -80,6 +80,7 @@ def build_prompt(
     docs_note: str = "",
     defect_class: bool = True,
     call_sites_note: str = "",
+    removed_note: str = "",
 ) -> str:
     """Chunk prompt with the output contract placed LAST, where a model
     weighs it most. *delta_note*, when given, frames the chunk as part of an
@@ -92,6 +93,9 @@ def build_prompt(
     *call_sites_note*, when given, quotes the sealed spec's call sites with no
     disposition (review.spec_review.render_call_sites_note); it follows the
     docs-only note, and with none the prompt is as it was.
+    *removed_note*, when given, lists the behaviour the change removes with its
+    ledger lines (review.spec_review.render_removed_note); it follows the call
+    sites note, and with none the prompt is as it was.
     *defect_class* says whether the output contract describes the two optional
     class keys (review.class_guidance); false gives the contract as it was
     before they existed."""
@@ -105,6 +109,8 @@ def build_prompt(
         parts.append(docs_note.strip() + "\n\n")
     if call_sites_note.strip():
         parts.append(call_sites_note.strip() + "\n\n")
+    if removed_note.strip():
+        parts.append(removed_note.strip() + "\n\n")
     if delta_note.strip():
         parts.append(delta_note.strip() + "\n\n")
     parts.append(f"## Diff chunk {chunk.index} of {total}\n\n" + chunk.text + "\n")
@@ -349,6 +355,7 @@ def review_chunk(
     class_rules: str = "",
     docs_note: str = "",
     call_sites_note: str = "",
+    removed_note: str = "",
 ) -> dict[str, Any]:
     """Review *chunk*; returns its persistable record. Never raises for an
     engine problem: every outcome is a record with a status. *cwd* is the
@@ -361,7 +368,7 @@ def review_chunk(
     record = _review_chunk(
         chunk, total, profile, attempts_before=attempts_before, cwd=cwd, log_dir=log_dir,
         runner=runner, delta_note=delta_note, breaker=breaker, class_rules=class_rules,
-        docs_note=docs_note, call_sites_note=call_sites_note,
+        docs_note=docs_note, call_sites_note=call_sites_note, removed_note=removed_note,
     )
     label = profile.fallback_model if record.get("engine") == ENGINE_FALLBACK else profile.carrier_model
     if label:
@@ -383,10 +390,12 @@ def _review_chunk(
     class_rules: str,
     docs_note: str,
     call_sites_note: str,
+    removed_note: str,
 ) -> dict[str, Any]:
     prompt = build_prompt(
         chunk, total, profile.rulebook_text, delta_note, class_rules, docs_note,
         defect_class=profile.defect_class, call_sites_note=call_sites_note,
+        removed_note=removed_note,
     )
     record = _new_record(chunk, attempts_before + 1)
 
