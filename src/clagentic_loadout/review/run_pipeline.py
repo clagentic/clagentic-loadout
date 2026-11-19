@@ -194,10 +194,13 @@ def _resume_key(
     class_rules: str = "",
     docs_note: str = "",
     pass_index: int = 0,
+    call_sites_note: str = "",
 ) -> str:
     """The resume key of one pass. Pass 0 is keyed exactly as the single pass
     always was, so a cache built before passes existed stays valid; every later
-    pass adds its index, so it samples on its own instead of replaying pass 0."""
+    pass adds its index, so it samples on its own instead of replaying pass 0.
+    A call-sites note is bound only when there is one, so a run with none keeps
+    the key it always had."""
     digest = hashlib.sha256()
     for part in (
         PIPELINE_VERSION,
@@ -212,6 +215,7 @@ def _resume_key(
         str(profile.chunk_lines),
         str(profile.defect_class),
         *((f"pass-{pass_index}",) if pass_index else ()),
+        *((call_sites_note,) if call_sites_note else ()),
     ):
         digest.update(part.encode("utf-8"))
         digest.update(b"\0")
@@ -489,6 +493,7 @@ class _PassPlan:
     docs_note: str
     resume_note: str
     resume_rules: str
+    call_sites_note: str = ""
 
 
 def _run_pass(
@@ -503,7 +508,7 @@ def _run_pass(
     prefix = _pass_prefix(pass_index)
     key = _resume_key(
         chunks, profile, plan.head_sha, plan.resume_note, plan.resume_rules, plan.docs_note,
-        pass_index=pass_index,
+        pass_index=pass_index, call_sites_note=plan.call_sites_note,
     )
     state_dir = run_dir / f"state-{key}"
     try:
@@ -589,6 +594,7 @@ def _run_pass(
                     breaker=breaker,
                     class_rules=plan.class_rules[chunk.index],
                     docs_note=plan.docs_note,
+                    call_sites_note=plan.call_sites_note,
                 )
             finally:
                 discard_chunk_workdir(chunk_cwd)
@@ -684,6 +690,7 @@ def run_review(
     unknown_resolutions: Sequence[str] | None = None,
     evaluation: EvaluationContext | None = None,
     changeset: ChangesetInput | None = None,
+    call_sites_note: str = "",
 ) -> RunOutcome:
     """Drive one invocation of the review pipeline for *acquired*. With
     *delta*, *acquired* already holds the delta diff and each chunk is framed
@@ -695,7 +702,9 @@ def run_review(
     it the verdict is computed with no policy base, which is DEGRADED.
     *changeset* describes the whole pull request, which a delta *acquired*
     does not; it is classified by the base profile's docs allowlist and the
-    classification is recorded in the result."""
+    classification is recorded in the result. *call_sites_note* is the note
+    quoting the spec's undisposed call sites (review.spec_review); it is put in
+    every chunk prompt and bound into the resume key, and "" changes neither."""
     stages: list[dict[str, Any]] = []
 
     def stage(name: str, status: str, **fields: Any) -> None:
@@ -763,6 +772,7 @@ def run_review(
         docs_note=docs_note,
         resume_note="\0".join(delta_notes[chunk.index] for chunk in chunks) if delta_notes else "",
         resume_rules="\0".join(class_rules[chunk.index] for chunk in chunks),
+        call_sites_note=call_sites_note,
     )
     # A delta review accounts for the findings a prior review left open, which is
     # one judgment of one pass; the passes are for a full review.
