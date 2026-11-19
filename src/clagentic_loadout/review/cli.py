@@ -38,6 +38,7 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -187,6 +188,7 @@ from clagentic_loadout.review.run_pipeline import (
 )
 from clagentic_loadout.repo_config import TRACKED_GATE_RELATIVE_PATH
 from clagentic_loadout.sha import FULL_SHA_RE
+from clagentic_loadout.spec import removal_ledger, removals
 from clagentic_loadout.spec.model import is_spec_hash
 from clagentic_loadout.transport.attestation import (
     AttestationError,
@@ -708,14 +710,39 @@ def _spec_facts_of_flag(
         _fail(str(exc), EXIT_SPEC_UNAVAILABLE)
 
 
-def _run_spec_inputs(args: argparse.Namespace, config_root) -> tuple[str | None, str]:
+def _run_spec_inputs(
+    args: argparse.Namespace, config_root
+) -> tuple[str | None, str, removal_ledger.Ledger]:
     """What the sealed spec `run` was given adds to the review input: its
     docs-only justification (None when it was given no spec or the spec states
-    none) and the note quoting its undisposed call sites ("" when there are none)."""
+    none), the note quoting its undisposed call sites ("" when there are none) and
+    its removal ledger (empty when it was given no spec or the spec has none)."""
     facts = _spec_facts_of_flag(args, config_root)
     if facts is None:
-        return None, ""
-    return facts.docs_only_justification, spec_review.render_call_sites_note(facts.undisposed_call_sites)
+        return None, "", {}
+    return (
+        facts.docs_only_justification,
+        spec_review.render_call_sites_note(facts.undisposed_call_sites),
+        facts.removal_ledger,
+    )
+
+
+def _removed_behaviour(
+    acquired: AcquiredPr, reader: PolicyReader, paths: Sequence[str], ledger: removal_ledger.Ledger
+) -> tuple[dict[str, Any], str]:
+    """The behaviour the whole pull request removes, between the policy base and
+    the head through the run's policy reader, matched against the spec's ledger:
+    the ``removed_behaviour`` result block and the prompt section ("" when nothing
+    is removed). A computation that fails is a block that is not computed and says
+    why; it never changes the run."""
+    try:
+        report = removals.report_for_paths(reader, acquired.policy_base_sha, acquired.head_sha, paths)
+    except Exception as exc:  # report-only step: no failure here may change the review
+        report = removals.not_computed_report(
+            f"{type(exc).__name__}: {exc}", acquired.policy_base_sha, acquired.head_sha
+        )
+    block = removal_ledger.result_block(report, ledger)
+    return block, spec_review.render_removed_note(block["items"])
 
 
 def _run_command(
@@ -742,7 +769,7 @@ def _run_command(
 
     since_head, prior_findings = _load_prior_review(args, owner=owner, repo=repo)
     resolutions = _load_resolutions(args.resolved_findings)
-    justification, call_sites_note = _run_spec_inputs(args, config_root)
+    justification, call_sites_note, ledger = _run_spec_inputs(args, config_root)
     # Read before any model is called, so a bad evaluator setting costs nothing.
     try:
         evaluation = context_from_config(config_root)
@@ -778,8 +805,12 @@ def _run_command(
 
     # Taken before a delta narrows `acquired`: the classification is of the whole
     # pull request, never of the slice since the last reviewed head.
+    changed_paths = changeset_paths.from_acquired(acquired)
+    removed_behaviour, removed_note = _removed_behaviour(
+        acquired, evaluation.policy_reader, [entry.path for entry in changed_paths], ledger
+    )
     changeset = ChangesetInput(
-        changed=tuple(changeset_paths.from_acquired(acquired)),
+        changed=tuple(changed_paths),
         earlier_rejection=earlier_verdicts_reader(
             backend, owner=owner, repo=repo, pr_number=args.pr
         ),
@@ -831,6 +862,8 @@ def _run_command(
         evaluation=evaluation,
         changeset=changeset,
         call_sites_note=call_sites_note,
+        removed_note=removed_note,
+        removed_behaviour=removed_behaviour,
         **kwargs,
     )
     return _report_outcome(outcome)

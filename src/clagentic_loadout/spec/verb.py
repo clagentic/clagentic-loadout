@@ -2,7 +2,7 @@
 
   loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
                     [--consumers-file FILE] [--path GLOB]... [--element NAME]... [--symbol SYMBOL]...
-                    [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
+                    [--removed-at REV] [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
   loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
   loadout-spec show HASH [--chain]
 
@@ -16,7 +16,9 @@ to replace; an unavailable map leaves the section empty with a note, again witho
 fills an impact section: the files and test files that import each matching Python file, from the tree at --ref read
 through git objects (see spec.impact); a path in another language is listed as not computed. Each --symbol fills a
 call-sites section: every place that refers to a function, export or verb, from the same tree, each with an empty
-disposition for the author to fill (see spec.call_sites). The draft
+disposition for the author to fill (see spec.call_sites). --removed-at REV fills a removal ledger section: each test
+case, public symbol and verb removed between the merge base of --ref and REV, and REV, with an empty disposition (see
+spec.removals). The draft
 is an ordinary file for the author to edit. With --supersedes it starts from a sealed spec instead, which is the only
 way to change one.
 
@@ -35,7 +37,8 @@ the specs root, and prints its hash with the copy to put in the pull request bod
 The copy is the artifact's own bytes. A document that already carries a seal is
 refused: no verb edits a sealed spec in place. Remedy entries with no decision are
 listed (stderr, and ``remedy_undecided`` in the output) and the seal still succeeds. So
-are call sites with no disposition (stderr, and ``call_sites_undisposed`` in the output).
+are call sites with no disposition (stderr, and ``call_sites_undisposed`` in the output) and
+removal ledger lines with no disposition (stderr, and ``removal_ledger_undisposed``).
 
 `show` prints the sealed spec stored under HASH, byte for byte, after recomputing
 the hash and refusing a file that does not match its name. With --chain it prints
@@ -92,6 +95,8 @@ from clagentic_loadout.merge.guidance_section import builder_guidance
 from clagentic_loadout.spec import call_sites as call_sites_mod
 from clagentic_loadout.spec import impact as impact_mod
 from clagentic_loadout.spec import model
+from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReadError
+from clagentic_loadout.spec import removals as removals_mod
 from clagentic_loadout.spec import remedy as remedy_mod
 from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.verdict_record.record import is_full_sha, utc_timestamp
@@ -213,6 +218,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "top-level function or class or a JavaScript exported name defined in <path>, or a bare "
         "name for a command-line verb. The call-sites section lists every reference to it at "
         "--ref, each with an empty disposition for the author to fill. May be repeated.",
+    )
+    new.add_argument(
+        "--removed-at",
+        default=None,
+        metavar="REV",
+        help="Fill the removal ledger with the test cases, public symbols and command-line verbs "
+        "removed between the merge base of --ref (default HEAD) and REV, and REV, each with an "
+        "empty disposition for the author to fill. Lines the draft already holds keep their "
+        "disposition. Without it the section is left as the draft holds it.",
     )
     new.add_argument(
         "--supersedes",
@@ -413,6 +427,29 @@ def _with_call_sites(draft: dict[str, object], args: argparse.Namespace) -> dict
     return model.apply_call_sites(draft, section)
 
 
+def _with_removal_ledger(draft: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
+    """*draft* with its removal ledger computed between the merge base of --ref
+    (default HEAD) and --removed-at, and --removed-at itself, read from git
+    objects. Without --removed-at the section is left as the draft holds it. A
+    revision that cannot be read leaves the held lines, says so in the section's
+    note and in a warning, and never stops the draft."""
+    if args.removed_at is None:
+        return draft
+    reader = GitPolicyReader(args.repo_path)
+    ref = args.ref or "HEAD"
+    try:
+        head = reader.resolve_commit(args.removed_at)
+        base = reader.merge_base(ref, head)
+    except PolicyReadError as exc:
+        print(f"loadout-spec: WARNING -- removal ledger not computed: {exc}", file=sys.stderr)
+        return model.apply_removal_ledger(draft, removals_mod.not_computed_report(str(exc)), source=None)
+    report = removals_mod.report_between(reader, base, head)
+    if report["status"] != removals_mod.STATUS_COMPUTED:
+        print(f"loadout-spec: WARNING -- removal ledger not computed: {report['note']}", file=sys.stderr)
+    source = f"removals between the merge base of {ref} and {args.removed_at}, and {args.removed_at}"
+    return model.apply_removal_ledger(draft, report, source=source)
+
+
 def _with_remedy(
     draft: dict[str, object], args: argparse.Namespace, config_root: str | Path | None
 ) -> dict[str, object]:
@@ -482,6 +519,7 @@ def _new(
     draft = _with_consumers(draft, args, config_root)
     draft = _with_impact(draft, args)
     draft = _with_call_sites(draft, args)
+    draft = _with_removal_ledger(draft, args)
     draft = _with_remedy(draft, args, config_root)
     draft = model.apply_guidance(draft, builder_guidance(), source=GUIDANCE_SOURCE)
     text = json.dumps(draft, indent=2) + "\n"
@@ -566,6 +604,13 @@ def _seal(args: argparse.Namespace, root: Path) -> int:
             "disposition; record changed, unaffected or out with a note",
             file=sys.stderr,
         )
+    unreplaced = model.undisposed_removals(sealed.doc)
+    for line in unreplaced:
+        print(
+            f"loadout-spec: removed {line['kind']} {line['item']} has no disposition; record "
+            "replaced_by, moved_to or retired_by",
+            file=sys.stderr,
+        )
     print(
         json.dumps(
             {
@@ -577,6 +622,7 @@ def _seal(args: argparse.Namespace, root: Path) -> int:
                 "artifact": str(path),
                 "remedy_undecided": [entry["id"] for entry in undecided],
                 "call_sites_undisposed": unaddressed,
+                "removal_ledger_undisposed": unreplaced,
                 "pr_body_copy": sealed.data.decode("ascii"),
             }
         )

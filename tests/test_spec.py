@@ -1306,6 +1306,182 @@ class TestCallSites:
         assert code == 0 and shown == sealed["pr_body_copy"]
 
 
+LEDGER_BASE = {
+    "lib/a.py": "def keep():\n    pass\n\n\ndef gone():\n    pass\n",
+    "tests/test_a.py": "def test_kept():\n    pass\n\n\ndef test_dropped():\n    pass\n\n\ndef test_also_dropped():\n    pass\n",
+}
+LEDGER_HEAD = {
+    "lib/a.py": "def keep():\n    pass\n",
+    "tests/test_a.py": "def test_kept():\n    pass\n",
+}
+LEDGER_KEYS = [
+    ("lib/a.py::gone", "symbol"),
+    ("tests/test_a.py::test_also_dropped", "test"),
+    ("tests/test_a.py::test_dropped", "test"),
+]
+REPLACED = {"kind": "replaced_by", "replacement": "tests/test_b.py::test_new"}
+MOVED = {"kind": "moved_to", "repo": "some-owner/other-repo", "task": "task-7"}
+RETIRED = {"kind": "retired_by", "decision": "the feature is removed"}
+
+
+def _ledger_repo(tmp_path: Path) -> tuple[Path, str, str]:
+    """A repository whose second commit removes a symbol and two test cases."""
+    path = make_repo(tmp_path)
+    base = commit_files(path, LEDGER_BASE)
+    return path, base, commit_files(path, LEDGER_HEAD)
+
+
+def _ledger_draft(repo: Path, base: str, capsys, *, extra=()) -> dict:
+    argv = ["new", "--role", ROLE, "--repo-path", str(repo), "--ref", base, "--removed-at", "HEAD", *extra]
+    code, out, err = _run(argv, capsys)
+    assert code == 0, err
+    return json.loads(out)
+
+
+def _ledger_lines(draft: dict) -> list[tuple[str, str, object]]:
+    return [(i["item"], i["kind"], i["disposition"]) for i in draft["removal_ledger"]["items"]]
+
+
+class TestRemovalLedger:
+    def test_the_draft_lists_every_removed_item_with_no_disposition_after_the_last_computed_section(
+        self, tmp_path, capsys
+    ):
+        repo, base, head = _ledger_repo(tmp_path)
+
+        draft = _ledger_draft(repo, base, capsys, extra=("--symbol", "lib/a.py::keep"))
+
+        assert _ledger_lines(draft) == [(item, kind, None) for item, kind in LEDGER_KEYS]
+        section = draft["removal_ledger"]
+        assert (section["base_sha"], section["head_sha"], section["note"]) == (base, head, None)
+        assert list(draft).index("removal_ledger") == list(draft).index("call_sites") + 1
+
+    def test_without_removed_at_the_section_is_left_as_the_draft_holds_it(self, tmp_path, capsys):
+        repo, _, _ = _ledger_repo(tmp_path)
+
+        assert "removal_ledger" not in _new_draft(repo, capsys)
+
+    def test_seal_names_each_undisposed_line_and_still_succeeds(self, tmp_path, capsys):
+        repo, base, _ = _ledger_repo(tmp_path)
+        draft = _ledger_draft(repo, base, capsys)
+        draft["removal_ledger"]["items"][1]["disposition"] = MOVED
+
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(draft))
+
+        assert code == 0, err
+        assert sealed["removal_ledger_undisposed"] == [
+            {"item": "lib/a.py::gone", "kind": "symbol"},
+            {"item": "tests/test_a.py::test_dropped", "kind": "test"},
+        ]
+        assert "removed symbol lib/a.py::gone has no disposition" in err
+        assert "test_also_dropped" not in err
+        assert model.undisposed_removals(json.loads(sealed["pr_body_copy"])) == sealed["removal_ledger_undisposed"]
+
+    @pytest.mark.parametrize("disposition", [REPLACED, MOVED, RETIRED], ids=["replaced_by", "moved_to", "retired_by"])
+    def test_each_of_the_three_dispositions_seals(self, tmp_path, capsys, disposition):
+        repo, base, _ = _ledger_repo(tmp_path)
+        draft = _ledger_draft(repo, base, capsys)
+        for line in draft["removal_ledger"]["items"]:
+            line["disposition"] = disposition
+
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(draft))
+
+        assert code == 0, err
+        assert sealed["removal_ledger_undisposed"] == []
+
+    @pytest.mark.parametrize(
+        "disposition",
+        [
+            {"kind": "replaced_by", "replacement": ""},
+            {"kind": "replaced_by"},
+            {"kind": "moved_to", "repo": "some-owner/other-repo"},
+            {"kind": "moved_to", "repo": "", "task": "task-7"},
+            {"kind": "retired_by", "decision": ""},
+            {"kind": "retired_by", "decision": "x", "extra": "y"},
+            {"kind": "replaced_by", "decision": "x"},
+            {"kind": "unknown", "replacement": "x"},
+            "retired",
+        ],
+        ids=[
+            "empty-replacement", "no-replacement", "moved-without-task", "empty-repo", "empty-decision",
+            "extra-key", "two-shapes-mixed", "unknown-kind", "bare-string",
+        ],
+    )
+    def test_a_disposition_of_any_other_shape_or_with_an_empty_string_is_not_sealed(
+        self, tmp_path, capsys, disposition
+    ):
+        repo, base, _ = _ledger_repo(tmp_path)
+        draft = _ledger_draft(repo, base, capsys)
+        draft["removal_ledger"]["items"][0]["disposition"] = disposition
+
+        code, _, _ = _seal(tmp_path, repo, capsys, _fill(draft))
+
+        assert code == spec_verb.EXIT_DRAFT_INVALID
+
+    def test_a_superseding_draft_keeps_each_filled_disposition_and_a_line_no_longer_computed(
+        self, tmp_path, capsys
+    ):
+        repo, base, _ = _ledger_repo(tmp_path)
+        first = _ledger_draft(repo, base, capsys)
+        first["removal_ledger"]["items"][0]["disposition"] = REPLACED
+        first["removal_ledger"]["items"][2]["disposition"] = RETIRED
+        first["removal_ledger"]["items"].append(
+            {"item": "lib/old.py::vanished", "kind": "symbol", "disposition": MOVED}
+        )
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(first))
+        assert code == 0, err
+
+        second = _ledger_draft(repo, base, capsys, extra=("--supersedes", sealed["spec_hash"]))
+
+        assert _ledger_lines(second) == [
+            ("lib/a.py::gone", "symbol", REPLACED),
+            ("tests/test_a.py::test_also_dropped", "test", None),
+            ("tests/test_a.py::test_dropped", "test", RETIRED),
+            ("lib/old.py::vanished", "symbol", MOVED),
+        ]
+
+    def test_a_superseding_draft_without_removed_at_carries_the_section_as_it_is(self, tmp_path, capsys):
+        repo, base, _ = _ledger_repo(tmp_path)
+        first = _ledger_draft(repo, base, capsys)
+        first["removal_ledger"]["items"][0]["disposition"] = REPLACED
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(first))
+        assert code == 0, err
+
+        code, out, err = _run(
+            ["new", "--role", ROLE, "--repo-path", str(repo), "--supersedes", sealed["spec_hash"]], capsys
+        )
+
+        assert code == 0, err
+        assert json.loads(out)["removal_ledger"] == first["removal_ledger"]
+
+    def test_a_revision_that_cannot_be_read_is_a_warning_and_a_note_and_keeps_the_held_lines(
+        self, tmp_path, capsys
+    ):
+        repo, base, _ = _ledger_repo(tmp_path)
+
+        code, out, err = _run(
+            ["new", "--role", ROLE, "--repo-path", str(repo), "--ref", base, "--removed-at", "no-such-rev"], capsys
+        )
+
+        assert code == 0
+        section = json.loads(out)["removal_ledger"]
+        assert section["items"] == [] and section["source"] is None
+        assert "no-such-rev" in section["note"] and "removal ledger not computed" in err
+
+    def test_a_spec_sealed_without_a_ledger_validates_reads_and_supersedes_as_before(self, tmp_path, capsys):
+        repo, _, _ = _ledger_repo(tmp_path)
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(_new_draft(repo, capsys)))
+        assert code == 0, err
+        assert "removal_ledger" not in json.loads(sealed["pr_body_copy"])
+        assert sealed["removal_ledger_undisposed"] == []
+
+        code, out, err = _run(
+            ["new", "--role", ROLE, "--repo-path", str(repo), "--supersedes", sealed["spec_hash"]], capsys
+        )
+
+        assert code == 0, err
+        assert "removal_ledger" not in json.loads(out)
+
+
 @pytest.mark.parametrize("surface", ["import-graph", "call-site-finder"])
 def test_reading_python_with_an_invalid_escape_sequence_prints_no_syntax_warning(surface):
     import warnings

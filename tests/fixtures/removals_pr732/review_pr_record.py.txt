@@ -1,0 +1,121 @@
+"""
+review_pr_record.py — settle the one reviewer rule whose condition is a fact about
+the PR body, from the PR record `loadout-review run` writes beside findings.json.
+
+The chunk reviewer sees diff chunks only, so it raised `amos.path-choice.5` ("no
+CREW_SOP section 6 record in the PR body") on PRs whose body carried a complete
+record, and kept raising it round after round. The run records the title and body
+it fetched at the reviewed head in `pr.json` (schema `loadout.review-pr/1`); this
+module reads that file and resolves the candidate mechanically, so the verdict no
+longer depends on the reviewer remembering to check.
+
+Only the false "record is missing" claim is removed. Whether the record is
+adequate stays a human or orchestrator question.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any, NamedTuple
+
+RULE_ID = "amos.path-choice.5"
+PR_RECORD_SCHEMA = "loadout.review-pr/1"
+
+#: The heading AMoS writes ("CREW_SOP section 6 record", "CREW_SOP §6 ..."), found
+#: case-insensitively. A record is this heading followed, anywhere after it, by
+#: evidence wording from `RECORD_EVIDENCE_RE`; a heading with no evidence after it
+#: is a mention, not a record.
+RECORD_HEADING_RE = re.compile(r"CREW_SOP\s*(?:§\s*|section\s+)6\b", re.IGNORECASE)
+RECORD_EVIDENCE_RE = re.compile(r"captured|pending (?:post-merge )?real run", re.IGNORECASE)
+
+DROP_REASON = "section 6 record present in PR body (pr.json)"
+TRUNCATED_REASON = "PR body truncated; record not verifiable"
+
+
+class Resolution(NamedTuple):
+    """What the PR record decided: the findings to carry on (a downgraded candidate
+    rewritten as a nit), the numbers to drop with their reasons, a record per
+    downgrade, and one line per unchanged candidate saying why."""
+
+    findings: list[dict[str, Any]]
+    drops: dict[int, str]
+    downgrades: list[dict[str, Any]]
+    notes: list[str]
+
+
+def has_section_6_record(body: str) -> bool:
+    """True iff `body` holds the section 6 heading followed by evidence wording."""
+    return any(RECORD_EVIDENCE_RE.search(body, match.end()) for match in RECORD_HEADING_RE.finditer(body))
+
+
+def load_record(path: Path | None, findings_head: str | None) -> tuple[dict[str, Any] | None, str]:
+    """(the PR record, "") when it can be trusted for this review, else (None, the
+    reason it cannot). Trusted means: readable, the expected schema, a string body,
+    and a head equal to the head the findings were produced for."""
+    if path is None:
+        return None, "pr.json path could not be resolved (TMPDIR unset)"
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None, "pr.json missing"
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"pr.json unreadable: {exc}"
+    if not isinstance(document, dict) or document.get("schema") != PR_RECORD_SCHEMA:
+        return None, f"pr.json is not a {PR_RECORD_SCHEMA} document"
+    if not isinstance(document.get("body"), str) or not isinstance(document.get("body_truncated"), bool):
+        return None, "pr.json has no body/body_truncated"
+    record_head = document.get("head_sha")
+    if not isinstance(findings_head, str) or not findings_head:
+        return None, "findings file carries no head_sha to compare with pr.json"
+    if record_head != findings_head:
+        return None, f"pr.json head_sha {str(record_head)[:12]} differs from findings head {findings_head[:12]}"
+    return document, ""
+
+
+def _describe(number: int, item: dict[str, Any]) -> str:
+    return f"finding {number} ({item.get('file')}:{item.get('line')})"
+
+
+def resolve(
+    findings: list[dict[str, Any]],
+    findings_head: str | None,
+    record_path: Path | None,
+    reviewer_drops: dict[int, str],
+) -> Resolution:
+    """Resolve every `amos.path-choice.5` candidate against the PR record.
+
+    A candidate the reviewer already dropped keeps the reviewer's reason. A record
+    that cannot be trusted leaves the candidate as it is and says why."""
+    candidates = [
+        number for number, item in enumerate(findings)
+        if item.get("rule_id") == RULE_ID and number not in reviewer_drops
+    ]
+    if not candidates:
+        return Resolution(findings, {}, [], [])
+    record, reason = load_record(record_path, findings_head)
+    if record is None:
+        notes = [f"{_describe(n, findings[n])} kept: {reason}" for n in candidates]
+        return Resolution(findings, {}, [], notes)
+    if has_section_6_record(record["body"]):
+        return Resolution(findings, {n: DROP_REASON for n in candidates}, [], [])
+    if not record["body_truncated"]:
+        return Resolution(findings, {}, [], [])
+    result = list(findings)
+    downgrades: list[dict[str, Any]] = []
+    for number in candidates:
+        item = findings[number]
+        if item.get("severity") != "blocking":
+            continue
+        result[number] = {**item, "severity": "nit"}
+        downgrades.append({
+            "file": item.get("file"), "line": item.get("line"), "rule_id": item.get("rule_id"),
+            "message": item.get("message"), "reason": f"downgraded to nit: {TRUNCATED_REASON}",
+        })
+        print(
+            f"review-judge: {_describe(number, item)} downgraded blocking -> nit: {TRUNCATED_REASON}",
+            file=sys.stderr,
+        )
+    return Resolution(result, {}, downgrades, [])

@@ -518,6 +518,7 @@ from clagentic_loadout.merge import (
 )
 from clagentic_loadout.merge.attestation import build_attestation_body
 from clagentic_loadout.merge.interface_notice import InterfaceNotices, collect_interface_notices
+from clagentic_loadout.merge.removed_notice import RemovedNotices, collect_removed_notices
 from clagentic_loadout.merge.authority import (
     AuthorityProvider,
     StaticRoleAuthorityProvider,
@@ -1067,6 +1068,16 @@ def _interface_readers(
         readers.append(GitPolicyReader(repo_path))
     readers.append(HostPolicyReader(backend.policy_file_backend(), owner=owner, repo=repo))
     return readers
+
+
+def _removal_readers(
+    backend, *, owner: str, repo: str, repo_path: str | None
+) -> list[PolicyReader]:
+    """Where the removed-behaviour computation reads the PR's base and head: the
+    local repository when the caller names one, and only then (the rule
+    _gate_policy_reader follows), else the host API. A named repository that does
+    not hold both commits gives a not-computed report, never a host read."""
+    return [_gate_policy_reader(backend, owner=owner, repo=repo, repo_path=repo_path)]
 
 
 def _resolve_backend(
@@ -2044,6 +2055,31 @@ def _run(
     for interface_note in interface_notices.notes:
         print(f"merge: NOTE -- {interface_note}", file=sys.stderr)
 
+    # Report-only, like the interface notice: the behaviour the PR removes, matched
+    # against the ledger of the spec the reviewer fences name. No failure here may
+    # change the gate outcome or stop the merge.
+    try:
+        removed_notices = collect_removed_notices(
+            changed_files=changed_files,
+            make_readers=lambda: _removal_readers(
+                backend, owner=owner, repo=repo, repo_path=args.repo_path
+            ),
+            base_sha=(pr_info.get("base") or {}).get("sha") if isinstance(pr_info, dict) else None,
+            head_sha=current_head_sha,
+            fence_spec_hashes=fence_spec_hashes,
+            repo_path=args.repo_path,
+        )
+    except Exception as exc:  # report-only step: no failure here may stop the merge
+        reason = f"{type(exc).__name__}: {exc}"
+        removed_notices = RemovedNotices(
+            notes=(f"removed behaviour not computed: {reason}",),
+            attestation=(f"not computed: {reason}",),
+        )
+    for removed_line in removed_notices.lines:
+        print(f"merge: NOTICE -- {removed_line}", file=sys.stderr)
+    for removed_note in removed_notices.notes:
+        print(f"merge: NOTE -- {removed_note}", file=sys.stderr)
+
     # 7. PR-title gate.
     if args.skip_title_check:
         print(
@@ -2504,6 +2540,7 @@ def _run(
             e.docs_only_waiver for e in gate_evaluations if e.docs_only_waiver is not None
         ],
         interface_notices=list(interface_notices.lines),
+        removed_behaviour=list(removed_notices.attestation),
         identity_provider=provider_fields(attested_identity)["provider"],
         self_declared=provider_fields(attested_identity)["self_declared"],
     )
@@ -2553,6 +2590,7 @@ def _run(
             if interface_notices.undisposed
             else {}
         ),
+        **({"removed_undisposed": list(removed_notices.undisposed)} if removed_notices.undisposed else {}),
         **provider_fields(attested_identity),
     }))
 

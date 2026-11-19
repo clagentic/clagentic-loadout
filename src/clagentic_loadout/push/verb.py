@@ -313,7 +313,7 @@ from clagentic_loadout.push.remote_readback import (
     read_remote_head,
     verify_remote_authorship,
 )
-from clagentic_loadout.push import interface_report, profile_report, uncalled_report
+from clagentic_loadout.push import interface_report, profile_report, removed_report, uncalled_report
 from clagentic_loadout.review.profile_posture import CompletenessItem
 from clagentic_loadout.push.ratio_notice import notice_line, ratio_for_push
 from clagentic_loadout.push.verify_config import (
@@ -1508,7 +1508,8 @@ def _run_verification_outcome(
     resolvable first; with any, a breaking change to the repository's declared
     interface is reported with its consumers (push.interface_report), and a
     public symbol the branch adds that nothing calls or tests is reported
-    (push.uncalled_report), before anything is skipped or run, and neither
+    (push.uncalled_report), as is the behaviour the branch removes
+    (push.removed_report), before anything is skipped or run, and none
     changes the outcome.
 
     Raises push.verify_config.InvalidVerifyConfigError for malformed config
@@ -1523,6 +1524,7 @@ def _run_verification_outcome(
     if base_refs:
         interface_report.print_notice(project_root, base_refs)
         uncalled_report.print_notice(project_root, base_refs)
+        removed_report.print_notice(project_root, base_refs)
     if not entries:
         return body, VERIFICATION_NONE, None
     if skip:

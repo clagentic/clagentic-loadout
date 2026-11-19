@@ -93,7 +93,10 @@ class World:
         return str(path)
 
     def seal(
-        self, justification: str | None = JUSTIFICATION, call_sites: dict | None = None
+        self,
+        justification: str | None = JUSTIFICATION,
+        call_sites: dict | None = None,
+        removal_ledger: dict | None = None,
     ) -> model.SealedSpec:
         draft = model.new_draft("planner-role")
         draft["goal"] = "Fix the guide."
@@ -103,6 +106,8 @@ class World:
         draft["docs_only_justification"] = justification
         if call_sites is not None:
             draft = model.apply_call_sites(draft, call_sites)
+        if removal_ledger is not None:
+            draft["removal_ledger"] = removal_ledger
         sealed = model.seal(draft, head_sha=SPEC_HEAD, sealed_at="2026-01-01T00:00:00Z")
         spec_store.write_sealed(spec_store.specs_root(), sealed)
         return sealed
@@ -655,6 +660,132 @@ class TestCallSitesInThePrompt:
 
         sent = prompts(world.env.stubs, "carrier")
         assert sent and all(self.HEADING not in prompt for prompt in sent)
+
+
+LEDGER_BASE = {
+    "lib/a.py": "def keep():\n    pass\n\n\ndef gone():\n    pass\n",
+    "tests/test_a.py": "def test_kept():\n    pass\n\n\ndef test_dropped():\n    pass\n",
+}
+LEDGER_REMOVING = {
+    "lib/a.py": "def keep():\n    pass\n",
+    "tests/test_a.py": "def test_kept():\n    pass\n",
+}
+LEDGER_ADDING = {"lib/a.py": LEDGER_BASE["lib/a.py"] + "\n\ndef fresh():\n    pass\n"}
+REMOVED_ITEMS = ["lib/a.py::gone", "tests/test_a.py::test_dropped"]
+DISPOSITIONS = {
+    "replaced_by": {"kind": "replaced_by", "replacement": "tests/test_b.py::test_new"},
+    "moved_to": {"kind": "moved_to", "repo": "some-owner/other-repo", "task": "task-7"},
+    "retired_by": {"kind": "retired_by", "decision": "the feature is removed"},
+}
+DISPOSITION_TEXT = {
+    "replaced_by": "replaced by tests/test_b.py::test_new",
+    "moved_to": "moved to some-owner/other-repo (task-7)",
+    "retired_by": "retired by the feature is removed",
+}
+
+
+def _ledger(disposition) -> dict:
+    return {
+        "source": "tree", "note": None, "base_sha": None, "head_sha": None,
+        "items": [
+            {"item": item, "kind": kind, "disposition": disposition}
+            for item, kind in (("lib/a.py::gone", "symbol"), ("tests/test_a.py::test_dropped", "test"))
+        ],
+    }
+
+
+class TestRemovedBehaviourInThePrompt:
+    """The behaviour the pull request removes is quoted into every chunk prompt of `run`
+    with its ledger line, and carried in the result; a change that removes nothing leaves
+    the prompt and what a resume binds as they were, and no failure changes the verdict."""
+
+    HEADING = "## Removed behaviour"
+
+    def _arrange(self, world, head_files: dict[str, str] | None) -> None:
+        """The pull request's base is LEDGER_BASE and its head the given files; None
+        leaves the head as a commit the repository does not hold."""
+        base = commit_files(world.env.repo, LEDGER_BASE)
+        world.host.set_base(base)
+        world.env.base_sha = base
+        world.host.files = list(LEDGER_BASE)
+        world.host.diff = make_diff({"tests/test_a.py": 3})
+        if head_files is not None:
+            head = commit_files(world.env.repo, head_files)
+            world.host.head_sha = head
+            world.host.pull["head"]["sha"] = head
+        world.env.configure()
+
+    def _run(self, world, capsys, *extra):
+        before = len(prompts(world.env.stubs, "carrier"))
+        code, result, _ = world.review("run", *extra, capsys=capsys)
+        return code, result, prompts(world.env.stubs, "carrier")[before:]
+
+    def test_an_item_with_no_ledger_line_is_undisposed_in_the_prompt_and_the_result(self, world, capsys):
+        self._arrange(world, LEDGER_REMOVING)
+        spec = world.seal(justification=None)
+
+        code, result, sent = self._run(world, capsys, "--spec-hash", spec.spec_hash)
+
+        assert code == 0 and sent
+        block = result["removed_behaviour"]
+        assert block["status"] == "computed" and block["undisposed"] == REMOVED_ITEMS
+        assert [(i["item"], i["kind"], i["disposition"]) for i in block["items"]] == [
+            ("lib/a.py::gone", "symbol", None), ("tests/test_a.py::test_dropped", "test", None),
+        ]
+        for prompt in sent:
+            assert "- `lib/a.py::gone` (symbol): no ledger line" in prompt
+            assert "- `tests/test_a.py::test_dropped` (test): no ledger line" in prompt
+            assert prompt.rfind(self.HEADING) < prompt.rfind("## Diff chunk")
+
+    @pytest.mark.parametrize("kind", list(DISPOSITIONS))
+    def test_an_item_with_a_ledger_line_is_listed_with_it_and_is_not_undisposed(self, world, capsys, kind):
+        self._arrange(world, LEDGER_REMOVING)
+        spec = world.seal(justification=None, removal_ledger=_ledger(DISPOSITIONS[kind]))
+
+        code, result, sent = self._run(world, capsys, "--spec-hash", spec.spec_hash)
+
+        assert code == 0
+        assert result["removed_behaviour"]["undisposed"] == []
+        assert {i["disposition"]["kind"] for i in result["removed_behaviour"]["items"]} == {kind}
+        assert sent and all(
+            f"- `lib/a.py::gone` (symbol): {DISPOSITION_TEXT[kind]}" in prompt and "no ledger line" not in prompt
+            for prompt in sent
+        )
+
+    def test_a_run_given_no_spec_reports_every_removed_item_as_undisposed(self, world, capsys):
+        self._arrange(world, LEDGER_REMOVING)
+
+        code, result, sent = self._run(world, capsys)
+
+        assert code == 0 and result["removed_behaviour"]["undisposed"] == REMOVED_ITEMS
+        assert sent and all(self.HEADING in prompt for prompt in sent)
+
+    def test_a_change_that_removes_nothing_says_none_and_leaves_the_prompt_and_the_resume_as_they_were(
+        self, world, capsys
+    ):
+        self._arrange(world, LEDGER_ADDING)
+        spec = world.seal(justification=None, removal_ledger=_ledger(DISPOSITIONS["retired_by"]))
+        self._run(world, capsys)
+
+        code, result, sent = self._run(world, capsys, "--spec-hash", spec.spec_hash)
+
+        block = result["removed_behaviour"]
+        assert code == 0 and (block["items"], block["undisposed"], block["note"]) == ([], [], "none")
+        # Nothing is sent again: the spec's ledger changes neither a prompt nor the key.
+        assert sent == []
+        assert all(self.HEADING not in prompt for prompt in prompts(world.env.stubs, "carrier"))
+
+    def test_a_head_the_repository_cannot_read_is_reported_not_computed_and_the_run_goes_on(
+        self, world, capsys
+    ):
+        self._arrange(world, None)
+
+        code, result, sent = self._run(world, capsys)
+
+        block = result["removed_behaviour"]
+        assert code == 0 and sent
+        assert block["status"] == "not_computed" and block["items"] == [] and block["note"]
+        assert all(self.HEADING not in prompt for prompt in sent)
 
 
 class TestJustificationInThePrompt:

@@ -2362,6 +2362,21 @@ symbols are listed (the constant `push.uncalled_report.REPORT_CAP`) and the rest
 line. A base that does not resolve prints nothing; a tree that cannot be read prints one
 `push: new public symbols not computed: ...` line.
 
+#### Removed behaviour
+
+Under the same condition, the step also reports the test cases, public symbols and command-line
+verbs the branch removes between the merge base and `HEAD` (what an item is, the languages covered
+and what is not computed are in [The removal ledger](#the-removal-ledger)). One line per item on
+standard error, never changing the exit code, the PR body or the verification outcome:
+
+```
+push: removed at <head sha>: <item> (<kind>)
+```
+
+At most 25 are listed (`push.removed_report.REPORT_CAP`) and the rest counted in one `push: and N more
+removed at <head sha>` line. A base that does not resolve prints nothing; a tree that cannot be read
+prints one `push: removed behaviour not computed: <reason>` line.
+
 **Trust model.** Like the review carrier above, `push.verify` names commands this
 process executes, but the repo-level placement is deliberate and differs from the
 carrier rule: a review carrier runs where a cloned, untrusted repository could pick the
@@ -3001,6 +3016,21 @@ error, non-2xx) is logged to stderr and swallowed — it never changes
 [docs/merge-authority.md](merge-authority.md)'s "The git-host attestation
 mark" section for the full field-by-field content and the rationale for
 this being the one intentionally fail-open step in the gate chain.
+
+**Removed behaviour (`merge.removed_notice`):** the merge computes the test cases, public symbols
+and command-line verbs the pull request removes between its recorded base and head (see
+[The removal ledger](#the-removal-ledger)), through the local repository when `--repo-path` is
+given (a repository that lacks either revision gives a not-computed note, and the host is not asked)
+and else the host API, and matches them against the removal ledger of the spec the
+reviewer fences name (found in the local spec store exactly as the interface notice finds its spec).
+Each item with no ledger line prints `merge: NOTICE -- removed without a ledger line: <item> (<kind>)`
+on standard error, the attestation gains a `Removed behaviour` row listing each item with its ledger
+line or `undisposed` (`none` when nothing is removed), and the final JSON gains `removed_undisposed`,
+the keys of the undisposed items, only when there are some. Anything that stops the computation (a
+revision that cannot be read, no spec hash in the fences, a spec not in the store, a file that
+cannot be parsed) is a `merge: NOTE -- ...` line and, when the report itself could not be computed,
+a row saying `not computed: <reason>`. It never changes the outcome or the exit code. A caller of
+`build_attestation_body` that does not pass `removed_behaviour` gets no row.
 
 **Post-merge steps (`merge.post_merge` / `merge.post_merge_config`):**
 after step 9 above actually merges the PR — never on any refusal path —
@@ -3974,7 +4004,7 @@ with or without `--repo-root`.
 ```
 loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
                   [--consumers-file FILE] [--path GLOB]... [--element NAME]... [--symbol SYMBOL]...
-                  [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
+                  [--removed-at REV] [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
 loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
 loadout-spec show HASH [--chain]
 ```
@@ -4006,6 +4036,7 @@ The published contract is `schemas/spec.schema.json`
 | `consumers` | `{source, note, items}`, each item `{consumer, disposition}` | no source yet |
 | `impact` | `{source, note, head_sha, languages_covered, cap, skipped_files, items}`, optional: the importers and importing tests of each `--path`, for Python and JavaScript. See [The impact section](#the-impact-section). | `new --path`, from the tree at `--ref` |
 | `call_sites` | `{source, note, head_sha, cap, items}`, optional: the places that refer to each `--symbol`, each with a disposition. See [The call sites section](#the-call-sites-section). | `new --symbol`, from the tree at `--ref` |
+| `removal_ledger` | `{source, note, base_sha, head_sha, items}`, optional: each test case, public symbol and verb the change removes, each with a disposition. See [The removal ledger](#the-removal-ledger). | `new --removed-at`, from git objects |
 | `test_plan` | `{source, note, declared, plan}`: the commands the profile's `test` block declares, and the author's plan. | profile + authored |
 | `verification_evidence_owed` | `{gate, note}` entries naming the verdict records that must exist. | authored |
 | `rulings_already_made` | Decisions the build must not reopen. | authored |
@@ -4161,6 +4192,63 @@ Schema change: `call_sites` is an additive, optional property of `schemas/spec.s
 `impact` and `remedy` were, so `schema_version` stays 1 and a spec sealed without it still validates
 and loads.
 
+### The removal ledger
+
+Nothing a change removes should disappear without a line saying where that behaviour went. The
+removal report (`spec.removals`) is computed from a change, from the merge base to the head, and is
+shown at push, at review and at merge; the spec's `removal_ledger` carries one line per removed item,
+and an item with no line is listed as undisposed. It is reporting only: no push, review, seal or merge
+outcome changes.
+
+**Items.** An item is removed when it is present at the base and absent at the head; a file deleted
+outright removes every item it held, and a rename is the deletion of the old path's items and nothing
+else (no move is inferred from a same-named item elsewhere).
+
+| kind | what | key |
+|---|---|---|
+| `test` | Python: a top-level function whose name starts with `test`, or a method starting with `test` of a top-level class whose name starts with `Test`, in a test file (see [The impact section](#the-impact-section)). JavaScript (`.js .jsx .mjs .cjs`): each `test(` or `it(` call whose first argument is a single string literal, in a test file; `describe` nesting is not tracked, and a title present n times at the base and m < n times at the head gives n - m items. | `<path>::<name>`, `<path>::<Class>::<name>` or `<path>::<title>` |
+| `symbol` | The public symbols of a non-test file, as the push report on new public symbols reads them: a top-level `def` or `class` not starting with `_`, or a name a JavaScript file exports. | `<path>::<name>` |
+| `verb` | A key of `[project.scripts]` in a `pyproject.toml`, or of the `bin` object of a `package.json` (a string `bin` names the package `name` with any `@scope/` prefix removed, the name npm installs it under). | the bare verb name |
+
+**Not computed.** Languages other than Python and JavaScript are not covered (TypeScript included): a
+changed source file in another language, a covered file that cannot be read or parsed at either side,
+and a `pyproject.toml` read on a Python without `tomllib` (before 3.11) are listed under `not_computed`
+with the reason, add no item, and the rest of the report is still computed. A revision or file list
+that cannot be read at all makes the whole report `not_computed`, with the reason as its note.
+Documents and data files are not listed.
+
+**The section.** `removal_ledger` is `{source, note, base_sha, head_sha, items}`; each item is
+`{item, kind, disposition}` with `kind` one of `test`, `symbol` or `verb`. The `disposition` is `null`
+or exactly one of `{kind: "replaced_by", replacement}` (the test or symbol that carries the behaviour
+now), `{kind: "moved_to", repo, task}` or `{kind: "retired_by", decision}`; every string is non-empty,
+and any other shape fails the schema at seal. `new --removed-at REV` computes the section between the
+merge base of `--ref` (default `HEAD`) and `REV`, and `REV`, in `--repo-path`, each item with a `null`
+disposition, placed after `call_sites` (or after `impact`, or `consumers`). Lines the draft already
+holds (from `--supersedes` or by hand) keep their disposition when the item and kind match, and a held
+line that is no longer computed is kept as authored. Without `--removed-at` the section is left exactly
+as the draft holds it. A revision that cannot be read leaves the held lines, says so in the section's
+`note` and in a warning on standard error, and the draft is still written.
+
+**Seal and review.** `seal` names each line whose disposition is `null` on standard error and in
+`removal_ledger_undisposed` of its output, a list of `{item, kind}`, and still exits 0.
+`loadout-review run` computes the report between the policy base and the head through the run's
+policy reader, for the whole pull request, and matches it against the ledger of `--spec-hash` (with no
+spec every item is undisposed). When at least one item is removed, every chunk prompt carries a
+`Removed behaviour` section listing each item with its kind and its ledger line, or `no ledger line`,
+quoted as data, and asks the reviewer to state a finding for removed behaviour left without a
+replacement, a move or a retiring decision; the section is bound into the resume key only when there
+is one, so a change that removes nothing leaves the prompt and the resume key byte-identical. The run
+result gains `removed_behaviour`: `{status, base_sha, head_sha, items: [{item, kind, disposition}],
+undisposed: [item keys], not_computed: [{path, reason}], note}`; with nothing removed `items` is empty
+and `note` is `none`, and a failure to compute is `status` `not_computed` with the reason. The exit
+code and the verdict are the same in every case.
+
+**Merge and push.** See the removed behaviour paragraphs under `loadout-merge` and `loadout-push`.
+
+Schema change: `removal_ledger` is an additive, optional property of `schemas/spec.schema.json`, as
+`call_sites` was, so `schema_version` stays 1 and a spec sealed without it still validates, loads and
+supersedes as before.
+
 ### The three verbs
 
 `new` writes a **draft**: the sealed form minus `head_sha` and `sealed_at`. A draft is
@@ -4172,7 +4260,8 @@ repeated criterion id, no unknown key), binds it to a branch head, stores it as 
 content-addressed artifact under the specs root, and prints one JSON object:
 `spec_hash`, `head_sha`, `role`, `sealed_at`, `supersedes`, `artifact` (the path),
 `remedy_undecided` (the ids of remedy entries with no decision), `call_sites_undisposed` (the call sites with no
-disposition; see [The call sites section](#the-call-sites-section)) and `pr_body_copy`. The head is `--head` or, by default, `git rev-parse HEAD` in
+disposition; see [The call sites section](#the-call-sites-section)), `removal_ledger_undisposed` (the ledger lines with no
+disposition; see [The removal ledger](#the-removal-ledger)) and `pr_body_copy`. The head is `--head` or, by default, `git rev-parse HEAD` in
 `--repo-path`; it must be a full sha (40 or 64 lowercase hex digits).
 
 `show HASH` prints the sealed spec stored under `HASH`, byte for byte, after

@@ -1,0 +1,189 @@
+"""
+review-judge settles `amos.path-choice.5` from the run's pr.json, through the real
+script with its argless default paths under TMPDIR.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from crew_runtime import review_pr_record
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+SCRIPT = REPO_ROOT / "scripts" / "review-judge"
+FIXTURE = REPO_ROOT / "tests" / "fixtures" / "real" / "review_pr_forgejo_crew_manifest_662.json"
+CONSOLE_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "real" / "review_pr_github_clagentic_console_440.json"
+HEAD = "e" * 40
+
+RECORD_BODY = (
+    "What changed\n- x\n\nCREW_SOP section 6 record (guard change). Caller shapes: foreground and "
+    "background Agent(). Captured payload: 3 real commands. Pending post-merge real run: one live review.\n"
+)
+NO_RECORD_BODY = "What changed\n- x\n\nTest status: failing-ID set (0).\n"
+
+PATH_CHOICE_5 = {
+    "file": "scripts/x.py", "line": 4, "rule_id": "amos.path-choice.5", "severity": "blocking",
+    "message": "no CREW_SOP section 6 PR-body record",
+    "failure_sequence": "the verdict claims a missing record, the author is blocked on a false premise",
+}
+OTHER = {
+    "file": "scripts/y.py", "line": 9, "rule_id": "amos.path-choice.4", "severity": "blocking",
+    "message": "same shape at z.py:2", "failure_sequence": "call with [], index raises, run aborts",
+}
+
+
+def _record(body: str, head: str = HEAD, truncated: bool = False, schema: str = "loadout.review-pr/1") -> dict:
+    return {
+        "schema": schema, "platform": "forgejo", "repo": "clagentic/example-repo", "pr_number": 1,
+        "head_sha": head, "title": "t", "body": body, "body_truncated": truncated,
+    }
+
+
+def _run(tmp_path: Path, findings: list, record: dict | str | None, head: str | None = HEAD):
+    run_dir = tmp_path / "review"
+    run_dir.mkdir()
+    document = {"schema": "loadout.review-findings/1", "chunks": [], "findings": findings}
+    if head is not None:
+        document["head_sha"] = head
+    (run_dir / "findings.json").write_text(json.dumps(document), encoding="utf-8")
+    if record is not None:
+        text = record if isinstance(record, str) else json.dumps(record)
+        (run_dir / "pr.json").write_text(text, encoding="utf-8")
+    env = {**os.environ, "TMPDIR": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--drop", "none"], capture_output=True, text=True, timeout=60, env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    judged = json.loads((tmp_path / "judged.json").read_text(encoding="utf-8"))["findings"]
+    dropped = json.loads((tmp_path / "judged.dropped.json").read_text(encoding="utf-8"))
+    return result, judged, dropped
+
+
+def test_a_body_with_a_record_drops_the_candidate_with_the_reason(tmp_path):
+    result, judged, dropped = _run(tmp_path, [PATH_CHOICE_5, OTHER], _record(RECORD_BODY))
+    assert judged == [OTHER]
+    assert [(d["rule_id"], d["reason"]) for d in dropped] == [
+        ("amos.path-choice.5", "section 6 record present in PR body (pr.json)")
+    ]
+    assert result.stdout.splitlines()[0].split("\t")[:2] == ["0", "drop"]
+
+
+def test_a_body_without_a_record_keeps_the_candidate(tmp_path):
+    _, judged, dropped = _run(tmp_path, [PATH_CHOICE_5, OTHER], _record(NO_RECORD_BODY))
+    assert judged == [PATH_CHOICE_5, OTHER]
+    assert dropped == []
+
+
+def test_a_heading_with_no_evidence_after_it_is_not_a_record(tmp_path):
+    body = "Evidence captured earlier.\n\nCREW_SOP section 6 record: to follow.\n"
+    _, judged, dropped = _run(tmp_path, [PATH_CHOICE_5], _record(body))
+    assert [item["rule_id"] for item in judged] == ["amos.path-choice.5"]
+    assert dropped == []
+
+
+def test_a_head_mismatch_keeps_the_candidate_and_records_the_reason(tmp_path):
+    result, judged, dropped = _run(tmp_path, [PATH_CHOICE_5], _record(RECORD_BODY, head="f" * 40))
+    assert judged == [PATH_CHOICE_5]
+    assert dropped == []
+    notes = [line for line in result.stdout.splitlines() if line.startswith("pr-record\t")]
+    assert len(notes) == 1 and "differs from findings head" in notes[0]
+
+
+def test_a_findings_file_with_no_head_keeps_the_candidate(tmp_path):
+    result, judged, _ = _run(tmp_path, [PATH_CHOICE_5], _record(RECORD_BODY), head=None)
+    assert judged == [PATH_CHOICE_5]
+    assert "no head_sha" in result.stdout
+
+
+def test_a_truncated_body_without_a_record_downgrades_to_a_nit(tmp_path):
+    result, judged, dropped = _run(tmp_path, [PATH_CHOICE_5, OTHER], _record(NO_RECORD_BODY, truncated=True))
+    assert [(item["rule_id"], item["severity"]) for item in judged] == [
+        ("amos.path-choice.5", "nit"), ("amos.path-choice.4", "blocking"),
+    ]
+    assert [(d["rule_id"], d["reason"]) for d in dropped] == [
+        ("amos.path-choice.5", "downgraded to nit: PR body truncated; record not verifiable")
+    ]
+    assert "PR body truncated; record not verifiable" in result.stderr
+
+
+def test_a_truncated_body_that_still_holds_a_record_drops_the_candidate(tmp_path):
+    _, judged, dropped = _run(tmp_path, [PATH_CHOICE_5], _record(RECORD_BODY, truncated=True))
+    assert judged == []
+    assert [d["rule_id"] for d in dropped] == ["amos.path-choice.5"]
+
+
+def test_no_pr_json_keeps_the_candidate_and_says_so(tmp_path):
+    result, judged, dropped = _run(tmp_path, [PATH_CHOICE_5], None)
+    assert judged == [PATH_CHOICE_5] and dropped == []
+    assert "pr-record\tfinding 0 (scripts/x.py:4) kept: pr.json missing" in result.stdout
+
+
+def test_an_unparseable_or_wrong_schema_pr_json_keeps_the_candidate(tmp_path):
+    result, judged, _ = _run(tmp_path, [PATH_CHOICE_5], "{not json")
+    assert judged == [PATH_CHOICE_5] and "pr.json unreadable" in result.stdout
+    other = tmp_path / "second"
+    other.mkdir()
+    result, judged, _ = _run(other, [PATH_CHOICE_5], _record(RECORD_BODY, schema="other/1"))
+    assert judged == [PATH_CHOICE_5] and "is not a loadout.review-pr/1 document" in result.stdout
+
+
+def test_other_candidates_are_never_touched(tmp_path):
+    other_nit = {**OTHER, "rule_id": "amos.code-craft.6", "severity": "nit"}
+    for record in (_record(RECORD_BODY), _record(NO_RECORD_BODY, truncated=True), None):
+        directory = tmp_path / str(id(record))
+        directory.mkdir()
+        _, judged, dropped = _run(directory, [OTHER, other_nit], record)
+        assert judged == [OTHER, other_nit] and dropped == []
+
+
+def test_a_reviewer_drop_of_the_candidate_keeps_the_reviewers_reason(tmp_path):
+    run_dir = tmp_path / "review"
+    run_dir.mkdir()
+    (run_dir / "findings.json").write_text(
+        json.dumps({"schema": "loadout.review-findings/1", "head_sha": HEAD, "chunks": [], "findings": [PATH_CHOICE_5]}),
+        encoding="utf-8",
+    )
+    (run_dir / "pr.json").write_text(json.dumps(_record(RECORD_BODY)), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--drop", "0=the claim is about another file"],
+        capture_output=True, text=True, timeout=60, env={**os.environ, "TMPDIR": str(tmp_path)},
+    )
+    assert result.returncode == 0, result.stderr
+    dropped = json.loads((tmp_path / "judged.dropped.json").read_text(encoding="utf-8"))
+    assert [d["reason"] for d in dropped] == ["the claim is about another file"]
+
+
+def test_the_real_pr_662_body_is_detected_as_a_record():
+    record = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    assert review_pr_record.has_section_6_record(record["body"])
+    without = record["body"].split("CREW_SOP section 6 record")[0]
+    assert not review_pr_record.has_section_6_record(without)
+
+
+def test_the_real_pr_662_record_drops_the_candidate_through_the_cli(tmp_path):
+    record = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    _, judged, dropped = _run(tmp_path, [PATH_CHOICE_5], record, head=record["head_sha"])
+    assert judged == [] and dropped[0]["reason"] == review_pr_record.DROP_REASON
+
+
+def test_the_real_console_pr_440_record_saying_pending_real_run_is_detected(tmp_path):
+    record = json.loads(CONSOLE_FIXTURE.read_text(encoding="utf-8"))
+    assert review_pr_record.has_section_6_record(record["body"])
+    _, judged, dropped = _run(tmp_path, [PATH_CHOICE_5], record, head=record["head_sha"])
+    assert judged == [] and dropped[0]["reason"] == review_pr_record.DROP_REASON
+
+
+def test_pending_real_run_is_evidence_with_or_without_post_merge():
+    assert review_pr_record.has_section_6_record("CREW_SOP section 6 record\n| x | pending real run: y |")
+    assert review_pr_record.has_section_6_record("CREW_SOP section 6 record\nPending post-merge real run")
+    assert not review_pr_record.has_section_6_record("CREW_SOP section 6 record\npending run")
+
+
+def test_the_section_sign_form_and_case_are_detected():
+    assert review_pr_record.has_section_6_record("crew_sop §6 compliance record\nPending post-merge real run: x")
+    assert review_pr_record.has_section_6_record("CREW_SOP § 6 record: payload captured from a live run")
+    assert not review_pr_record.has_section_6_record("see CREW_SOP section 7, captured")

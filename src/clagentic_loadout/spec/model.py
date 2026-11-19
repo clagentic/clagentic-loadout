@@ -302,6 +302,65 @@ def apply_call_sites(draft: dict[str, Any], call_sites: dict[str, Any]) -> dict[
     return out
 
 
+def apply_removal_ledger(
+    draft: dict[str, Any], report: dict[str, Any], *, source: str | None
+) -> dict[str, Any]:
+    """*draft* with its removal ledger section set from *report* (see
+    spec.removals), placed after the call-sites section, or after the impact or
+    consumers section, whichever exists last. Each removed item is a line with a
+    null disposition, unless the draft already holds a line for the same item and
+    kind, which keeps its disposition. A held line the report no longer computes is
+    kept as authored, after the computed ones."""
+    out: dict[str, Any] = {}
+    held = list((draft.get("removal_ledger") or {}).get("items") or [])
+    held_by_key = {(line["item"], line["kind"]): line for line in held}
+    computed = {(entry["item"], entry["kind"]) for entry in report["items"]}
+    lines: list[dict[str, Any]] = []
+    for key in dict.fromkeys((entry["item"], entry["kind"]) for entry in report["items"]):
+        prior = held_by_key.get(key)
+        lines.append(
+            {"item": key[0], "kind": key[1], "disposition": copy.deepcopy(prior["disposition"]) if prior else None}
+        )
+    lines.extend(copy.deepcopy(line) for line in held if (line["item"], line["kind"]) not in computed)
+    computed_ok = report["status"] == "computed"
+    skipped = report.get("not_computed") or []
+    if not computed_ok:
+        note: str | None = report["note"]
+    elif skipped:
+        shown = "; ".join(f"{entry['path']}: {entry['reason']}" for entry in skipped[:5])
+        more = f" (and {len(skipped) - 5} more)" if len(skipped) > 5 else ""
+        note = f"{len(skipped)} path(s) not computed: {shown}{more}"
+    else:
+        note = None if lines else "nothing removed between the two revisions"
+    section = {
+        "source": source if computed_ok else None,
+        "note": note,
+        "base_sha": report["base_sha"] or None,
+        "head_sha": report["head_sha"] or None,
+        "items": lines,
+    }
+    anchor = next((k for k in ("call_sites", "impact", "consumers") if k in draft), None)
+    for key, value in draft.items():
+        if key == "removal_ledger":
+            continue
+        out[key] = copy.deepcopy(value)
+        if key == anchor:
+            out["removal_ledger"] = copy.deepcopy(section)
+    out.setdefault("removal_ledger", copy.deepcopy(section))
+    return out
+
+
+def undisposed_removals(doc: dict[str, Any]) -> list[dict[str, str]]:
+    """The ledger lines of *doc* whose disposition is still null, each as its item
+    and kind. A spec with no ledger (sealed before it existed) has none."""
+    section = doc.get("removal_ledger") or {}
+    return [
+        {"item": line["item"], "kind": line["kind"]}
+        for line in section.get("items", [])
+        if line.get("disposition") is None
+    ]
+
+
 def undisposed_call_sites(doc: dict[str, Any]) -> list[dict[str, Any]]:
     """The call sites of *doc* whose disposition is still null, each as its
     symbol, file and line. A spec with no call-sites section (sealed before it
@@ -399,6 +458,7 @@ __all__ = [
     "apply_guidance",
     "apply_impact",
     "apply_remedy",
+    "apply_removal_ledger",
     "canonical_bytes",
     "draft_from_sealed",
     "hash_bytes",
@@ -409,5 +469,6 @@ __all__ = [
     "seal",
     "undecided_remedy",
     "undisposed_call_sites",
+    "undisposed_removals",
     "validate_sealed_doc",
 ]
