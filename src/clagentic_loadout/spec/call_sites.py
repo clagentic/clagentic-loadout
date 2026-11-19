@@ -198,9 +198,11 @@ def _function_item(symbol: Symbol, sources: _Sources) -> dict[str, Any]:
 
 def _carried_dispositions(
     carried: Mapping[str, Any] | None, reader: GitPolicyReader
-) -> dict[tuple[str, str, str], dict[str, Any]]:
+) -> dict[tuple[str, str, str], list[dict[str, Any] | None]]:
     """The dispositions of the carried section by (symbol, file, stripped line
-    text), the text read at the head the carried section was computed at. A head
+    text), the text read at the head the carried section was computed at. Each key
+    holds one entry per old site with that text, in line order, null for a site
+    with no disposition, so the k-th old site pairs with the k-th new one. A head
     that cannot be read carries nothing: a site is never matched on its line
     number alone."""
     if not isinstance(carried, Mapping) or not isinstance(carried.get("head_sha"), str):
@@ -210,13 +212,12 @@ def _carried_dispositions(
     except PolicyReadError:
         return {}
     old = _Sources(reader, carried["head_sha"], old_tree)
-    held: dict[tuple[str, str, str], dict[str, Any]] = {}
+    held: dict[tuple[str, str, str], list[dict[str, Any] | None]] = {}
     for item in carried.get("items") or []:
-        for site in item.get("sites") or []:
-            disposition = site.get("disposition")
-            text = old.line(site["file"], site["line"]) if disposition is not None else None
+        for site in sorted(item.get("sites") or [], key=lambda s: (s["file"], s["line"])):
+            text = old.line(site["file"], site["line"])
             if text is not None:
-                held.setdefault((item["symbol"], site["file"], text), disposition)
+                held.setdefault((item["symbol"], site["file"], text), []).append(site.get("disposition"))
     return held
 
 
@@ -231,7 +232,8 @@ def compute_call_sites(
     the repository at *repo_path*, at *ref* (default HEAD). The ref is resolved once
     and every read is made at the commit it names. A disposition in *carried* (the
     section of a superseded spec) moves to a site with the same symbol, file and
-    stripped line text; every other site starts with none. A read that fails gives
+    stripped line text, the k-th old site of such a group to the k-th new one in
+    line order; every other site starts with none. A read that fails gives
     every symbol a not-computed item that says why."""
     parsed = [parse_symbol(value) for value in dict.fromkeys(symbols)]
     reader = GitPolicyReader(repo_path)
@@ -250,11 +252,18 @@ def compute_call_sites(
         items.append(_verb_item(symbol, sources) if symbol.path is None else _function_item(symbol, sources))
     held = _carried_dispositions(carried, reader)
     if held:
+        seen: dict[tuple[str, str, str], int] = {}
         for item in items:
             for site in item["sites"]:
                 text = sources.line(site["file"], site["line"])
-                if text is not None and (item["symbol"], site["file"], text) in held:
-                    site["disposition"] = dict(held[(item["symbol"], site["file"], text)])
+                if text is None:
+                    continue
+                key = (item["symbol"], site["file"], text)
+                position = seen.get(key, 0)
+                seen[key] = position + 1
+                old_dispositions = held.get(key, [])
+                if position < len(old_dispositions) and old_dispositions[position] is not None:
+                    site["disposition"] = dict(old_dispositions[position])
     return _section(f"references in the tree at {head}, read from git objects", head, items)
 
 

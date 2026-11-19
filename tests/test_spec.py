@@ -1210,17 +1210,19 @@ class TestCallSites:
         assert "cannot read the file list" in section["items"][0]["note"]
 
     @pytest.mark.parametrize(
-        ("edit", "kept"),
+        ("edit", "kept", "twin_line"),
         [
             # AC8: the site moved down a line keeps its disposition; a site added later has none.
-            ("import lib.resolve as m\n\n\nvalue = m.resolve(1)\n", True),
+            ("import lib.resolve as m\n\n\nvalue = m.resolve(1)\n", True, None),
             # The same line number with other text is another site.
-            ("import lib.resolve as m\n\nvalue = m.resolve(99)\n", False),
+            ("import lib.resolve as m\n\nvalue = m.resolve(99)\n", False, None),
+            # Two lines with the same text are two sites: the disposition goes to the first only.
+            ("import lib.resolve as m\n\nvalue = m.resolve(1)\nvalue = m.resolve(1)\n", True, 4),
         ],
-        ids=["moved-down-keeps-it", "edited-line-loses-it"],
+        ids=["moved-down-keeps-it", "edited-line-loses-it", "identical-twin-line-starts-null"],
     )
     def test_a_superseding_draft_recomputes_the_sites_and_carries_a_disposition_by_line_text(
-        self, tmp_path, capsys, edit, kept
+        self, tmp_path, capsys, edit, kept, twin_line
     ):
         repo, _ = _call_sites_repo(tmp_path)
         first = _call_sites_draft(repo, capsys, "lib/resolve.py::resolve")
@@ -1242,6 +1244,8 @@ class TestCallSites:
         moved = ("lib/use_a.py", 4 if "\n\n\n" in edit else 3)
         assert by_site[moved] == ({"kind": "unaffected", "note": "reads the value only"} if kept else None)
         assert by_site[("lib/use_d.py", 2)] is None and by_site[("lib/use_b.py", 5)] is None
+        if twin_line:
+            assert by_site[("lib/use_a.py", twin_line)] is None
 
     def test_seal_names_each_undisposed_site_and_still_succeeds(self, tmp_path, capsys):
         repo, _ = _call_sites_repo(tmp_path)
