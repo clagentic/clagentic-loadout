@@ -34,6 +34,12 @@ ROWS = {
     "esm-const-and-class": (
         {"lib/b.js": "export const limit = 1;\nexport class Widget {}\n"}, ["lib/b.js::Widget", "lib/b.js::limit"]
     ),
+    # The comma inside f(1, 2) does not end a's declarator; b is the second one and is
+    # the only name nothing calls.
+    "esm-multi-declarator-const": (
+        {"lib/b.js": "export const a = f(1, 2), b = 2;\n", "lib/e.js": "import { a } from './b';\na;\n"},
+        ["lib/b.js::b"],
+    ),
     "commonjs-assignments": (
         {"lib/b.js": "exports.one = function () {};\nmodule.exports.two = () => 2;\n"},
         ["lib/b.js::one", "lib/b.js::two"],
