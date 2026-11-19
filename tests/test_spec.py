@@ -764,6 +764,13 @@ IMPACT_FILES = {
     "app/src/widgets/index.js": "export class Widget {}\n",
     "app/src/widgets.test.js": "const { Widget } = require('./widgets/index.js');\n",
     "app/src/__tests__/widgets.js": "const { Widget } = require('../widgets');\n",
+    # A JavaScript import of a Python file is no edge, and a mixed scope keeps each language's importers.
+    "mix/a.js": "import './foo.py';\n",
+    "mix/foo.py": "X = 1\n",
+    "mix/bar.py": "import foo\n",
+    # A JSX file with a multi-line closing tag still has its import edge.
+    "jsx/dep.js": "export const d = 1;\n",
+    "jsx/view.jsx": "import { d } from './dep';\nexport const V = () => (\n  <div>\n    <span>x</span>\n  </div>\n);\n",
     # A namespace package: no __init__.py, so a relative import has no layout to lean on.
     "ns/x.py": "X = 1\n",
     "ns/y.py": "from . import x\n",
@@ -823,6 +830,10 @@ class TestImpact:
             # the file, and from a __tests__ file; the two test files are not importers.
             ("app/src/widgets/index.js", None, ["app/src/main.js"], 0,
              ["app/src/__tests__/widgets.js", "app/src/widgets.test.js"], "computed", "javascript", "", JS_SKIPPED, False),
+            # A JS import of './foo.py' adds no edge, and a mixed scope keeps the Python importer.
+            (("mix/foo.py", "mix/a.js"), None, ["mix/bar.py"], 0, [], "computed", "python", "", sorted(SKIPPED + JS_SKIPPED), False),
+            # A closing JSX tag is not a regular expression, so the import edge of the file is present.
+            ("jsx/dep.js", None, ["jsx/view.jsx"], 0, [], "computed", "javascript", "", JS_SKIPPED, False),
             # AC4: over the cap, the cap is listed and the rest counted.
             ("pkg/core.py", 2, CORE_IMPORTERS[:2], 1, ["tests/test_core.py"], "computed", "python", "", SKIPPED, False),
             # A target whose own source is over the read bound or is not Python is not
@@ -847,7 +858,9 @@ class TestImpact:
             "importers-and-tests", "none-found", "typescript-not-computed", "json-not-computed",
             "javascript-importers-and-tests", "javascript-none-found",
             "javascript-unparsable-target", "javascript-unparsable-importer-is-named",
-            "javascript-app-tree-directory-import-and-tests", "over-the-cap",
+            "javascript-app-tree-directory-import-and-tests",
+            "javascript-import-of-a-python-file-is-no-edge-in-a-mixed-scope", "jsx-closing-tag-is-not-a-regex",
+            "over-the-cap",
             "unreadable-target", "unparsable-target", "unparsable-importer-is-named",
             "namespace-package-relative-import", "dotted-import-counts-the-package-init",
             "root-import-is-not-a-non-package-stem", "sibling-import-in-a-non-package-dir",
@@ -859,6 +872,8 @@ class TestImpact:
         skipped, supersede,
     ):
         repo, head = _impact_repo(tmp_path)
+        globs = (path,) if isinstance(path, str) else path
+        path = globs[0]
         if cap is not None:
             monkeypatch.setattr("clagentic_loadout.spec.impact.IMPORTER_CAP", cap)
 
@@ -876,12 +891,13 @@ class TestImpact:
             assert code == 0, err
             section = json.loads(out)["impact"]
         else:
-            section = _impact(repo, capsys, path)
+            section = _impact(repo, capsys, *globs)
 
         assert section["head_sha"] == head
         assert section["languages_covered"] == ["python", "javascript"]
         assert section["cap"] == (cap or 25)
-        (item,) = section["items"]
+        assert len(section["items"]) == len(globs)
+        item = section["items"][0]
         assert (item["path"], item["status"], item["language"]) == (path, status, language)
         assert section["skipped_paths"] == skipped and section["skipped_files"] == len(skipped)
         if files is None:

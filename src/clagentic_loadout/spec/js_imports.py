@@ -22,7 +22,9 @@ maps, path aliases and ``node_modules`` are not consulted. Nothing is guessed.
 
 A ``/`` after ``)``, ``]``, ``}`` or an operand is read as division, so a regular
 expression literal right after a ``)`` (``if (x) /re/.test(y)``) is not recognised
-as one. A source whose string, comment, template or regular expression is not
+as one. A ``/`` right after ``<`` is never a regular expression, so a JSX closing tag
+(``</div>``) is skipped; JSX text holding an apostrophe is still read as an
+unterminated string and the source is unparsed. A source whose string, comment, template or regular expression is not
 terminated is unparsed, with the reason and line recorded.
 """
 
@@ -184,7 +186,9 @@ def tokenize(src: str) -> list[_Token]:
             tokens.append(_Token("punct", "{"))
             i += 1
         elif c == "/":
-            if _regex_allowed(tokens[-1] if tokens else None):
+            prev = tokens[-1] if tokens else None
+            # "</" is a JSX closing tag, never a regular expression.
+            if _regex_allowed(prev) and not _is(prev, "punct", "<"):
                 i = _scan_regex(src, i)
                 tokens.append(_Token("regex", None))
             else:
@@ -312,8 +316,11 @@ def _resolve(specifier: str, importer: str, tree: frozenset[str]) -> str | None:
     base = posixpath.normpath(posixpath.join(posixpath.dirname(importer), specifier))
     if base == ".." or base.startswith("../") or base.startswith("/"):
         return None
-    candidates = [base, *(base + ext for ext in JS_SUFFIXES)] if not specifier.endswith("/") else []
-    candidates += [f"{base}/{_INDEX}{ext}" for ext in JS_SUFFIXES]
+    # An exact path counts only when it is itself a covered JavaScript file, so
+    # './foo.py' or './data.json' never makes an edge to a file of another language.
+    exact = [base] if base.endswith(JS_SUFFIXES) and not specifier.endswith("/") else []
+    extended = [base + ext for ext in JS_SUFFIXES] if not specifier.endswith("/") else []
+    candidates = [*exact, *extended, *(f"{base}/{_INDEX}{ext}" for ext in JS_SUFFIXES)]
     return next((c for c in candidates if c in tree), None)
 
 

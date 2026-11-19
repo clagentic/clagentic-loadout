@@ -157,7 +157,8 @@ def compute_impact(repo_path: str, ref: str | None, globs: Sequence[str]) -> dic
             except PolicyReadError as exc:
                 reasons[path] = f"its source could not be read ({exc})"
         built = build(sources, tree)
-        importers.update(built.importers)
+        for target, found in built.importers.items():
+            importers[target] = importers.get(target, frozenset()) | found
         for path in built.unparsed:
             detail = built.unparsed_reasons.get(path)
             reasons[path] = f"its source could not be parsed as {label}" + (f" ({detail})" if detail else "")
