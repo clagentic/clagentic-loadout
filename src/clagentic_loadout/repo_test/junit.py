@@ -91,6 +91,28 @@ def parse_junit(path: Path) -> JunitSummary:
     )
 
 
+OUTCOME_PASSED = "passed"
+OUTCOME_FAILED = "failed"
+OUTCOME_SKIPPED = "skipped"
+
+
+def parse_outcomes(path: Path) -> dict[str, tuple[str, ...]]:
+    """Every case's outcome keyed by its id: one entry per case, in report order,
+    each ``passed``, ``failed`` or ``skipped`` by the same rule as ``parse_junit``.
+    An id absent from the report is absent from the result."""
+    outcomes: dict[str, list[str]] = {}
+    for case in _load_root(path).iter("testcase"):
+        tags = {child.tag for child in case}
+        if tags & {"failure", "error"}:
+            outcome = OUTCOME_FAILED
+        elif "skipped" in tags:
+            outcome = OUTCOME_SKIPPED
+        else:
+            outcome = OUTCOME_PASSED
+        outcomes.setdefault(_test_id(case), []).append(outcome)
+    return {test_id: tuple(found) for test_id, found in outcomes.items()}
+
+
 def parse_failed_cases(path: Path) -> list[FailedCase]:
     """One entry per failed case, in report order, so cases sharing an id each
     keep their own entry (the same multiset rule as ``JunitSummary.failing_ids``)."""
@@ -112,9 +134,13 @@ def parse_failed_cases(path: Path) -> list[FailedCase]:
 __all__ = [
     "ID_SCHEME",
     "MAX_JUNIT_BYTES",
+    "OUTCOME_FAILED",
+    "OUTCOME_PASSED",
+    "OUTCOME_SKIPPED",
     "FailedCase",
     "JunitError",
     "JunitSummary",
     "parse_failed_cases",
     "parse_junit",
+    "parse_outcomes",
 ]

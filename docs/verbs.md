@@ -3032,6 +3032,23 @@ cannot be parsed) is a `merge: NOTE -- ...` line and, when the report itself cou
 a row saying `not computed: <reason>`. It never changes the outcome or the exit code. A caller of
 `build_attestation_body` that does not pass `removed_behaviour` gets no row.
 
+**Criterion evidence (`merge.criterion_evidence`):** each acceptance criterion of the spec the
+reviewer fences name may carry an `evidence` line (see the spec's `acceptance_criteria`). The merge
+reads the newest complete, clean-tree run in the test-report store whose recorded commit equals the
+pull request's head exactly and whose repository is the one being merged (a run at an older head or
+on a dirty tree is never used), reads each named test id's outcome from that run's JUnit report, and
+prints one `merge: CRITERION EVIDENCE -- <id>: <state>` line per criterion on standard error. The
+states are `shown` (every named test passed, or the named run is complete, clean, at the head and
+recorded zero failures), `not shown` (each named id that is `absent` from the run, `failed` or
+`skipped`, or the reason no run could be read, such as that no run at the head was found), and
+`no evidence named`. A spec none of whose criteria carry an evidence line gives the one line `the
+spec carries no evidence lines`. The attestation gains a `Criterion evidence` row holding the same
+lines. Anything that stops the computation (no spec hash in the fences, a spec not in the store, a
+missing reports root or JUnit report) is a `merge: NOTE -- ...` line and a `not computed` or `not
+shown` line. The merge reads an existing run and starts none, and it never changes the outcome or
+the exit code. A caller of `build_attestation_body` that does not pass `criterion_evidence` gets no
+row.
+
 **Post-merge steps (`merge.post_merge` / `merge.post_merge_config`):**
 after step 9 above actually merges the PR — never on any refusal path —
 `--repo-path DIR` opts into running an ordered list of steps in that local
@@ -4030,7 +4047,7 @@ The published contract is `schemas/spec.schema.json`
 | `supersedes` | The hash of the sealed spec this one replaces, or `null`. | `new --supersedes` |
 | `goal` | What the change is for. | authored |
 | `scope` | `in` and `out`, lists of strings. | authored |
-| `acceptance_criteria` | At least one `{id, given, when, then}`; ids are unique in the spec. | authored |
+| `acceptance_criteria` | At least one `{id, given, when, then}`; ids are unique in the spec. Each may carry an optional `evidence` object, `{tests, run}` with at least one of them: `tests` lists test ids in the form the test-report store records (`<classname>::<name>`), `run` names one test-report run id for a criterion no test can show. `loadout-merge` reports per criterion whether the evidence is shown at the pull request's head and refuses nothing on it; see `loadout-merge`. `show` prints it as authored. | authored |
 | `class_rules` | `{source, note, class, rules, paths}`: the repository class, the rule statements of each class in effect, and the per-path overrides. | the repo profile |
 | `group_rules` | `{source, note, items}`: the group rules that apply to the repository, items as strings. | the groups file |
 | `consumers` | `{source, note, items}`, each item `{consumer, disposition}` | no source yet |

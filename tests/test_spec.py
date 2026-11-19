@@ -36,6 +36,7 @@ OTHER_ROLE = "second-role"
 HEAD_A = "a" * 40
 HEAD_B = "b" * 40
 TEST_FULL = ["python3", "-m", "pytest", "--junitxml={junit}"]
+CRITERION = {"id": "ac-1", "given": "g", "when": "w", "then": "t"}
 
 
 def _run(argv, capsys, **kwargs):
@@ -311,6 +312,11 @@ class TestModel:
             {"role": "not a role"},
             {"supersedes": "short"},
             {"verification_evidence_owed": [{"gate": "two\nlines"}]},
+            {"acceptance_criteria": [dict(CRITERION, evidence={})]},
+            {"acceptance_criteria": [dict(CRITERION, evidence={"tests": []})]},
+            {"acceptance_criteria": [dict(CRITERION, evidence={"tests": [""]})]},
+            {"acceptance_criteria": [dict(CRITERION, evidence={"run": "latest"})]},
+            {"acceptance_criteria": [dict(CRITERION, evidence={"other": "x"})]},
         ],
     )
     def test_an_incomplete_or_malformed_draft_is_not_sealed(self, mutation):
@@ -320,6 +326,23 @@ class TestModel:
                 head_sha=HEAD_A,
                 sealed_at="2026-01-01T00:00:00Z",
             )
+
+    @pytest.mark.parametrize(
+        "evidence",
+        [None, {"tests": ["tests.test_a::test_one"]}, {"run": "20260101T000000Z-123"},
+         {"tests": ["tests.test_a::test_one"], "run": "20260101T000000Z-123"}],
+    )
+    def test_evidence_on_a_criterion_is_optional_and_survives_seal_and_load(self, evidence):
+        criterion = dict(CRITERION) if evidence is None else dict(CRITERION, evidence=evidence)
+        sealed = model.seal(
+            _fill(model.new_draft(ROLE), acceptance_criteria=[criterion]),
+            head_sha=HEAD_A,
+            sealed_at="2026-01-01T00:00:00Z",
+        )
+
+        loaded = model.parse_sealed(sealed.data, sealed.spec_hash)
+
+        assert loaded["acceptance_criteria"] == [criterion]
 
     def test_a_document_that_carries_a_seal_is_never_sealed_again(self):
         sealed = model.seal(
@@ -552,6 +575,17 @@ class TestShow:
         artifact.rename(moved / artifact.name)
         code, _, err = _run(["show", sealed["spec_hash"]], capsys)
         assert code == spec_verb.EXIT_STORED_INVALID and "filed under" in err
+
+    def test_show_prints_the_evidence_line_of_a_criterion(self, repo, tmp_path, capsys):
+        evidence = {"tests": ["tests.test_a::test_one"]}
+        draft = _fill(
+            _new_draft(repo, capsys), acceptance_criteria=[dict(CRITERION, evidence=evidence)]
+        )
+        _, sealed, _ = _seal(tmp_path, repo, capsys, draft, head=HEAD_A)
+
+        code, out, _ = _run(["show", sealed["spec_hash"]], capsys)
+
+        assert code == 0 and json.loads(out)["acceptance_criteria"][0]["evidence"] == evidence
 
     def test_an_unknown_hash_is_not_found(self, capsys):
         code, _, err = _run(["show", "e" * 64], capsys)

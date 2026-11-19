@@ -127,6 +127,18 @@ class TestReviewAgainstASpec:
         assert fence["fence_schema_version"] == fence_state.SPEC_FENCE_SCHEMA_VERSION == 4
         assert fence["verdict_outcome"] in fence_state.VERDICT_OUTCOMES
 
+    def test_a_spec_whose_criterion_carries_evidence_loads_for_coverage_unchanged(self, env):
+        draft = model.new_draft("planner-role")
+        draft["goal"] = "Add a thing."
+        draft["acceptance_criteria"] = [
+            {"id": "ac-1", "given": "g", "when": "w", "then": "t", "evidence": {"tests": ["a::b"]}},
+            {"id": "ac-2", "given": "g", "when": "w", "then": "t"},
+        ]
+        sealed = model.seal(draft, head_sha=SPEC_HEAD, sealed_at="2026-01-01T00:00:00Z")
+        spec_store.write_sealed(spec_store.specs_root(), sealed)
+
+        assert spec_review.load_spec_criterion_ids(sealed.spec_hash) == CRITERIA
+
     def test_the_coverage_pass_is_a_verdict_record_pointing_at_the_posted_comment(
         self, env, tmp_path, capsys
     ):

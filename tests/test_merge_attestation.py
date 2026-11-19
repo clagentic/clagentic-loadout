@@ -262,6 +262,18 @@ class TestFieldValueTableRendering:
         )
         assert "| Removed behaviour | a.py::gone (symbol): undisposed<br>b\\|c (verb): replaced by x |" in body
 
+    def test_the_criterion_evidence_row_is_present_only_when_the_caller_computed_it(self):
+        common = dict(
+            gated_head_sha=_FULL_SHA, merged_sha=_FULL_SHA, ci_disposition="success", version="1.0.0"
+        )
+
+        assert "Criterion evidence" not in build_attestation_body(**common)
+        assert "Criterion evidence" not in build_attestation_body(**common, criterion_evidence=())
+        body = build_attestation_body(
+            **common, criterion_evidence=["ac-1: shown (a::b passed)", "ac-2: not shown (c|d\nabsent)"]
+        )
+        assert "| Criterion evidence | ac-1: shown (a::b passed)<br>ac-2: not shown (c\\|d absent) |" in body
+
     def test_no_authorize_rationale_row(self):
         # Named trade-off (lr-0b77dd): sourcing a rationale line would
         # require either a new pre_checks_summary-shaped parameter
