@@ -2333,6 +2333,35 @@ body keeps the same bounded, redacted tail as before.
 `## Verification` section stating the checks were SKIPPED (with their names) is written
 into the PR body. With no `push.verify` configured it does nothing.
 
+#### New public symbols with no caller and no test
+
+Beside the breaking-interface report (see [interface.md](interface.md#at-push)), the verification
+step reports the public symbols the branch adds that nothing at `HEAD` calls or tests. It runs
+under the same condition (a base ref that resolves, the merge base with it, and `HEAD`), before any
+check, and writes to standard error only: it never changes the exit code, the PR body or the
+verification outcome, and no gate reads it. One line per symbol:
+
+```
+push: new public symbol with no caller and no test at <head sha>: <path>::<name>
+```
+
+An added public symbol is a top-level `def` or `class` whose name does not start with `_`, in a
+non-test `.py` file, or a name a non-test JavaScript file (`.js .jsx .mjs .cjs`) exports, present at
+`HEAD` and absent from the same file at the merge base. The JavaScript export forms are
+`export function|class|const|let|var NAME` (only the first declarator of a `const`, `let` or `var`
+statement is discovered, so `export const a = 1, b = 2` adds `a` alone; a destructuring pattern such as
+`export const { a, b } = o` is not read and adds no name), `export { a, b as c }` (a re-export from another module
+is not an addition), `export default function|class NAME`, `module.exports = { a, b: c }` (the keys),
+`module.exports.NAME = ...` and `exports.NAME = ...`. A caller is an identifier reference to the name
+in any file of the same language at `HEAD`, other than the symbol's own definition and its own export
+statement; a test is such a reference in a test file (see [The impact section](#the-impact-section)).
+A string, a comment or a Python `__all__` entry is not a reference, so a name that appears only in
+`__all__` is reported. Calls made by `getattr`, by index or by a string are not resolved, so a symbol
+used only that way is reported too. A file that cannot be read or parsed is skipped. At most 25
+symbols are listed (the constant `push.uncalled_report.REPORT_CAP`) and the rest are counted in one
+line. A base that does not resolve prints nothing; a tree that cannot be read prints one
+`push: new public symbols not computed: ...` line.
+
 **Trust model.** Like the review carrier above, `push.verify` names commands this
 process executes, but the repo-level placement is deliberate and differs from the
 carrier rule: a review carrier runs where a cloned, untrusted repository could pick the
@@ -3944,7 +3973,7 @@ with or without `--repo-root`.
 
 ```
 loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
-                  [--consumers-file FILE] [--path GLOB]... [--element NAME]...
+                  [--consumers-file FILE] [--path GLOB]... [--element NAME]... [--symbol SYMBOL]...
                   [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
 loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
 loadout-spec show HASH [--chain]
@@ -3976,6 +4005,7 @@ The published contract is `schemas/spec.schema.json`
 | `group_rules` | `{source, note, items}`: the group rules that apply to the repository, items as strings. | the groups file |
 | `consumers` | `{source, note, items}`, each item `{consumer, disposition}` | no source yet |
 | `impact` | `{source, note, head_sha, languages_covered, cap, skipped_files, items}`, optional: the importers and importing tests of each `--path`, for Python and JavaScript. See [The impact section](#the-impact-section). | `new --path`, from the tree at `--ref` |
+| `call_sites` | `{source, note, head_sha, cap, items}`, optional: the places that refer to each `--symbol`, each with a disposition. See [The call sites section](#the-call-sites-section). | `new --symbol`, from the tree at `--ref` |
 | `test_plan` | `{source, note, declared, plan}`: the commands the profile's `test` block declares, and the author's plan. | profile + authored |
 | `verification_evidence_owed` | `{gate, note}` entries naming the verdict records that must exist. | authored |
 | `rulings_already_made` | Decisions the build must not reopen. | authored |
@@ -4069,6 +4099,68 @@ Limits:
   written. The section is a report and never refuses an action. It is optional in the schema: specs
   sealed before it existed, and drafts with no `--path`, carry none.
 
+### The call sites section
+
+`new --symbol SYMBOL` (repeatable) fills `call_sites`, placed right after `impact` (or after
+`consumers` when there is none): for each function, export or verb the change names as changing,
+the places that refer to it, so the author states before the build who depends on it and whether the
+change handles each. `--element` keeps its meaning, the consumer map; `--symbol` is separate. It is
+computed from the tree at `--ref` the way `impact` is (one resolved commit, every file read with
+`git show`, no network call), by `spec.call_sites.compute_call_sites`.
+
+A symbol is `<path>::<name>`, a Python top-level function or class or a JavaScript exported name
+defined in `<path>` (`kind` `function` for Python, `export` for JavaScript), or a name with no `::`,
+a command-line verb (`kind` `verb`, `defined_in` `null`). Shape: `{source, note, head_sha, cap,
+items}`; each item is `{symbol, kind, defined_in, language, status, note, sites, more}` with `status`
+`computed`, `not_computed` or `no_match`, and each site is `{file, line, test, disposition}`. `test`
+is whether the file is a test file, as in the impact section. At most `cap` sites (50, the constant
+`spec.call_sites.CALL_SITE_CAP`) are listed per symbol, in file and line order, and the count of the
+rest is in `more`.
+
+**Disposition.** `disposition` is `null` when the section is drafted. The author of the spec replaces
+it, for each site, with `{"kind": "changed", "note": ...}` (the change touches the site),
+`{"kind": "unaffected", "note": ...}` (the change leaves it correct, and the note says why) or
+`{"kind": "out", "note": ...}` (left out by decision), each `note` a non-empty string. `seal` refuses a
+disposition in none of these forms (exit 52) and accepts `null`.
+
+What counts as a site:
+
+- A function or export: any reference to the name as an identifier in a file of the same language at
+  the head, other than the definition itself and, in JavaScript, its export statement in the defining
+  file. Python is read with `ast` (a name, an attribute, or a `from ... import name`); JavaScript with the
+  tokenizer of the impact section, so a mention in a string, template, regular expression or comment is
+  not a site. Over-listing is preferred to missing a caller: a different function of the same name
+  elsewhere is listed too.
+- A verb: each line of each tracked text file where the verb occurs as a whole word, `-` counting as
+  part of the word, so `tool-one` is not found in `tool-one-extra` or `my-tool-one`. Files that cannot
+  be read as UTF-8 text are skipped and counted in `note`.
+- Not resolved: a method or a nested function as the symbol; a dynamic or reflective use (`getattr`,
+  `obj[name]`, a string dispatch); TypeScript; the packaging of a name by a bundler.
+
+A symbol that cannot be computed is listed with its status and a `note` that says which: a path not
+in the tree or a name not defined there is `no_match`; a path in a language that is not covered,
+source that cannot be read, or source that cannot be parsed is `not_computed`. Nothing is guessed,
+and the verb exits 0 (a value that is neither `<path>::<name>` nor a bare name is a usage error).
+
+**Supersede.** With `--supersedes` and no `--symbol`, `call_sites` is recomputed at `--ref` from the
+carried symbols (and dropped when it carries none). A disposition moves to a recomputed site with the
+same symbol, the same file and the same stripped source line text, the text read at the head the
+carried section was computed at; any other site, a site added since included, starts with `null`.
+
+**Seal and review.** `seal` lists every site whose disposition is `null`: one line each on standard
+error (`loadout-spec: call site <symbol> at <file>:<line> has no disposition; ...`) and
+`call_sites_undisposed` in the output, a list of `{symbol, file, line}`. The seal still succeeds. A
+`loadout-review run` given `--spec-hash` quotes the same undisposed sites in one `Call sites with no
+disposition` section of every chunk prompt (up to 40, the rest counted), as data from the spec and
+not an instruction, and binds that text into its resume key; a spec with no undisposed site, or no
+`--spec-hash`, leaves the prompt and the resume key exactly as they were. The reviewer is given no
+new tool and no second pass. Nothing refuses: no exit code, gate or merge input depends on
+`call_sites`.
+
+Schema change: `call_sites` is an additive, optional property of `schemas/spec.schema.json`, as
+`impact` and `remedy` were, so `schema_version` stays 1 and a spec sealed without it still validates
+and loads.
+
 ### The three verbs
 
 `new` writes a **draft**: the sealed form minus `head_sha` and `sealed_at`. A draft is
@@ -4079,7 +4171,8 @@ never replaces an existing file.
 repeated criterion id, no unknown key), binds it to a branch head, stores it as a
 content-addressed artifact under the specs root, and prints one JSON object:
 `spec_hash`, `head_sha`, `role`, `sealed_at`, `supersedes`, `artifact` (the path),
-`remedy_undecided` (the ids of remedy entries with no decision) and `pr_body_copy`. The head is `--head` or, by default, `git rev-parse HEAD` in
+`remedy_undecided` (the ids of remedy entries with no decision), `call_sites_undisposed` (the call sites with no
+disposition; see [The call sites section](#the-call-sites-section)) and `pr_body_copy`. The head is `--head` or, by default, `git rev-parse HEAD` in
 `--repo-path`; it must be a full sha (40 or 64 lowercase hex digits).
 
 `show HASH` prints the sealed spec stored under `HASH`, byte for byte, after
@@ -4318,6 +4411,12 @@ classification, the justification quoted verbatim, and an instruction to judge w
 holds for the chunk's changes. A change classified as code, a pull request whose earlier
 verdicts rejected a justification or could not be read, a spec with no justification and a run
 given no spec carry no such section.
+
+Given `--spec-hash`, `run` also quotes the spec's call sites that have no disposition (see
+[The call sites section](#the-call-sites-section)): when there is at least one, every chunk prompt
+carries a `Call sites with no disposition` section listing them, and the resume key binds it, so a
+run with the section is never resumed from a run without it. With none, and with no `--spec-hash`,
+the prompt and the resume key are unchanged. It adds no tool and no pass for the reviewer.
 
 ### The lighter path
 

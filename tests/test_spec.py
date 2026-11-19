@@ -1076,6 +1076,253 @@ class TestImpact:
         assert (item["language"], item["importers"]["files"]) == ("javascript", ["src/b.js"])
 
 
+CALL_SITE_FILES = {
+    "lib/__init__.py": "",
+    "lib/resolve.py": "def resolve(x):\n    return x\n\n\nclass Resolver:\n    pass\n",
+    "lib/use_a.py": "import lib.resolve as m\n\nvalue = m.resolve(1)\n",
+    "lib/use_b.py": "import lib.resolve as m\n\n\ndef go():\n    return m.resolve(2)\n",
+    "lib/use_c.py": "from lib.resolve import resolve\n",
+    "lib/strings.py": "text = 'resolve'\n# resolve(1)\n",
+    "tests/test_resolve.py": "import lib.resolve as m\n\n\ndef test_it():\n    assert m.resolve(3) == 3\n",
+    "lib/a.js": "function doThing() {}\nmodule.exports = { doThing };\n",
+    "lib/b.js": "const { doThing } = require('./a');\ndoThing();\n",
+    "test/a.test.js": "const a = require('../lib/a');\na.doThing();\n// doThing in a comment\nconst s = 'doThing';\n",
+    "lib/esm.js": "export function run() {}\n",
+    "lib/esm_user.js": "import { run } from './esm';\nrun();\n",
+    "scripts/run.sh": "tool-one --help\ntool-one-extra x\n",
+    "scripts/other.sh": "my-tool-one\ntool-one_x\nTOOL-ONE\n",
+    "docs/verbs.md": "Use `tool-one` here.\n",
+    "tests/test_x.py": "main(['tool-one'])\n",
+    "web/app.ts": "export const x = 1;\n",
+    "bad/broken.py": "def (:\n",
+    "js/bad.js": "const s = 'open;\n",
+}
+RESOLVE_SITES = [("lib/use_a.py", 3), ("lib/use_b.py", 5), ("lib/use_c.py", 1), ("tests/test_resolve.py", 5)]
+
+
+def _call_sites_repo(tmp_path: Path) -> tuple[Path, str]:
+    path = make_repo(tmp_path)
+    return path, commit_files(path, CALL_SITE_FILES)
+
+
+def _call_sites_draft(repo: Path, capsys, *symbols: str, extra=()) -> dict:
+    argv = ["new", "--role", ROLE, "--repo-path", str(repo), *extra]
+    for symbol in symbols:
+        argv += ["--symbol", symbol]
+    code, out, err = _run(argv, capsys)
+    assert code == 0, err
+    return json.loads(out)
+
+
+def _site_tuples(item: dict) -> list[tuple[str, int]]:
+    return [(site["file"], site["line"]) for site in item["sites"]]
+
+
+class TestCallSites:
+    @pytest.mark.parametrize(
+        ("symbol", "kind", "status", "language", "sites", "says"),
+        [
+            # Name, Attribute and from-import nodes are sites; the definition, a string and a
+            # comment are not, and a dotted module path is not a reference to the function.
+            ("lib/resolve.py::resolve", "function", "computed", "python", RESOLVE_SITES, ""),
+            ("lib/resolve.py::Resolver", "function", "computed", "python", [], "none found"),
+            # An identifier in JavaScript, outside strings and comments; the export statement
+            # and the declaration in the defining file are not sites.
+            ("lib/a.js::doThing", "export", "computed", "javascript",
+             [("lib/b.js", 1), ("lib/b.js", 2), ("test/a.test.js", 2)], ""),
+            ("lib/esm.js::run", "export", "computed", "javascript",
+             [("lib/esm_user.js", 1), ("lib/esm_user.js", 2)], ""),
+            # A verb is a whole word in any tracked text file; '-' is part of the word.
+            ("tool-one", "verb", "computed", "text",
+             [("docs/verbs.md", 1), ("scripts/run.sh", 1), ("tests/test_x.py", 1)], ""),
+            # Nothing is guessed: each of these says which condition it met, and the verb exits 0.
+            ("lib/missing.py::x", "function", "no_match", "python", [], "no file 'lib/missing.py'"),
+            ("lib/resolve.py::nothing", "function", "no_match", "python", [], "not a top-level function or class"),
+            ("lib/a.js::nothing", "export", "no_match", "javascript", [], "not an exported or declared name"),
+            ("web/app.ts::x", "function", "not_computed", "typescript", [], "typescript is not covered"),
+            ("bad/broken.py::x", "function", "not_computed", "python", [], "could not be parsed as Python"),
+            ("js/bad.js::x", "export", "not_computed", "javascript", [], "could not be parsed as JavaScript"),
+        ],
+    )
+    def test_each_symbol_lists_its_call_sites_or_says_why_not(
+        self, tmp_path, capsys, symbol, kind, status, language, sites, says
+    ):
+        repo, head = _call_sites_repo(tmp_path)
+
+        section = _call_sites_draft(repo, capsys, symbol)["call_sites"]
+
+        assert section["head_sha"] == head and section["cap"] == 50
+        (item,) = section["items"]
+        assert (item["symbol"], item["kind"], item["status"], item["language"]) == (symbol, kind, status, language)
+        assert item["defined_in"] == (symbol.split("::")[0] if "::" in symbol else None)
+        assert _site_tuples(item) == sites and item["more"] == 0
+        assert all(
+            site["disposition"] is None and site["test"] == site["file"].startswith(("tests/", "test/"))
+            for site in item["sites"]
+        )
+        assert says in (item["note"] or "")
+
+    def test_sites_past_the_cap_are_counted_and_the_section_follows_impact(self, tmp_path, capsys, monkeypatch):
+        repo, _ = _call_sites_repo(tmp_path)
+        monkeypatch.setattr("clagentic_loadout.spec.call_sites.CALL_SITE_CAP", 2)
+
+        draft = _call_sites_draft(repo, capsys, "lib/resolve.py::resolve", extra=("--path", "lib/resolve.py"))
+
+        assert list(draft).index("call_sites") == list(draft).index("impact") + 1
+        item = draft["call_sites"]["items"][0]
+        assert (_site_tuples(item), item["more"], draft["call_sites"]["cap"]) == (RESOLVE_SITES[:2], 2, 2)
+
+    @pytest.mark.parametrize("value", ["", "a b", "::name", "path::", "lib/x.py::two words"])
+    def test_a_value_that_is_not_a_symbol_is_a_usage_error(self, tmp_path, capsys, value):
+        repo, _ = _call_sites_repo(tmp_path)
+
+        code, _, err = _run(["new", "--role", ROLE, "--repo-path", str(repo), "--symbol", value], capsys)
+
+        assert code == spec_verb.EXIT_USAGE and "is not a symbol" in err
+
+    def test_the_tree_is_read_at_the_ref_and_no_symbol_means_no_section(self, tmp_path, capsys):
+        repo, first = _call_sites_repo(tmp_path)
+        commit_files(repo, {"lib/use_a.py": "import os\n"})
+
+        before = _call_sites_draft(repo, capsys, "lib/resolve.py::resolve", extra=("--ref", first))
+        after = _call_sites_draft(repo, capsys, "lib/resolve.py::resolve")
+
+        assert ("lib/use_a.py", 3) in _site_tuples(before["call_sites"]["items"][0])
+        assert ("lib/use_a.py", 3) not in _site_tuples(after["call_sites"]["items"][0])
+        assert "call_sites" not in _call_sites_draft(repo, capsys)
+
+    def test_a_tree_that_cannot_be_read_gives_not_computed_items_and_the_draft_is_still_written(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReadError
+
+        repo, _ = _call_sites_repo(tmp_path)
+
+        def unreadable(self, base):
+            raise PolicyReadError("cannot read the file list")
+
+        monkeypatch.setattr(GitPolicyReader, "list_paths", unreadable)
+
+        section = _call_sites_draft(repo, capsys, "tool-one")["call_sites"]
+
+        assert section["head_sha"] is not None and section["source"] is None
+        assert [(i["symbol"], i["status"]) for i in section["items"]] == [("tool-one", "not_computed")]
+        assert "cannot read the file list" in section["items"][0]["note"]
+
+    @pytest.mark.parametrize(
+        ("edit", "kept", "twin_line"),
+        [
+            # AC8: the site moved down a line keeps its disposition; a site added later has none.
+            ("import lib.resolve as m\n\n\nvalue = m.resolve(1)\n", True, None),
+            # The same line number with other text is another site.
+            ("import lib.resolve as m\n\nvalue = m.resolve(99)\n", False, None),
+            # Two lines with the same text are two sites: the disposition goes to the first only.
+            ("import lib.resolve as m\n\nvalue = m.resolve(1)\nvalue = m.resolve(1)\n", True, 4),
+        ],
+        ids=["moved-down-keeps-it", "edited-line-loses-it", "identical-twin-line-starts-null"],
+    )
+    def test_a_superseding_draft_recomputes_the_sites_and_carries_a_disposition_by_line_text(
+        self, tmp_path, capsys, edit, kept, twin_line
+    ):
+        repo, _ = _call_sites_repo(tmp_path)
+        first = _call_sites_draft(repo, capsys, "lib/resolve.py::resolve")
+        for site in first["call_sites"]["items"][0]["sites"]:
+            if site["file"] == "lib/use_a.py":
+                site["disposition"] = {"kind": "unaffected", "note": "reads the value only"}
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(first))
+        assert code == 0, err
+        head = commit_files(repo, {"lib/use_a.py": edit, "lib/use_d.py": "import lib.resolve as m\nm.resolve(4)\n"})
+
+        code, out, err = _run(
+            ["new", "--role", ROLE, "--repo-path", str(repo), "--supersedes", sealed["spec_hash"]], capsys
+        )
+
+        assert code == 0, err
+        section = json.loads(out)["call_sites"]
+        assert section["head_sha"] == head
+        by_site = {(s["file"], s["line"]): s["disposition"] for s in section["items"][0]["sites"]}
+        moved = ("lib/use_a.py", 4 if "\n\n\n" in edit else 3)
+        assert by_site[moved] == ({"kind": "unaffected", "note": "reads the value only"} if kept else None)
+        assert by_site[("lib/use_d.py", 2)] is None and by_site[("lib/use_b.py", 5)] is None
+        if twin_line:
+            assert by_site[("lib/use_a.py", twin_line)] is None
+
+    def test_seal_names_each_undisposed_site_and_still_succeeds(self, tmp_path, capsys):
+        repo, _ = _call_sites_repo(tmp_path)
+        draft = _call_sites_draft(repo, capsys, "lib/resolve.py::resolve")
+        for site in draft["call_sites"]["items"][0]["sites"]:
+            if site["file"] == "lib/use_a.py":
+                site["disposition"] = {"kind": "changed", "note": "updated in this change"}
+
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(draft))
+
+        assert code == 0
+        undisposed = [(s["file"], s["line"]) for s in sealed["call_sites_undisposed"]]
+        assert undisposed == [("lib/use_b.py", 5), ("lib/use_c.py", 1), ("tests/test_resolve.py", 5)]
+        assert all(s["symbol"] == "lib/resolve.py::resolve" for s in sealed["call_sites_undisposed"])
+        assert "lib/resolve.py::resolve at lib/use_b.py:5" in err and "lib/use_a.py:3" not in err
+        assert model.undisposed_call_sites(json.loads(sealed["pr_body_copy"])) == sealed["call_sites_undisposed"]
+
+    @pytest.mark.parametrize(
+        "disposition",
+        [{"kind": "unaffected", "note": ""}, {"kind": "later", "note": "x"}, "unaffected", {"kind": "out"}],
+        ids=["empty-note", "unknown-kind", "bare-string", "no-note"],
+    )
+    def test_a_disposition_in_none_of_the_three_forms_is_not_sealed(self, tmp_path, capsys, disposition):
+        repo, _ = _call_sites_repo(tmp_path)
+        draft = _call_sites_draft(repo, capsys, "lib/resolve.py::resolve")
+        draft["call_sites"]["items"][0]["sites"][0]["disposition"] = disposition
+
+        code, _, err = _seal(tmp_path, repo, capsys, _fill(draft))
+
+        assert code == spec_verb.EXIT_DRAFT_INVALID
+
+    def test_a_spec_sealed_without_call_sites_still_reads_and_has_nothing_undisposed(self):
+        old = _fill(model.new_draft(ROLE))
+        assert "call_sites" not in old
+        legacy = model.seal(old, head_sha=HEAD_A, sealed_at="2026-01-01T00:00:00Z")
+
+        assert model.parse_sealed(legacy.data, legacy.spec_hash) == legacy.doc
+        assert model.undisposed_call_sites(legacy.doc) == []
+
+    def test_a_console_shaped_javascript_tree_seals_its_impact_and_show_returns_it_byte_for_byte(
+        self, tmp_path, capsys
+    ):
+        repo = make_repo(tmp_path)
+        commit_files(repo, {
+            "lib/server-auth.js": "module.exports = { check };\nfunction check() {}\n",
+            "lib/routes.js": "const auth = require('./server-auth');\nauth.check();\n",
+            "test/server-auth.test.js": "const auth = require('../lib/server-auth');\n",
+        })
+        draft = json.loads(_run(["new", "--role", ROLE, "--repo-path", str(repo), "--path", "lib/*.js"], capsys)[1])
+        items = {item["path"]: item for item in draft["impact"]["items"]}
+        assert items["lib/server-auth.js"]["importers"]["files"] == ["lib/routes.js"]
+        assert items["lib/server-auth.js"]["importing_tests"]["files"] == ["test/server-auth.test.js"]
+
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(draft))
+        assert code == 0, err
+        code, shown, err = _run(["show", sealed["spec_hash"]], capsys)
+
+        assert code == 0 and shown == sealed["pr_body_copy"]
+
+
+@pytest.mark.parametrize("surface", ["import-graph", "call-site-finder"])
+def test_reading_python_with_an_invalid_escape_sequence_prints_no_syntax_warning(surface):
+    import warnings
+
+    from clagentic_loadout.spec.import_graph import build_import_graph
+    from clagentic_loadout.spec.references import python_top_level
+
+    source = 'PATTERN = "\\d+"\n\n\ndef find():\n    return PATTERN\n'
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", SyntaxWarning)
+        if surface == "import-graph":
+            graph = build_import_graph({"a.py": source}, ["a.py"])
+            assert graph.unparsed == ()
+        else:
+            assert python_top_level(source) == {"find": 4}
+
+
 class TestSpecsRoot:
     def test_environment_variable_wins(self, monkeypatch, tmp_path):
         monkeypatch.setenv(spec_store.SPECS_DIR_ENV_VAR, str(tmp_path / "from-env"))

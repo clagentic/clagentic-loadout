@@ -28,6 +28,8 @@ from collections import defaultdict
 from collections.abc import Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 
+from clagentic_loadout.spec.source_parse import parse_python
+
 PYTHON_SUFFIX = ".py"
 _INIT = "__init__"
 
@@ -154,7 +156,7 @@ def build_import_graph(
     unparsed: list[str] = []
     for path in sorted(sources):
         try:
-            module = ast.parse(sources[path])
+            module = parse_python(sources[path])
         except (SyntaxError, ValueError):
             unparsed.append(path)
             continue

@@ -58,6 +58,12 @@ class _Unparseable(Exception):
 class _Token(NamedTuple):
     kind: str  # "id", "str", "num", "punct", "regex"
     value: str | None  # a string's text; None for a string that is not a plain literal
+    pos: int = 0  # offset of the token's first character in the source
+
+
+#: The names other modules use for the tokenizer's token and its failure.
+Token = _Token
+Unparseable = _Unparseable
 
 
 def _scan_string(src: str, i: int) -> tuple[int, str | None]:
@@ -146,6 +152,7 @@ def tokenize(src: str) -> list[_Token]:
     template_start = 0
     while i < n:
         c = src[i]
+        start, held = i, len(tokens)
         if c in " \t\r\n\f\v﻿":
             i += 1
         elif src.startswith("//", i):
@@ -212,6 +219,8 @@ def tokenize(src: str) -> list[_Token]:
         else:
             tokens.append(_Token("punct", c))
             i += 1
+        if len(tokens) > held:
+            tokens[-1] = tokens[-1]._replace(pos=start)
     if "t" in stack:
         raise _Unparseable("unterminated template literal", template_start, src)
     return tokens
@@ -350,4 +359,4 @@ def build_js_import_graph(sources: Mapping[str, str], tree_paths: Collection[str
     )
 
 
-__all__ = ["JS_SUFFIXES", "build_js_import_graph", "extract_specifiers"]
+__all__ = ["JS_SUFFIXES", "Token", "Unparseable", "build_js_import_graph", "extract_specifiers", "tokenize"]
