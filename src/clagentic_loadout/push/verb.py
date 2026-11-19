@@ -313,7 +313,7 @@ from clagentic_loadout.push.remote_readback import (
     read_remote_head,
     verify_remote_authorship,
 )
-from clagentic_loadout.push import interface_report, profile_report
+from clagentic_loadout.push import interface_report, profile_report, uncalled_report
 from clagentic_loadout.review.profile_posture import CompletenessItem
 from clagentic_loadout.push.ratio_notice import notice_line, ratio_for_push
 from clagentic_loadout.push.verify_config import (
@@ -1506,8 +1506,10 @@ def _run_verification_outcome(
     rather than at a second read the checks or the push could have outrun.
     *base_refs* are the refs the branch's base may be found under, first
     resolvable first; with any, a breaking change to the repository's declared
-    interface is reported with its consumers (push.interface_report), before
-    anything is skipped or run, and never changes the outcome.
+    interface is reported with its consumers (push.interface_report), and a
+    public symbol the branch adds that nothing calls or tests is reported
+    (push.uncalled_report), before anything is skipped or run, and neither
+    changes the outcome.
 
     Raises push.verify_config.InvalidVerifyConfigError for malformed config
     and push.verify_run.VerificationFailedError on the first failing check;
@@ -1520,6 +1522,7 @@ def _run_verification_outcome(
         profile_items_out.extend(profile_items)
     if base_refs:
         interface_report.print_notice(project_root, base_refs)
+        uncalled_report.print_notice(project_root, base_refs)
     if not entries:
         return body, VERIFICATION_NONE, None
     if skip:

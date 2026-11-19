@@ -285,6 +285,36 @@ def apply_impact(draft: dict[str, Any], impact: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def apply_call_sites(draft: dict[str, Any], call_sites: dict[str, Any]) -> dict[str, Any]:
+    """*draft* with its call-sites section set to *call_sites* (see
+    spec.call_sites), placed right after the impact section, or after the
+    consumers section when there is none. Whatever the draft held is replaced: the
+    section describes the head it was computed at."""
+    out: dict[str, Any] = {}
+    anchor = "impact" if "impact" in draft else "consumers"
+    for key, value in draft.items():
+        if key == "call_sites":
+            continue
+        out[key] = copy.deepcopy(value)
+        if key == anchor:
+            out["call_sites"] = copy.deepcopy(call_sites)
+    out.setdefault("call_sites", copy.deepcopy(call_sites))
+    return out
+
+
+def undisposed_call_sites(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    """The call sites of *doc* whose disposition is still null, each as its
+    symbol, file and line. A spec with no call-sites section (sealed before it
+    existed) has none."""
+    section = doc.get("call_sites") or {}
+    return [
+        {"symbol": item["symbol"], "file": site["file"], "line": site["line"]}
+        for item in section.get("items", [])
+        for site in item.get("sites", [])
+        if site.get("disposition") is None
+    ]
+
+
 def draft_from_sealed(sealed: dict[str, Any], sealed_hash: str) -> dict[str, Any]:
     """A draft that starts from the sealed spec *sealed* (whose hash is
     *sealed_hash*) and names it in ``supersedes``. The only way to change a
@@ -362,6 +392,7 @@ __all__ = [
     "SealedSpec",
     "SpecFormatError",
     "apply_brief",
+    "apply_call_sites",
     "apply_completeness",
     "apply_consumers",
     "apply_group_rules",
@@ -377,5 +408,6 @@ __all__ = [
     "remedy_entry",
     "seal",
     "undecided_remedy",
+    "undisposed_call_sites",
     "validate_sealed_doc",
 ]

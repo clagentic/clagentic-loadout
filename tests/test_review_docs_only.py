@@ -92,13 +92,17 @@ class World:
         path.write_text(json.dumps(document), encoding="utf-8")
         return str(path)
 
-    def seal(self, justification: str | None = JUSTIFICATION) -> model.SealedSpec:
+    def seal(
+        self, justification: str | None = JUSTIFICATION, call_sites: dict | None = None
+    ) -> model.SealedSpec:
         draft = model.new_draft("planner-role")
         draft["goal"] = "Fix the guide."
         draft["acceptance_criteria"] = [
             {"id": cid, "given": "g", "when": "w", "then": "t"} for cid in CRITERIA
         ]
         draft["docs_only_justification"] = justification
+        if call_sites is not None:
+            draft = model.apply_call_sites(draft, call_sites)
         sealed = model.seal(draft, head_sha=SPEC_HEAD, sealed_at="2026-01-01T00:00:00Z")
         spec_store.write_sealed(spec_store.specs_root(), sealed)
         return sealed
@@ -592,6 +596,65 @@ class TestRun:
         world.review("run", capsys=capsys)
 
         assert not [r for r in world.host.requests if "/comments" in r[1]]
+
+
+def _call_sites(disposition) -> dict:
+    site = {"file": "lib/caller.py", "line": 7, "test": False, "disposition": disposition}
+    item = {
+        "symbol": "lib/a.py::go", "kind": "function", "defined_in": "lib/a.py", "language": "python",
+        "status": "computed", "note": None, "sites": [site], "more": 0,
+    }
+    return {"source": "tree", "note": None, "head_sha": SPEC_HEAD, "cap": 50, "items": [item]}
+
+
+class TestCallSitesInThePrompt:
+    """An undisposed call site of the spec is quoted into every chunk prompt of `run`
+    and bound into what a resume reuses; a spec with none leaves the run as it was."""
+
+    HEADING = "## Call sites with no disposition"
+
+    def _run(self, world, capsys, spec):
+        before = len(prompts(world.env.stubs, "carrier"))
+        code, _, _ = world.review("run", "--spec-hash", spec.spec_hash, capsys=capsys)
+        assert code == 0
+        return prompts(world.env.stubs, "carrier")[before:]
+
+    def test_every_chunk_names_the_undisposed_site_even_after_an_earlier_run_without_the_spec(
+        self, world, capsys
+    ):
+        world.host.diff = make_diff({"docs/guide.md": 30})
+        world.env.configure(chunk_lines=10)
+        spec = world.seal(justification=None, call_sites=_call_sites(None))
+        world.review("run", capsys=capsys)
+
+        sent = self._run(world, capsys, spec)
+
+        assert len(sent) > 1
+        for prompt in sent:
+            assert "- `lib/a.py::go` at lib/caller.py:7" in prompt
+            assert prompt.rfind(self.HEADING) < prompt.rfind("## Diff chunk")
+
+    def test_a_spec_whose_sites_are_all_disposed_leaves_the_run_resumable_from_one_with_no_spec(
+        self, world, capsys
+    ):
+        world.env.configure()
+        disposed = world.seal(
+            justification=None, call_sites=_call_sites({"kind": "unaffected", "note": "read only"})
+        )
+        world.review("run", capsys=capsys)
+
+        sent = self._run(world, capsys, disposed)
+
+        assert sent == []
+
+    def test_a_run_given_no_spec_carries_no_call_sites_note(self, world, capsys):
+        world.env.configure()
+        world.seal(justification=None, call_sites=_call_sites(None))
+
+        world.review("run", capsys=capsys)
+
+        sent = prompts(world.env.stubs, "carrier")
+        assert sent and all(self.HEADING not in prompt for prompt in sent)
 
 
 class TestJustificationInThePrompt:

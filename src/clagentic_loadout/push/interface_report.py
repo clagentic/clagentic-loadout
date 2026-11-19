@@ -31,7 +31,7 @@ def _producer(project_root: Path) -> str | None:
         return None
 
 
-def _merge_base(reader: GitPolicyReader, base_refs: Sequence[str]) -> str | None:
+def merge_base(reader: GitPolicyReader, base_refs: Sequence[str]) -> str | None:
     """The merge base of the first of *base_refs* that resolves and HEAD."""
     for ref in base_refs:
         try:
@@ -46,7 +46,7 @@ def notice_lines(project_root: Path, base_refs: Sequence[str]) -> list[str]:
     branch changes the interface file between its merge base with the first
     resolvable of *base_refs* and HEAD, and the change is breaking."""
     reader = GitPolicyReader(project_root)
-    base = _merge_base(reader, base_refs)
+    base = merge_base(reader, base_refs)
     if base is None:
         return []
     try:
@@ -95,4 +95,4 @@ def print_notice(
         print(line, file=out)
 
 
-__all__ = ["notice_lines", "print_notice"]
+__all__ = ["merge_base", "notice_lines", "print_notice"]

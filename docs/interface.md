@@ -129,6 +129,10 @@ CHANGE (...)` and one line per consumer, or one line saying the map is unavailab
 the producer could not be determined from the origin. A base that does not resolve prints
 nothing. It never changes the push.
 
+The same step also reports public symbols the branch adds that nothing calls or tests (see
+[`loadout-push`: new public symbols](verbs.md#new-public-symbols-with-no-caller-and-no-test)), under
+the same base condition.
+
 ## At merge
 
 When a pull request changes the interface file, `loadout-merge` reads it at the PR's

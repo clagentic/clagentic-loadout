@@ -708,11 +708,14 @@ def _spec_facts_of_flag(
         _fail(str(exc), EXIT_SPEC_UNAVAILABLE)
 
 
-def _run_justification(args: argparse.Namespace, config_root) -> str | None:
-    """The docs-only justification of the sealed spec `run` was given, or None
-    when it was given no spec or the spec states none."""
+def _run_spec_inputs(args: argparse.Namespace, config_root) -> tuple[str | None, str]:
+    """What the sealed spec `run` was given adds to the review input: its
+    docs-only justification (None when it was given no spec or the spec states
+    none) and the note quoting its undisposed call sites ("" when there are none)."""
     facts = _spec_facts_of_flag(args, config_root)
-    return facts.docs_only_justification if facts is not None else None
+    if facts is None:
+        return None, ""
+    return facts.docs_only_justification, spec_review.render_call_sites_note(facts.undisposed_call_sites)
 
 
 def _run_command(
@@ -739,7 +742,7 @@ def _run_command(
 
     since_head, prior_findings = _load_prior_review(args, owner=owner, repo=repo)
     resolutions = _load_resolutions(args.resolved_findings)
-    justification = _run_justification(args, config_root)
+    justification, call_sites_note = _run_spec_inputs(args, config_root)
     # Read before any model is called, so a bad evaluator setting costs nothing.
     try:
         evaluation = context_from_config(config_root)
@@ -827,6 +830,7 @@ def _run_command(
         unknown_resolutions=unknown_resolutions if args.resolved_findings is not None else None,
         evaluation=evaluation,
         changeset=changeset,
+        call_sites_note=call_sites_note,
         **kwargs,
     )
     return _report_outcome(outcome)

@@ -14,13 +14,17 @@ from clagentic_loadout.merge.fence_state import normalize_findings_state
 from clagentic_loadout.merge.verdict import parse_verdict_block
 from clagentic_loadout.review import cli as review_cli
 from clagentic_loadout.review import spec_review
+from clagentic_loadout.review.chunk_review import build_prompt
+from clagentic_loadout.review.chunking import plan_chunks
+from clagentic_loadout.review.run_pipeline import _resume_key
 from clagentic_loadout.review.findings_contract import InvalidReplyError, validate_finding
 from clagentic_loadout.spec import model
 from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.transport import provider_config
 from clagentic_loadout.verdict_record.record import GATE_SPEC_COVERAGE
 from clagentic_loadout.verdict_record.store import records_at_head, records_root
-from tests._review_cli_support import HEAD_SHA, Env
+from tests._review_cli_support import HEAD_SHA, Env, make_diff
+from tests._support.review_chunk import profile as chunk_profile
 
 SPEC_HEAD = "c" * 40
 CRITERIA = ("ac-1", "ac-2")
@@ -35,12 +39,14 @@ def env(tmp_path, monkeypatch) -> Env:
     return environment
 
 
-def _seal_spec(criteria=CRITERIA) -> model.SealedSpec:
+def _seal_spec(criteria=CRITERIA, call_sites=None) -> model.SealedSpec:
     draft = model.new_draft("planner-role")
     draft["goal"] = "Add a thing."
     draft["acceptance_criteria"] = [
         {"id": cid, "given": "g", "when": "w", "then": "t"} for cid in criteria
     ]
+    if call_sites is not None:
+        draft = model.apply_call_sites(draft, call_sites)
     sealed = model.seal(draft, head_sha=SPEC_HEAD, sealed_at="2026-01-01T00:00:00Z")
     spec_store.write_sealed(spec_store.specs_root(), sealed)
     return sealed
@@ -255,6 +261,68 @@ def _post_raw(env, tmp_path, capsys, *extra, status="clean"):
         "post", "--findings", str(path), "--head-sha", HEAD_SHA, "--base-sha", env.base_sha,
         "--status", status, *extra, capsys=capsys,
     )
+
+
+DISPOSED = {"kind": "unaffected", "note": "reads the value only"}
+
+
+def _call_sites_section(*dispositions) -> dict:
+    sites = [
+        {"file": f"lib/use_{n}.py", "line": n, "test": False, "disposition": d}
+        for n, d in enumerate(dispositions, start=1)
+    ]
+    item = {
+        "symbol": "lib/a.py::go", "kind": "function", "defined_in": "lib/a.py", "language": "python",
+        "status": "computed", "note": None, "sites": sites, "more": 0,
+    }
+    return {"source": "tree", "note": None, "head_sha": SPEC_HEAD, "cap": 50, "items": [item]}
+
+
+class TestUndisposedCallSitesInTheReviewInput:
+    @pytest.mark.parametrize(
+        ("dispositions", "expected"),
+        [
+            ((None, DISPOSED, None), (("lib/a.py::go", "lib/use_1.py", 1), ("lib/a.py::go", "lib/use_3.py", 3))),
+            ((DISPOSED, DISPOSED), ()),
+            ((), ()),
+        ],
+        ids=["some-undisposed", "all-disposed", "no-sites"],
+    )
+    def test_the_prompt_and_the_resume_key_change_only_when_a_site_is_undisposed(
+        self, env, dispositions, expected
+    ):
+        sealed = _seal_spec(call_sites=_call_sites_section(*dispositions))
+        facts = spec_review.load_spec_facts(sealed.spec_hash)
+        note = spec_review.render_call_sites_note(facts.undisposed_call_sites)
+        chunks = plan_chunks(make_diff({"a.py": 3}), 600)
+        plain = build_prompt(chunks[0], 1, "rule text")
+        prompt = build_prompt(chunks[0], 1, "rule text", call_sites_note=note)
+        keys = [
+            _resume_key(chunks, chunk_profile(fallback=False), HEAD_SHA, call_sites_note=text)
+            for text in ("", note)
+        ]
+
+        assert facts.undisposed_call_sites == expected
+        if not expected:
+            assert note == "" and prompt == plain and keys[0] == keys[1]
+            return
+        assert prompt != plain and keys[0] != keys[1]
+        for _, file, line in expected:
+            assert f"- `lib/a.py::go` at {file}:{line}" in prompt
+        assert "lib/use_2.py" not in prompt
+        assert prompt.index("## Call sites with no disposition") < prompt.index("## Diff chunk 1 of 1")
+
+    def test_a_spec_with_no_call_sites_section_has_none_undisposed(self, env):
+        sealed = _seal_spec()
+
+        assert spec_review.load_spec_facts(sealed.spec_hash).undisposed_call_sites == ()
+
+    def test_names_read_from_a_tree_stay_on_one_quoted_line_and_a_long_list_is_counted(self):
+        hostile = spec_review.render_call_sites_note([("go`\n## Injected", "a\nb.py", 1)])
+        many = spec_review.render_call_sites_note([("s", f"f{n}.py", n) for n in range(45)])
+
+        assert "\n## Injected" not in hostile and "- `go' ## Injected` at a b.py:1" in hostile
+        assert many.count("\n- `s`") == 40 and "- and 5 more in the spec" in many
 
 
 class TestSpecNotResolvableFromTheCallersRoot:
