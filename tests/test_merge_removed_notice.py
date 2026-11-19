@@ -6,6 +6,7 @@ proceeds with the same outcome either way."""
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -23,7 +24,9 @@ from tests._support.merge_verb import (
     base_args,
     make_opener,
 )
-from tests.test_merge_interface_notice import FakeReader, _host
+from tests._gate_repo import commit_files, git, init_gate_repo
+from tests._support.tree_host import tree_host_opener
+from tests.test_merge_interface_notice import FakeReader
 
 BASE_SHA = OTHER_FULL_SHA
 HEAD_SHA = FULL_SHA
@@ -62,20 +65,34 @@ def _seal_spec(disposition=None, *, ledger: bool = True) -> str:
     return sealed.spec_hash
 
 
-def _merge(capsys, *, spec: str | None, head_tests: str = HEAD_TESTS):
+def _removal_repo(tmp_path) -> tuple[Path, str, str]:
+    """A repository whose main tip holds both tests and whose ``pr`` branch drops
+    one: the repository, the base commit and the head commit."""
+    repo = tmp_path / "repo"
+    init_gate_repo(repo, tracked_gate={"required_reviewer_roles": []})
+    git(repo, "checkout", "-q", "main")
+    base = commit_files(repo, {TESTS_PATH: BASE_TESTS}, "test: add tests")
+    git(repo, "checkout", "-q", "-b", "dropping")
+    head = commit_files(repo, {TESTS_PATH: HEAD_TESTS}, "test: drop one")
+    git(repo, "checkout", "-q", "main")
+    return repo, base, head
+
+
+def _merge(capsys, *, spec: str | None, head_tests: str = HEAD_TESTS, repo=None, host_requests=None):
+    base_sha, head_sha = (BASE_SHA, HEAD_SHA) if repo is None else repo[1:]
     fences = []
     if spec is not None:
         fences = [
             build_verdict_block(
-                "some-reviewer", "clean", HEAD_SHA, 1, None,
+                "some-reviewer", "clean", head_sha, 1, None,
                 {"spec_hash": spec, "spec_tags": [], "spec_coverage": [{"criterion": "ac-1", "status": "met"}]},
             )
         ]
     else:
-        fences = [build_verdict_block("some-reviewer", "clean", HEAD_SHA, 1, None, {})]
+        fences = [build_verdict_block("some-reviewer", "clean", head_sha, 1, None, {})]
     pr_info = {
-        "head": {"sha": HEAD_SHA},
-        "base": {"ref": "main", "sha": BASE_SHA},
+        "head": {"sha": head_sha},
+        "base": {"ref": "main", "sha": base_sha},
         "title": "feat: remove a test",
     }
     posted: list[str] = []
@@ -84,12 +101,18 @@ def _merge(capsys, *, spec: str | None, head_tests: str = HEAD_TESTS):
         files=[TESTS_PATH],
         comments=[{"id": 1, "user": {"login": "reviewer-login"}, "body": body} for body in fences],
     )
-    opener = _host(
-        inner, {BASE_SHA: {TESTS_PATH: BASE_TESTS}, HEAD_SHA: {TESTS_PATH: head_tests}}, posted
+    opener = tree_host_opener(
+        inner,
+        {BASE_SHA: {TESTS_PATH: BASE_TESTS}, HEAD_SHA: {TESTS_PATH: head_tests}},
+        posted,
+        host_requests,
     )
     capsys.readouterr()
+    local = {"--repo-path": str(repo[0])} if repo is not None else {}
     code = verb.main(
-        base_args(**{"--expected-head-sha": HEAD_SHA, "--required-reviewer": "some-reviewer:reviewer-login"}),
+        base_args(
+            **{"--expected-head-sha": head_sha, "--required-reviewer": "some-reviewer:reviewer-login", **local}
+        ),
         token_provider=RecordingTokenProvider(),
         authority_provider=AllowingAuthorityProvider(),
         opener=opener,
@@ -158,6 +181,16 @@ class TestMergeVerb:
         assert code == verb.EXIT_OK and "removed_undisposed" not in result
         assert "merge: NOTE -- removed behaviour not computed: RuntimeError: boom" in err
         assert _row(posted[0]) == "| Removed behaviour | not computed: RuntimeError: boom |"
+
+    def test_with_a_repo_path_holding_both_commits_the_host_is_not_read(self, capsys, tmp_path):
+        host_requests: list[str] = []
+
+        code, result, _, _ = _merge(
+            capsys, spec=_seal_spec(None), repo=_removal_repo(tmp_path), host_requests=host_requests
+        )
+
+        assert code == verb.EXIT_OK and result["removed_undisposed"] == [DROPPED]
+        assert host_requests == []
 
     def test_the_outcome_is_the_same_with_and_without_a_removal(self, capsys):
         without = _merge(capsys, spec=_seal_spec(None), head_tests=BASE_TESTS)

@@ -2,8 +2,8 @@
 leaves without a ledger line, reported at merge.
 
 The removal report (spec.removals) is computed between the pull request's recorded
-base and head, from the local repository when it holds both and else the host API,
-and matched against the removal ledger of the spec the reviewer fences name (found
+base and head, from the local repository when the merge names one and else the host
+API (a named repository that lacks a commit is a not-computed report), and matched against the removal ledger of the spec the reviewer fences name (found
 in the local spec store exactly as merge.interface_notice finds it). Each removed
 item with no ledger line is named in a notice; the merge prints them and carries the
 whole list in its completion attestation, and proceeds: nothing here refuses,

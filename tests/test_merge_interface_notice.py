@@ -4,9 +4,7 @@ changes: the merge proceeds with the same outcome either way."""
 
 from __future__ import annotations
 
-import base64
 import json
-import urllib.parse
 
 import pytest
 
@@ -18,7 +16,6 @@ from clagentic_loadout.merge.verdict import build_verdict_block
 from clagentic_loadout.review.policy_reader import PolicyReadError
 from clagentic_loadout.spec import model
 from clagentic_loadout.spec import store as spec_store
-from tests._support.fakes import json_resp
 from tests._support.interface_fixtures import (
     ADDED_INTERFACE,
     BASE_INTERFACE,
@@ -33,6 +30,7 @@ from tests._support.merge_verb import (
     base_args,
     make_opener,
 )
+from tests._support.tree_host import tree_host_opener
 
 BASE_SHA = OTHER_FULL_SHA
 HEAD_SHA = FULL_SHA
@@ -190,29 +188,6 @@ class TestCollect:
         assert result.lines == () and any("interface diff not computed" in n for n in result.notes)
 
 
-def _host(inner, trees: dict[str, dict[str, str]], posted: list[str]):
-    """*inner* with the tree and contents endpoints answered from *trees*, and
-    every posted comment body recorded in *posted*."""
-
-    def opener(req, timeout=15):
-        url = req.full_url
-        method = req.get_method()
-        if method == "GET" and "/git/trees/" in url:
-            ref = urllib.parse.unquote(url.split("/git/trees/")[1].split("?")[0])
-            entries = [{"path": p, "type": "blob"} for p in trees[ref]]
-            return json_resp(200, {"tree": entries, "truncated": False, "total_count": len(entries)})
-        if method == "GET" and "/contents/" in url:
-            path = urllib.parse.unquote(url.split("/contents/")[1].split("?")[0])
-            ref = urllib.parse.unquote(url.split("ref=")[1])
-            content = base64.b64encode(trees[ref][path].encode("utf-8")).decode("ascii")
-            return json_resp(200, {"encoding": "base64", "content": content})
-        if method == "POST" and "/comments" in url:
-            posted.append(json.loads(req.data.decode("utf-8"))["body"])
-        return inner(req, timeout)
-
-    return opener
-
-
 def _merge(capsys, tmp_path, *, head_interface, spec_items, files=(INTERFACE_PATH, "a.py")):
     write_consumers(tmp_path)
     spec = _seal_spec(spec_items)
@@ -239,7 +214,7 @@ def _merge(capsys, tmp_path, *, head_interface, spec_items, files=(INTERFACE_PAT
         files=list(files),
         comments=[{"id": 1, "user": {"login": "reviewer-login"}, "body": fence}],
     )
-    opener = _host(
+    opener = tree_host_opener(
         inner,
         {
             BASE_SHA: {INTERFACE_PATH: BASE_INTERFACE, "a.py": "x"},

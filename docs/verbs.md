@@ -3019,8 +3019,9 @@ this being the one intentionally fail-open step in the gate chain.
 
 **Removed behaviour (`merge.removed_notice`):** the merge computes the test cases, public symbols
 and command-line verbs the pull request removes between its recorded base and head (see
-[The removal ledger](#the-removal-ledger)), through the local repository when `--repo-path` holds
-both revisions and else the host API, and matches them against the removal ledger of the spec the
+[The removal ledger](#the-removal-ledger)), through the local repository when `--repo-path` is
+given (a repository that lacks either revision gives a not-computed note, and the host is not asked)
+and else the host API, and matches them against the removal ledger of the spec the
 reviewer fences name (found in the local spec store exactly as the interface notice finds its spec).
 Each item with no ledger line prints `merge: NOTICE -- removed without a ledger line: <item> (<kind>)`
 on standard error, the attestation gains a `Removed behaviour` row listing each item with its ledger
@@ -4207,7 +4208,7 @@ else (no move is inferred from a same-named item elsewhere).
 |---|---|---|
 | `test` | Python: a top-level function whose name starts with `test`, or a method starting with `test` of a top-level class whose name starts with `Test`, in a test file (see [The impact section](#the-impact-section)). JavaScript (`.js .jsx .mjs .cjs`): each `test(` or `it(` call whose first argument is a single string literal, in a test file; `describe` nesting is not tracked, and a title present n times at the base and m < n times at the head gives n - m items. | `<path>::<name>`, `<path>::<Class>::<name>` or `<path>::<title>` |
 | `symbol` | The public symbols of a non-test file, as the push report on new public symbols reads them: a top-level `def` or `class` not starting with `_`, or a name a JavaScript file exports. | `<path>::<name>` |
-| `verb` | A key of `[project.scripts]` in a `pyproject.toml`, or of the `bin` object of a `package.json` (a string `bin` names the package `name`). | the bare verb name |
+| `verb` | A key of `[project.scripts]` in a `pyproject.toml`, or of the `bin` object of a `package.json` (a string `bin` names the package `name` with any `@scope/` prefix removed, the name npm installs it under). | the bare verb name |
 
 **Not computed.** Languages other than Python and JavaScript are not covered (TypeScript included): a
 changed source file in another language, a covered file that cannot be read or parsed at either side,

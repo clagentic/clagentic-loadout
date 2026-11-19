@@ -1070,6 +1070,16 @@ def _interface_readers(
     return readers
 
 
+def _removal_readers(
+    backend, *, owner: str, repo: str, repo_path: str | None
+) -> list[PolicyReader]:
+    """Where the removed-behaviour computation reads the PR's base and head: the
+    local repository when the caller names one, and only then (the rule
+    _gate_policy_reader follows), else the host API. A named repository that does
+    not hold both commits gives a not-computed report, never a host read."""
+    return [_gate_policy_reader(backend, owner=owner, repo=repo, repo_path=repo_path)]
+
+
 def _resolve_backend(
     platform: str,
     *,
@@ -2051,7 +2061,7 @@ def _run(
     try:
         removed_notices = collect_removed_notices(
             changed_files=changed_files,
-            make_readers=lambda: _interface_readers(
+            make_readers=lambda: _removal_readers(
                 backend, owner=owner, repo=repo, repo_path=args.repo_path
             ),
             base_sha=(pr_info.get("base") or {}).get("sha") if isinstance(pr_info, dict) else None,
