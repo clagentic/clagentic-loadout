@@ -284,10 +284,12 @@ def _python_lines(source: str, names: Collection[str]) -> dict[str, set[int]]:
 
 def _js_lines(source: str, names: Collection[str], defining: Collection[str]) -> dict[str, set[int]]:
     module = JsModule(source)
-    skipped = {index for name in defining for index in module.own_indices(name)}
+    # Per name: a token that declares or exports one symbol can be a plain reference
+    # to another (the local on the right of ``{ a: b }``), so exclusions never pool.
+    skipped = {name: module.own_indices(name) for name in defining}
     found: dict[str, set[int]] = {}
     for index, token in enumerate(module.tokens):
-        if token.kind == "id" and token.value in names and index not in skipped:
+        if token.kind == "id" and token.value in names and index not in skipped.get(str(token.value), ()):
             found.setdefault(str(token.value), set()).add(module.line_of(index))
     return found
 

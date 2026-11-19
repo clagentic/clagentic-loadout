@@ -47,6 +47,12 @@ ROWS = {
     "added-to-an-existing-exports-object": (
         {"lib/server-auth.js": UNLOCK_HEAD}, ["lib/server-auth.js::unlockUser"]
     ),
+    # beta's only other mention is the value of alpha's export entry: that token is not
+    # beta's own export, so it is a reference to beta and only alpha is reported.
+    "another-symbols-export-entry-is-a-reference": (
+        {"lib/b.js": "function alpha() {}\nfunction beta() {}\nmodule.exports = { alpha: beta, beta };\n"},
+        ["lib/b.js::alpha"],
+    ),
     "string-in-dunder-all-is-no-caller": (
         {"lib/c.py": '__all__ = ["listed"]\n\n\ndef listed():\n    pass\n'}, ["lib/c.py::listed"]
     ),
@@ -122,18 +128,19 @@ def test_the_first_base_ref_that_resolves_is_used(repo):
     assert len(uncalled_report.notice_lines(path, ["no-such-ref", base])) == 1
 
 
-def test_a_tree_that_cannot_be_read_is_one_not_computed_line_never_an_error(repo, monkeypatch):
+@pytest.mark.parametrize("method", ["changed_paths", "list_paths"], ids=["changed-paths-unreadable", "head-tree-unreadable"])
+def test_a_tree_that_cannot_be_read_is_one_not_computed_line_never_an_error(repo, monkeypatch, method):
     path, base = repo
     _push_head(path, {"lib/c.py": "def fresh():\n    pass\n"})
 
-    def unreadable(self, base, head):
-        raise PolicyReadError("cannot read the changed paths")
+    def unreadable(self, *args):
+        raise PolicyReadError("cannot read the repository")
 
-    monkeypatch.setattr(GitPolicyReader, "changed_paths", unreadable)
+    monkeypatch.setattr(GitPolicyReader, method, unreadable)
 
     lines = uncalled_report.notice_lines(path, [base])
 
-    assert len(lines) == 1 and lines[0].startswith("push: new public symbols not computed:")
+    assert lines == ["push: new public symbols not computed: cannot read the repository"]
 
 
 def test_print_notice_writes_each_line_to_the_stream(repo):
