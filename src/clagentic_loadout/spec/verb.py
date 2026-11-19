@@ -1,7 +1,7 @@
 """spec.verb -- `loadout-spec`: create, seal and read the standard spec.
 
   loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--groups-file FILE]
-                    [--consumers-file FILE] [--path GLOB]... [--element NAME]...
+                    [--consumers-file FILE] [--path GLOB]... [--element NAME]... [--symbol SYMBOL]...
                     [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
   loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
   loadout-spec show HASH [--chain]
@@ -14,7 +14,9 @@ rules empty with a note and never changes the exit code. When --path or --elemen
 consumers are filled from the consumer map (interface.consumers), each with a placeholder disposition for the author
 to replace; an unavailable map leaves the section empty with a note, again without changing the exit code. --path also
 fills an impact section: the files and test files that import each matching Python file, from the tree at --ref read
-through git objects (see spec.impact); a path in another language is listed as not computed. The draft
+through git objects (see spec.impact); a path in another language is listed as not computed. Each --symbol fills a
+call-sites section: every place that refers to a function, export or verb, from the same tree, each with an empty
+disposition for the author to fill (see spec.call_sites). The draft
 is an ordinary file for the author to edit. With --supersedes it starts from a sealed spec instead, which is the only
 way to change one.
 
@@ -32,7 +34,8 @@ of the repository at --repo-path), stores it as a content-addressed artifact und
 the specs root, and prints its hash with the copy to put in the pull request body.
 The copy is the artifact's own bytes. A document that already carries a seal is
 refused: no verb edits a sealed spec in place. Remedy entries with no decision are
-listed (stderr, and ``remedy_undecided`` in the output) and the seal still succeeds.
+listed (stderr, and ``remedy_undecided`` in the output) and the seal still succeeds. So
+are call sites with no disposition (stderr, and ``call_sites_undisposed`` in the output).
 
 `show` prints the sealed spec stored under HASH, byte for byte, after recomputing
 the hash and refusing a file that does not match its name. With --chain it prints
@@ -86,6 +89,7 @@ from clagentic_loadout.rules.applying import applying_group_rules, format_rule_i
 from clagentic_loadout.rules import groups as gr
 from clagentic_loadout.rules.groups import GroupsFileError
 from clagentic_loadout.merge.guidance_section import builder_guidance
+from clagentic_loadout.spec import call_sites as call_sites_mod
 from clagentic_loadout.spec import impact as impact_mod
 from clagentic_loadout.spec import model
 from clagentic_loadout.spec import remedy as remedy_mod
@@ -199,6 +203,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         metavar="NAME",
         help="An interface element the change touches, such as a verb; the consumers section is "
         "filled from the consumer map for it. May be repeated.",
+    )
+    new.add_argument(
+        "--symbol",
+        action="append",
+        default=[],
+        metavar="SYMBOL",
+        help="A function, export or verb the change touches: '<path>::<name>' for a Python "
+        "top-level function or class or a JavaScript exported name defined in <path>, or a bare "
+        "name for a command-line verb. The call-sites section lists every reference to it at "
+        "--ref, each with an empty disposition for the author to fill. May be repeated.",
     )
     new.add_argument(
         "--supersedes",
@@ -379,6 +393,26 @@ def _with_impact(draft: dict[str, object], args: argparse.Namespace) -> dict[str
     return model.apply_impact(draft, impact_mod.compute_impact(args.repo_path, args.ref, paths))
 
 
+def _with_call_sites(draft: dict[str, object], args: argparse.Namespace) -> dict[str, object]:
+    """*draft* with its call-sites section computed for the --symbol values from
+    the tree at --ref. Without --symbol, a section carried from a superseded spec
+    describes the head it was sealed at, so it is recomputed at --ref from its own
+    symbols, or dropped when it names none. A disposition moves to a recomputed
+    site with the same symbol, file and line text."""
+    carried = draft.get("call_sites")
+    symbols = list(args.symbol) or call_sites_mod.carried_symbols(carried)
+    if not symbols:
+        return {key: value for key, value in draft.items() if key != "call_sites"}
+    try:
+        section = call_sites_mod.compute_call_sites(
+            args.repo_path, args.ref, symbols,
+            carried=carried if isinstance(carried, dict) else None,
+        )
+    except ValueError as exc:
+        raise SpecVerbError(f"--symbol {exc}", EXIT_USAGE) from exc
+    return model.apply_call_sites(draft, section)
+
+
 def _with_remedy(
     draft: dict[str, object], args: argparse.Namespace, config_root: str | Path | None
 ) -> dict[str, object]:
@@ -447,6 +481,7 @@ def _new(
     draft = _with_group_rules(draft, args, snapshot.profile, config_root)
     draft = _with_consumers(draft, args, config_root)
     draft = _with_impact(draft, args)
+    draft = _with_call_sites(draft, args)
     draft = _with_remedy(draft, args, config_root)
     draft = model.apply_guidance(draft, builder_guidance(), source=GUIDANCE_SOURCE)
     text = json.dumps(draft, indent=2) + "\n"
@@ -524,6 +559,13 @@ def _seal(args: argparse.Namespace, root: Path) -> int:
             f"{entry['line']}) has no decision; a fold spec records fix_shared, fix_here or decline",
             file=sys.stderr,
         )
+    unaddressed = model.undisposed_call_sites(sealed.doc)
+    for site in unaddressed:
+        print(
+            f"loadout-spec: call site {site['symbol']} at {site['file']}:{site['line']} has no "
+            "disposition; record changed, unaffected or out with a note",
+            file=sys.stderr,
+        )
     print(
         json.dumps(
             {
@@ -534,6 +576,7 @@ def _seal(args: argparse.Namespace, root: Path) -> int:
                 "supersedes": prior_hash,
                 "artifact": str(path),
                 "remedy_undecided": [entry["id"] for entry in undecided],
+                "call_sites_undisposed": unaddressed,
                 "pr_body_copy": sealed.data.decode("ascii"),
             }
         )

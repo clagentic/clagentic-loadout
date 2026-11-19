@@ -173,6 +173,58 @@
         }
       }
     },
+    "call_sites": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "note", "head_sha", "cap", "items"],
+      "description": "OPTIONAL, additive. For each function, export or command-line verb the change names as changing, the places that refer to it, computed from the tree at one commit when the draft is created, each with a disposition the author of the spec fills before the spec is sealed. Reported only; an empty disposition is listed at seal and in the review input and never refuses anything. An absent section is a spec sealed before this section existed, or one drafted with no symbol named.",
+      "properties": {
+        "source": {"type": ["string", "null"], "description": "How the section was computed; null when it could not be."},
+        "note": {"type": ["string", "null"], "description": "Why the section is empty, when it is."},
+        "head_sha": {"type": ["string", "null"], "pattern": "^([0-9a-f]{40}|[0-9a-f]{64})$", "description": "The commit the tree was read at."},
+        "cap": {"type": "integer", "minimum": 1, "description": "The most sites listed per symbol; the rest are counted in more."},
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["symbol", "kind", "defined_in", "language", "status", "note", "sites", "more"],
+            "properties": {
+              "symbol": {"type": "string", "minLength": 1, "description": "'<path>::<name>' for a function or export, or a bare verb name."},
+              "kind": {"type": "string", "enum": ["function", "export", "verb"]},
+              "defined_in": {"type": ["string", "null"], "description": "The file that defines the symbol; null for a verb."},
+              "language": {"type": "string", "minLength": 1},
+              "status": {"type": "string", "enum": ["computed", "not_computed", "no_match"]},
+              "note": {"type": ["string", "null"]},
+              "sites": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["file", "line", "test", "disposition"],
+                  "properties": {
+                    "file": {"type": "string", "minLength": 1},
+                    "line": {"type": "integer", "minimum": 1},
+                    "test": {"type": "boolean", "description": "Whether the file is a test file."},
+                    "disposition": {
+                      "type": ["object", "null"],
+                      "additionalProperties": false,
+                      "required": ["kind", "note"],
+                      "description": "null until the author fills it: changed in this change, unaffected because of the note, or out by decision.",
+                      "properties": {
+                        "kind": {"type": "string", "enum": ["changed", "unaffected", "out"]},
+                        "note": {"type": "string", "minLength": 1}
+                      }
+                    }
+                  }
+                }
+              },
+              "more": {"type": "integer", "minimum": 0, "description": "How many sites past the cap are not listed."}
+            }
+          }
+        }
+      }
+    },
     "test_plan": {
       "type": "object",
       "additionalProperties": false,
