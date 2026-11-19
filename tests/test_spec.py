@@ -747,6 +747,23 @@ IMPACT_FILES = {
     "pkg/sub/c.py": "from ..core import X\n",
     "tests/test_core.py": "from pkg.core import X\n",
     "web/app.js": "export const x = 1;\n",
+    "web/app.ts": "export const x: number = 1;\n",
+    "web/data.json": "{}\n",
+    # JavaScript: src/a.js is imported by a source file (ESM) and by a test file (require).
+    "src/a.js": "export const a = 1;\n",
+    "src/b.js": "import x from './a';\n",
+    "tests/a.test.js": "const a = require('../src/a.js');\n",
+    # A JavaScript importer and a JavaScript target that cannot be tokenized.
+    "js/ok.js": "export {};\n",
+    "js/broken-importer.js": "import './ok';\nconst s = 'unterminated;\n",
+    "js/broken-target.js": "const t = `open ${1}\n",
+    # A browser/Node app tree: a directory import through index.js, ESM and require callers,
+    # a __tests__ file and a *.test.js file.
+    "app/src/main.js": "import { Widget } from './widgets';\nimport './util.js';\n",
+    "app/src/util.js": "export const u = 1;\n",
+    "app/src/widgets/index.js": "export class Widget {}\n",
+    "app/src/widgets.test.js": "const { Widget } = require('./widgets/index.js');\n",
+    "app/src/__tests__/widgets.js": "const { Widget } = require('../widgets');\n",
     # A namespace package: no __init__.py, so a relative import has no layout to lean on.
     "ns/x.py": "X = 1\n",
     "ns/y.py": "from . import x\n",
@@ -763,6 +780,7 @@ IMPACT_FILES = {
 }
 CORE_IMPORTERS = ["pkg/a.py", "pkg/sub/b.py", "pkg/sub/c.py"]
 SKIPPED = ["bad/big.py", "bad/broken.py"]
+JS_SKIPPED = ["js/broken-importer.js", "js/broken-target.js"]
 
 
 def _impact_repo(tmp_path: Path) -> tuple[Path, str]:
@@ -790,8 +808,21 @@ class TestImpact:
             ("pkg/core.py", None, CORE_IMPORTERS, 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED, False),
             # AC2: nothing imports it.
             ("pkg/lonely.py", None, [], 0, [], "computed", "python", "", SKIPPED, False),
-            # AC3: another language is listed, not computed, and named.
-            ("web/app.js", None, None, None, None, "not_computed", "javascript", "javascript", [], False),
+            # AC3 and AC7: another language is listed, not computed, and named with the covered list.
+            ("web/app.ts", None, None, None, None, "not_computed", "typescript", "typescript is not covered (covered: python, javascript)", [], False),
+            ("web/data.json", None, None, None, None, "not_computed", "json", "json is not covered (covered: python, javascript)", [], False),
+            # JS-AC1: an ESM importer and a require from a test file.
+            ("src/a.js", None, ["src/b.js"], 0, ["tests/a.test.js"], "computed", "javascript", "", JS_SKIPPED, False),
+            # JS-AC6: nothing imports it; the rest of the JavaScript tree is not Python-read.
+            ("web/app.js", None, [], 0, [], "computed", "javascript", "", JS_SKIPPED, False),
+            # JS-AC5: a target that cannot be tokenized is not computed, with the reason, never none found.
+            ("js/broken-target.js", None, None, None, None, "not_computed", "javascript", "unterminated template literal at line 1", JS_SKIPPED, False),
+            # JS-AC5: an importer that cannot be tokenized leaves the list short and is named.
+            ("js/ok.js", None, [], 0, [], "computed", "javascript", "", JS_SKIPPED, False),
+            # An app-shaped tree: index.js reached by a directory import (ESM), by require of
+            # the file, and from a __tests__ file; the two test files are not importers.
+            ("app/src/widgets/index.js", None, ["app/src/main.js"], 0,
+             ["app/src/__tests__/widgets.js", "app/src/widgets.test.js"], "computed", "javascript", "", JS_SKIPPED, False),
             # AC4: over the cap, the cap is listed and the rest counted.
             ("pkg/core.py", 2, CORE_IMPORTERS[:2], 1, ["tests/test_core.py"], "computed", "python", "", SKIPPED, False),
             # A target whose own source is over the read bound or is not Python is not
@@ -813,7 +844,10 @@ class TestImpact:
             ("pkg/core.py", None, CORE_IMPORTERS[1:], 0, ["tests/test_core.py"], "computed", "python", "", SKIPPED, True),
         ],
         ids=[
-            "importers-and-tests", "none-found", "not-computed", "over-the-cap",
+            "importers-and-tests", "none-found", "typescript-not-computed", "json-not-computed",
+            "javascript-importers-and-tests", "javascript-none-found",
+            "javascript-unparsable-target", "javascript-unparsable-importer-is-named",
+            "javascript-app-tree-directory-import-and-tests", "over-the-cap",
             "unreadable-target", "unparsable-target", "unparsable-importer-is-named",
             "namespace-package-relative-import", "dotted-import-counts-the-package-init",
             "root-import-is-not-a-non-package-stem", "sibling-import-in-a-non-package-dir",
@@ -845,7 +879,7 @@ class TestImpact:
             section = _impact(repo, capsys, path)
 
         assert section["head_sha"] == head
-        assert section["languages_covered"] == ["python"]
+        assert section["languages_covered"] == ["python", "javascript"]
         assert section["cap"] == (cap or 25)
         (item,) = section["items"]
         assert (item["path"], item["status"], item["language"]) == (path, status, language)
@@ -859,6 +893,99 @@ class TestImpact:
             {"files": tests, "more": 0},
         )
         assert (item["note"] or "").startswith("none found") == (not files and not tests)
+
+    @pytest.mark.parametrize(
+        ("source", "edge"),
+        [
+            # JS-AC2: each import form with a plain literal makes an edge.
+            ("import x from './a';", True),
+            ("import x, { y as z, default as w } from './a';", True),
+            ("import {\n  y,\n  z,\n} from './a';", True),
+            ("import * as ns from './a';", True),
+            ("import './a';", True),
+            ("export { x } from './a';", True),
+            ("export * from './a';", True),
+            ("export * as ns from './a';", True),
+            ("const x = require('./a');", True),
+            ("import('./a').then(f);", True),
+            ("require(`./a`);", True),
+            ("const t = `${require('./a')}`;", True),
+            ("const q = a / b; const r = c / d; require('./a');", True),
+            ("n++ / 2; require('./a');", True),
+            # JS-AC2: a non-literal, a substituted template, a bare, node: or absolute
+            # specifier, a path outside the tree, a missing file and a member call are not edges.
+            ("require(name);", False),
+            ("require('./' + name);", False),
+            ("require(`./${name}`);", False),
+            ("import(`./${name}`);", False),
+            ("import x from 'pkg';", False),
+            ("import fs from 'node:fs';", False),
+            ("import x from '/abs/a';", False),
+            ("import x from '../../outside';", False),
+            ("import x from './missing';", False),
+            ("obj.require('./a');", False),
+            ("export { x };", False),
+            ("export const a = 1;", False),
+            # JS-AC3: the text of a comment, string, template or regular expression is not code.
+            ("// import './a'", False),
+            ("/* require('./a') */", False),
+            ("const s = \"import './a'\";", False),
+            ("const s = 'require(\\'./a\\')';", False),
+            ("const t = `import './a'`;", False),
+            ("const t = `x ${1} require('./a')`;", False),
+            ("const r = /require\\('\\.\\/a'\\)/;", False),
+            ("const r = /[/]import '.\\/a'/;", False),
+        ],
+    )
+    def test_javascript_import_forms_and_the_text_that_is_not_code(self, source, edge):
+        from clagentic_loadout.spec.js_imports import build_js_import_graph
+
+        tree = ["main.js", "a.js"]
+        graph = build_js_import_graph({"main.js": source}, tree)
+
+        assert graph.unparsed == ()
+        assert dict(graph.importers) == ({"a.js": frozenset({"main.js"})} if edge else {})
+
+    @pytest.mark.parametrize(
+        ("importer", "specifier", "target"),
+        [
+            # JS-AC4: exact path, then the extensions in order, then index in the same order.
+            ("main.js", "./dir", "dir/index.js"),
+            ("main.js", "./a", "a.js"),
+            ("main.js", "./a.mjs", "a.mjs"),
+            ("main.js", "./x", "x.js"),
+            ("main.js", "./x/", "x/index.js"),
+            ("main.js", "./only", "only/index.cjs"),
+            ("main.js", "./sub/../a", "a.js"),
+            ("sub/m.js", "../a", "a.js"),
+            ("main.js", "./nothing", None),
+            ("main.js", ".", None),
+            ("sub/m.js", "../../up", None),
+        ],
+    )
+    def test_javascript_specifiers_resolve_in_the_documented_order(self, importer, specifier, target):
+        from clagentic_loadout.spec.js_imports import build_js_import_graph
+
+        tree = ["main.js", "a.js", "a.mjs", "dir/index.js", "dir/index.mjs", "x.js", "x/index.js",
+                "only/index.cjs", "sub/m.js"]
+        graph = build_js_import_graph({importer: f"import '{specifier}';"}, tree)
+
+        assert {t: set(v) for t, v in graph.importers.items() if t != importer} == (
+            {target: {importer}} if target else {}
+        )
+
+    @pytest.mark.parametrize(
+        "source",
+        ["const s = 'open;\n", "/* open", "const t = `open", "const t = `a ${b", "const r = /open\n"],
+        ids=["string", "comment", "template", "template-substitution", "regex"],
+    )
+    def test_a_javascript_source_that_cannot_be_tokenized_is_unparsed_with_its_reason(self, source):
+        from clagentic_loadout.spec.js_imports import build_js_import_graph
+
+        graph = build_js_import_graph({"main.js": source}, ["main.js"])
+
+        assert graph.unparsed == ("main.js",)
+        assert "unterminated" in graph.unparsed_reasons["main.js"] and "line 1" in graph.unparsed_reasons["main.js"]
 
     def test_two_refs_that_differ_in_imports_give_two_sections_each_with_its_own_head(
         self, tmp_path, capsys
@@ -905,7 +1032,10 @@ class TestImpact:
         legacy = model.seal(old, head_sha=HEAD_A, sealed_at="2026-01-01T00:00:00Z")
         assert "impact" not in model.parse_sealed(legacy.data, legacy.spec_hash)
 
-    def test_the_computation_makes_no_network_call(self, tmp_path, capsys, monkeypatch):
+    @pytest.mark.parametrize(
+        ("path", "files"), [("pkg/core.py", CORE_IMPORTERS), ("src/a.js", ["src/b.js"])], ids=["python", "javascript"]
+    )
+    def test_the_computation_makes_no_network_call(self, tmp_path, capsys, monkeypatch, path, files):
         import socket
 
         def refuse(*_args, **_kwargs):
@@ -915,9 +1045,19 @@ class TestImpact:
         monkeypatch.setattr(socket.socket, "connect", refuse)
         monkeypatch.setattr(socket, "getaddrinfo", refuse)
 
-        section = _impact(repo, capsys, "pkg/core.py")
+        section = _impact(repo, capsys, path)
 
-        assert section["items"][0]["importers"]["files"] == CORE_IMPORTERS
+        assert section["items"][0]["importers"]["files"] == files
+
+    def test_a_spec_sealed_with_a_javascript_item_validates_against_the_schema(self, tmp_path, capsys):
+        repo, _ = _impact_repo(tmp_path)
+        draft = json.loads(_run(["new", "--role", ROLE, "--repo-path", str(repo), "--path", "src/a.js"], capsys)[1])
+
+        code, sealed, err = _seal(tmp_path, repo, capsys, _fill(draft))
+
+        assert code == 0, err
+        item = model.parse_sealed(sealed["pr_body_copy"].encode("ascii"), sealed["spec_hash"])["impact"]["items"][0]
+        assert (item["language"], item["importers"]["files"]) == ("javascript", ["src/b.js"])
 
 
 class TestSpecsRoot:
