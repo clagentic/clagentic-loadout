@@ -112,8 +112,8 @@ def notice_lines(project_root: Path, base_refs: Sequence[str]) -> list[str]:
     try:
         head = reader.resolve_commit("HEAD")
         tree = reader.list_paths(head)
-    except PolicyReadError:
-        return []
+    except PolicyReadError as exc:
+        return [f"push: new public symbols not computed: {exc}"]
     try:
         added = _added_symbols(reader, base, head, tree)
         if not added:
