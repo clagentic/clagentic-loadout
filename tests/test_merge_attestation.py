@@ -248,6 +248,20 @@ class TestFieldValueTableRendering:
         assert "| task_id |" not in body
         assert "| Issue |" not in body
 
+    def test_the_removed_behaviour_row_is_present_only_when_the_caller_computed_it(self):
+        common = dict(
+            gated_head_sha=_FULL_SHA, merged_sha=_FULL_SHA, ci_disposition="success", version="1.0.0"
+        )
+
+        assert "Removed behaviour" not in build_attestation_body(**common)
+        assert "Removed behaviour" not in build_attestation_body(**common, removed_behaviour=())
+        assert "| Removed behaviour | none |" in build_attestation_body(**common, removed_behaviour=["none"])
+        body = build_attestation_body(
+            **common,
+            removed_behaviour=["a.py::gone (symbol): undisposed", "b|c (verb): replaced by x"],
+        )
+        assert "| Removed behaviour | a.py::gone (symbol): undisposed<br>b\\|c (verb): replaced by x |" in body
+
     def test_no_authorize_rationale_row(self):
         # Named trade-off (lr-0b77dd): sourcing a rationale line would
         # require either a new pre_checks_summary-shaped parameter

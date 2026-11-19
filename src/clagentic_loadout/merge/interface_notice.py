@@ -19,6 +19,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from clagentic_loadout.interface.model import INTERFACE_PATH, InterfaceError
 from clagentic_loadout.interface.notice import (
@@ -43,14 +44,15 @@ class InterfaceNotices:
     undisposed: tuple[Undisposed, ...] = ()
 
 
-def _spec_dispositions(
+def load_fence_specs(
     hashes: Sequence[str], repo_path: str | None, config_root: str | Path | None
-) -> tuple[list[tuple[str, str]], list[str]]:
-    """The dispositions of every spec that can be read, and a note for each that
-    cannot."""
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The sealed spec documents of the hashes the reviewer fences carry that can
+    be read from the local spec store, and a note for each that cannot (or one
+    note when there is no hash at all)."""
     if not hashes:
         return [], ["no sealed spec hash in the reviewer fences, so no dispositions were read"]
-    dispositions: list[tuple[str, str]] = []
+    docs: list[dict[str, Any]] = []
     notes: list[str] = []
     untrusted = (Path(repo_path),) if repo_path else ()
     try:
@@ -63,8 +65,17 @@ def _spec_dispositions(
         except spec_store.StoreError as exc:
             notes.append(f"spec {spec_hash[:_SHORT]} was not read: {exc}")
             continue
-        dispositions.extend(spec_dispositions(stored.doc))
-    return dispositions, notes
+        docs.append(stored.doc)
+    return docs, notes
+
+
+def _spec_dispositions(
+    hashes: Sequence[str], repo_path: str | None, config_root: str | Path | None
+) -> tuple[list[tuple[str, str]], list[str]]:
+    """The dispositions of every spec that can be read, and a note for each that
+    cannot."""
+    docs, notes = load_fence_specs(hashes, repo_path, config_root)
+    return [pair for doc in docs for pair in spec_dispositions(doc)], notes
 
 
 def collect_interface_notices(
@@ -127,4 +138,4 @@ def collect_interface_notices(
     )
 
 
-__all__ = ["InterfaceNotices", "collect_interface_notices"]
+__all__ = ["InterfaceNotices", "collect_interface_notices", "load_fence_specs"]
