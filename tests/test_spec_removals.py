@@ -26,7 +26,8 @@ JS_TESTS = (
 )
 PACKAGE_BIN = '{"name": "pkg", "bin": {"one": "a.js", "two": "b.js"}}'
 PACKAGE_STRING_BIN = '{"name": "pkg", "bin": "cli.js"}'
-PACKAGE_NONE = '{"name": "pkg"}'
+PACKAGE_SCOPED_STRING_BIN = '{"name": "@scope/tool", "bin": "cli.js"}'
+PACKAGE_NONE ='{"name": "pkg"}'
 BASE = {
     "tests/test_a.py": PY_TESTS,
     "lib/a.py": PY_LIB,
@@ -34,6 +35,7 @@ BASE = {
     "web/b.test.js": JS_TESTS,
     "package.json": PACKAGE_BIN,
     "sub/package.json": PACKAGE_STRING_BIN,
+    "scoped/package.json": PACKAGE_SCOPED_STRING_BIN,
     "lib/x.go": "package x\n",
     "lib/ok.py": "def survivor():\n    pass\n",
 }
@@ -84,6 +86,12 @@ ROWS = {
     "package-json-bin-object-and-string": (
         {"package.json": PACKAGE_NONE, "sub/package.json": PACKAGE_NONE},
         [("verb", "one"), ("verb", "pkg"), ("verb", "two")],
+        [],
+    ),
+    # npm installs a string bin under the package name without its scope.
+    "package-json-string-bin-is-keyed-without-the-scope": (
+        {"scoped/package.json": PACKAGE_NONE},
+        [("verb", "tool")],
         [],
     ),
     # Nothing is inferred from the new path holding the same content.

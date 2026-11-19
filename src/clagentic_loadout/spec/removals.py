@@ -19,8 +19,8 @@ An item is one of:
 * kind ``symbol``: a public symbol of a non-test file, the definition
   push.uncalled_report uses (spec.references); key ``<path>::<name>``.
 * kind ``verb``: a key of ``[project.scripts]`` in a ``pyproject.toml`` or of the
-  ``bin`` object of a ``package.json`` (a string ``bin`` names the package ``name``);
-  key is the bare verb name. Reading TOML needs ``tomllib`` (Python 3.11 or newer);
+  ``bin`` object of a ``package.json`` (a string ``bin`` names the package ``name``
+  with any ``@scope/`` prefix removed, as npm installs it); key is the bare verb name. Reading TOML needs ``tomllib`` (Python 3.11 or newer);
   without it a ``pyproject.toml`` is reported as not computed.
 
 A file deleted outright removes every item it held; a rename is the deletion of the
@@ -140,7 +140,8 @@ def _verbs_of_package_json(path: str, source: str) -> list[str]:
         name = data.get("name")
         if not isinstance(name, str) or not name:
             raise _Unread(f"the string bin of {path} has no package name to key it by")
-        return [name]
+        # npm installs a string bin under the package name without its scope.
+        return [name.rsplit("/", 1)[-1]]
     raise _Unread(f"bin in {path} is neither an object nor a string")
 
 
