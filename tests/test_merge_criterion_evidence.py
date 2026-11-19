@@ -58,6 +58,18 @@ CASES = {
         [(OLDER, GOOD)], "sealed",
         ["ac-1: not shown (t.a::gone absent; t.a::fails failed; t.a::skips skipped)"], [],
     ),
+    "an id with a passed and a skipped case is not shown, skipped": (
+        [_ac("ac-1", tests=["t.a::dup"])],
+        [(OLDER, dict(GOOD, junit_body=(
+            '<testcase classname="t.a" name="dup"/>'
+            '<testcase classname="t.a" name="dup"><skipped/></testcase>'
+        )))],
+        "sealed", ["ac-1: not shown (t.a::dup skipped)"], [],
+    ),
+    "a pull request naming no head is a note and a line": (
+        [PASSES], [(OLDER, GOOD)], "sealed",
+        ["not computed: the pull request names no head commit"], ["criterion evidence not computed"],
+    ),
     "a criterion with no evidence line reads no evidence named": (
         [PASSES, _ac("ac-2")], [(OLDER, GOOD)], "sealed",
         ["ac-1: shown", "ac-2: no evidence named"], [],
@@ -149,8 +161,12 @@ def _record(tmp_path, runs) -> None:
         write_run(tmp_path / "reports", run_id, **overrides)
 
 
-def _collect(hashes):
-    return collect_criterion_evidence(head_sha=HEAD, repo_names=[REPO], fence_spec_hashes=hashes)
+#: Cases whose pull request head differs from HEAD (None: the pull request names none).
+CASE_HEADS = {"a pull request naming no head is a note and a line": None}
+
+
+def _collect(hashes, head=HEAD):
+    return collect_criterion_evidence(head_sha=head, repo_names=[REPO], fence_spec_hashes=hashes)
 
 
 @pytest.mark.parametrize("name", list(CASES))
@@ -159,22 +175,13 @@ def test_each_criterion_reads_shown_not_shown_or_no_evidence_named(tmp_path, nam
     _record(tmp_path, runs)
     fence_hashes = {"sealed": [_seal(criteria)], "missing": ["e" * 64], "none": []}[hashes]
 
-    result = _collect(fence_hashes)
+    result = _collect(fence_hashes, CASE_HEADS.get(name, HEAD))
 
     assert len(result.lines) == len(expected), result.lines
     for line, prefix in zip(result.lines, expected):
         assert line.startswith(prefix), line
     for part in note_parts:
         assert any(part in note for note in result.notes), (part, result.notes)
-
-
-def test_a_pull_request_naming_no_head_is_a_note_and_a_line(tmp_path):
-    result = collect_criterion_evidence(
-        head_sha=None, repo_names=[REPO], fence_spec_hashes=[_seal([PASSES])]
-    )
-
-    assert result.lines == ("not computed: the pull request names no head commit",)
-    assert result.notes[0].startswith("criterion evidence not computed")
 
 
 def _merge(capsys, spec: str):

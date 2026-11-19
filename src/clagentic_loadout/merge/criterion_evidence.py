@@ -109,13 +109,14 @@ def _read_outcomes(root: Path, run: store.RunRecord) -> _HeadRun:
 
 
 def _test_status(outcomes: tuple[str, ...] | None) -> str:
-    """How one id reads across its cases: failed if any case failed, passed if any
-    passed, else skipped; absent when the run holds no case of that id."""
+    """How one id reads across its cases: passed only when every case of it passed,
+    else failed if any case failed, else skipped; absent when the run holds no case
+    of that id."""
     if not outcomes:
         return ABSENT
     if junit.OUTCOME_FAILED in outcomes:
         return junit.OUTCOME_FAILED
-    if junit.OUTCOME_PASSED in outcomes:
+    if all(outcome == junit.OUTCOME_PASSED for outcome in outcomes):
         return junit.OUTCOME_PASSED
     return junit.OUTCOME_SKIPPED
 
