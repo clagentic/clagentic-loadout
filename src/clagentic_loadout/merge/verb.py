@@ -517,6 +517,7 @@ from clagentic_loadout.merge import (
     verdict,
 )
 from clagentic_loadout.merge.attestation import build_attestation_body
+from clagentic_loadout.merge.criterion_evidence import CriterionEvidence, collect_criterion_evidence
 from clagentic_loadout.merge.interface_notice import InterfaceNotices, collect_interface_notices
 from clagentic_loadout.merge.removed_notice import RemovedNotices, collect_removed_notices
 from clagentic_loadout.merge.authority import (
@@ -2080,6 +2081,28 @@ def _run(
     for removed_note in removed_notices.notes:
         print(f"merge: NOTE -- {removed_note}", file=sys.stderr)
 
+    # Report-only, like the notices above: whether a named test passed at the head
+    # for each acceptance criterion of the spec the reviewer fences name. It reads
+    # an existing test run and starts none; no failure here may change the gate
+    # outcome or stop the merge.
+    try:
+        criterion_evidence = collect_criterion_evidence(
+            head_sha=current_head_sha,
+            repo_names=[f"{owner}/{repo}", *([args.repo_path] if args.repo_path else [])],
+            fence_spec_hashes=fence_spec_hashes,
+            repo_path=args.repo_path,
+        )
+    except Exception as exc:  # report-only step: no failure here may stop the merge
+        reason = f"{type(exc).__name__}: {exc}"
+        criterion_evidence = CriterionEvidence(
+            lines=(f"not computed: {reason}",),
+            notes=(f"criterion evidence not computed: {reason}",),
+        )
+    for evidence_line in criterion_evidence.lines:
+        print(f"merge: CRITERION EVIDENCE -- {evidence_line}", file=sys.stderr)
+    for evidence_note in criterion_evidence.notes:
+        print(f"merge: NOTE -- {evidence_note}", file=sys.stderr)
+
     # 7. PR-title gate.
     if args.skip_title_check:
         print(
@@ -2541,6 +2564,7 @@ def _run(
         ],
         interface_notices=list(interface_notices.lines),
         removed_behaviour=list(removed_notices.attestation),
+        criterion_evidence=list(criterion_evidence.lines),
         identity_provider=provider_fields(attested_identity)["provider"],
         self_declared=provider_fields(attested_identity)["self_declared"],
     )

@@ -138,6 +138,7 @@ def build_attestation_body(
     docs_only_waivers: "list[str] | tuple[str, ...]" = (),
     interface_notices: "list[str] | tuple[str, ...]" = (),
     removed_behaviour: "list[str] | tuple[str, ...] | None" = None,
+    criterion_evidence: "list[str] | tuple[str, ...] | None" = None,
     identity_provider: str | None = None,
     self_declared: bool | None = None,
 ) -> str:
@@ -203,6 +204,11 @@ def build_attestation_body(
         merge.removed_notice; `none` when nothing is removed, or a line saying the
         computation did not run. Rendered as a `Removed behaviour` row; report
         only. Omitted when None (the caller did not compute it) or empty.
+      - `criterion_evidence`: one line per acceptance criterion of the sealed spec
+        saying whether a named test or run shows it at the pull request's head, from
+        merge.criterion_evidence; or one line saying the spec names no evidence, or
+        that the computation did not run. Rendered as a `Criterion evidence` row;
+        report only. Omitted when None or empty.
       - `identity_provider`, `self_declared`: which identity provider vouched for
         the merging actor (`legacy` when no provider is configured) and whether
         nothing outside the process vouched for it. Rendered as `Identity
@@ -252,6 +258,10 @@ def build_attestation_body(
     if removed_behaviour:
         rows.append(
             ("Removed behaviour", "<br>".join(_escape_table_cell(line) for line in removed_behaviour))
+        )
+    if criterion_evidence:
+        rows.append(
+            ("Criterion evidence", "<br>".join(_escape_table_cell(line) for line in criterion_evidence))
         )
     rows.append(("CI status", _escape_table_cell(ci_disposition)))
     if identity_provider is not None:
