@@ -15,9 +15,9 @@ JavaScript is read with the tokenizer of spec.js_imports, which skips comments,
 strings, templates and regular-expression literals. A reference is any identifier
 token with the name, a property access included. The definition and the export
 statement of the symbol in its own file are not references. The export forms read
-are ``export function|class|const|let|var NAME`` (every top-level declarator of a
-const, let or var statement, ``export const a = 1, b = 2``; a destructuring pattern
-declares no name), ``export { a, b as c }`` (not a
+are ``export function|class|const|let|var NAME`` (only the first declarator of a
+const, let or var statement is discovered, so ``export const a = 1, b = 2`` adds
+``a`` alone; a destructuring pattern declares no name), ``export { a, b as c }`` (not a
 re-export from another module), ``export default function|class NAME``,
 ``module.exports = { a, b: c }`` (the keys), ``module.exports.NAME = ...`` and
 ``exports.NAME = ...``. Nothing else is guessed: a dynamic or reflective use of a
@@ -43,10 +43,6 @@ _DECLARATIONS = frozenset({"function", "class", "const", "let", "var"})
 _NOT_A_LOCAL = frozenset(
     {"function", "async", "class", "new", "await", "require", "null", "true", "false", "undefined", "this"}
 )
-_DECLARATORS = frozenset({"const", "let", "var"})
-#: Words that, starting a line, continue the expression above instead of a new statement.
-_CONTINUES_AN_EXPRESSION = frozenset({"in", "of", "instanceof"})
-_OPERAND_END = frozenset({")", "]", "}", "++", "--"})
 _OPENERS = frozenset({"(", "[", "{"})
 _CLOSERS = frozenset({")", "]", "}"})
 
@@ -101,63 +97,11 @@ class JsModule:
             j += 1
         return j if _is(self._at(j), "id") else None
 
-    def _starts_new_statement(self, index: int) -> bool:
-        """Whether the token at *index* starts a statement on a new line after a
-        complete operand (automatic semicolon insertion)."""
-        token, prev = self.tokens[index], self.tokens[index - 1]
-        if token.kind not in ("id", "str", "num") or token.value in _CONTINUES_AN_EXPRESSION:
-            return False
-        operand_end = prev.kind in ("id", "str", "num", "regex") or (prev.kind == "punct" and prev.value in _OPERAND_END)
-        return operand_end and self.source.find("\n", prev.pos, token.pos) != -1
-
-    def _initializer_end(self, start: int) -> int:
-        """Index of the token that ends the declarator whose initializer begins at
-        *start*: a comma or semicolon outside every bracket group, an unmatched
-        closer, or a new statement. Commas inside brackets, braces, parentheses and
-        template substitutions do not end it."""
-        depth = 0
-        for k in range(start, len(self.tokens)):
-            token = self.tokens[k]
-            if token.kind == "punct":
-                if token.value in _OPENERS:
-                    depth += 1
-                elif token.value in _CLOSERS:
-                    if depth == 0:
-                        return k
-                    depth -= 1
-                elif depth == 0 and token.value in (",", ";"):
-                    return k
-            if depth == 0 and self._starts_new_statement(k):
-                return k
-        return len(self.tokens)
-
-    def _declared_names(self, keyword_index: int) -> list[int]:
-        """Every name a declaration keyword at *keyword_index* declares: the one name
-        of ``function`` or ``class``, each top-level declarator of ``const``, ``let``
-        or ``var``. A destructuring pattern declares no name here."""
-        if self.tokens[keyword_index].value not in _DECLARATORS:
-            name_index = self._declared_name(keyword_index)
-            return [] if name_index is None else [name_index]
-        names: list[int] = []
-        j = keyword_index + 1
-        while True:
-            if _is(self._at(j), "id"):
-                names.append(j)
-                j += 1
-            elif _is(self._at(j), "punct", "{") or _is(self._at(j), "punct", "["):
-                j = self._group_end(j)
-            else:
-                break
-            j = self._initializer_end(j)
-            if not _is(self._at(j), "punct", ","):
-                break
-            j += 1
-        return names
-
     def _read_declarations(self) -> None:
         for i, token in enumerate(self.tokens):
             if token.kind == "id" and token.value in _DECLARATIONS and not self._after_dot(i):
-                for name_index in self._declared_names(i):
+                name_index = self._declared_name(i)
+                if name_index is not None:
                     self.declared.setdefault(str(self.tokens[name_index].value), name_index)
 
     def _add_export(self, name: str, own: set[int], local: str | None) -> None:
@@ -267,7 +211,8 @@ class JsModule:
         if token.kind == "id" and token.value in _DECLARATIONS:
             if default and token.value not in ("function", "class"):
                 return
-            for name_index in self._declared_names(j):
+            name_index = self._declared_name(j)
+            if name_index is not None:
                 self._add_export(str(self.tokens[name_index].value), {name_index}, None)
         elif _is(token, "punct", "{") and not default:
             self._read_clause(j)

@@ -2348,8 +2348,8 @@ push: new public symbol with no caller and no test at <head sha>: <path>::<name>
 An added public symbol is a top-level `def` or `class` whose name does not start with `_`, in a
 non-test `.py` file, or a name a non-test JavaScript file (`.js .jsx .mjs .cjs`) exports, present at
 `HEAD` and absent from the same file at the merge base. The JavaScript export forms are
-`export function|class|const|let|var NAME` (every top-level declarator of a `const`, `let` or `var`
-statement counts, so `export const a = 1, b = 2` adds both; a destructuring pattern such as
+`export function|class|const|let|var NAME` (only the first declarator of a `const`, `let` or `var`
+statement is discovered, so `export const a = 1, b = 2` adds `a` alone; a destructuring pattern such as
 `export const { a, b } = o` is not read and adds no name), `export { a, b as c }` (a re-export from another module
 is not an addition), `export default function|class NAME`, `module.exports = { a, b: c }` (the keys),
 `module.exports.NAME = ...` and `exports.NAME = ...`. A caller is an identifier reference to the name
