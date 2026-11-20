@@ -3,7 +3,8 @@
 Advisory only: the check never fails the run and never resolves an identity, so
 it reads no token and no delivery directory. It reports the configured provider,
 the key-set sources it trusts, whether the provider's answer is self-declared and
-how many `prefer-assertion` fallbacks the telemetry sink has recorded.
+how many `prefer-assertion` fallbacks the telemetry sink has recorded (never
+attributed to `assertion-or-legacy`, which records none).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from typing import Mapping
 
 from clagentic_loadout.doctor.checks import CheckResult
 from clagentic_loadout.identity import (
+    PROVIDER_ASSERTION_OR_LEGACY,
     PROVIDER_STATIC,
     IdentityError,
     has_legacy_attestation_config,
@@ -97,6 +99,9 @@ def check_identity_provider(
             "provider": cfg.provider,
             "self_declared": self_declared,
             "jwks_sources": _key_set_sources(cfg),
-            "fallback_count": _fallback_count(active_env),
+            # assertion-or-legacy emits no fallback event, so no count belongs to it.
+            "fallback_count": None
+            if cfg.provider == PROVIDER_ASSERTION_OR_LEGACY
+            else _fallback_count(active_env),
         },
     )

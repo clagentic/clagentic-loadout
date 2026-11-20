@@ -5,7 +5,8 @@ from the seam's `Actor` instead of the legacy attestation chain. This module is
 the one place that mapping lives:
 
 * `configured_actor` resolves the seam, or answers None when `identity.provider`
-  is unset so the verb keeps the legacy chain exactly as before.
+  is unset (or `assertion-or-legacy` without a delivery directory) so the verb
+  keeps the legacy chain exactly as before.
 * `identity_for_actor` maps an `Actor` to the `Identity` the binding layer
   compares. The role a verb mints is `--caller`/`--role`; omitted, it is the
   actor's single role. An actor that holds several roles, or none, must name one.
@@ -78,7 +79,10 @@ class SeamIdentity(Identity):
 def configured_actor(
     *, env: Mapping[str, str] | None = None, config_root: str | Path | None = None
 ) -> Actor | None:
-    """The seam's `Actor`, or None when `identity.provider` is unset.
+    """The seam's `Actor`, or None when `identity.provider` is unset, or is
+    `assertion-or-legacy` and `CLAGENTIC_IDENTITY_DIR` is unset or blank. In
+    both cases the verb runs its existing legacy chain, so its result reports
+    provider `legacy` and `self_declared` false.
 
     A refusal from the seam surfaces as `AttestationError`, the type every
     caller-bound verb already maps to its own mismatch exit code."""
@@ -86,11 +90,16 @@ def configured_actor(
     # package, whose initialisation imports this module, so loading the identity
     # package first (`python -m clagentic_loadout.identity.verb`) would otherwise
     # hit a partially initialised module.
-    from clagentic_loadout.identity.config import load_identity_config
-    from clagentic_loadout.identity.seam import resolve
+    from clagentic_loadout.identity.config import PROVIDER_ASSERTION_OR_LEGACY, load_identity_config
+    from clagentic_loadout.identity.seam import identity_dir_is_set, resolve
 
     try:
-        if load_identity_config(config_root=config_root).provider is None:
+        provider = load_identity_config(config_root=config_root).provider
+        if provider is None:
+            return None
+        if provider == PROVIDER_ASSERTION_OR_LEGACY and not identity_dir_is_set(
+            os.environ if env is None else env
+        ):
             return None
         return resolve(env=env, config_root=config_root)
     except IdentityError as exc:
