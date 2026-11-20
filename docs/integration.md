@@ -218,8 +218,11 @@ attestation source for free from layer 3 with zero configuration.
 > `CLAGENTIC_IDENTITY_DIR` instead (see [identity.md](identity.md)); a harness that
 > cannot deliver assertions yet can set `identity.provider: prefer-assertion`, which
 > keeps accepting exactly this per-spawn sidecar, with one stderr notice and one
-> telemetry event per use, while it migrates. The legacy chain stays in force while
-> `identity.provider` is unset and is removed in a later release.
+> telemetry event per use, while it migrates. A deployment that wants the assertion
+> where one is delivered and the unchanged legacy chain everywhere else can set
+> `identity.provider: assertion-or-legacy`, which adds no refusal, notice or event.
+> The legacy chain stays in force while `identity.provider` is unset and is removed
+> in a later release.
 
 The chain above is generic across every deployment shape. This section is
 for the specific shape where it goes wrong: a consumer whose dispatch loop

@@ -14,6 +14,11 @@ and answers from exactly that provider.
   configured env, an unscoped adapter config, the session scope, the OS user and
   any miss refuse naming the variable. Each fallback attempt emits one stderr
   notice and one telemetry event.
+* `assertion-or-legacy` (optional, not the default): the assertion provider
+  answers when the directory variable is set, exactly as `gatekeeper` or `jwks`
+  would. Otherwise the full legacy attestation chain answers, as with
+  `identity.provider` unset, with no notice, no event and no read of the
+  assertion issuer config. It adds no refusal of its own.
 * unset: a config with legacy `attestation` keys keeps the legacy chain; a config
   with neither refuses naming `identity.provider`.
 
@@ -35,11 +40,13 @@ from clagentic_loadout.identity.config import (
     ASSERTION_PROVIDERS,
     PROVIDER_GATEKEEPER,
     PROVIDER_JWKS,
+    PROVIDER_ASSERTION_OR_LEGACY,
     PROVIDER_KEY,
     PROVIDER_MODULE,
     PROVIDER_PREFER_ASSERTION,
     PROVIDER_STATIC,
     IdentityConfig,
+    check_assertion_provider,
     load_identity_config,
 )
 from clagentic_loadout.identity.delivery import IDENTITY_DIR_ENV
@@ -72,6 +79,24 @@ def has_legacy_attestation_config(*, config_root: str | Path | None = None) -> b
 def _assertion_provider(kind: str, cfg: IdentityConfig) -> Provider:
     issuers = cfg.gatekeeper_issuers() if kind == PROVIDER_GATEKEEPER else cfg.jwks_issuers()
     return AssertionProvider(kind, issuers)
+
+
+def identity_dir_is_set(env: Mapping[str, str]) -> bool:
+    """True when the delivery directory variable is present and not blank."""
+    return bool((env.get(IDENTITY_DIR_ENV) or "").strip())
+
+
+def _selected_assertion_provider(cfg: IdentityConfig) -> Provider:
+    """The assertion provider `identity.assertion_provider` names, for the
+    providers that select one (`prefer-assertion`, `assertion-or-legacy`)."""
+    check_assertion_provider(cfg.assertion_provider)
+    if cfg.assertion_provider is None:
+        raise errors.IdentityError(
+            errors.CONFIG_INVALID,
+            f"{PROVIDER_KEY} {cfg.provider} requires identity.assertion_provider "
+            f"({PROVIDER_GATEKEEPER} or {PROVIDER_JWKS})",
+        )
+    return _assertion_provider(cfg.assertion_provider, cfg)
 
 
 def _legacy_actor(env: Mapping[str, str], config_root: str | Path | None) -> Actor:
@@ -146,7 +171,7 @@ def resolve(
         raise errors.IdentityError(
             errors.PROVIDER_UNSET,
             f"{PROVIDER_KEY} is not set; choose one of gatekeeper, jwks, static, "
-            "prefer-assertion or set identity.provider_module. There is no default.",
+            "prefer-assertion, assertion-or-legacy or set identity.provider_module. There is no default.",
         )
     if cfg.provider in ASSERTION_PROVIDERS:
         return _assertion_provider(cfg.provider, cfg).resolve(active_env)
@@ -155,15 +180,15 @@ def resolve(
         return StaticProvider(actor, roles).resolve(active_env)
     if cfg.provider == PROVIDER_MODULE:
         return ModuleProvider(cfg.provider_module or "", cfg.raw).resolve(active_env)
+    if cfg.provider == PROVIDER_ASSERTION_OR_LEGACY:
+        # Without the directory the assertion config is not read at all, so a
+        # missing or invalid issuer section cannot change the legacy answer.
+        if not identity_dir_is_set(active_env):
+            return _legacy_actor(active_env, config_root)
+        return _selected_assertion_provider(cfg).resolve(active_env)
     if cfg.provider == PROVIDER_PREFER_ASSERTION:
-        if cfg.assertion_provider is None:
-            raise errors.IdentityError(
-                errors.CONFIG_INVALID,
-                f"{PROVIDER_KEY} prefer-assertion requires identity.assertion_provider "
-                f"({PROVIDER_GATEKEEPER} or {PROVIDER_JWKS})",
-            )
-        provider = _assertion_provider(cfg.assertion_provider, cfg)
-        if (active_env.get(IDENTITY_DIR_ENV) or "").strip():
+        provider = _selected_assertion_provider(cfg)
+        if identity_dir_is_set(active_env):
             return provider.resolve(active_env)
         _announce_fallback(active_env)
         return _per_spawn_actor(active_env, config_root)

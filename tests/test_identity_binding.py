@@ -9,6 +9,7 @@ as before.
 
 from __future__ import annotations
 
+import getpass
 import importlib
 import json
 import subprocess
@@ -405,6 +406,156 @@ def test_an_unstamped_body_is_refused_when_an_actor_is_expected(tmp_path) -> Non
         body_env.peek_caller_body(caller="builder", expect_target_pr=3, env=env, expect_actor="agent:alpha")
     # The refusal touched nothing: the pair is still readable by a caller that expects no actor.
     assert body_env.read_caller_body_bytes(caller="builder", expect_target_pr=3, env=env)
+
+
+# --- assertion-or-legacy: assertion with the directory, the legacy chain without it ----
+
+
+def _bind_outcome(cfg: Path, env: dict, *, caller: str = "builder", explicit: bool = True):
+    """Bind through the real `configured_actor` and the real legacy resolver."""
+    from clagentic_loadout.transport.caller_binding import resolve_for_binding
+    from clagentic_loadout.transport.seam_binding import configured_actor
+
+    try:
+        identity = resolve_for_binding(
+            caller_explicit=explicit,
+            caller=caller,
+            resolve_identity_fn=lambda: attestation.resolve_bound_identity(env=env, config_root=cfg),
+            seam_actor_fn=lambda: configured_actor(env=env, config_root=cfg),
+        )
+        bind_caller(caller, caller_explicit=explicit, identity=identity)
+    except (AttestationError, CallerBindingError) as exc:
+        return ("refused", type(exc).__name__, str(exc))
+    return (
+        "ok", identity.subject, identity.source, provider_fields(identity),
+        getattr(identity, "roles", None), getattr(identity, "actor", None),
+        getattr(identity, "dir", None), getattr(identity, "jti", None),
+    )
+
+
+def _legacy_sources(tmp_path: Path) -> dict[str, tuple[dict | None, dict, str]]:
+    """source -> (attestation section, env, expected source or 'refused')."""
+    (tmp_path / "sc").mkdir(exist_ok=True)
+    for name in ("plain-s1", "spawn-s1", "sess-s1"):
+        (tmp_path / "sc" / name).write_text("builder\n")
+
+    def adapter(prefix: str, env_var: str, scope: str | None = None) -> dict:
+        out = {"dir": str(tmp_path / "sc"), "file_prefix": prefix, "session_id_env": env_var}
+        if scope:
+            out["scope"] = scope
+        return out
+
+    return {
+        "layer1_configured_env": ({"identity_env": "WHO"}, {"WHO": "builder"}, "configured"),
+        "bound_identity_required_miss": ({"bound_identity": "required"}, {}, "refused"),
+        "bound_identity_builtin_fallback": ({"bound_identity": "builtin-fallback"}, {}, "builtin"),
+        "unscoped_sidecar_adapter": (
+            {"sidecars": [adapter("plain-", "SESS_ID")]}, {"SESS_ID": "s1"}, "sidecar",
+        ),
+        "per_spawn_sidecar_adapter": (
+            {"sidecars": [adapter("spawn-", "SPAWN_ID", "per-spawn")]}, {"SPAWN_ID": "s1"}, "sidecar-subagent",
+        ),
+        "session_scope_sidecar": (
+            {"sidecars": [adapter("sess-", "SESS_ID", "session")]}, {"SESS_ID": "s1"}, "sidecar-session",
+        ),
+        "os_user": (None, {}, "builtin"),
+        "per_spawn_miss": (
+            {"sidecars": [adapter("spawn-", "SPAWN_ID", "per-spawn")]}, {"SPAWN_ID": "missing"}, "refused",
+        ),
+    }
+
+
+@pytest.mark.parametrize("dir_value", [None, ""], ids=["dir-unset", "dir-blank"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        "layer1_configured_env", "bound_identity_required_miss", "bound_identity_builtin_fallback",
+        "unscoped_sidecar_adapter", "per_spawn_sidecar_adapter", "session_scope_sidecar", "os_user",
+        "per_spawn_miss",
+    ],
+)
+def test_assertion_or_legacy_without_the_directory_binds_exactly_as_provider_unset(
+    tmp_path: Path, source: str, dir_value
+) -> None:
+    section, extra_env, expected = _legacy_sources(tmp_path)[source]
+    sections = {"attestation": section} if section else {}
+    unset_cfg = write_config(tmp_path / "cfg-unset", None, **sections)
+    combined_cfg = write_config(
+        tmp_path / "cfg-combined",
+        {"provider": "assertion-or-legacy", "assertion_provider": "gatekeeper"},
+        **sections,
+    )
+    env = clean_env(**extra_env)
+    if dir_value is not None:
+        env[DIR_VAR] = dir_value
+    # The OS user is whoever runs the suite, so the caller names it for those rows.
+    caller = getpass.getuser() if expected == "builtin" else "builder"
+    baseline = _bind_outcome(unset_cfg, env, caller=caller)
+    assert baseline[0] == ("refused" if expected == "refused" else "ok")
+    if expected != "refused":
+        assert baseline[2] == expected and baseline[3] == {"provider": "legacy", "self_declared": False}
+    assert _bind_outcome(combined_cfg, env, caller=caller) == baseline
+
+
+@pytest.mark.parametrize("kind", ["gatekeeper", "jwks"])
+@pytest.mark.parametrize("case", ["valid", "invalid"])
+def test_assertion_or_legacy_with_the_directory_binds_as_the_assertion_provider(
+    tmp_path: Path, kind: str, case: str
+) -> None:
+    issuer = Issuer()
+    jwks = issuer.write_jwks(tmp_path / "jwks.json")
+    base = (
+        {"provider": "gatekeeper", "gatekeeper": {"jwks": jwks, "issuer": ISSUER}}
+        if kind == "gatekeeper"
+        else {"provider": "jwks", "issuers": [{"iss": ISSUER, "jwks": jwks}]}
+    )
+    plain = write_config(tmp_path / "cfg-plain", base)
+    combined = write_config(
+        tmp_path / "cfg-combined",
+        {**base, "provider": "assertion-or-legacy", "assertion_provider": kind},
+        attestation={"identity_env": "WHO"},
+    )
+    token = "bad.token.here" if case == "invalid" else issuer.sign(issuer.claims(str(tmp_path / "d")))
+    env = clean_env(WHO="legacy-parent", **{DIR_VAR: make_delivery(tmp_path, token, name="d")})
+    expected = _bind_outcome(plain, env)
+    assert expected[0] == ("refused" if case == "invalid" else "ok")
+    if case == "valid":
+        assert expected[3]["self_declared"] is False and expected[6] == str(tmp_path / "d")
+    assert _bind_outcome(combined, env) == expected
+
+
+@pytest.mark.parametrize("dir_value", [None, ""], ids=["dir-unset", "dir-blank"])
+def test_assertion_or_legacy_through_a_verb_reports_legacy_and_not_self_declared(
+    monkeypatch, tmp_path, capsys, dir_value
+) -> None:
+    from clagentic_loadout.acquire import verb
+    from tests.test_acquire_verb import _RecordingTokenProvider, _forgejo_opener
+
+    results = []
+    for name, identity in (
+        ("unset", None),
+        ("combined", {"provider": "assertion-or-legacy", "assertion_provider": "gatekeeper"}),
+    ):
+        sub = tmp_path / name
+        sub.mkdir()
+        _use_config(monkeypatch, sub, identity, attestation={"identity_env": "WHO"})
+        monkeypatch.setenv("WHO", "builder")
+        if dir_value is None:
+            monkeypatch.delenv(DIR_VAR, raising=False)
+        else:
+            monkeypatch.setenv(DIR_VAR, dir_value)
+        tokens = _RecordingTokenProvider()
+        rc = verb.main(
+            ["--caller", "builder", "--platform", "forgejo", "--git-host-base-url",
+             "http://git-host.example.com", "some-owner/some-repo", "42"],
+            token_provider=tokens, opener=_forgejo_opener(),
+        )
+        captured = capsys.readouterr()
+        out = json.loads(captured.out)
+        assert "identity" not in captured.err
+        results.append((rc, tokens.resolved_for, out["provider"], out["self_declared"], captured.err))
+    assert results[0] == results[1]
+    assert results[0][:4] == (0, ["builder"], "legacy", False)
 
 
 def _prefer_assertion_cfg(tmp_path: Path, issuer: Issuer, sidecars: list[dict]) -> dict:

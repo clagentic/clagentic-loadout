@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import time
 from pathlib import Path
@@ -360,6 +361,128 @@ def test_prefer_assertion_refuses_every_other_legacy_source(
     for leaked in ("agent:parent", "agent:configured", "agent:unscoped", "root"):
         assert f"{leaked}\n" not in str(caught.value)
     assert capsys.readouterr().err.count("prefer-assertion is using the legacy") == 1
+
+
+# --- assertion-or-legacy (optional, never the default) ---------------------------------
+
+
+def _assertion_cfg(tmp_path: Path, issuer: Issuer, kind: str, *, provider: str, **attestation) -> Path:
+    jwks = issuer.write_jwks(tmp_path / "jwks.json")
+    identity = (
+        {"gatekeeper": {"jwks": jwks, "issuer": ISSUER}}
+        if kind == "gatekeeper"
+        else {"issuers": [{"iss": ISSUER, "jwks": jwks}]}
+    )
+    identity["provider"] = provider
+    if provider != kind:
+        identity["assertion_provider"] = kind
+    sections = {"attestation": attestation} if attestation else {}
+    return write_config(tmp_path / f"cfg-{provider}", identity, **sections)
+
+
+def _outcome(env: dict, cfg: Path):
+    try:
+        return resolve(env=env, config_root=cfg)
+    except IdentityError as exc:
+        return (exc.code, str(exc))
+
+
+@pytest.mark.parametrize("kind", ["gatekeeper", "jwks"])
+@pytest.mark.parametrize("case", ["valid", "expired", "malformed", "wrong_dir", "unsafe_mode"])
+def test_assertion_or_legacy_with_the_directory_equals_the_assertion_provider(
+    tmp_path: Path, issuer: Issuer, kind: str, case: str
+) -> None:
+    directory = str(tmp_path / "delivery")
+    claims = issuer.claims(directory)
+    if case == "expired":
+        claims = issuer.claims(directory, iat=int(time.time()) - 100, exp=int(time.time()) - 10)
+    elif case == "wrong_dir":
+        claims = issuer.claims(str(tmp_path / "elsewhere"))
+    token = "not.a.token" if case == "malformed" else issuer.sign(claims)
+    delivered = make_delivery(tmp_path, token)
+    if case == "unsafe_mode":
+        Path(delivered).chmod(0o755)
+    env = clean_env(**{DIR_VAR: delivered}, LEGACY_WHO="agent:legacy")
+    plain = _assertion_cfg(tmp_path, issuer, kind, provider=kind)
+    combined = _assertion_cfg(
+        tmp_path, issuer, kind, provider="assertion-or-legacy", identity_env="LEGACY_WHO"
+    )
+    expected = _outcome(env, plain)
+    assert _outcome(env, combined) == expected
+    if case == "valid":
+        assert isinstance(expected, Actor) and expected.origin != "legacy"
+    else:
+        assert isinstance(expected, tuple) and expected[0] != errors.ATTESTATION_REFUSED
+    # `identity verify` reads the same assertion class for the new value.
+    from clagentic_loadout.identity import load_identity_config
+
+    assert load_identity_config(config_root=combined).assertion_issuers() == load_identity_config(
+        config_root=plain
+    ).assertion_issuers()
+
+
+@pytest.mark.parametrize("dir_value", [None, "", "   "])
+@pytest.mark.parametrize(
+    "identity_extra",
+    [
+        {},
+        {"assertion_provider": "gatekeeper"},
+        {"assertion_provider": "bogus"},
+        {"assertion_provider": "gatekeeper", "gatekeeper": {"jwks": "not-a-locator"}},
+        {"assertion_provider": "jwks", "issuers": "nope"},
+    ],
+)
+def test_assertion_or_legacy_without_the_directory_is_the_legacy_chain_and_silent(
+    tmp_path: Path, capsys, dir_value, identity_extra: dict
+) -> None:
+    events = tmp_path / "events"
+    cfg = write_config(
+        tmp_path / "cfg",
+        {"provider": "assertion-or-legacy", **identity_extra},
+        attestation={"identity_env": "LEGACY_WHO"},
+    )
+    env = clean_env(
+        LEGACY_WHO="agent:legacy",
+        CLAGENTIC_LOADOUT_TELEMETRY_SINK="filesystem",
+        CLAGENTIC_LOADOUT_TELEMETRY_DIR=str(events),
+    )
+    if dir_value is not None:
+        env[DIR_VAR] = dir_value
+    actor = resolve(env=env, config_root=cfg)
+    assert (actor.actor, actor.origin, actor.provider) == ("agent:legacy", "legacy", "legacy:configured")
+    assert capsys.readouterr().err == ""
+    assert not events.exists() or not list(events.iterdir())
+
+
+def test_assertion_or_legacy_with_the_directory_still_needs_an_assertion_provider(tmp_path: Path) -> None:
+    cfg = write_config(tmp_path / "cfg", {"provider": "assertion-or-legacy"})
+    env = clean_env(**{DIR_VAR: str(tmp_path / "somewhere")})
+    with pytest.raises(IdentityError) as caught:
+        resolve(env=env, config_root=cfg)
+    assert caught.value.code == errors.CONFIG_INVALID and "identity.assertion_provider" in str(caught.value)
+
+
+def test_assertion_or_legacy_whoami_answers_from_legacy_with_no_legacy_attestation_keys(
+    tmp_path: Path, capsys
+) -> None:
+    from clagentic_loadout.identity import verb
+
+    cfg = write_config(tmp_path / "cfg", {"provider": "assertion-or-legacy", "assertion_provider": "gatekeeper"})
+    rc = verb.main(["whoami"], env=clean_env(), config_root=cfg)
+    out = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert out["origin"] == "legacy" and out["provider"].startswith("legacy:")
+
+
+def test_the_identity_error_codes_and_exit_codes_are_unchanged() -> None:
+    assert errors.EXIT_CODES == {
+        "identity_dir_missing": 90, "identity_dir_unsafe": 91, "identity_file_missing": 92,
+        "identity_file_symlink": 93, "malformed": 94, "alg_not_allowed": 95, "issuer_untrusted": 96,
+        "key_not_found": 97, "signature_invalid": 98, "contract_version_unsupported": 99, "expired": 100,
+        "not_yet_valid": 101, "ttl_exceeded": 102, "claims_invalid": 103, "audience_unexpected": 104,
+        "audience_mismatch": 105, "dir_mismatch": 106, "provider_unset": 107, "config_invalid": 108,
+        "jwks_unavailable": 109, "provider_module_invalid": 110, "attestation_refused": 111,
+    }
 
 
 @pytest.mark.parametrize(

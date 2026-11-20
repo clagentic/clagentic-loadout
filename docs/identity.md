@@ -17,9 +17,9 @@ User-level config (`~/.config/clagentic/loadout/config.yaml`), section `identity
 
 | Key | Meaning |
 |---|---|
-| `provider` | `gatekeeper`, `jwks`, `static`, `prefer-assertion` or `module`. No default. |
+| `provider` | `gatekeeper`, `jwks`, `static`, `prefer-assertion`, `assertion-or-legacy` or `module`. No default. |
 | `provider_module` | Dotted module name implementing `resolve(*, env, config)`. |
-| `assertion_provider` | `gatekeeper` or `jwks`: which assertion provider `prefer-assertion` answers with. |
+| `assertion_provider` | `gatekeeper` or `jwks`: which assertion provider `prefer-assertion` and `assertion-or-legacy` answer with. |
 | `gatekeeper.jwks` | Key-set locator of the one trusted issuer (`file:///`, `unix:///`, `https://`, loopback `http://`). |
 | `gatekeeper.issuer` | Issuer identifier. Defaults to `gatekeeper.jwks` when that is a `file:///` or `unix:///` locator. |
 | `issuers` | For `jwks`: a list of `{iss, jwks?}`. `jwks` defaults to the locator the `iss` form names. |
@@ -89,6 +89,30 @@ everywhere. With `assertion_provider` naming the assertion class:
   to stderr and emits one telemetry event (schema `identity-fallback/v1`) to the
   configured sink.
 
+## `assertion-or-legacy`
+
+Optional, and not the default: a value you choose when some callers receive a signed
+assertion and others have only the legacy attestation chain, and you want each to
+resolve the way it would on its own. With `assertion_provider` naming the assertion
+class:
+
+* `CLAGENTIC_IDENTITY_DIR` set: the assertion provider answers exactly as
+  `gatekeeper` (or `jwks`) does for the same delivery, and refuses with the same
+  error code and exit on any failure.
+* `CLAGENTIC_IDENTITY_DIR` unset or blank: the full legacy attestation chain answers
+  (layer 1 configured env, the configured bound identity, sidecar adapters of any
+  scope, the OS user), exactly as with `identity.provider` unset. `loadout-identity
+  whoami` reports origin `legacy` and provider `legacy:<source>`, and never refuses
+  with `provider_unset` or `identity_dir_missing` for want of legacy attestation keys.
+  The assertion issuer config is not read on this path.
+
+It adds no refusal, stderr notice or telemetry event of its own: every refusal under
+it is one the assertion provider or the legacy chain already raises. It differs from
+`prefer-assertion`, which on an unset directory accepts only a per-spawn sidecar,
+refuses every other legacy source, and writes a notice and an event for each attempt.
+A caller-bound verb with the directory unset binds through its existing legacy chain,
+so its result reports provider `legacy` and `self_declared` `false`.
+
 ## Verb binding
 
 With `identity.provider` set, `loadout-push`, `loadout-review` and `loadout-review-post`,
@@ -114,8 +138,9 @@ by name equality, as the legacy chain does.
 
 Every JSON result a binding verb prints carries two additive fields, `provider`
 (`gatekeeper`, `jwks:<iss>`, `declared`, `module:<name>`, `legacy:<source>`, or
-`legacy` when `identity.provider` is unset) and `self_declared` (`false` when
-`identity.provider` is unset). The merge attestation comment carries them as
+`legacy` when `identity.provider` is unset, or is `assertion-or-legacy` with no
+delivery directory) and `self_declared` (`false` when
+`identity.provider` is unset, or is `assertion-or-legacy` with no delivery directory). The merge attestation comment carries them as
 `Identity provider` and `Self-declared` rows. `loadout-git-host-api` prints the
 host's response unchanged and adds nothing.
 
@@ -127,7 +152,9 @@ and with the provider unset, `$TMPDIR` applies as before.
 
 `loadout-doctor` reports the provider, the key-set sources it trusts, the
 `self_declared` flag and the number of `prefer-assertion` fallbacks the filesystem
-telemetry sink has recorded (advisory, always exit 0).
+telemetry sink has recorded (advisory, always exit 0). Under `assertion-or-legacy` it
+reports `self_declared` false and the key-set sources of the configured assertion
+provider, with no fallback count.
 
 ## No provider configured
 
