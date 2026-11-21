@@ -24,6 +24,7 @@ User-level config (`~/.config/clagentic/loadout/config.yaml`), section `identity
 | `gatekeeper.issuer` | Issuer identifier. Defaults to `gatekeeper.jwks` when that is a `file:///` or `unix:///` locator. |
 | `issuers` | For `jwks`: a list of `{iss, jwks?}`. `jwks` defaults to the locator the `iss` form names. |
 | `static.actor`, `static.roles` | For `static`: the declared actor and role list. |
+| `caller_names.actor_prefix`, `caller_names.roles` | Optional. A `--caller` naming the actor (see [Verb binding](#verb-binding)): the prefix to add to a bare name, and a map from name to one role. |
 
 Nothing is read from a repository-local config: a cloned repository cannot choose
 the provider, the issuers or the module.
@@ -125,10 +126,30 @@ mints is:
 | Request | Result |
 |---|---|
 | `--caller`/`--role` names a role in `Actor.roles` | that role is minted |
-| `--caller`/`--role` names anything else, including the actor's own name | refused; the message names the role requested and the roles present |
+| `--caller`/`--role` names the actor (the actor string, or the actor string minus `caller_names.actor_prefix`) and `caller_names.roles` maps it to a role the actor holds | that role is minted |
+| `--caller`/`--role` names the actor, has no `caller_names.roles` entry, and the actor holds exactly one role | that role is minted |
+| `--caller`/`--role` names the actor, has no entry, and the actor holds none or several; or its entry names a role the actor does not hold | refused; the message names the roles present and `identity.caller_names.roles` |
+| `--caller`/`--role` names anything else | refused; the message names the role requested and the roles present |
 | omitted, and the actor holds exactly one role | that role |
 | omitted, and the actor holds none or several | refused; the actor must name a role |
 | the provider refuses (for example `gatekeeper` or `jwks` with `CLAGENTIC_IDENTITY_DIR` unset) | refused, naming the variable; never a parent, session or OS-user identity |
+
+A name binds only the check: every verb passes the `--caller`/`--role` value
+downstream exactly as given (credential minting, merge authority, reviewer fence,
+staging key), so one value behaves the same with and without a provider.
+`identity.caller_names` is optional and read only when a value is not a held role:
+
+```yaml
+identity:
+  provider: static
+  static: {actor: "svc:builder-one", roles: [builder, reviewer]}
+  caller_names:
+    actor_prefix: "svc:"          # --caller builder-one names svc:builder-one
+    roles: {builder-one: builder} # needed when the actor holds several roles
+```
+
+With a single-role actor, `actor_prefix` alone is enough. It is never read on the
+legacy path or for an answer that carries no role list.
 
 A refusal exits with the verb's existing caller-mismatch code (numbers unchanged).
 `loadout-stage-body` had no such code and uses `5`. The role list is a ceiling, never
