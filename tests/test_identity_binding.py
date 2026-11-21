@@ -241,6 +241,31 @@ def test_release_dispatch_reads_the_secret_of_the_actors_single_role(monkeypatch
 # --- the mapping and the shared primitives ------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    "identity,caller,role",
+    [
+        (_static(["builder", "reviewer"]), "reviewer", "reviewer"),
+        (_static(["builder"]), "builder-bot", "builder"),
+        (_named(["builder"], actor_prefix="svc:"), "builder-one", "builder"),
+        (_named(["builder", "reviewer"], roles={"builder-one": "builder"}, actor_prefix="svc:"),
+         "builder-one", "builder"),
+        (_named(["builder", "reviewer"], roles={"builder-one": "reviewer"}, actor_prefix="svc:"),
+         "builder-one", "reviewer"),
+    ],
+)
+def test_a_bound_caller_resolves_to_the_expected_held_role(monkeypatch, tmp_path, identity, caller, role) -> None:
+    config = identity["static"]
+    _use_config(monkeypatch, tmp_path, identity)
+    actor = Actor(
+        sub=config["actor"], actor=config["actor"], chain=(config["actor"],),
+        roles=tuple(config["roles"]), grade="declared", origin="declared",
+        provider="declared", self_declared=True,
+    )
+    bound = identity_for_actor(actor, caller_explicit=True)
+    bind_caller(caller, caller_explicit=True, identity=bound)
+    assert bound.resolved_role == role
+
+
 def test_actor_to_role_mapping_is_explicit() -> None:
     explicit = identity_for_actor(_declared_actor(("builder", "reviewer")), caller_explicit=True)
     assert explicit.subject == "builder-bot" and explicit.roles == ("builder", "reviewer")

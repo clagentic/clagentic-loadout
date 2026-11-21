@@ -76,7 +76,7 @@ class SeamIdentity(Identity):
         self.actor = actor
         self.dir = dir
         self.jti = jti
-        # Set by `bind_caller`: the role the bound caller resolved to.
+        # Call sites keep passing the flag value downstream, so this records which held role a name resolved to, for messages and inspection.
         self.resolved_role: str | None = None
 
 
