@@ -15,11 +15,13 @@ Keys (all optional at load; `provider` is required when the seam resolves):
   identity.issuers            list of {iss, jwks?} trusted by provider jwks
   identity.static.actor       declared actor
   identity.static.roles       declared role list
+  identity.caller_names.actor_prefix  caller X names the actor <actor_prefix>X
+  identity.caller_names.roles         map of caller name to the one role it binds as
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -57,6 +59,14 @@ def _invalid(message: str) -> errors.IdentityError:
 class TrustedIssuer:
     iss: str
     locator: str
+
+
+@dataclass(frozen=True)
+class CallerNames:
+    """How a `--caller`/`--role` value that names the actor, not a role, resolves."""
+
+    actor_prefix: str | None = None
+    roles: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -125,6 +135,20 @@ class IdentityConfig:
         if not isinstance(roles, list) or not all(isinstance(r, str) and r for r in roles):
             raise _invalid("identity.static.roles must be a list of role names")
         return actor.strip(), tuple(roles)
+
+    def caller_names(self) -> CallerNames:
+        """The optional `caller_names` section; empty when absent."""
+        section = self._mapping("caller_names")
+        prefix = section.get("actor_prefix")
+        roles = section.get("roles")
+        if prefix is not None and (not isinstance(prefix, str) or not prefix):
+            raise _invalid("identity.caller_names.actor_prefix must be a non-empty string")
+        if roles is not None and (
+            not isinstance(roles, dict)
+            or not all(isinstance(k, str) and k and isinstance(v, str) and v for k, v in roles.items())
+        ):
+            raise _invalid("identity.caller_names.roles must map a caller name to one role name")
+        return CallerNames(actor_prefix=prefix, roles=dict(roles or {}))
 
 
 def check_assertion_provider(assertion: object) -> None:
