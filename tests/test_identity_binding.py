@@ -87,8 +87,19 @@ def git_tree(tmp_path: Path) -> Path:
     return tree
 
 
+def _named(held: list[str], *, actor: str = "svc:builder-one", **caller_names) -> dict:
+    identity = _static(held, actor)
+    if caller_names:
+        identity["caller_names"] = caller_names
+    return identity
+
+
 class _PermissiveTokens:
+    def __init__(self) -> None:
+        self.roles: list[str] = []
+
     def resolve_token(self, role: str, *, repo: str | None = None) -> str:
+        self.roles.append(role)
         return "token"
 
 
@@ -117,8 +128,23 @@ def _run_verb(module, argv: list[str], tokens, monkeypatch) -> int:
         (_static(["reviewer"]), "builder", True, ["requested role 'builder'", "roles present [reviewer]"]),
         # AC9: no role at all.
         (_static([]), "builder", True, ["requested role 'builder'", "roles present [none]"]),
-        # The actor's own name is not a role it holds.
-        (_static(["builder"]), "builder-bot", True, ["requested role 'builder-bot'"]),
+        # The actor's own name binds to its single role.
+        (_static(["builder"]), "builder-bot", False, []),
+        # A name binds through the optional prefix, or as the exact actor string.
+        (_named(["builder"], actor_prefix="svc:"), "builder-one", False, []),
+        (_named(["builder"], actor_prefix="svc:"), "svc:builder-one", False, []),
+        (_named(["builder"]), "svc:builder-one", False, []),
+        # Another actor's name stays refused; so does the bare name when no prefix is configured.
+        (_named(["builder"], actor_prefix="svc:"), "reviewer-two", True,
+         ["'reviewer-two'", "svc:builder-one", "roles present [builder]"]),
+        (_named(["builder"]), "builder-one", True, ["'builder-one'", "roles present [builder]"]),
+        # Several roles: the name binds only through caller_names.roles, to a role the actor holds.
+        (_named(["builder", "reviewer"], roles={"builder-one": "builder"}, actor_prefix="svc:"),
+         "builder-one", False, []),
+        (_named(["builder", "reviewer"], actor_prefix="svc:"), "builder-one", True,
+         ["roles present [builder, reviewer]", "caller_names.roles"]),
+        (_named(["builder", "reviewer"], roles={"builder-one": "releaser"}, actor_prefix="svc:"),
+         "builder-one", True, ["roles present [builder, reviewer]", "'releaser'"]),
         # AC3: the held role binds; an omitted caller mints the single role.
         (_static(["builder"]), "builder", False, []),
         (_static(["builder"]), None, False, []),
@@ -141,7 +167,8 @@ def test_every_minting_verb_binds_to_the_actor(
         if caller is not None:
             argv = [flag, caller, *argv]
         capsys.readouterr()
-        rc = _run_verb(module, argv, _RefusingTokens() if refused else _PermissiveTokens(), monkeypatch)
+        tokens = _RefusingTokens() if refused else _PermissiveTokens()
+        rc = _run_verb(module, argv, tokens, monkeypatch)
         err = capsys.readouterr().err
         if refused:
             assert rc == module.EXIT_CALLER_INVOKER_MISMATCH, (script, rc, err)
@@ -149,6 +176,9 @@ def test_every_minting_verb_binds_to_the_actor(
                 assert fragment in err, (script, fragment, err)
         else:
             assert rc != module.EXIT_CALLER_INVOKER_MISMATCH, (script, rc, err)
+            # The value downstream is the flag value as given, as on the legacy path.
+            if caller is not None:
+                assert set(tokens.roles) <= {caller}, (script, tokens.roles)
 
 
 def test_the_two_verbs_without_a_prior_binding_refuse_too(monkeypatch, tmp_path, capsys) -> None:
@@ -167,6 +197,30 @@ def test_the_two_verbs_without_a_prior_binding_refuse_too(monkeypatch, tmp_path,
         dispatch.resolve_hook_secret(secret_env_caller="builder", secret_env_var=None)
     assert exc.value.code == dispatch.EXIT_SECRET_FAILED
     assert "roles present [reviewer]" in capsys.readouterr().err
+
+
+def test_stage_body_and_release_dispatch_bind_a_name_and_keep_the_flag_value(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    from clagentic_loadout.release import dispatch
+    from clagentic_loadout.transport import stage_body_verb
+
+    _use_config(monkeypatch, tmp_path, _named(["releaser"], actor_prefix="svc:"))
+    monkeypatch.setattr("sys.stdin.buffer.read", lambda: b'{"body": "x"}')
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    rc = stage_body_verb.main(["--caller", "builder-one", "--target-pr", "1"])
+    assert rc == 0, capsys.readouterr().err
+    assert list(tmp_path.glob("clagentic-loadout/body.builder-one.*"))
+
+    asked: list[str] = []
+
+    def fake_read(role, keys):
+        asked.append(role)
+        return {"STATUS_HOOK_SECRET": "s"}
+
+    monkeypatch.setattr(dispatch, "read_role_env_file", fake_read)
+    assert dispatch.resolve_hook_secret(secret_env_caller="builder-one", secret_env_var=None) == "s"
+    assert asked == ["builder-one"]
 
 
 def test_release_dispatch_reads_the_secret_of_the_actors_single_role(monkeypatch, tmp_path) -> None:
@@ -207,6 +261,33 @@ def test_a_legacy_origin_actor_binds_by_name_equality() -> None:
     bind_caller("agent:spawned", caller_explicit=True, identity=identity)
     with pytest.raises(CallerBindingError):
         bind_caller("builder", caller_explicit=True, identity=identity)
+
+
+def test_a_legacy_origin_actor_never_reads_caller_names(monkeypatch, tmp_path) -> None:
+    _use_config(monkeypatch, tmp_path, _named(["builder"], actor_prefix="agent:"))
+    monkeypatch.setattr(
+        "clagentic_loadout.identity.config.load_user_config_section",
+        lambda *a, **k: pytest.fail("caller_names was read on the legacy path"),
+    )
+    actor = Actor(
+        sub="agent:spawned", actor="agent:spawned", chain=("agent:spawned",), roles=(),
+        grade="unverified", origin="legacy", provider="legacy:sidecar-subagent", self_declared=True,
+    )
+    identity = identity_for_actor(actor, caller_explicit=True)
+    bind_caller("agent:spawned", caller_explicit=True, identity=identity)
+    with pytest.raises(CallerBindingError):
+        bind_caller("spawned", caller_explicit=True, identity=identity)
+
+
+def test_unset_provider_with_caller_names_binds_by_name_equality(monkeypatch, tmp_path) -> None:
+    _use_config(monkeypatch, tmp_path, {"caller_names": {"actor_prefix": "svc:"}})
+    legacy_identity = attestation.Identity("svc:builder-one", attestation.SOURCE_CONFIGURED)
+    identity = resolve_for_binding(
+        caller_explicit=True, caller="builder-one", resolve_identity_fn=lambda: legacy_identity
+    )
+    assert not isinstance(identity, SeamIdentity)
+    with pytest.raises(CallerBindingError):
+        bind_caller("builder-one", caller_explicit=True, identity=identity)
 
 
 def test_a_legacy_identity_carries_the_additive_fields() -> None:

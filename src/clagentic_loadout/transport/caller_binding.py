@@ -175,7 +175,13 @@ from clagentic_loadout.transport.attestation import (
     resolve_bound_identity_policy,
 )
 from clagentic_loadout.transport.credential_provider import DEFAULT_ROLE
-from clagentic_loadout.transport.seam_binding import SeamIdentity, configured_actor, identity_for_actor
+from clagentic_loadout.transport.seam_binding import (
+    CallerNameRefused,
+    SeamIdentity,
+    configured_actor,
+    identity_for_actor,
+    resolve_named_role,
+)
 
 
 def describe_omitted_caller_behavior(*, flag_name: str = "--caller") -> str:
@@ -264,8 +270,11 @@ def bind_caller(caller: str, *, caller_explicit: bool, identity: Identity) -> No
     Raises CallerBindingError when `caller != identity.subject`, except for an
     identity that came from the provider seam with a role list (`identity.roles`
     is not None): there *caller* is the role the verb will mint and must be one
-    the actor holds, else the refusal names the role requested and the roles
-    present. The role list is a ceiling, never a grant.
+    the actor holds, or must name the actor (see
+    `seam_binding.resolve_named_role`), else the refusal names the role requested
+    and the roles present. The value the call site passes downstream stays
+    *caller*; the role it resolved to is left on `identity.resolved_role`. The
+    role list is a ceiling, never a grant.
 
     *caller_explicit* is accepted for call-site symmetry and audit-log
     parity with `resolve_for_binding` (every call site passes the same
@@ -282,7 +291,16 @@ def bind_caller(caller: str, *, caller_explicit: bool, identity: Identity) -> No
     raises `AttestationError`/`BoundAttestationError`.
     """
     if isinstance(identity, SeamIdentity) and identity.roles is not None:
-        if caller not in identity.roles:
+        if caller in identity.roles:
+            identity.resolved_role = caller
+            return
+        try:
+            named = resolve_named_role(identity, caller)
+        except CallerNameRefused as exc:
+            raise CallerBindingError(caller, identity, detail=f"{exc}. Refused before any I/O.") from exc
+        if named is not None:
+            identity.resolved_role = named
+        else:
             present = ", ".join(identity.roles) or "none"
             raise CallerBindingError(
                 caller,

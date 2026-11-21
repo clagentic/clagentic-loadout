@@ -13,6 +13,8 @@ the one place that mapping lives:
   An actor whose answer came from the legacy per-spawn sidecar (origin
   `legacy`) carries no role list, so it binds by name equality as the legacy
   chain always did.
+* `resolve_named_role` binds a `--caller`/`--role` that names the actor, not a
+  role, to the actor's role; the one place that rule lives.
 * `provider_fields` is the additive `provider` / `self_declared` pair every
   result carries.
 * `staging_env` and `staging_kwargs` root body staging and acquire scratch in the
@@ -53,7 +55,7 @@ class SeamIdentity(Identity):
     `jti` are the verified actor string, delivery directory and assertion id.
     """
 
-    __slots__ = ("provider", "self_declared", "roles", "actor", "dir", "jti")
+    __slots__ = ("provider", "self_declared", "roles", "actor", "dir", "jti", "resolved_role")
 
     def __init__(
         self,
@@ -74,6 +76,8 @@ class SeamIdentity(Identity):
         self.actor = actor
         self.dir = dir
         self.jti = jti
+        # Set by `bind_caller`: the role the bound caller resolved to.
+        self.resolved_role: str | None = None
 
 
 def configured_actor(
@@ -137,6 +141,56 @@ def identity_for_actor(actor: Actor, *, caller_explicit: bool) -> SeamIdentity:
         actor=actor.actor,
         dir=actor.dir,
         jti=actor.jti,
+    )
+
+
+class CallerNameRefused(Exception):
+    """A `--caller`/`--role` value names the actor but resolves to no role it holds."""
+
+
+def _caller_names(config_root: str | Path | None):
+    # Imported here for the reason `configured_actor` gives. Read only when a
+    # value is not already a held role, so a config that never meets a name
+    # never has this key looked at.
+    from clagentic_loadout.identity.config import load_identity_config
+
+    try:
+        return load_identity_config(config_root=config_root).caller_names()
+    except IdentityError as exc:
+        raise CallerNameRefused(f"identity.caller_names is invalid: {exc}") from exc
+
+
+def resolve_named_role(
+    identity: SeamIdentity, caller: str, *, config_root: str | Path | None = None
+) -> str | None:
+    """The role *caller* binds as when it names the actor, else None.
+
+    *caller* names the actor when it is the actor string, or the actor string
+    minus the configured `identity.caller_names.actor_prefix`. It then binds as
+    `identity.caller_names.roles[caller]` (which must be a role the actor holds)
+    or, with no entry, as the actor's single role. Raises `CallerNameRefused`
+    when it names the actor but no role results. Only for an identity with a
+    role list; a legacy-origin answer has none and never reaches the config."""
+    roles = identity.roles or ()
+    names = _caller_names(config_root)
+    prefix = names.actor_prefix
+    if caller != identity.actor and not (prefix and identity.actor == prefix + caller):
+        return None
+    present = ", ".join(roles) or "none"
+    where = f"the actor {identity.actor!r} ({identity.provider}) holds roles [{present}]"
+    if caller in names.roles:
+        role = names.roles[caller]
+        if role not in roles:
+            raise CallerNameRefused(
+                f"--caller/--role {caller!r} names {where}, but identity.caller_names.roles "
+                f"maps it to {role!r}, which the actor does not hold: roles present [{present}]"
+            )
+        return role
+    if len(roles) == 1:
+        return roles[0]
+    raise CallerNameRefused(
+        f"--caller/--role {caller!r} names {where}: roles present [{present}]; name one "
+        f"role, or map {caller!r} to one in identity.caller_names.roles"
     )
 
 
