@@ -17,8 +17,9 @@ the one place that mapping lives:
   role, to the actor's role; the one place that rule lives.
 * `provider_fields` is the additive `provider` / `self_declared` pair every
   result carries.
-* `staging_env` and `staging_kwargs` root body staging and acquire scratch in the
-  verified delivery directory for the assertion providers.
+* `staging_env` and `staging_kwargs` root body staging and acquire scratch for the
+  assertion providers: at the rendered `identity.staging_root` template when set,
+  else in the verified delivery directory.
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from clagentic_loadout.transport.attestation import (
     AttestationError,
     Identity,
 )
+from clagentic_loadout.transport.body_env import BODY_ENV_SUBDIR
 
 LEGACY_ORIGIN = "legacy"
 #: `provider` reported for every identity the legacy chain resolves.
@@ -42,6 +44,9 @@ _GATEKEEPER_PROVIDER = "gatekeeper"
 _JWKS_PROVIDER_PREFIX = "jwks:"
 #: Subdirectory of the verified delivery directory that holds scratch.
 DELIVERY_TMP_SUBDIR = "tmp"
+#: Config key of the staging-root template; the same string `identity.config`
+#: names, held here because that module cannot be imported at this level.
+STAGING_ROOT_KEY = "identity.staging_root"
 
 
 class SeamIdentity(Identity):
@@ -55,7 +60,7 @@ class SeamIdentity(Identity):
     `jti` are the verified actor string, delivery directory and assertion id.
     """
 
-    __slots__ = ("provider", "self_declared", "roles", "actor", "dir", "jti", "resolved_role")
+    __slots__ = ("provider", "self_declared", "roles", "actor", "dir", "jti", "sid", "spawn", "resolved_role")
 
     def __init__(
         self,
@@ -68,6 +73,8 @@ class SeamIdentity(Identity):
         actor: str | None = None,
         dir: str | None = None,  # noqa: A002 -- mirrors the claim name
         jti: str | None = None,
+        sid: str | None = None,
+        spawn: str | None = None,
     ) -> None:
         super().__init__(subject, source)
         self.provider = provider
@@ -76,6 +83,8 @@ class SeamIdentity(Identity):
         self.actor = actor
         self.dir = dir
         self.jti = jti
+        self.sid = sid
+        self.spawn = spawn
         # Call sites keep passing the flag value downstream, so this records which held role a name resolved to, for messages and inspection.
         self.resolved_role: str | None = None
 
@@ -98,16 +107,24 @@ def configured_actor(
     from clagentic_loadout.identity.seam import identity_dir_is_set, resolve
 
     try:
-        provider = load_identity_config(config_root=config_root).provider
+        config = load_identity_config(config_root=config_root)
+        provider = config.provider
         if provider is None:
             return None
         if provider == PROVIDER_ASSERTION_OR_LEGACY and not identity_dir_is_set(
             os.environ if env is None else env
         ):
             return None
-        return resolve(env=env, config_root=config_root)
+        actor = resolve(env=env, config_root=config_root)
+        template = config.staging_root
     except IdentityError as exc:
         raise AttestationError(f"identity provider refused: {exc}") from exc
+    # Rendered here as well as at staging time so a template that cannot render
+    # for this actor is refused in the binding step every verb already maps,
+    # before any call site reaches `staging_kwargs`.
+    if template is not None and _is_verified(actor.provider) and actor.dir:
+        _render_staging_root(template, actor=actor.actor, sid=actor.sid, spawn=actor.spawn)
+    return actor
 
 
 def _default_role(actor: Actor) -> str:
@@ -141,6 +158,8 @@ def identity_for_actor(actor: Actor, *, caller_explicit: bool) -> SeamIdentity:
         actor=actor.actor,
         dir=actor.dir,
         jti=actor.jti,
+        sid=actor.sid,
+        spawn=actor.spawn,
     )
 
 
@@ -216,19 +235,87 @@ def staging_kwargs(identity: Identity, *, actor_key: str | None = None) -> dict[
     return out
 
 
-def staging_env(identity: Identity, env: Mapping[str, str] | None = None) -> dict[str, str] | None:
-    """An environment whose TMPDIR is `<dir>/tmp` for an identity verified by an
+def _is_verified(provider: str) -> bool:
+    return provider == _GATEKEEPER_PROVIDER or provider.startswith(_JWKS_PROVIDER_PREFIX)
+
+
+def _claim_component(template: str, placeholder: str, value: str | None) -> str:
+    """*value* when it is one safe path component, else `AttestationError`."""
+    where = f"{STAGING_ROOT_KEY} {template!r}, placeholder {{{placeholder}}}"
+    if value is None:
+        raise AttestationError(f"{where}: the verified assertion carries no such claim")
+    if not value or value in (".", "..") or "/" in value or "\0" in value:
+        raise AttestationError(
+            f"{where}: claim value {value!r} is not a single safe path component"
+        )
+    return value
+
+
+def _render_staging_root(
+    template: str, *, actor: str | None, sid: str | None, spawn: str | None
+) -> str:
+    """Render *template* over the verified claims into an absolute path.
+
+    `{actor_name}` is the actor string after its `kind:` prefix (the whole string
+    when it has none). A claim that is absent, or is not one path component, or a
+    result that is not absolute, raises `AttestationError` naming the key, the
+    template and the offending placeholder or value; there is no fallback root."""
+    from clagentic_loadout.identity.config import staging_root_parts
+
+    actor_name = actor.partition(":")[2] if actor and ":" in actor else actor
+    claims = {"actor_name": actor_name, "sid": sid, "spawn": spawn}
+    try:
+        parts = staging_root_parts(template)
+    except IdentityError as exc:
+        raise AttestationError(f"identity provider refused: {exc}") from exc
+    rendered = "".join(
+        literal + (_claim_component(template, name, claims[name]) if name else "")
+        for literal, name in parts
+    )
+    if not os.path.isabs(rendered):
+        raise AttestationError(
+            f"{STAGING_ROOT_KEY} {template!r} renders to {rendered!r}, which is not an absolute path"
+        )
+    return rendered
+
+
+def _prepare_staging_root(root: str) -> None:
+    """Create *root* and its body-staging subdirectory, mode 0700, when absent."""
+    try:
+        Path(root).mkdir(mode=0o700, parents=True, exist_ok=True)
+        (Path(root) / BODY_ENV_SUBDIR).mkdir(mode=0o700, exist_ok=True)
+    except OSError as exc:
+        raise AttestationError(f"{STAGING_ROOT_KEY}: cannot create staging root {root!r}: {exc}") from exc
+
+
+def staging_env(
+    identity: Identity,
+    env: Mapping[str, str] | None = None,
+    *,
+    config_root: str | Path | None = None,
+) -> dict[str, str] | None:
+    """An environment whose TMPDIR roots staging for an identity verified by an
     assertion provider, else None (the caller's own TMPDIR applies).
 
-    `dir` comes from the verified claims, so two actors never share a staging
-    root. Static, legacy and module identities have no verified directory."""
+    The root is `identity.staging_root` rendered over the verified claims when
+    that key is set (created 0700 if absent), else `<dir>/tmp`. Both come from the
+    verified claims, so two actors never share a staging root. Static, legacy and
+    module identities have no verified directory and the key has no effect."""
+    from clagentic_loadout.identity.config import load_identity_config
+
     if not isinstance(identity, SeamIdentity) or not identity.dir:
         return None
-    verified = identity.provider == _GATEKEEPER_PROVIDER or identity.provider.startswith(
-        _JWKS_PROVIDER_PREFIX
-    )
-    if not verified:
+    if not _is_verified(identity.provider):
         return None
+    try:
+        template = load_identity_config(config_root=config_root).staging_root
+    except IdentityError as exc:
+        raise AttestationError(f"identity provider refused: {exc}") from exc
     out = dict(os.environ if env is None else env)
-    out["TMPDIR"] = str(Path(identity.dir) / DELIVERY_TMP_SUBDIR)
+    if template is None:
+        out["TMPDIR"] = str(Path(identity.dir) / DELIVERY_TMP_SUBDIR)
+        return out
+    root = _render_staging_root(template, actor=identity.actor, sid=identity.sid, spawn=identity.spawn)
+    _prepare_staging_root(root)
+    out["TMPDIR"] = root
     return out

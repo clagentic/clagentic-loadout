@@ -25,6 +25,7 @@ User-level config (`~/.config/clagentic/loadout/config.yaml`), section `identity
 | `issuers` | For `jwks`: a list of `{iss, jwks?}`. `jwks` defaults to the locator the `iss` form names. |
 | `static.actor`, `static.roles` | For `static`: the declared actor and role list. |
 | `caller_names.actor_prefix`, `caller_names.roles` | Optional. A `--caller` naming the actor (see [Verb binding](#verb-binding)): the prefix to add to a bare name, and a map from name to one role. |
+| `staging_root` | Optional template for the body-staging and acquire-scratch root under `gatekeeper` and `jwks` (see [Verb binding](#verb-binding)). Placeholders `{actor_name}`, `{sid}`, `{spawn}`. Unset: `<dir>/tmp`. |
 
 Nothing is read from a repository-local config: a cloned repository cannot choose
 the provider, the issuers or the module.
@@ -170,6 +171,26 @@ to `<dir>/tmp/` (so `<dir>/tmp/clagentic-loadout/` for bodies), where `dir` is t
 verified delivery directory. The body's stamp records the staging actor and the
 assertion `jti`, and a read by a different actor is refused. Under `static`, `module`
 and with the provider unset, `$TMPDIR` applies as before.
+
+The delivery directory may be a place a session cannot write. `identity.staging_root`
+moves the root elsewhere, for example `/var/scratch/{actor_name}/{sid}`. Placeholders:
+
+| Placeholder | Value |
+|---|---|
+| `{actor_name}` | The verified actor string after its `kind:` prefix (the whole string when it has none). |
+| `{sid}` | The assertion `sid` claim, always present. |
+| `{spawn}` | The assertion `spawn` claim, when the assertion carries one. |
+
+The template must name `{sid}` or `{spawn}`, so two spawns, and so two actors, never
+share a root. At config load the key is refused as `config_invalid`, naming the key and
+the template, when it is not a string, uses another placeholder, or names neither. At
+staging time a verb is refused, naming the key, the template and the placeholder or
+value, when a referenced claim is absent, a claim value is not a single path component
+(empty, `.`, `..`, or containing `/`), or the rendered path is not absolute. There is no
+fallback to another root. The root and its `clagentic-loadout` subdirectory are created
+with mode `0700` when absent. With the key unset the root is `<dir>/tmp/`, exactly as
+before. The key has no effect under `static`, `module` or a legacy answer. It is a
+location only: it grants no access to the directory it names.
 
 `loadout-doctor` reports the provider, the key-set sources it trusts, the
 `self_declared` flag and the number of `prefer-assertion` fallbacks the filesystem
