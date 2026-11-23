@@ -173,7 +173,7 @@ assertion `jti`, and a read by a different actor is refused. Under `static`, `mo
 and with the provider unset, `$TMPDIR` applies as before.
 
 The delivery directory may be a place a session cannot write. `identity.staging_root`
-moves the root elsewhere, for example `/var/scratch/{actor_name}/{sid}`. Placeholders:
+moves the root elsewhere, for example `<scratch-root>/{actor_name}/{sid}`. Placeholders:
 
 | Placeholder | Value |
 |---|---|

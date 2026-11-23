@@ -70,7 +70,7 @@ def staging_root_parts(template: object) -> list[tuple[str, str | None]]:
 
     Raises `config_invalid` naming the key and the template when it is not a
     string, uses an unknown placeholder (or a format spec or conversion), or names
-    no per-spawn placeholder."""
+    no per-spawn placeholder, or has a literal '.' or '..' path segment."""
     if not isinstance(template, str) or not template:
         raise _invalid(f"{STAGING_ROOT_KEY} must be a non-empty string template, got {template!r}")
     parts: list[tuple[str, str | None]] = []
@@ -91,6 +91,13 @@ def staging_root_parts(template: object) -> list[tuple[str, str | None]]:
         raise _invalid(
             f"{STAGING_ROOT_KEY} {template!r} names no per-spawn placeholder; "
             f"include {{sid}} or {{spawn}} so two spawns never share a root"
+        )
+    # A literal '.' or '..' segment would collapse distinct sids into one directory.
+    opaque = "".join(literal + ("{}" if name else "") for literal, name in parts)
+    if any(segment in (".", "..") for segment in opaque.split("/")):
+        raise _invalid(
+            f"{STAGING_ROOT_KEY} {template!r} has a '.' or '..' path segment; "
+            "a staging root must not collapse spawns into one directory"
         )
     return parts
 
