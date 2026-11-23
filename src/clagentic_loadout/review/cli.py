@@ -209,7 +209,7 @@ from clagentic_loadout.transport.git_host_api import (
     resolve_git_host_base,
 )
 from clagentic_loadout.transport.provider_config import DEFAULT_USER_CONFIG_ROOT
-from clagentic_loadout.transport.seam_binding import staging_kwargs
+from clagentic_loadout.transport.seam_binding import staging_kwargs, staging_temp_parent
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -758,7 +758,12 @@ def _run_command(
     config_root,
     run_root,
     runner,
+    identity: Identity | None = None,
 ) -> int:
+    try:
+        temp_parent = staging_temp_parent(identity)
+    except AttestationError as exc:
+        _fail(f"attested-identity resolution FAILED -- {exc}", EXIT_CALLER_INVOKER_MISMATCH)
     profile_name = args.profile or caller
     try:
         profile: ReviewProfile = load_review_profile(
@@ -864,6 +869,7 @@ def _run_command(
         call_sites_note=call_sites_note,
         removed_note=removed_note,
         removed_behaviour=removed_behaviour,
+        temp_parent=temp_parent,
         **kwargs,
     )
     return _report_outcome(outcome)
@@ -1990,6 +1996,7 @@ def main(
                 args, caller, owner=owner, repo=repo, platform=platform,
                 repo_path=repo_path, token_provider=token_provider, opener=opener,
                 config_root=config_root, run_root=run_root, runner=runner,
+                identity=identity,
             )
         if args.command == "open":
             return _open_command(

@@ -308,9 +308,13 @@ def merge_result_clone(
     base_branch: str = "",
     env: Mapping[str, str] | None = None,
     fetch_auth: MergeFetchAuth | None = None,
+    temp_parent: str | Path | None = None,
 ) -> Iterator[Path]:
     """Yield the path of a private clone whose `HEAD` is the result of merging
     *head_sha* onto *base_sha*, and remove it on exit however the body ends.
+
+    *temp_parent* is the directory the private scratch directory is created in;
+    None keeps the temp-directory default.
 
     *base_branch* names the branch whose `refs/remotes/origin/<base_branch>` is
     pinned to *base_sha* in the clone. Every git command this runs has hooks,
@@ -337,7 +341,7 @@ def merge_result_clone(
         raise
     except CommitFileReadError as exc:
         raise MergeResultCloneError(str(exc)) from exc
-    scratch = Path(tempfile.mkdtemp(prefix="loadout-precheck-"))
+    scratch = Path(tempfile.mkdtemp(prefix="loadout-precheck-", dir=temp_parent))
     try:
         clone = scratch / _TREE_NAME
         _materialise(clone, git_tree, base_sha, head_sha, base_branch, env)

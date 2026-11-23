@@ -166,7 +166,7 @@ from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
 )
-from clagentic_loadout.transport.seam_binding import provider_fields
+from clagentic_loadout.transport.seam_binding import provider_fields, staging_temp_parent
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
     bind_caller,
@@ -505,6 +505,7 @@ def _run(
             caller=args.role or DEFAULT_ROLE,
             resolve_identity_fn=resolve_identity_fn,
         )
+        temp_parent = staging_temp_parent(attested_identity)
     except AttestationError as exc:
         _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
     role = args.role if args.role is not None else attested_identity.subject
@@ -545,6 +546,7 @@ def _run(
         )
     except PlatformMismatchError as exc:
         _fail(str(exc), code=EXIT_WRONG_PLATFORM)
+    fetch_auth = fetch_auth.with_temp_parent(temp_parent)
 
     # 4. Read the PR's LIVE current state -- POSITIVELY confirm it is
     # actually merged before touching anything. A PR that is open, or
@@ -708,6 +710,7 @@ def _run(
                         ),
                         default_timeout_seconds=default_step_timeout,
                         placeholders=step_placeholders(git_tree_path, landed_sha),
+                        temp_parent=temp_parent,
                     )
                 else:
                     refuse_detached_steps(steps)
@@ -731,6 +734,7 @@ def _run(
                                 ),
                                 default_timeout_seconds=default_step_timeout,
                                 placeholders=step_placeholders(tool_tree, landed_sha),
+                                temp_parent=temp_parent,
                             )
                         except (
                             PostMergeStepFailedError,

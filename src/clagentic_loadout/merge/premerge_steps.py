@@ -86,6 +86,7 @@ def read_merged_commit_steps(
     head_sha: str,
     base_branch: str,
     fetch_auth: MergeFetchAuth | None,
+    temp_parent: str | Path | None = None,
 ) -> MergedCommitSteps:
     """The post_merge_steps *head_sha* merged onto *base_sha* would declare.
 
@@ -105,7 +106,8 @@ def read_merged_commit_steps(
     relative, legacy = resolve_git_tree_relative_config_paths(str(config_root), git_tree)
     try:
         with merge_result_clone(
-            git_tree, base_sha, head_sha, base_branch=base_branch, fetch_auth=fetch_auth
+            git_tree, base_sha, head_sha, base_branch=base_branch, fetch_auth=fetch_auth,
+            temp_parent=temp_parent,
         ) as clone:
             commit = _clone_head(clone)
             try:

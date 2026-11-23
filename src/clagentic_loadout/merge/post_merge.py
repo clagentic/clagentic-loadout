@@ -823,6 +823,7 @@ def run_post_merge_steps(
     base_env: Mapping[str, str] | None = None,
     argv_prefix: Sequence[str] = (),
     placeholders: Mapping[str, str] | None = None,
+    temp_parent: str | Path | None = None,
 ) -> None:
     """Execute post_merge_steps IN ORDER inside *project_root*.
 
@@ -959,6 +960,10 @@ def run_post_merge_steps(
     choose the bound path. It is removed once the step has run. `()` (the
     default) leaves every argv, environment and directory exactly as before.
 
+    `temp_parent`: the directory the private per-step directories are created
+    under instead of the base environment's `TMPDIR`; the verb that holds a
+    bound identity passes its staging root. `None` keeps the resolution above.
+
     The whole list is validated (`validate_post_merge_steps`) BEFORE any
     step executes, so a malformed step later in the list is caught up front
     rather than after earlier steps already ran with side effects.
@@ -974,6 +979,7 @@ def run_post_merge_steps(
             base_env=base_env,
             argv_prefix=argv_prefix,
             placeholders=placeholders,
+            temp_parent=temp_parent,
         )
 
 
@@ -987,6 +993,7 @@ def _execute_steps(
     base_env: Mapping[str, str] | None,
     argv_prefix: Sequence[str],
     placeholders: Mapping[str, str] | None = None,
+    temp_parent: str | Path | None = None,
 ) -> None:
     """The step loop of `run_post_merge_steps`; *scratch* owns the private
     per-step directories so they are removed however the loop ends."""
@@ -996,7 +1003,9 @@ def _execute_steps(
     inherited_env = base_env if base_env is not None else os.environ
     # Resolved once, from the caller's environment, before any step or
     # deployment override can influence it.
-    check_tmp_parent = (inherited_env.get("TMPDIR") or tempfile.gettempdir()) if argv_prefix else ""
+    check_tmp_parent = (
+        str(temp_parent) if temp_parent else (inherited_env.get("TMPDIR") or tempfile.gettempdir())
+    ) if argv_prefix else ""
 
     for i, step in enumerate(steps):
         scratch.close()
