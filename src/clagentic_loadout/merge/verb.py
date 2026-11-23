@@ -679,7 +679,7 @@ from clagentic_loadout.transport.attestation import (
     AttestationError,
     resolve_bound_identity as _resolve_identity,
 )
-from clagentic_loadout.transport.seam_binding import provider_fields
+from clagentic_loadout.transport.seam_binding import provider_fields, staging_temp_parent
 from clagentic_loadout.transport.caller_binding import (
     CallerBindingError,
     bind_caller,
@@ -991,6 +991,7 @@ def _refuse_tool_tree_steps_before_merge(
     base_sha: str,
     head_sha: str,
     fetch_auth: MergeFetchAuth,
+    temp_parent: str | None = None,
 ) -> None:
     """Refuse, before the server-side merge, post-merge steps the tool tree cannot
     run. Whether the steps will run in a tool tree depends only on --repo-path being
@@ -1030,6 +1031,7 @@ def _refuse_tool_tree_steps_before_merge(
             head_sha=head_sha,
             base_branch=base_branch,
             fetch_auth=fetch_auth,
+            temp_parent=temp_parent,
         )
     except MergedStepsUnreadableError as exc:
         _fail(
@@ -1596,6 +1598,7 @@ def _run(
             caller=args.role or DEFAULT_ROLE,
             resolve_identity_fn=resolve_identity_fn,
         )
+        temp_parent = staging_temp_parent(attested_identity)
     except AttestationError as exc:
         _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
     role = args.role if args.role is not None else attested_identity.subject
@@ -1674,7 +1677,7 @@ def _run(
     # before any network call, and a refusal propagates as a usage error rather
     # than degrading the gate. Everything before this point talked to the platform
     # API only; no git command has touched a network.
-    fetch_auth = backend.fetch_auth()
+    fetch_auth = backend.fetch_auth().with_temp_parent(temp_parent)
     # Every base-dependent read below (the repo gate, the gate's policy, the
     # pre_checks merge result, the tree-safety check) uses the base branch's tip
     # now. The PR record's base.sha is the tip as of the last head push; it is
@@ -2299,6 +2302,7 @@ def _run(
                 base_branch=resolve_base_branch(pr_info),
                 env=check_env,
                 fetch_auth=fetch_auth,
+                temp_parent=temp_parent,
             ) as check_tree:
                 print(
                     f"merge: pre_checks gate -- running {len(pre_checks)} declared "
@@ -2318,7 +2322,8 @@ def _run(
                         file=sys.stderr,
                     )
                 run_post_merge_steps(
-                    pre_checks, check_tree, base_env=check_env, argv_prefix=sandbox
+                    pre_checks, check_tree, base_env=check_env, argv_prefix=sandbox,
+                    temp_parent=temp_parent,
                 )
         except MergeResultCloneError as exc:
             _fail(
@@ -2474,6 +2479,7 @@ def _run(
         live_base_sha,
         current_head_sha,
         fetch_auth,
+        temp_parent=temp_parent,
     )
 
     # 9. All gates passed -- execute the merge.
@@ -3172,6 +3178,7 @@ def _run(
                                 ),
                                 default_timeout_seconds=default_step_timeout,
                                 placeholders=step_placeholders(git_tree_path, landed_sha),
+                                temp_parent=temp_parent,
                             )
                         else:
                             refuse_detached_steps(steps)
@@ -3194,6 +3201,7 @@ def _run(
                                         ),
                                         default_timeout_seconds=default_step_timeout,
                                         placeholders=step_placeholders(tool_tree, landed_sha),
+                                        temp_parent=temp_parent,
                                     )
                                 except (
                                     PostMergeStepFailedError,

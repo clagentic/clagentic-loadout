@@ -138,6 +138,7 @@ def fetch_branch_commit_subjects(
     *,
     remote: str = "origin",
     token: str | None = None,
+    temp_parent: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return [(sha, subject), ...] for EVERY commit in `<fetched
     remote/base_branch>..HEAD`, unfiltered (first line only) -- the raw
@@ -176,7 +177,7 @@ def fetch_branch_commit_subjects(
             failure, so it is not folded into CommitCheckUnavailableError.
     """
     try:
-        git_fetch_with_token(remote, base_branch, token, Path(repo_root))
+        git_fetch_with_token(remote, base_branch, token, Path(repo_root), temp_parent=temp_parent)
     except GitFetchError as exc:
         # The message is already category-only: git's output and the remote are
         # withheld because both can quote a credential-bearing URL.
@@ -215,6 +216,7 @@ def find_non_conformant_branch_commits(
     *,
     remote: str = "origin",
     token: str | None = None,
+    temp_parent: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return [(sha, subject), ...] for every commit in
     `<fetched remote/base_branch>..HEAD` whose subject (first line only)
@@ -229,7 +231,9 @@ def find_non_conformant_branch_commits(
         CommitCheckUnavailableError: the fetch or log command itself fails
             (unreachable remote, no such base branch, not a git repo).
     """
-    subjects = fetch_branch_commit_subjects(repo_root, base_branch, remote=remote, token=token)
+    subjects = fetch_branch_commit_subjects(
+        repo_root, base_branch, remote=remote, token=token, temp_parent=temp_parent
+    )
     return [(sha, subject) for sha, subject in subjects if not is_conventional_title(subject)]
 
 
@@ -277,6 +281,7 @@ def check_branch_for_stray_merge_commits(
     remote: str = "origin",
     skip: bool = False,
     token: str | None = None,
+    temp_parent: str | None = None,
 ) -> None:
     """Push-time backstop: refuse a push whose branch carries a commit in
     `<fetched remote/base_branch>..HEAD` with a non-Conventional-Commits
@@ -310,7 +315,7 @@ def check_branch_for_stray_merge_commits(
         return
 
     offenders = find_non_conformant_branch_commits(
-        repo_root, base_branch, remote=remote, token=token
+        repo_root, base_branch, remote=remote, token=token, temp_parent=temp_parent
     )
     if offenders:
         raise StrayMergeCommitError(offenders, base_branch=base_branch)

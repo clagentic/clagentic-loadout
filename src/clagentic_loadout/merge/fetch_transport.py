@@ -27,7 +27,7 @@ are never printed (they can carry a credential).
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from clagentic_loadout.merge.errors import MergeUsageError
@@ -74,10 +74,18 @@ class MergeFetchFailedError(Exception):
 @dataclass(frozen=True)
 class MergeFetchAuth:
     """What a merge-path fetch may present: the platform URL whose host and port
-    an http(s) fetch url must equal, and the merger's minted token for it."""
+    an http(s) fetch url must equal, and the merger's minted token for it.
+
+    *temp_parent* is the directory the fetch's own private temporary directories
+    are created under; None keeps the temporary-directory default."""
 
     anchor_url: str
     token: str = field(repr=False)
+    temp_parent: str | None = None
+
+    def with_temp_parent(self, temp_parent: str | None) -> "MergeFetchAuth":
+        """This auth with *temp_parent* set; unchanged when *temp_parent* is None."""
+        return self if temp_parent is None else replace(self, temp_parent=temp_parent)
 
 
 def _remote_for(git_tree: Path, base_branch: str) -> str:
@@ -95,6 +103,7 @@ def require_fetch_destination(
             _remote_for(git_tree, base_branch),
             anchor_url=fetch_auth.anchor_url if fetch_auth is not None else None,
             git_cwd=git_tree,
+            temp_parent=fetch_auth.temp_parent if fetch_auth is not None else None,
         )
     except guard.DestinationDeniedError as exc:
         raise MergeFetchDeniedError(_DENIED_MESSAGES[exc.category]) from exc
@@ -119,6 +128,7 @@ def fetch_from_tracking_remote(
             target,
             fetch_auth.token if fetch_auth is not None else None,
             git_tree,
+            temp_parent=fetch_auth.temp_parent if fetch_auth is not None else None,
         )
     except (RepoLocalConfigHazardError, GitVersionTooOldError) as exc:
         raise MergeFetchDeniedError(str(exc)) from exc

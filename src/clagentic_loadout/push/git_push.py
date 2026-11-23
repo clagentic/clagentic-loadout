@@ -646,7 +646,13 @@ _HERMETIC_ARGV_PREFIX = ["-c", "credential.helper="]
 
 @contextlib.contextmanager
 def _destination_git_env(
-    remote: str, token: str | None, *, push: bool, git_cwd: Path | None, force_trace: bool = False
+    remote: str,
+    token: str | None,
+    *,
+    push: bool,
+    git_cwd: Path | None,
+    force_trace: bool = False,
+    temp_parent: str | None = None,
 ):
     """The git environment for a call to *remote*: token-carrying only when the
     destination is not local. A local or file:// push runs the destination
@@ -655,13 +661,19 @@ def _destination_git_env(
     a local transport needs no credential. *push* selects the push or the fetch
     destination set. A set mixing local and network destinations raises
     DestinationDeniedError."""
-    carried = None if destinations_are_local(remote, push=push, git_cwd=git_cwd) else token
-    with _credentialed_git_env(carried, force_trace=force_trace) as env:
+    carried = (
+        None
+        if destinations_are_local(remote, push=push, git_cwd=git_cwd, temp_parent=temp_parent)
+        else token
+    )
+    with _credentialed_git_env(carried, force_trace=force_trace, temp_parent=temp_parent) as env:
         yield env
 
 
 @contextlib.contextmanager
-def _credentialed_git_env(token: str | None, *, force_trace: bool = False):
+def _credentialed_git_env(
+    token: str | None, *, force_trace: bool = False, temp_parent: str | None = None
+):
     """Construct the isolated, token-injected, HERMETIC environment every
     credentialed git subprocess in this module runs under, and yield it.
 
@@ -708,9 +720,10 @@ def _credentialed_git_env(token: str | None, *, force_trace: bool = False):
     runs BEFORE this context manager is ever entered.
 
     The whole token-carrying temp dir is removed when the context exits,
-    regardless of what the caller did inside it.
+    regardless of what the caller did inside it. It is created under
+    *temp_parent* (None: the temporary directory).
     """
-    tmp_dir = tempfile.mkdtemp(prefix="loadout_push_")
+    tmp_dir = tempfile.mkdtemp(prefix="loadout_push_", dir=temp_parent)
     try:
         isolated_home = os.path.join(tmp_dir, "home")
         os.makedirs(isolated_home, exist_ok=True)
@@ -797,6 +810,8 @@ def git_fetch_with_token(
     branch: str,
     token: str | None,
     git_cwd: Path | None = None,
+    *,
+    temp_parent: str | None = None,
 ) -> None:
     """Fetch *branch* from *remote* using *token* for authentication (None:
     the same hermetic fetch with no credential at all), via
@@ -826,7 +841,9 @@ def git_fetch_with_token(
     always exist and must never be allowed to silently win).
     """
     _hermeticity_preflight(f"fetch {branch!r} from the tracking remote", git_cwd)
-    with _destination_git_env(remote, token, push=False, git_cwd=git_cwd) as env:
+    with _destination_git_env(
+        remote, token, push=False, git_cwd=git_cwd, temp_parent=temp_parent
+    ) as env:
         result = subprocess.run(
             ["git", *_HERMETIC_ARGV_PREFIX, "fetch", remote, branch],
             capture_output=True,
@@ -850,6 +867,8 @@ def git_ls_remote_with_token(
     ref: str,
     token: str,
     git_cwd: Path | None = None,
+    *,
+    temp_parent: str | None = None,
 ) -> subprocess.CompletedProcess:
     """Run `git ls-remote --exit-code <remote> refs/heads/<ref>` through the
     SAME credentialed, hermetic envelope the push itself used, and return the
@@ -861,7 +880,9 @@ def git_ls_remote_with_token(
     hermeticity pre-flight as push and fetch, same fail-closed errors.
     """
     _hermeticity_preflight(f"read back {ref!r} from the tracking remote", git_cwd)
-    with _destination_git_env(remote, token, push=False, git_cwd=git_cwd) as env:
+    with _destination_git_env(
+        remote, token, push=False, git_cwd=git_cwd, temp_parent=temp_parent
+    ) as env:
         result = subprocess.run(
             ["git", *_HERMETIC_ARGV_PREFIX, "ls-remote", "--exit-code", remote, f"refs/heads/{ref}"],
             capture_output=True,
@@ -942,6 +963,7 @@ def git_push_with_token(
     other_platform_label: str | None = None,
     dry_run: bool = False,
     verbose: bool = False,
+    temp_parent: str | None = None,
 ) -> str | None:
     """Push *branch* to *remote* using *token* for authentication, via
     GIT_ASKPASS (never the remote URL, never git config, never argv) — see
@@ -1003,7 +1025,7 @@ def git_push_with_token(
     """
     _hermeticity_preflight(f"push {branch!r} to the tracking remote", git_cwd)
     with _destination_git_env(
-        remote, token, push=True, git_cwd=git_cwd, force_trace=verbose
+        remote, token, push=True, git_cwd=git_cwd, force_trace=verbose, temp_parent=temp_parent
     ) as env:
         refspec = f"{branch}:{branch}"
         push_cmd = ["git", *_HERMETIC_ARGV_PREFIX, "push", remote, refspec, "--set-upstream"]
@@ -1029,7 +1051,7 @@ def git_push_with_token(
             # SAME choke point every other field in this module uses
             # (push.push_redaction), never a second implementation.
             dry_run_transcript = _redacted_transcript(
-                result, token, push_locations(remote, git_cwd=git_cwd)
+                result, token, push_locations(remote, git_cwd=git_cwd, temp_parent=temp_parent)
             )
             print(f"push: --dry-run transcript -- {dry_run_transcript}", file=sys.stderr)
 

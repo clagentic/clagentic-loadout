@@ -114,12 +114,14 @@ class DestinationDeniedError(Exception):
         self.category = category
 
 
-def _git_lines(args: list[str], git_cwd: Path | None) -> list[str] | None:
+def _git_lines(
+    args: list[str], git_cwd: Path | None, temp_parent: str | None = None
+) -> list[str] | None:
     """stdout lines of `git <args>` under the neutralized environment, or None
     when git exits non-zero. HOME and XDG_CONFIG_HOME point at an empty
-    directory so a git older than the GIT_CONFIG_GLOBAL redirect still reads
-    no user config."""
-    with tempfile.TemporaryDirectory(prefix="loadout_dest_") as empty_home:
+    directory (created under *temp_parent*, None: the temporary directory) so a
+    git older than the GIT_CONFIG_GLOBAL redirect still reads no user config."""
+    with tempfile.TemporaryDirectory(prefix="loadout_dest_", dir=temp_parent) as empty_home:
         env = neutralize_ambient_git_env(os.environ.copy())
         env["HOME"] = empty_home
         env["XDG_CONFIG_HOME"] = empty_home
@@ -193,25 +195,27 @@ def _anchor_authority(anchor_url: str) -> tuple[str, int]:
 
 
 def _destination_urls(
-    tracking_remote_name: str, *, push: bool, git_cwd: Path | None
+    tracking_remote_name: str, *, push: bool, git_cwd: Path | None, temp_parent: str | None = None
 ) -> list[str]:
     """Every URL git would use for *tracking_remote_name*, or raise.
 
     A name that is not listed by `git remote` is refused first: that is what
     separates a URL-valued `branch.<name>.remote` from an alias."""
-    configured = _git_lines(["remote"], git_cwd)
+    configured = _git_lines(["remote"], git_cwd, temp_parent)
     if configured is None:
         raise DestinationDeniedError(CATEGORY_UNRESOLVED)
     if tracking_remote_name not in configured:
         raise DestinationDeniedError(CATEGORY_NOT_CONFIGURED)
-    return _resolved_urls(tracking_remote_name, push=push, git_cwd=git_cwd)
+    return _resolved_urls(tracking_remote_name, push=push, git_cwd=git_cwd, temp_parent=temp_parent)
 
 
-def _resolved_urls(name: str, *, push: bool, git_cwd: Path | None) -> list[str]:
+def _resolved_urls(
+    name: str, *, push: bool, git_cwd: Path | None, temp_parent: str | None = None
+) -> list[str]:
     args = ["remote", "get-url", "--all"]
     if push:
         args.append("--push")
-    urls = _git_lines([*args, "--", name], git_cwd)
+    urls = _git_lines([*args, "--", name], git_cwd, temp_parent)
     if not urls:
         raise DestinationDeniedError(CATEGORY_UNRESOLVED)
     return urls
@@ -222,33 +226,43 @@ def _refuse_mixed(urls: list[str]) -> None:
         raise DestinationDeniedError(CATEGORY_MIXED_TRANSPORT)
 
 
-def destinations_are_local(remote: str, *, push: bool, git_cwd: Path | None = None) -> bool:
+def destinations_are_local(
+    remote: str, *, push: bool, git_cwd: Path | None = None, temp_parent: str | None = None
+) -> bool:
     """True when every destination a git call to *remote* reaches is local, so
     the call must run without a credential; False when none is. A *remote* that
     is not a configured name is itself the destination (git accepts a URL or a
     path there). A set mixing the two kinds raises DestinationDeniedError: no
     single environment is right for both."""
-    configured = _git_lines(["remote"], git_cwd)
+    configured = _git_lines(["remote"], git_cwd, temp_parent)
     if configured is not None and remote in configured:
-        urls = _resolved_urls(remote, push=push, git_cwd=git_cwd)
+        urls = _resolved_urls(remote, push=push, git_cwd=git_cwd, temp_parent=temp_parent)
     else:
         urls = [remote]
     _refuse_mixed(urls)
     return _is_local(urls[0])
 
 
-def push_locations(remote: str, *, git_cwd: Path | None = None) -> tuple[str, ...]:
+def push_locations(
+    remote: str, *, git_cwd: Path | None = None, temp_parent: str | None = None
+) -> tuple[str, ...]:
     """Every location a push to *remote* can name in git's output: the push URLs
     of a configured remote name, or *remote* itself when it is not a name. Empty
     when a configured name does not resolve."""
-    configured = _git_lines(["remote"], git_cwd)
+    configured = _git_lines(["remote"], git_cwd, temp_parent)
     if configured is not None and remote in configured:
-        return tuple(_git_lines(["remote", "get-url", "--all", "--push", "--", remote], git_cwd) or ())
+        return tuple(
+            _git_lines(["remote", "get-url", "--all", "--push", "--", remote], git_cwd, temp_parent) or ()
+        )
     return (remote,)
 
 
 def check_push_destination(
-    tracking_remote_name: str, *, anchor_url: str, git_cwd: Path | None = None
+    tracking_remote_name: str,
+    *,
+    anchor_url: str,
+    git_cwd: Path | None = None,
+    temp_parent: str | None = None,
 ) -> None:
     """Refuse (DestinationDeniedError) unless every push destination AND every
     fetch destination of *tracking_remote_name* may receive the token. The
@@ -257,7 +271,9 @@ def check_push_destination(
     host and port an http(s) destination must equal."""
     anchor = _anchor_authority(anchor_url)
     for push in (True, False):
-        urls = _destination_urls(tracking_remote_name, push=push, git_cwd=git_cwd)
+        urls = _destination_urls(
+            tracking_remote_name, push=push, git_cwd=git_cwd, temp_parent=temp_parent
+        )
         _refuse_mixed(urls)
         for url in urls:
             category = _violation(url, anchor)
@@ -266,7 +282,11 @@ def check_push_destination(
 
 
 def check_fetch_destination(
-    tracking_remote_name: str, *, anchor_url: str | None, git_cwd: Path | None = None
+    tracking_remote_name: str,
+    *,
+    anchor_url: str | None,
+    git_cwd: Path | None = None,
+    temp_parent: str | None = None,
 ) -> None:
     """Refuse (DestinationDeniedError) unless every FETCH destination of
     *tracking_remote_name* may be reached by a git call: an http(s) URL on the
@@ -276,7 +296,9 @@ def check_fetch_destination(
     reaches a fetch). *anchor_url* None means no platform host is known, so any
     http(s) destination is refused and only local ones pass."""
     anchor = _anchor_authority(anchor_url) if anchor_url is not None else None
-    urls = _destination_urls(tracking_remote_name, push=False, git_cwd=git_cwd)
+    urls = _destination_urls(
+        tracking_remote_name, push=False, git_cwd=git_cwd, temp_parent=temp_parent
+    )
     _refuse_mixed(urls)
     for url in urls:
         category = _violation(url, anchor)

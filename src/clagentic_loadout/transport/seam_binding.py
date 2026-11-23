@@ -312,6 +312,43 @@ def _prepare_staging_root(root: str) -> None:
         raise AttestationError(f"{STAGING_ROOT_KEY}: cannot create staging root {root!r}: {exc}") from exc
 
 
+def staging_temp_parent(
+    identity: Identity | None,
+    *,
+    config_root: str | Path | None = None,
+) -> str | None:
+    """The directory a verb's own temporary directories are created under: the
+    rendered `identity.staging_root` (created 0700 if absent) for an identity
+    verified by an assertion provider when that key is set, else None.
+
+    None means "keep today's location" (the temp-directory default, or the
+    inherited TMPDIR). Unlike `staging_env`, an unset key never falls back to the
+    delivery directory's `tmp/`, so a verb that does not opt in to the key sees
+    no change. Static, legacy and module identities are never rooted here."""
+    from clagentic_loadout.identity.config import load_identity_config
+
+    if not isinstance(identity, SeamIdentity) or not identity.dir:
+        return None
+    if not _is_verified(identity.provider):
+        return None
+    try:
+        template = load_identity_config(config_root=config_root).staging_root
+    except IdentityError as exc:
+        raise AttestationError(f"identity provider refused: {exc}") from exc
+    if template is None:
+        return None
+    root = _render_staging_root(template, actor=identity.actor, sid=identity.sid, spawn=identity.spawn)
+    _prepare_staging_root(root)
+    return root
+
+
+def temp_parent_kwargs(temp_parent: str | None) -> dict[str, str]:
+    """`temp_parent` as a keyword argument when one is set, else empty, so a call
+    that passes `**temp_parent_kwargs(...)` is byte-for-byte the existing call
+    when `staging_temp_parent` returned None."""
+    return {} if temp_parent is None else {"temp_parent": temp_parent}
+
+
 def staging_env(
     identity: Identity,
     env: Mapping[str, str] | None = None,

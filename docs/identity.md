@@ -195,6 +195,20 @@ the path and the condition, and is never repaired. With the key unset the root i
 before. The key has no effect under `static`, `module` or a legacy answer. It is a
 location only: it grants no access to the directory it names.
 
+With the key set and the identity verified, the verbs' other temporary directories are
+created under the same rendered root instead of the system temporary directory:
+
+| Verb | Temporary directory |
+|---|---|
+| `loadout-merge` | the pre-check merge-result clone (`loadout-precheck-*`), the clone built to read the merged commit's post-merge steps, the private per-step directory of a sandboxed pre-check or post-merge step (`pre-check-*`), and the scratch directories of its git fetches |
+| `loadout-post-merge` | the private per-step directory of a sandboxed step (`pre-check-*`), and the scratch directories of its git fetches |
+| `loadout-review run` | each chunk working directory |
+| `loadout-push` | the credential and empty-home directories of its git calls (`loadout_push_*`, `loadout_dest_*`) |
+
+With the key unset these stay where they were, including under a verified identity: they
+do not follow the `<dir>/tmp/` fallback above. `clagentic-loadout test`'s report scratch is not
+moved: it must stay reachable by the user the test command runs as.
+
 `loadout-doctor` reports the provider, the key-set sources it trusts, the
 `self_declared` flag and the number of `prefer-assertion` fallbacks the filesystem
 telemetry sink has recorded (advisory, always exit 0). Under `assertion-or-legacy` it

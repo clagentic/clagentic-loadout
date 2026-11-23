@@ -160,6 +160,7 @@ def read_remote_head(
     project_root: Path,
     *,
     token: str | None = None,
+    temp_parent: str | None = None,
 ) -> RemoteReadback:
     """Read *ref*'s current SHA on *remote* via `git ls-remote` — an actual
     round-trip to the remote, never a local/cached value.
@@ -183,7 +184,9 @@ def read_remote_head(
     """
     if token:
         try:
-            result = git_ls_remote_with_token(remote, ref, token, project_root)
+            result = git_ls_remote_with_token(
+                remote, ref, token, project_root, temp_parent=temp_parent
+            )
         except (GitVersionTooOldError, RepoLocalConfigHazardError, DestinationDeniedError) as exc:
             raise RemoteReadbackError(
                 f"post-push remote readback FAILED -- hermeticity pre-flight "

@@ -227,9 +227,10 @@ def _resume_key(
     return digest.hexdigest()[:16]
 
 
-def fresh_chunk_workdir() -> Path:
+def fresh_chunk_workdir(temp_parent: str | Path | None = None) -> Path:
     """A new, empty, uniquely named working directory for one chunk attempt,
-    under the temporary directory and outside the run directory.
+    under *temp_parent* (None: the temporary directory) and outside the run
+    directory.
 
     The run directory holds every chunk's persisted result and the merged
     findings; an engine started inside it (or in a directory beside it) can
@@ -240,7 +241,7 @@ def fresh_chunk_workdir() -> Path:
 
     A directory is never reused, so a failed cleanup can never surface an
     earlier attempt's artifacts. Raises OSError when it cannot be made."""
-    return Path(tempfile.mkdtemp(prefix=CHUNK_WORKDIR_PREFIX))
+    return Path(tempfile.mkdtemp(prefix=CHUNK_WORKDIR_PREFIX, dir=temp_parent))
 
 
 def discard_chunk_workdir(path: Path) -> None:
@@ -497,6 +498,7 @@ class _PassPlan:
     resume_rules: str
     call_sites_note: str = ""
     removed_note: str = ""
+    temp_parent: str | Path | None = None
 
 
 def _run_pass(
@@ -571,7 +573,11 @@ def _run_pass(
     def work(chunk: Chunk) -> dict[str, Any]:
         previous = _load_record(state_dir, chunk.index) or {}
         try:
-            chunk_cwd = fresh_chunk_workdir()
+            chunk_cwd = (
+                fresh_chunk_workdir()
+                if plan.temp_parent is None
+                else fresh_chunk_workdir(plan.temp_parent)
+            )
         except OSError as exc:
             # Persisted through the same write below as any other attempt
             # outcome, so the attempt count and retriable=false survive a resume.
@@ -698,8 +704,10 @@ def run_review(
     call_sites_note: str = "",
     removed_note: str = "",
     removed_behaviour: dict[str, Any] | None = None,
+    temp_parent: str | Path | None = None,
 ) -> RunOutcome:
-    """Drive one invocation of the review pipeline for *acquired*. With
+    """Drive one invocation of the review pipeline for *acquired*. Chunk working
+    directories are created under *temp_parent* (None: the temporary directory). With
     *delta*, *acquired* already holds the delta diff and each chunk is framed
     by review.delta; *delta_stage* is the decision between delta and full,
     reported once right after "acquired". *unknown_resolutions*, given only
@@ -784,6 +792,7 @@ def run_review(
         resume_rules="\0".join(class_rules[chunk.index] for chunk in chunks),
         call_sites_note=call_sites_note,
         removed_note=removed_note,
+        temp_parent=temp_parent,
     )
     # A delta review accounts for the findings a prior review left open, which is
     # one judgment of one pass; the passes are for a full review.
