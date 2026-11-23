@@ -513,6 +513,9 @@ _TMPDIR_ENV_VAR = "TMPDIR"
 #: root -- so a harness populating this file can never collide with any
 #: other per-spawn scratch content sharing the same TMPDIR.
 _BODY_ENV_SUBDIR = "clagentic-loadout"
+#: Exported name of the same subdirectory, so a staging root can be prepared
+#: without reaching for the private constant.
+BODY_ENV_SUBDIR = _BODY_ENV_SUBDIR
 
 #: The fixed filename within `_BODY_ENV_SUBDIR`. Callers never choose this
 #: name -- see the module docstring for why a fixed, non-caller-supplied
@@ -1707,6 +1710,7 @@ def claim_caller_body(
 
 __all__ = [
     "BODY_ENV_NOT_EPHEMERAL_NOTE",
+    "BODY_ENV_SUBDIR",
     "BODY_STDIN_CONTRACT_GUIDANCE",
     "BodyEnvError",
     "ClaimedBody",

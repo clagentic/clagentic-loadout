@@ -715,3 +715,175 @@ def test_prefer_assertion_through_a_verb_accepts_only_a_per_spawn_sidecar(
         assert rc == verb.EXIT_CALLER_INVOKER_MISMATCH and tokens.resolved_for == []
         assert DIR_VAR in captured.err
     assert captured.err.count("prefer-assertion is using the legacy") == 1
+
+
+# --- identity.staging_root: the staging root as a template over the verified claims ------
+
+
+def _staging_identity(monkeypatch, tmp_path, template, **claims) -> Path:
+    """Gatekeeper config with *template* (`ROOT` stands for a per-test scratch root;
+    None leaves the key unset) and the verified identity in the process env. Returns
+    the scratch root."""
+    issuer = Issuer()
+    jwks = issuer.write_jwks(tmp_path / "jwks.json")
+    scratch = tmp_path / "scratch"
+    cfg = {"provider": "gatekeeper", "gatekeeper": {"jwks": jwks, "issuer": ISSUER}}
+    if template is not None:
+        cfg["staging_root"] = template.replace("ROOT", str(scratch))
+    _use_config(monkeypatch, tmp_path, cfg)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "ambient-tmp"))
+    claims.setdefault("sub", "agent:x")
+    claims.setdefault("sid", "s1")
+    for key, value in _assertion_env(tmp_path, issuer, "delivery", **claims).items():
+        monkeypatch.setenv(key, value)
+    return scratch
+
+
+def _draft_path(capsys) -> Path:
+    from clagentic_loadout.transport import stage_body_verb
+
+    assert stage_body_verb.main(["--caller", "builder", "--show-draft-path"]) == 0
+    return Path(capsys.readouterr().out.strip())
+
+
+def _stage_draft(path: Path) -> int:
+    from clagentic_loadout.transport import stage_body_verb
+
+    path.write_text('{"body": "hello"}')
+    return stage_body_verb.main(["--caller", "builder", "--target-pr", "7", "--body-draft"])
+
+
+@pytest.mark.parametrize(
+    "template,claims,rel",
+    [
+        ("ROOT/{actor_name}/{sid}", {}, "x/s1"),
+        ("ROOT/{actor_name}/{spawn}", {"spawn": "sp9"}, "x/sp9"),
+        ("ROOT/{actor_name}-{sid}-{spawn}", {"spawn": "sp9", "sub": "runtime:y"}, "y-s1-sp9"),
+    ],
+)
+def test_staging_root_template_roots_the_draft_and_the_stage(
+    monkeypatch, tmp_path, capsys, template, claims, rel
+) -> None:
+    scratch = _staging_identity(monkeypatch, tmp_path, template, **claims)
+    path = _draft_path(capsys)
+    assert path == scratch / rel / "clagentic-loadout" / "draft.builder.json"
+    assert _stage_draft(path) == 0
+    assert (scratch / rel / "clagentic-loadout" / "body.builder.json").is_file()
+    assert not (tmp_path / "delivery" / "tmp").exists()
+
+
+def test_staging_root_unset_keeps_the_delivery_tmp_path(monkeypatch, tmp_path, capsys) -> None:
+    _staging_identity(monkeypatch, tmp_path, None)
+    path = _draft_path(capsys)
+    assert str(path) == str(tmp_path / "delivery" / "tmp" / "clagentic-loadout" / "draft.builder.json")
+    # Unset keeps today's behavior: the delivery tmp dir is the writer's to create.
+    path.parent.mkdir(parents=True)
+    assert _stage_draft(path) == 0
+
+
+def test_staging_root_separates_actors_and_spawns(monkeypatch, tmp_path, capsys) -> None:
+    roots = set()
+    for index, (sub, sid) in enumerate([("agent:x", "s1"), ("agent:y", "s1"), ("agent:x", "s2")]):
+        sub_path = tmp_path / f"case{index}"
+        sub_path.mkdir()
+        _staging_identity(monkeypatch, sub_path, "ROOT/{actor_name}/{sid}", sub=sub, sid=sid)
+        roots.add(_draft_path(capsys).parent)
+    assert len(roots) == 3
+
+
+@pytest.mark.parametrize(
+    "template,claims,needles",
+    [
+        ("ROOT/{actor_name}", {}, ["identity.staging_root", "ROOT/{actor_name}", "no per-spawn placeholder"]),
+        ("ROOT/{actor_name}/{sid}/{bogus}", {}, ["identity.staging_root", "ROOT/{actor_name}/{sid}/{bogus}", "{bogus}"]),
+        ("ROOT/{actor_name}/{sid!r}", {}, ["identity.staging_root", "{sid}"]),
+        ("{actor_name}/{sid}/rel", {}, ["identity.staging_root", "{actor_name}/{sid}/rel", "not an absolute path"]),
+        ("ROOT/{actor_name}/{sid}", {"sid": "a/b"}, ["identity.staging_root", "ROOT/{actor_name}/{sid}", "{sid}", "'a/b'"]),
+        ("ROOT/{actor_name}/{sid}", {"sid": ".."}, ["identity.staging_root", "{sid}", "'..'"]),
+        ("ROOT/{actor_name}/{spawn}", {}, ["identity.staging_root", "ROOT/{actor_name}/{spawn}", "{spawn}", "no such claim"]),
+        ("ROOT/{actor_name}/{sid}/..", {}, ["identity.staging_root", "ROOT/{actor_name}/{sid}/..", "'..' path segment"]),
+        ("ROOT/{sid}", {}, ["identity.staging_root", "ROOT/{sid}", "names no {actor_name} placeholder"]),
+    ],
+)
+def test_a_staging_root_that_cannot_render_is_refused_with_no_fallback(
+    monkeypatch, tmp_path, capsys, template, claims, needles
+) -> None:
+    from clagentic_loadout.transport import stage_body_verb
+
+    scratch = _staging_identity(monkeypatch, tmp_path, template, **claims)
+    rc = stage_body_verb.main(["--caller", "builder", "--show-draft-path"])
+    captured = capsys.readouterr()
+    assert rc == stage_body_verb.EXIT_CALLER_INVOKER_MISMATCH and captured.out == ""
+    for needle in needles:
+        assert needle.replace("ROOT", str(scratch)) in captured.err, captured.err
+    assert not scratch.exists() and not (tmp_path / "delivery" / "tmp").exists()
+
+
+def test_a_staging_root_template_is_refused_at_load_when_not_a_string(monkeypatch, tmp_path) -> None:
+    from clagentic_loadout.identity.config import load_identity_config
+    from clagentic_loadout.identity.errors import CONFIG_INVALID, IdentityError
+
+    cfg = write_config(tmp_path / "cfg", {"staging_root": ["a"]})
+    with pytest.raises(IdentityError, match="identity.staging_root") as info:
+        load_identity_config(config_root=cfg)
+    assert info.value.code == CONFIG_INVALID
+
+
+@pytest.mark.parametrize("kind", ["static", "legacy", "module"])
+def test_staging_root_has_no_effect_without_a_verified_assertion(monkeypatch, tmp_path, kind) -> None:
+    scratch = tmp_path / "scratch"
+    _use_config(monkeypatch, tmp_path, {**_static(["builder"]), "staging_root": f"{scratch}/{{actor_name}}/{{sid}}"})
+    identity = identity_for_actor(
+        Actor(
+            sub="builder-bot", actor="builder-bot", chain=("builder-bot",), roles=("builder",),
+            grade="workload", origin=kind, provider="declared" if kind == "static" else f"{kind}:x",
+            self_declared=True, dir="<unused-dir>", sid="s1",
+        ),
+        caller_explicit=True,
+    )
+    assert staging_env(identity) is None
+    assert not scratch.exists()
+
+
+@pytest.mark.parametrize("plant,needle", [("symlink", "a symlink"), ("root-777", "0o777"), ("subdir-777", "0o777")])
+def test_a_staging_root_that_is_not_a_private_directory_is_refused(
+    monkeypatch, tmp_path, capsys, plant, needle
+) -> None:
+    from clagentic_loadout.transport import stage_body_verb
+
+    scratch = _staging_identity(monkeypatch, tmp_path, "ROOT/{actor_name}/{sid}")
+    root = scratch / "x" / "s1"
+    elsewhere = tmp_path / "elsewhere"
+    root.parent.mkdir(parents=True)
+    if plant == "symlink":
+        elsewhere.mkdir()
+        root.symlink_to(elsewhere)
+    else:
+        planted = root if plant == "root-777" else root / "clagentic-loadout"
+        planted.mkdir(parents=True)
+        planted.chmod(0o777)
+    rc = stage_body_verb.main(["--caller", "builder", "--show-draft-path"])
+    captured = capsys.readouterr()
+    assert rc == stage_body_verb.EXIT_CALLER_INVOKER_MISMATCH and captured.out == ""
+    assert "identity.staging_root" in captured.err and needle in captured.err, captured.err
+    assert str(root) in captured.err
+    assert not (elsewhere / "clagentic-loadout").exists()
+
+
+def test_the_staging_root_is_created_0700_for_stage_and_acquire_scratch(monkeypatch, tmp_path, capsys) -> None:
+    scratch = _staging_identity(monkeypatch, tmp_path, "ROOT/{actor_name}/{sid}")
+    assert not scratch.exists()
+    assert _stage_draft(_draft_path(capsys)) == 0
+    root = scratch / "x" / "s1"
+    assert (root.stat().st_mode & 0o777, (root / "clagentic-loadout").stat().st_mode & 0o777) == (0o700, 0o700)
+
+    from clagentic_loadout.acquire import verb
+    from tests.test_acquire_verb import _RecordingTokenProvider, _forgejo_opener
+
+    rc = verb.main(
+        ["--caller", "builder", "--platform", "forgejo", "--git-host-base-url", "http://git-host.example.com",
+         "--stage-scratch", "some-owner/some-repo", "42"],
+        token_provider=_RecordingTokenProvider(), opener=_forgejo_opener(),
+    )
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["scratch_root"].startswith(str(root / "clagentic-loadout-acquire"))
