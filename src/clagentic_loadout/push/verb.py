@@ -348,7 +348,12 @@ from clagentic_loadout.transport.caller_binding import (
     describe_omitted_caller_behavior as _describe_omitted_caller,
     resolve_for_binding as _resolve_for_binding,
 )
-from clagentic_loadout.transport.seam_binding import provider_fields, staging_kwargs, staging_temp_parent
+from clagentic_loadout.transport.seam_binding import (
+    provider_fields,
+    staging_kwargs,
+    staging_temp_parent,
+    temp_parent_kwargs,
+)
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -1294,7 +1299,7 @@ def _run_branch_commit_check(
     try:
         check_branch_for_stray_merge_commits(
             project_root, base_branch, merge_method=merge_method, remote=remote, skip=False,
-            token=token, temp_parent=temp_parent,
+            token=token, **temp_parent_kwargs(temp_parent),
         )
     except CommitCheckUnavailableError as exc:
         print(
@@ -1352,7 +1357,8 @@ def _run_task_id_guard_commit_check(
 
     try:
         subjects = fetch_branch_commit_subjects(
-            project_root, base_branch, remote=remote, token=token, temp_parent=temp_parent
+            project_root, base_branch, remote=remote, token=token,
+            **temp_parent_kwargs(temp_parent),
         )
     except CommitCheckUnavailableError as exc:
         print(
@@ -1870,7 +1876,7 @@ def _perform_remote_readback(
     """
     try:
         readback = read_remote_head(
-            remote, branch, project_root, token=token, temp_parent=temp_parent
+            remote, branch, project_root, token=token, **temp_parent_kwargs(temp_parent)
         )
     except RemoteReadbackError as exc:
         print(
@@ -2732,7 +2738,8 @@ def _run_create_pr(
     anchor_url = f"https://{DEFAULT_GITHUB_HOSTNAME}" if args.platform == PLATFORM_GITHUB else api_base
     try:
         check_push_destination(
-            remote_name, anchor_url=anchor_url, git_cwd=project_root, temp_parent=temp_parent
+            remote_name, anchor_url=anchor_url, git_cwd=project_root,
+            **temp_parent_kwargs(temp_parent),
         )
     except DestinationDeniedError as exc:
         _fail(str(exc), code=EXIT_REMOTE_ERROR)
@@ -2864,7 +2871,9 @@ def _run_create_pr(
     remote_branch_ref: str | None = None
     if effective_bot_name and effective_bot_email:
         try:
-            git_fetch_with_token(remote_name, branch, token, project_root, temp_parent=temp_parent)
+            git_fetch_with_token(
+                remote_name, branch, token, project_root, **temp_parent_kwargs(temp_parent)
+            )
         except GitFetchError as exc:
             print(
                 f"push: WARNING -- could not refresh the remote copy of {branch!r} "
@@ -2946,7 +2955,7 @@ def _run_create_pr(
             other_platform_label=other_platform_label,
             dry_run=args.dry_run,
             verbose=args.verbose,
-            temp_parent=temp_parent,
+            **temp_parent_kwargs(temp_parent),
         )
     except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
         _fail(str(exc), code=EXIT_HERMETICITY_FAILED)

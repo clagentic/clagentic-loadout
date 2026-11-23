@@ -342,6 +342,13 @@ def staging_temp_parent(
     return root
 
 
+def temp_parent_kwargs(temp_parent: str | None) -> dict[str, str]:
+    """`temp_parent` as a keyword argument when one is set, else empty, so a call
+    that passes `**temp_parent_kwargs(...)` is byte-for-byte the existing call
+    when `staging_temp_parent` returned None."""
+    return {} if temp_parent is None else {"temp_parent": temp_parent}
+
+
 def staging_env(
     identity: Identity,
     env: Mapping[str, str] | None = None,

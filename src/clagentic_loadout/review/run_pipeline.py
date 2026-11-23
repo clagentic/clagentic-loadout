@@ -573,7 +573,11 @@ def _run_pass(
     def work(chunk: Chunk) -> dict[str, Any]:
         previous = _load_record(state_dir, chunk.index) or {}
         try:
-            chunk_cwd = fresh_chunk_workdir(plan.temp_parent)
+            chunk_cwd = (
+                fresh_chunk_workdir()
+                if plan.temp_parent is None
+                else fresh_chunk_workdir(plan.temp_parent)
+            )
         except OSError as exc:
             # Persisted through the same write below as any other attempt
             # outcome, so the attempt count and retriable=false survive a resume.

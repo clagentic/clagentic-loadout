@@ -22,7 +22,11 @@ import pytest
 from clagentic_loadout.merge import verb as merge_verb
 from clagentic_loadout.push.git_push import _credentialed_git_env
 from clagentic_loadout.review.run_pipeline import CHUNK_WORKDIR_PREFIX
-from clagentic_loadout.transport.seam_binding import SeamIdentity, staging_temp_parent
+from clagentic_loadout.transport.seam_binding import (
+    SeamIdentity,
+    staging_temp_parent,
+    temp_parent_kwargs,
+)
 from tests._gate_repo import init_gate_repo
 from tests._review_cli_support import Env, write_profile_config
 from tests._support.gate_merge import run_gate_merge
@@ -210,6 +214,11 @@ def test_the_temp_parent_is_absent_unless_a_verified_identity_meets_the_key(monk
     assert staging_temp_parent(None) is None
     assert staging_temp_parent(_identity("declared")) is None
     assert not scratch.exists()
+
+
+def test_an_unset_temp_parent_adds_no_keyword_to_a_call() -> None:
+    assert temp_parent_kwargs(None) == {}
+    assert temp_parent_kwargs("/a") == {"temp_parent": "/a"}
 
 
 def test_the_credentialed_git_environment_is_made_under_the_given_parent(tmp_path) -> None:
