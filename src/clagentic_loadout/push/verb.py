@@ -348,7 +348,7 @@ from clagentic_loadout.transport.caller_binding import (
     describe_omitted_caller_behavior as _describe_omitted_caller,
     resolve_for_binding as _resolve_for_binding,
 )
-from clagentic_loadout.transport.seam_binding import provider_fields, staging_kwargs
+from clagentic_loadout.transport.seam_binding import provider_fields, staging_kwargs, staging_temp_parent
 from clagentic_loadout.transport.credential_provider import (
     CredentialProviderError,
     DEFAULT_ROLE,
@@ -1261,6 +1261,7 @@ def _run_branch_commit_check(
     merge_method: str,
     skip: bool,
     token: str | None = None,
+    temp_parent: str | None = None,
 ) -> None:
     """Push-time branch commit-subject check (lr-dd1742,
     push.branch_commit_check) -- catches a branch carrying a stray,
@@ -1293,7 +1294,7 @@ def _run_branch_commit_check(
     try:
         check_branch_for_stray_merge_commits(
             project_root, base_branch, merge_method=merge_method, remote=remote, skip=False,
-            token=token,
+            token=token, temp_parent=temp_parent,
         )
     except CommitCheckUnavailableError as exc:
         print(
@@ -1303,7 +1304,12 @@ def _run_branch_commit_check(
 
 
 def _run_task_id_guard_commit_check(
-    project_root: Path, *, base_branch: str, remote: str, token: str | None = None
+    project_root: Path,
+    *,
+    base_branch: str,
+    remote: str,
+    token: str | None = None,
+    temp_parent: str | None = None,
 ) -> None:
     """Task-id guard, branch-commit-subject surface (lr-4005f5,
     task_id_guard) -- refuses (mode="block") or warns (mode="warn") when any
@@ -1346,7 +1352,7 @@ def _run_task_id_guard_commit_check(
 
     try:
         subjects = fetch_branch_commit_subjects(
-            project_root, base_branch, remote=remote, token=token
+            project_root, base_branch, remote=remote, token=token, temp_parent=temp_parent
         )
     except CommitCheckUnavailableError as exc:
         print(
@@ -1804,6 +1810,7 @@ def _perform_remote_readback(
     project_root: Path,
     expected_bot_email: str | None,
     token: str | None = None,
+    temp_parent: str | None = None,
 ) -> dict:
     """Post-push authoritative remote state (lr-4e8a43): read the branch's
     HEAD back FROM THE REMOTE via `git ls-remote` (push.remote_readback,
@@ -1862,7 +1869,9 @@ def _perform_remote_readback(
     full rationale.
     """
     try:
-        readback = read_remote_head(remote, branch, project_root, token=token)
+        readback = read_remote_head(
+            remote, branch, project_root, token=token, temp_parent=temp_parent
+        )
     except RemoteReadbackError as exc:
         print(
             f"push: WARNING -- post-push remote readback could not confirm "
@@ -2124,6 +2133,7 @@ def _run(
             caller=args.caller or DEFAULT_ROLE,
             resolve_identity_fn=resolve_identity_fn,
         )
+        temp_parent = staging_temp_parent(attested_identity)
     except AttestationError as exc:
         _fail(f"attested-identity resolution FAILED -- {exc}", code=EXIT_CALLER_INVOKER_MISMATCH)
     caller = args.caller if args.caller is not None else attested_identity.subject
@@ -2265,7 +2275,7 @@ def _run(
         host_config_is_set=host_config_is_set,
         token_provider=token_provider, opener=opener,
         builder_identity_config_root=builder_identity_config_root,
-        staged=staged, identity_fields=identity_fields,
+        staged=staged, identity_fields=identity_fields, temp_parent=temp_parent,
     )
 
 
@@ -2657,6 +2667,7 @@ def _run_create_pr(
     builder_identity_config_root: str | Path | None = None,
     staged: _StagedBody,
     identity_fields: dict | None = None,
+    temp_parent: str | None = None,
 ) -> int:
     branch = git_coords.current_branch(project_root)
     if branch in git_coords.PROTECTED_BRANCHES:
@@ -2720,7 +2731,9 @@ def _run_create_pr(
     # urls. Runs before the mint.
     anchor_url = f"https://{DEFAULT_GITHUB_HOSTNAME}" if args.platform == PLATFORM_GITHUB else api_base
     try:
-        check_push_destination(remote_name, anchor_url=anchor_url, git_cwd=project_root)
+        check_push_destination(
+            remote_name, anchor_url=anchor_url, git_cwd=project_root, temp_parent=temp_parent
+        )
     except DestinationDeniedError as exc:
         _fail(str(exc), code=EXIT_REMOTE_ERROR)
 
@@ -2851,7 +2864,7 @@ def _run_create_pr(
     remote_branch_ref: str | None = None
     if effective_bot_name and effective_bot_email:
         try:
-            git_fetch_with_token(remote_name, branch, token, project_root)
+            git_fetch_with_token(remote_name, branch, token, project_root, temp_parent=temp_parent)
         except GitFetchError as exc:
             print(
                 f"push: WARNING -- could not refresh the remote copy of {branch!r} "
@@ -2886,10 +2899,12 @@ def _run_create_pr(
             merge_method=args.merge_method,
             skip=args.skip_branch_commit_check,
             token=token,
+            temp_parent=temp_parent,
         )
 
         _run_task_id_guard_commit_check(
             project_root, base_branch=args.base, remote=remote_name, token=token,
+            temp_parent=temp_parent,
         )
     except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
         _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
@@ -2931,6 +2946,7 @@ def _run_create_pr(
             other_platform_label=other_platform_label,
             dry_run=args.dry_run,
             verbose=args.verbose,
+            temp_parent=temp_parent,
         )
     except (GitVersionTooOldError, RepoLocalConfigHazardError) as exc:
         _fail(str(exc), code=EXIT_HERMETICITY_FAILED)
@@ -2982,7 +2998,7 @@ def _run_create_pr(
     # caller most needs to know the push landed).
     remote_readback_envelope = _perform_remote_readback(
         remote=remote_name, branch=branch, project_root=project_root,
-        expected_bot_email=effective_bot_email, token=token,
+        expected_bot_email=effective_bot_email, token=token, temp_parent=temp_parent,
     )
 
     # Verification records name the head the REMOTE now holds, read back above,
