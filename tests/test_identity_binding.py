@@ -795,13 +795,14 @@ def test_staging_root_separates_actors_and_spawns(monkeypatch, tmp_path, capsys)
     "template,claims,needles",
     [
         ("ROOT/{actor_name}", {}, ["identity.staging_root", "ROOT/{actor_name}", "no per-spawn placeholder"]),
-        ("ROOT/{sid}/{bogus}", {}, ["identity.staging_root", "ROOT/{sid}/{bogus}", "{bogus}"]),
-        ("ROOT/{sid!r}", {}, ["identity.staging_root", "{sid}"]),
-        ("{sid}/rel", {}, ["identity.staging_root", "{sid}/rel", "not an absolute path"]),
-        ("ROOT/{sid}", {"sid": "a/b"}, ["identity.staging_root", "ROOT/{sid}", "{sid}", "'a/b'"]),
-        ("ROOT/{sid}", {"sid": ".."}, ["identity.staging_root", "{sid}", "'..'"]),
-        ("ROOT/{spawn}", {}, ["identity.staging_root", "ROOT/{spawn}", "{spawn}", "no such claim"]),
-        ("ROOT/{sid}/..", {}, ["identity.staging_root", "ROOT/{sid}/..", "'..' path segment"]),
+        ("ROOT/{actor_name}/{sid}/{bogus}", {}, ["identity.staging_root", "ROOT/{actor_name}/{sid}/{bogus}", "{bogus}"]),
+        ("ROOT/{actor_name}/{sid!r}", {}, ["identity.staging_root", "{sid}"]),
+        ("{actor_name}/{sid}/rel", {}, ["identity.staging_root", "{actor_name}/{sid}/rel", "not an absolute path"]),
+        ("ROOT/{actor_name}/{sid}", {"sid": "a/b"}, ["identity.staging_root", "ROOT/{actor_name}/{sid}", "{sid}", "'a/b'"]),
+        ("ROOT/{actor_name}/{sid}", {"sid": ".."}, ["identity.staging_root", "{sid}", "'..'"]),
+        ("ROOT/{actor_name}/{spawn}", {}, ["identity.staging_root", "ROOT/{actor_name}/{spawn}", "{spawn}", "no such claim"]),
+        ("ROOT/{actor_name}/{sid}/..", {}, ["identity.staging_root", "ROOT/{actor_name}/{sid}/..", "'..' path segment"]),
+        ("ROOT/{sid}", {}, ["identity.staging_root", "ROOT/{sid}", "names no {actor_name} placeholder"]),
     ],
 )
 def test_a_staging_root_that_cannot_render_is_refused_with_no_fallback(
@@ -829,7 +830,9 @@ def test_a_staging_root_template_is_refused_at_load_when_not_a_string(monkeypatc
 
 
 @pytest.mark.parametrize("kind", ["static", "legacy", "module"])
-def test_staging_root_has_no_effect_without_a_verified_assertion(kind) -> None:
+def test_staging_root_has_no_effect_without_a_verified_assertion(monkeypatch, tmp_path, kind) -> None:
+    scratch = tmp_path / "scratch"
+    _use_config(monkeypatch, tmp_path, {**_static(["builder"]), "staging_root": f"{scratch}/{{actor_name}}/{{sid}}"})
     identity = identity_for_actor(
         Actor(
             sub="builder-bot", actor="builder-bot", chain=("builder-bot",), roles=("builder",),
@@ -839,6 +842,7 @@ def test_staging_root_has_no_effect_without_a_verified_assertion(kind) -> None:
         caller_explicit=True,
     )
     assert staging_env(identity) is None
+    assert not scratch.exists()
 
 
 def test_the_staging_root_is_created_0700_for_stage_and_acquire_scratch(monkeypatch, tmp_path, capsys) -> None:

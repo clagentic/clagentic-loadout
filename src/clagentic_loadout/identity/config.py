@@ -18,7 +18,8 @@ Keys (all optional at load; `provider` is required when the seam resolves):
   identity.caller_names.actor_prefix  caller X names the actor <actor_prefix>X
   identity.caller_names.roles         map of caller name to the one role it binds as
   identity.staging_root       template for the body-staging and scratch root under an
-                              assertion provider; placeholders {actor_name}, {sid}, {spawn}
+                              assertion provider; placeholders {actor_name}, {sid}, {spawn};
+                              must name {actor_name} and {sid} or {spawn}
 """
 
 from __future__ import annotations
@@ -55,8 +56,8 @@ ASSERTION_SELECTING_PROVIDERS = (PROVIDER_PREFER_ASSERTION, PROVIDER_ASSERTION_O
 
 
 STAGING_ROOT_KEY = "identity.staging_root"
-#: Per-spawn placeholders: a template must name at least one so two spawns, and
-#: so two actors, never share a staging root.
+#: A template must name {actor_name} (two actors never share a root) and at least
+#: one per-spawn placeholder (two spawns never share a root).
 STAGING_PER_SPAWN_PLACEHOLDERS = ("sid", "spawn")
 STAGING_PLACEHOLDERS = ("actor_name", *STAGING_PER_SPAWN_PLACEHOLDERS)
 
@@ -69,8 +70,9 @@ def staging_root_parts(template: object) -> list[tuple[str, str | None]]:
     """Split a `identity.staging_root` template into `(literal, placeholder)` pairs.
 
     Raises `config_invalid` naming the key and the template when it is not a
-    string, uses an unknown placeholder (or a format spec or conversion), or names
-    no per-spawn placeholder, or has a literal '.' or '..' path segment."""
+    string, uses an unknown placeholder (or a format spec or conversion), names no
+    {actor_name}, names no per-spawn placeholder, or has a literal '.' or '..'
+    path segment."""
     if not isinstance(template, str) or not template:
         raise _invalid(f"{STAGING_ROOT_KEY} must be a non-empty string template, got {template!r}")
     parts: list[tuple[str, str | None]] = []
@@ -87,6 +89,11 @@ def staging_root_parts(template: object) -> list[tuple[str, str | None]]:
                 f"known placeholders: {', '.join(STAGING_PLACEHOLDERS)}"
             )
         parts.append((literal, field_name))
+    if not any(name == "actor_name" for _, name in parts):
+        raise _invalid(
+            f"{STAGING_ROOT_KEY} {template!r} names no {{actor_name}} placeholder; "
+            "include it so two actors never share a root"
+        )
     if not any(name in STAGING_PER_SPAWN_PLACEHOLDERS for _, name in parts):
         raise _invalid(
             f"{STAGING_ROOT_KEY} {template!r} names no per-spawn placeholder; "

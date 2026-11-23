@@ -25,7 +25,7 @@ User-level config (`~/.config/clagentic/loadout/config.yaml`), section `identity
 | `issuers` | For `jwks`: a list of `{iss, jwks?}`. `jwks` defaults to the locator the `iss` form names. |
 | `static.actor`, `static.roles` | For `static`: the declared actor and role list. |
 | `caller_names.actor_prefix`, `caller_names.roles` | Optional. A `--caller` naming the actor (see [Verb binding](#verb-binding)): the prefix to add to a bare name, and a map from name to one role. |
-| `staging_root` | Optional template for the body-staging and acquire-scratch root under `gatekeeper` and `jwks` (see [Verb binding](#verb-binding)). Placeholders `{actor_name}`, `{sid}`, `{spawn}`. Unset: `<dir>/tmp`. |
+| `staging_root` | Optional template for the body-staging and acquire-scratch root under `gatekeeper` and `jwks` (see [Verb binding](#verb-binding)). Placeholders `{actor_name}`, `{sid}`, `{spawn}`; the template must name `{actor_name}` and `{sid}` or `{spawn}`. Unset: `<dir>/tmp`. |
 
 Nothing is read from a repository-local config: a cloned repository cannot choose
 the provider, the issuers or the module.
@@ -181,9 +181,10 @@ moves the root elsewhere, for example `<scratch-root>/{actor_name}/{sid}`. Place
 | `{sid}` | The assertion `sid` claim, always present. |
 | `{spawn}` | The assertion `spawn` claim, when the assertion carries one. |
 
-The template must name `{sid}` or `{spawn}`, so two spawns, and so two actors, never
-share a root. At config load the key is refused as `config_invalid`, naming the key and
-the template, when it is not a string, uses another placeholder, or names neither. At
+The template must name `{actor_name}`, so two actors never share a root, and `{sid}` or
+`{spawn}`, so two spawns never share one. At config load the key is refused as
+`config_invalid`, naming the key and the template, when it is not a string, uses another
+placeholder, or lacks either requirement (the message says which). At
 staging time a verb is refused, naming the key, the template and the placeholder or
 value, when a referenced claim is absent, a claim value is not a single path component
 (empty, `.`, `..`, or containing `/`), or the rendered path is not absolute. There is no
