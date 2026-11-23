@@ -25,6 +25,7 @@ the one place that mapping lives:
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 from typing import Mapping
 
@@ -119,11 +120,14 @@ def configured_actor(
         template = config.staging_root
     except IdentityError as exc:
         raise AttestationError(f"identity provider refused: {exc}") from exc
-    # Rendered here as well as at staging time so a template that cannot render
-    # for this actor is refused in the binding step every verb already maps,
-    # before any call site reaches `staging_kwargs`.
+    # Rendered and prepared here as well as at staging time so a template that
+    # cannot render for this actor, or a root that is not a private directory, is
+    # refused in the binding step every verb already maps, before any call site
+    # reaches `staging_kwargs` (none of which catches the error itself).
     if template is not None and _is_verified(actor.provider) and actor.dir:
-        _render_staging_root(template, actor=actor.actor, sid=actor.sid, spawn=actor.spawn)
+        _prepare_staging_root(
+            _render_staging_root(template, actor=actor.actor, sid=actor.sid, spawn=actor.spawn)
+        )
     return actor
 
 
@@ -279,11 +283,31 @@ def _render_staging_root(
     return rendered
 
 
+def _require_private_dir(path: Path) -> None:
+    """Refuse *path* unless it is a real directory owned by this process's
+    effective user with no group or other write bit. Never repairs it: a
+    pre-existing directory is not ours to chmod or chown."""
+    info = os.lstat(path)
+    if not stat.S_ISDIR(info.st_mode):
+        problem = "a symlink" if stat.S_ISLNK(info.st_mode) else "not a directory"
+    elif info.st_uid != os.geteuid():
+        problem = f"owner uid {info.st_uid} not {os.geteuid()}"
+    elif info.st_mode & 0o022:
+        problem = f"mode {oct(stat.S_IMODE(info.st_mode))} is group or other writable"
+    else:
+        return
+    raise AttestationError(f"{STAGING_ROOT_KEY}: staging directory {str(path)!r} is refused: {problem}")
+
+
 def _prepare_staging_root(root: str) -> None:
-    """Create *root* and its body-staging subdirectory, mode 0700, when absent."""
+    """Create *root* and its body-staging subdirectory, mode 0700, when absent,
+    and refuse either when it is not a private directory of this user. The
+    parents above *root* are not checked."""
     try:
         Path(root).mkdir(mode=0o700, parents=True, exist_ok=True)
+        _require_private_dir(Path(root))
         (Path(root) / BODY_ENV_SUBDIR).mkdir(mode=0o700, exist_ok=True)
+        _require_private_dir(Path(root) / BODY_ENV_SUBDIR)
     except OSError as exc:
         raise AttestationError(f"{STAGING_ROOT_KEY}: cannot create staging root {root!r}: {exc}") from exc
 

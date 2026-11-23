@@ -189,7 +189,9 @@ staging time a verb is refused, naming the key, the template and the placeholder
 value, when a referenced claim is absent, a claim value is not a single path component
 (empty, `.`, `..`, or containing `/`), or the rendered path is not absolute. There is no
 fallback to another root. The root and its `clagentic-loadout` subdirectory are created
-with mode `0700` when absent. With the key unset the root is `<dir>/tmp/`, exactly as
+with mode `0700` when absent; an existing root or subdirectory that is a symlink, is not
+owned by the invoking user, or is group- or other-writable is refused, naming the key,
+the path and the condition, and is never repaired. With the key unset the root is `<dir>/tmp/`, exactly as
 before. The key has no effect under `static`, `module` or a legacy answer. It is a
 location only: it grants no access to the directory it names.
 

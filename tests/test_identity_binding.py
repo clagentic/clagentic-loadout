@@ -845,6 +845,31 @@ def test_staging_root_has_no_effect_without_a_verified_assertion(monkeypatch, tm
     assert not scratch.exists()
 
 
+@pytest.mark.parametrize("plant,needle", [("symlink", "a symlink"), ("root-777", "0o777"), ("subdir-777", "0o777")])
+def test_a_staging_root_that_is_not_a_private_directory_is_refused(
+    monkeypatch, tmp_path, capsys, plant, needle
+) -> None:
+    from clagentic_loadout.transport import stage_body_verb
+
+    scratch = _staging_identity(monkeypatch, tmp_path, "ROOT/{actor_name}/{sid}")
+    root = scratch / "x" / "s1"
+    elsewhere = tmp_path / "elsewhere"
+    root.parent.mkdir(parents=True)
+    if plant == "symlink":
+        elsewhere.mkdir()
+        root.symlink_to(elsewhere)
+    else:
+        planted = root if plant == "root-777" else root / "clagentic-loadout"
+        planted.mkdir(parents=True)
+        planted.chmod(0o777)
+    rc = stage_body_verb.main(["--caller", "builder", "--show-draft-path"])
+    captured = capsys.readouterr()
+    assert rc == stage_body_verb.EXIT_CALLER_INVOKER_MISMATCH and captured.out == ""
+    assert "identity.staging_root" in captured.err and needle in captured.err, captured.err
+    assert str(root) in captured.err
+    assert not (elsewhere / "clagentic-loadout").exists()
+
+
 def test_the_staging_root_is_created_0700_for_stage_and_acquire_scratch(monkeypatch, tmp_path, capsys) -> None:
     scratch = _staging_identity(monkeypatch, tmp_path, "ROOT/{actor_name}/{sid}")
     assert not scratch.exists()
