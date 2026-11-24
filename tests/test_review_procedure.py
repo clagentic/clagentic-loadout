@@ -161,6 +161,9 @@ def _records(spec: bool, scanner: bool, *, reject: bool) -> str:
         lines += [f"cover {cid} met" for cid in CRITERIA]
         if reject:
             lines.append(f"reject {REJECTION}")
+    if scanner and not spec:
+        # A spec row's scanner reports no hit, so there is nothing to drop there.
+        lines.append("drop s1 a test fixture")
     return "\n".join(lines) + "\n"
 
 
@@ -227,10 +230,6 @@ def test_every_printed_line_runs_as_written_in_order(world, tmp_path, capsys, ro
     skipped = {"post_clean_reject", "post_blocking_reject"} if not reject else {
         "post_clean", "post_blocking"
     }
-    if scanner and not spec:
-        # The hit stays in range and undropped, so the verdict is blocking and a clean
-        # post is refused by `post` itself; the blocking lines are the ones that run.
-        skipped |= {"post_clean", "post_clean_reject"}
     results = {}
 
     for item in payload["lines"]:
@@ -247,8 +246,9 @@ def test_every_printed_line_runs_as_written_in_order(world, tmp_path, capsys, ro
 
     assert Path(files["findings"]).is_file()
     dropped = json.loads(Path(files["dropped"]).read_text(encoding="utf-8"))
-    # A spec review keeps its one finding, tagged; the others drop it.
-    assert len(dropped) == (0 if spec else 1)
+    # A spec review keeps its one finding, tagged; the others drop it, and a non-spec
+    # scanner review drops its hit as well.
+    assert len(dropped) == (0 if spec else 1 + (1 if scanner else 0))
     assert all(entry["read_at"] == world.host.head_sha for entry in dropped)
     assert results["apply"]["read_at"] == world.host.head_sha
     assert len(results["check"]["drops"]) == len(dropped)

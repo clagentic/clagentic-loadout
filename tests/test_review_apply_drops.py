@@ -98,7 +98,7 @@ def test_drops_a_finding_and_a_hit_and_lists_the_hits(area, capsys):
     assert area.read("dropped.json") == [
         {"file": "src/f1.py", "line": 11, "rule_id": "R1", "message": "problem 1 spans lines",
          "reason": "not a defect: guarded upstream"},
-        {"file": "a/two.py", "line": 5, "rule_id": "A2", "message": "second hit",
+        {"file": "a/two.py", "line": 5, "rule_id": "scan-a.A2", "message": "second hit",
          "reason": "test fixture"},
     ]
     assert [(h["id"], h["scanner"], h["file"], h["line"], h["rule_id"]) for h in result["hits"]] == [
