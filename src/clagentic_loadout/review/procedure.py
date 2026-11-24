@@ -9,7 +9,8 @@ runs a line and it adds no refusal of its own beyond an unusable input.
 Every printed line is one physical line that runs as written: a flag name is a literal
 taken from the verb that owns it, every value is shell-quoted, and no line holds a
 placeholder, a heredoc or a shell variable. The reviewer's judgement reaches the lines
-only through a records file at a printed path (see review.apply_drops).
+only through ``--record`` arguments appended to the apply line (see review.apply_drops
+and ``records_input``); the apply line writes the records it used to the records file.
 
 Layout under ``--out DIR``: ``DIR/head`` is the stage directory, ``DIR/work`` is the
 caller's (the run directory, the records file, and every output the lines write).
@@ -26,7 +27,6 @@ from typing import Any
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO
-from clagentic_loadout.review.atomic_io import write_bytes_atomic
 from clagentic_loadout.review.profile_spec_section import show_line
 from clagentic_loadout.review.stage_manifest import MANIFEST_NAME
 
@@ -39,7 +39,7 @@ JUDGED_NAME = "judged.json"
 DROPPED_NAME = "dropped.json"
 COVERAGE_NAME = "coverage.json"
 REJECT_REASON_NAME = "reject-reason.txt"
-HITS_RECORDS_NAME = "hits-records.txt"
+RECORD_FLAG = "--record"
 HITS_JUDGED_NAME = "hits-judged.json"
 HITS_DROPPED_NAME = "hits-dropped.json"
 
@@ -68,8 +68,9 @@ def add_procedure_parser(
         help="Pin a pull request's head, stage it and print the review steps as command lines.",
         description="Reads the pull request through the host API as `stage` does (--caller "
         "binds that read), writes the head copies and their manifest under OUT/head, creates "
-        "OUT/work with an empty records file, and prints one JSON object: the pinned head, the "
-        "manifest, the files the steps read and write, and an ordered list of {step, line}. "
+        "OUT/work, and prints one JSON object: the pinned head, the "
+        "manifest, the files the steps read and write, records_input (the step that takes "
+        "records and how a record is added to its line) and an ordered list of {step, line}. "
         "Each line runs as written: no placeholder, heredoc or shell variable, every value "
         "shell-quoted. With --spec-hash the lines also read the spec's criteria, carry the "
         "coverage and add the two reject variants of the post. Nothing is run and no rule is "
@@ -206,7 +207,6 @@ def work_files(inputs: ProcedureInputs) -> dict[str, str | None]:
         "coverage": str(work / COVERAGE_NAME) if spec else None,
         "reject_reason": str(work / REJECT_REASON_NAME) if spec else None,
         "scanner_input": inputs.scanner_input,
-        "hits_records": str(work / HITS_RECORDS_NAME) if scanner else None,
         "hits_judged": str(work / HITS_JUDGED_NAME) if scanner else None,
         "hits_dropped": str(work / HITS_DROPPED_NAME) if scanner else None,
     }
@@ -240,13 +240,13 @@ def build_lines(inputs: ProcedureInputs) -> list[dict[str, str]]:
     if scanner is not None:
         add(
             STEP_HITS, "loadout-review", "apply-drops",
-            "--findings", files["findings"], "--records", files["hits_records"],
+            "--findings", files["findings"],
             "--judged-out", files["hits_judged"], "--dropped-out", files["hits_dropped"],
             "--scanner-input", scanner,
         )
     apply = [
         "loadout-review", "apply-drops",
-        "--findings", files["findings"], "--records", files["records"],
+        "--findings", files["findings"], "--records-out", files["records"],
         "--judged-out", files["judged"], "--dropped-out", files["dropped"],
         "--manifest", files["manifest"],
     ]
@@ -294,16 +294,28 @@ def build_lines(inputs: ProcedureInputs) -> list[dict[str, str]]:
     return steps
 
 
+def records_input() -> dict[str, str]:
+    """Which printed step takes the reviewer's records and how one is added to it."""
+    return {
+        "step": STEP_APPLY,
+        "flag": RECORD_FLAG,
+        "rule": (
+            f"append one shell-quoted {RECORD_FLAG} argument per record to the {STEP_APPLY} "
+            f"line; with no records the line runs as printed. The {STEP_APPLY} step writes "
+            "the records it used to the records file."
+        ),
+    }
+
+
 def create_work_area(inputs: ProcedureInputs) -> None:
-    """Create the work directory with an empty records file (and an empty records
-    file for the scanner-hits step)."""
+    """Create the work directory. No records file is created: `apply-drops` writes
+    records.txt itself (--records-out), and the hits step runs with no records."""
     inputs.work_dir.mkdir(parents=True, exist_ok=True)
-    write_bytes_atomic(inputs.work_dir / RECORDS_NAME, b"")
-    if inputs.scanner_input is not None:
-        write_bytes_atomic(inputs.work_dir / HITS_RECORDS_NAME, b"")
 
 
 __all__ = [
+    "RECORD_FLAG",
+    "records_input",
     "RECORDS_NAME",
     "STAGE_DIR_NAME",
     "WORK_DIR_NAME",

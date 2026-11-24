@@ -1,6 +1,7 @@
-"""review.drop_records — the records file `apply-drops` reads.
+"""review.drop_records — the records `apply-drops` reads, from a file or inline.
 
-A UTF-8 text file, one record per line, blank lines ignored::
+A UTF-8 text file, one record per line, blank lines ignored; the inline form is one
+record per ``--record`` argument, parsed by the same code::
 
     drop <id> <reason>
     tag <n> <in-spec|out-of-spec|fix-caused>
@@ -68,6 +69,22 @@ class Records:
     tags: tuple[Tag, ...]
     covers: tuple[Cover, ...]
     rejects: tuple[Reject, ...]
+    #: What the records were read from, for a message about all of them.
+    label: str = ""
+    #: ``line`` for the file form, ``argument`` for the inline form.
+    unit: str = "line"
+    #: The records as text: the file's own text, or the inline records one per line.
+    text: str = ""
+
+    def ref(self, number: int) -> str:
+        """Record *number* as a short reference inside a longer message."""
+        return f"{self.unit} {number}"
+
+    def at(self, number: int) -> str:
+        """Where record *number* came from, for a message."""
+        if self.unit == "argument":
+            return f"--record argument {number}"
+        return f"{self.label}, line {number}"
 
     @property
     def spec_records(self) -> tuple[Tag | Cover | Reject, ...]:
@@ -91,18 +108,59 @@ def parse_records(path: str) -> Records:
     resolved path, and the line number for a bad record."""
     resolved = str(Path(path).expanduser().resolve())
     try:
-        text = Path(path).expanduser().read_text(encoding="utf-8")
+        raw_bytes = Path(path).expanduser().read_bytes()
+        text = raw_bytes.decode("utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise RecordsError(f"cannot read the records file {resolved!r}: {exc}") from exc
+    # Text mode read translated every line ending to a newline; keep that for the
+    # parse, and keep the file's own text for --records-out.
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    return _parse(
+        list(enumerate(lines, start=1)),
+        path=resolved,
+        label=f"records file {resolved!r}",
+        unit="line",
+        text=text,
+    )
+
+
+def parse_arguments(values: list[str]) -> Records:
+    """Parse inline records, one per ``--record`` argument, with the file form's
+    grammar. Raises RecordsError naming the argument number for a bad record or a
+    value that holds a newline or a carriage return."""
+    for number, value in enumerate(values, start=1):
+        if "\n" in value or "\r" in value:
+            raise RecordsError(
+                f"--record argument {number} holds a newline or carriage return; "
+                "a record is one line, so give each record as its own --record"
+            )
+    records = _parse(
+        list(enumerate(values, start=1)),
+        path="",
+        label="the --record arguments",
+        unit="argument",
+        text="",
+    )
+    kept = [value for value in values if value.strip()]
+    text = "".join(f"{value}\n" for value in kept)
+    return Records(
+        records.path, records.drops, records.tags, records.covers, records.rejects,
+        records.label, records.unit, text,
+    )
+
+
+def _parse(
+    items: list[tuple[int, str]], *, path: str, label: str, unit: str, text: str
+) -> Records:
     drops: list[Drop] = []
     tags: list[Tag] = []
     covers: list[Cover] = []
     rejects: list[Reject] = []
-    for number, raw in enumerate(text.split("\n"), start=1):
+    for number, raw in items:
         line = raw[:-1] if raw.endswith("\r") else raw
         if not line.strip():
             continue
-        where = f"records file {resolved!r}, line {number}"
+        where = f"records file {path!r}, line {number}" if unit == "line" else f"--record argument {number}"
         match = _RECORD_RE.match(line)
         keyword = match.group(1) if match else line.split(None, 1)[0]
         if match is None or keyword not in _KEYWORDS:
@@ -137,7 +195,16 @@ def parse_records(path: str) -> Records:
                     f"{where}: cover status must be one of {list(COVERAGE_STATUSES)}, got {value!r}"
                 )
             covers.append(Cover(number, first, value))
-    return Records(resolved, tuple(drops), tuple(tags), tuple(covers), tuple(rejects))
+    return Records(path, tuple(drops), tuple(tags), tuple(covers), tuple(rejects), label, unit, text)
 
 
-__all__ = ["Cover", "Drop", "Records", "RecordsError", "Reject", "Tag", "parse_records"]
+__all__ = [
+    "Cover",
+    "Drop",
+    "Records",
+    "RecordsError",
+    "Reject",
+    "Tag",
+    "parse_arguments",
+    "parse_records",
+]
