@@ -347,6 +347,17 @@ def _isolate_review_records_root(monkeypatch, tmp_path):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_review_evidence_root(monkeypatch, tmp_path):
+    """Autouse repo-wide: kept review evidence is written and read in a directory
+    of the test's own, never the host's, for the reason the review records root
+    above is. A test of the default location deletes the variable, which wins."""
+    monkeypatch.setenv(
+        "CLAGENTIC_LOADOUT_REVIEW_EVIDENCE_DIR",
+        str(tmp_path.parent / f"{tmp_path.name}-review-evidence"),
+    )
+
+
+@pytest.fixture(autouse=True)
 def _isolate_specs_root(monkeypatch, tmp_path):
     """Autouse repo-wide: sealed specs are written and read in a directory of the
     test's own, never the host's, and a sibling of tmp_path for the reason the

@@ -38,7 +38,7 @@ verbs:
   - name: loadout-release-dispatch
     exit_codes: {ok: 0, usage: 1, secret_failed: 2, hook_failed: 3}
   - name: loadout-review
-    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, profile_invalid: 3, wrong_platform: 4, acquire_failed: 5, caller_invoker_mismatch: 7, resume: 10, post_failed: 30, stale_head: 31, findings_invalid: 32, spec_unavailable: 33}
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, profile_invalid: 3, wrong_platform: 4, acquire_failed: 5, caller_invoker_mismatch: 7, resume: 10, post_failed: 30, stale_head: 31, findings_invalid: 32, spec_unavailable: 33, refused: 64}
   - name: loadout-review-post
     exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, verify_failed: 5, post_failed: 6, body_stdin_empty: 7, verdict_block_usage: 8, verdict_block_mismatch: 9, body_env_unreadable: 10, delete_own_comment_refused: 11, caller_invoker_mismatch: 12, verdict_route_intent_mismatch: 13}
   - name: loadout-reviewer-login
@@ -97,6 +97,7 @@ env:
   - CLAGENTIC_LOADOUT_PUSH_ALLOWED_HOSTS
   - CLAGENTIC_LOADOUT_PUSH_GIT_TRACE
   - CLAGENTIC_LOADOUT_READ_ALLOWED_HOSTS
+  - CLAGENTIC_LOADOUT_REVIEW_EVIDENCE_DIR
   - CLAGENTIC_LOADOUT_REVIEW_RECORDS_DIR
   - CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT
   - CLAGENTIC_LOADOUT_RULINGS_FILE

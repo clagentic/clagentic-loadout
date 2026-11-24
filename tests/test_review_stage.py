@@ -369,7 +369,9 @@ def test_a_repository_whose_name_starts_with_a_dot_stages_tears_down_and_checks_
     assert code == 0 and result["removed_directory"] is True and not out.exists()
 
 
-@pytest.mark.parametrize("subcommand", ["stage", "teardown", "check-drops"])
+@pytest.mark.parametrize(
+    "subcommand", ["stage", "teardown", "check-drops", "apply-drops", "keep-evidence"]
+)
 @pytest.mark.parametrize("flag", ["--help", "--version"])
 def test_the_new_subcommands_answer_help_and_version(subcommand, flag, capsys):
     code = review_cli.main([subcommand, flag])

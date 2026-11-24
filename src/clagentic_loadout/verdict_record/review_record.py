@@ -52,7 +52,7 @@ from clagentic_loadout.artifact_store import (
     write_into_head_dir,
 )
 from clagentic_loadout.envelope import validate_against_schema
-from clagentic_loadout.verdict_record.record import utc_timestamp
+from clagentic_loadout.verdict_record.record import is_full_sha, utc_timestamp
 
 REVIEW_RECORDS_DIR_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RECORDS_DIR"
 CONFIG_SECTION = "review_records"
@@ -285,6 +285,42 @@ def load_review_record(
     return load_review_records(root, comment_id, head=head, untrusted_roots=untrusted_roots)[0]
 
 
+def find_review_records(
+    root: Path, *, head: str, repo: str, pr: int, role: str
+) -> list[dict[str, Any]]:
+    """The records at *head* for this repository, pull request and role, newest
+    ``recorded_at`` first (ties break on the comment id). A repository name is
+    compared ignoring case, as the hosts do. A file that is not a valid record
+    cannot say it matches, so it is skipped. Raises StoreError when *head* is not
+    a full commit sha and RootUnreadableError when the root cannot be listed."""
+    if not is_full_sha(head):
+        raise StoreError(f"{head!r} is not a full commit sha (40 or 64 lowercase hex digits)")
+    found: list[dict[str, Any]] = []
+    for directory in list_head_dirs(root, _REVIEW_RECORDS_KIND):
+        if directory.name != head:
+            continue
+        try:
+            candidates = sorted(directory.iterdir())
+        except OSError as exc:
+            raise RootUnreadableError(f"cannot read {str(directory)!r}: {exc}") from exc
+        for candidate in candidates:
+            stem = candidate.name[: -len(".json")]
+            if not candidate.name.endswith(".json") or COMMENT_ID_RE.match(stem) is None:
+                continue
+            try:
+                record = _read_file(candidate, directory.name, stem)
+            except ReviewRecordInvalidError:
+                continue
+            if (
+                str(record["repo"]).casefold() == repo.casefold()
+                and record["pr"] == pr
+                and record["role"] == role
+            ):
+                found.append(record)
+    found.sort(key=lambda record: (record["recorded_at"], record["comment_id"]), reverse=True)
+    return found
+
+
 __all__ = [
     "COMMENT_ID_RE",
     "CONFIG_KEY_DIR",
@@ -298,6 +334,7 @@ __all__ = [
     "StoreError",
     "build_review_record",
     "chunk_boundaries",
+    "find_review_records",
     "load_review_record",
     "load_review_records",
     "review_records_root",

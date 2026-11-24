@@ -1563,6 +1563,82 @@ them as `unproven_drops` in its result and as an `Unproven drops` row of the
 merge-completion attestation. An entry from a fence written before these keys existed
 has no `proven` key and is not reported. No gate outcome depends on any of it.
 
+### Applying drops and keeping evidence
+
+Two more offline subcommands of `loadout-review` carry a reviewer's judgement to
+`post` and keep a review's files. Neither reads a host or binds a caller, and neither
+refuses a review or a verdict: the only refusal is exit **64** for an unusable input,
+with nothing written.
+
+**`apply-drops --findings <f> --records <r> --judged-out <p> --dropped-out <p>
+[--scanner-input <s>] [--manifest <m>] [--coverage-out <p> --reject-reason-out <p>]`**
+reads the findings document `run` wrote and a records file, UTF-8 text with one record
+per line (blank lines ignored):
+
+| Record | Meaning |
+| --- | --- |
+| `drop <id> <reason>` | drop a finding (`<id>` is its zero-based position in the `findings` array) or a scanner hit (`sN`, the 1-based number of the hit in `--scanner-input`: scanners in file order, hits in each scanner's order) |
+| `tag <n> <in-spec\|out-of-spec\|fix-caused>` | spec mode: the tag of kept finding `<n>` |
+| `cover <criterion-id> <met\|unmet>` | spec mode: the coverage of one criterion |
+| `reject <text>` | spec mode: reject the docs-only justification, in one line (the check `post --reject-justification` applies) |
+
+Only the leading fields are split off. The rest of the line is stored as a string, byte
+for byte, and never reaches a shell, `eval` or a template, so a reason may hold quotes,
+braces, `$(...)` or backticks. A records file with no records is valid: the run writes
+the judged findings unchanged and lists the scanner hits with their `sN` ids.
+
+`--coverage-out` turns spec mode on and is given together with `--reject-reason-out`
+(else exit 1). In spec mode every kept finding needs exactly one `tag`, at least one
+`cover` record is required (`post` checks the criterion ids against the spec), and a
+`tag`, `cover` or `reject` record outside spec mode is refused.
+
+Outputs, each replacing an earlier file at its path atomically:
+
+- **judged** (`--judged-out`): the findings document with the dropped findings removed
+  and every other key unchanged, plus `spec_tag` on each kept finding in spec mode. Give
+  it to `post --findings`.
+- **dropped** (`--dropped-out`): `[{file, line, rule_id, message, reason}]` for each
+  dropped finding and hit, in record order, the message collapsed to one line, plus
+  `read_at` (the manifest's `head_sha`) on every entry when `--manifest` is given. Give it
+  to `post --dropped`.
+- **coverage** (`--coverage-out`): `[{criterion, status}]` in record order, the file
+  `post --spec-coverage` takes.
+- **reject reason** (`--reject-reason-out`): the `reject` text, for `post
+  --reject-justification-file`. A file left at that path by an earlier run is removed
+  when the records hold no `reject` record.
+
+Standard output is one JSON object: `result` (`written`), the output paths, the drop
+counts, `read_at` (or null) and `hits`, every scanner hit with its `sN` id, `scanner`,
+`file`, `line` and `rule_id`. Exit **64** names the line number (or the path) of an
+unreadable or malformed file, an unknown record, an id that names no finding or hit, an
+id dropped twice, a tag on a dropped finding, a kept finding with no tag, or a spec
+record outside spec mode.
+
+**`keep-evidence --repo <owner/name> --pr <n> --head-sha <sha> --role <role>
+[--comment-id <id>] --file <path> [--file <path> ...]`** copies each file, byte for
+byte, to `<review evidence root>/<head sha>/<comment id>/<file name>`. Without
+`--comment-id` the comment id is the one on the newest [review record](#review-records)
+at `--head-sha` whose repository, pull request and role match (`comment_id_source` is
+then `review record`, else `argument`); with none it exits **64** naming the root, repo,
+pr, role and head. A missing or unreadable `--file`, or two `--file` values with one file
+name, exits **64** before anything is written. Run again for the same comment it replaces
+the whole earlier copy, and the earlier copy survives any failure of the replacement.
+Standard output is one JSON object: `result` (`kept`), `directory`, `comment_id`,
+`comment_id_source` and each file's `name`, `bytes` and `sha256`. A repository name that
+starts with a dot is accepted; `.` and `..` are not names.
+
+**Where evidence lives.** The root is, in order: `CLAGENTIC_LOADOUT_REVIEW_EVIDENCE_DIR`,
+the user-level `review_evidence.dir` setting, then `<user config root>/state/review-evidence`;
+the permission rule is that of the review records store. Nothing prunes the store.
+
+**`post --reject-justification-file <path>`** reads the path as UTF-8, removes one
+trailing newline, and then behaves exactly as `--reject-justification` with that text.
+Giving both flags, or a file that cannot be read, is a usage error (exit **1**) before
+any host call, naming the flags or the resolved path.
+
+Exit codes of the two subcommands: **0** done, **64** unusable input (`apply-drops` also
+**1** for a spec-mode flag given without its pair).
+
 ### Defect classes and class guidance
 
 A finding may carry two optional keys: `defect_class`, a short name for the recurring
@@ -4667,6 +4743,9 @@ verdict for that head and records the rejection in the fence and the record. Eve
 (any author, any head): one rejection anywhere means full review for every later round,
 whatever the spec says, and `run` reports the pull request as `code`. An earlier verdict
 that cannot be read counts against the lighter path the same way.
+`--reject-justification-file PATH` takes the same reason from a UTF-8 file (one trailing
+newline removed), so the text never travels on a command line; it cannot be combined with
+`--reject-justification`.
 
 **The waiver line.** `loadout-merge` prints one line per reviewer fence that accepted a
 justification, on stderr as `merge: WAIVER -- <reviewer>: docs-only review waiver accepted:
