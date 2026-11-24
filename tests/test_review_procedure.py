@@ -43,7 +43,8 @@ class World:
     root: Path
 
     def argv(self, out: Path, *extra: str, repo: str = REPO, role: str = ROLE, base_url=True):
-        args = ["procedure", "--caller", ROLE, "--repo", repo, "--role", role, "--out", str(out)]
+        # The `=` form lets a value that starts with '-' reach the verb's own checks.
+        args = ["procedure", "--caller", ROLE, f"--repo={repo}", f"--role={role}", "--out", str(out)]
         platform = self.host.platform_args()
         if not base_url and "--git-host-base-url" in platform:
             platform = platform[:-2]
@@ -379,8 +380,14 @@ def _refusal(world, tmp_path, capsys, case):
         extra = ["--spec-hash", "e" * 64]
     elif case == "scanner-name-clash":
         extra = ["--scanner-input", str(tmp_path / "elsewhere" / "findings.json")]
+    elif case == "scanner-path-alias":
+        extra = ["--scanner-input", str(out / "work" / "hits-records.txt")]
     elif case == "newline-in-role":
         return out, world.procedure(out, capsys=capsys, role="two\nlines")
+    elif case == "role-starts-with-dash":
+        return out, world.procedure(out, capsys=capsys, role="-x")
+    elif case == "repo-starts-with-dash":
+        return out, world.procedure(out, capsys=capsys, repo="-o/name")
     return out, world.procedure(out, *extra, capsys=capsys)
 
 
@@ -391,7 +398,10 @@ def _refusal(world, tmp_path, capsys, case):
         ("malformed-hash", 1, "XYZ"),
         ("unknown-hash", review_cli.EXIT_SPEC_UNAVAILABLE, "e" * 64),
         ("scanner-name-clash", 1, "findings.json"),
+        ("scanner-path-alias", 1, "hits_records"),
         ("newline-in-role", 1, "two"),
+        ("role-starts-with-dash", 1, "'-x' starts with"),
+        ("repo-starts-with-dash", 1, "'-o/name' starts with"),
     ],
 )
 def test_an_unusable_input_is_refused_naming_it_before_the_host_is_read(

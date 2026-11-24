@@ -144,8 +144,23 @@ def check_printable(values: dict[str, str]) -> None:
             )
 
 
-def check_scanner_name(scanner_input: str | None, spec_hash: str | None) -> None:
-    """The scanner input is kept beside the review's own files, by file name."""
+def check_not_option(values: dict[str, str]) -> None:
+    """Refuse a value printed as a flag's argument that starts with '-': the verb's
+    parser would read it as an option, and the line would fail as written."""
+    for label, value in values.items():
+        if value.startswith("-"):
+            raise ProcedureInputError(
+                f"{label} {value!r} starts with '-', so the printed line would read it as an "
+                "option; give a value that does not start with '-'"
+            )
+
+
+def check_scanner_input(
+    scanner_input: str | None, spec_hash: str | None, out: Path
+) -> None:
+    """The scanner input is kept beside the review's own files, by file name, and
+    must not be a path the procedure generates or prints (it would be overwritten
+    by, or read as, one of them)."""
     if scanner_input is None:
         return
     name = Path(scanner_input).name
@@ -154,6 +169,20 @@ def check_scanner_name(scanner_input: str | None, spec_hash: str | None) -> None
             f"--scanner-input {scanner_input!r} has the file name {name!r}, which is also a "
             "file the review keeps; give the scanner input another file name"
         )
+    resolved = Path(scanner_input).expanduser().resolve()
+    generated = work_files(
+        ProcedureInputs(
+            role="", repo="", pr=0, platform="", head_sha="",
+            stage_dir=out / STAGE_DIR_NAME, work_dir=out / WORK_DIR_NAME,
+            spec_hash=spec_hash, scanner_input=scanner_input,
+        )
+    )
+    for label, path in generated.items():
+        if label != "scanner_input" and path is not None and Path(path).resolve() == resolved:
+            raise ProcedureInputError(
+                f"--scanner-input {scanner_input!r} resolves to {str(resolved)!r}, which is the "
+                f"procedure's own {label} path; give the scanner input another path"
+            )
 
 
 def _command(*parts: str) -> str:
@@ -282,7 +311,8 @@ __all__ = [
     "add_procedure_parser",
     "build_lines",
     "check_printable",
-    "check_scanner_name",
+    "check_not_option",
+    "check_scanner_input",
     "create_work_area",
     "kept_file_names",
     "work_files",

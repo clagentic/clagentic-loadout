@@ -1528,7 +1528,17 @@ def _procedure_command(
                 **({"--git-host-base-url": base_url} if base_url else {}),
             }
         )
-        procedure.check_scanner_name(args.scanner_input, args.spec_hash)
+        procedure.check_not_option(
+            {
+                "--role": role,
+                "--repo": repo_arg,
+                **({"--scanner-input": args.scanner_input} if args.scanner_input else {}),
+                **({"--git-host-base-url": base_url} if base_url else {}),
+            }
+        )
+        procedure.check_scanner_input(
+            args.scanner_input, args.spec_hash, Path(args.out).expanduser().resolve()
+        )
     except procedure.ProcedureInputError as exc:
         _fail(str(exc), EXIT_USAGE)
     _spec_facts_of_flag(args, config_root)
