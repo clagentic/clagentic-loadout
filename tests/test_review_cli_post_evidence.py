@@ -146,7 +146,10 @@ def test_dropped_candidates_render_a_section_and_count_in_the_header(env, tmp_pa
     assert "Dropped candidates (2):" in prose
     assert "- b.py:7 [R2] maybe a race (reason: the lock is held by the caller)" in prose
     assert "- b.py:9 [R2] maybe a race (reason: dead code)" in prose
-    assert parse_verdict_block(env.opener_state["posted_body"])["dropped"] == dropped
+    # The fence also records the read revision post computes: none was given.
+    assert parse_verdict_block(env.opener_state["posted_body"])["dropped"] == [
+        {**entry, "read_at": None, "proven": False} for entry in dropped
+    ]
 
 
 def test_a_dropped_file_may_be_an_object_with_a_dropped_array(env, tmp_path, capsys):

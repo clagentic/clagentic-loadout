@@ -35,10 +35,12 @@ class ReviewHost:
         *,
         diff: str,
         base_sha: str,
-        files: list[str] | None = None,
+        files: list[str | dict] | None = None,
         comments: list[dict] | None = None,
         login: str = "reviewer",
         base_files: dict[str, str] | None = None,
+        head_files: dict[str, bytes | int] | None = None,
+        changed_files_count: int | None = None,
         comment_read_failures: int = 0,
         range_diff: str | None = None,
         base_merged: bool = False,
@@ -52,6 +54,10 @@ class ReviewHost:
         #: The tree served by the tree and contents endpoints at any ref; None
         #: serves none, so a test that reads policy from the host must give it.
         self.base_files = base_files
+        #: The bytes of each file at the PR's head, served by the contents endpoint
+        #: at that ref (an int serves that HTTP status for the file); a path not
+        #: listed is a 404. None serves no head content.
+        self.head_files = head_files
         #: How many comment listings fail (HTTP 500) before they succeed.
         self.comment_read_failures = comment_read_failures
         pull = json.loads((PAYLOADS / f"{platform}_pull.json").read_text(encoding="utf-8"))
@@ -61,6 +67,11 @@ class ReviewHost:
         self.head_sha: str = pull["head"]["sha"]
         self.diff = diff
         self.files = files if files is not None else []
+        # The host's own count, which a test sets apart from the list to model a
+        # paged or capped file listing.
+        self.pull["changed_files"] = (
+            changed_files_count if changed_files_count is not None else len(self.files)
+        )
         self.seeded = list(comments or [])
         self.posted: list[dict] = []
         self.login = login
@@ -99,11 +110,34 @@ class ReviewHost:
         self.posted.append(comment)
         return comment
 
+    def _file_entries(self) -> list[dict]:
+        """The changed-file list: a name is a modified file, a dict is served as given."""
+        return [
+            f if isinstance(f, dict) else {"filename": f, "status": "modified"} for f in self.files
+        ]
+
     def _comment_read_fails(self) -> bool:
         if self.comment_read_failures > 0:
             self.comment_read_failures -= 1
             return True
         return False
+
+    def _head_file(self, method: str, url: str):
+        """A contents read at the PR's head, from ``head_files``; None for any
+        other URL."""
+        if method != "GET" or self.head_files is None or "/contents/" not in url:
+            return None
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        if query.get("ref") != [self.head_sha]:
+            return None
+        name = urllib.parse.unquote(url.split("/contents/", 1)[1].split("?")[0])
+        served = self.head_files.get(name)
+        if served is None:
+            return FakeResponse(404, b"{}")
+        if isinstance(served, int):
+            return FakeResponse(served, b"{}")
+        encoded = base64.b64encode(served).decode("ascii")
+        return json_resp(200, {"type": "file", "encoding": "base64", "content": encoded})
 
     def _policy_file(self, method: str, url: str):
         """The tree and contents reads of the policy files, the same on both
@@ -136,7 +170,7 @@ class ReviewHost:
         method = req.get_method()
         self.requests.append((method, url))
         path = urllib.parse.urlparse(url).path
-        served = self._policy_file(method, url)
+        served = self._head_file(method, url) or self._policy_file(method, url)
         if served is not None:
             return served
         if self.platform == "github":
@@ -169,7 +203,7 @@ class ReviewHost:
                 return response
             return json_resp(200, copy.deepcopy(self.pull))
         if method == "GET" and path.endswith(f"/pulls/{n}/files"):
-            return json_resp(200, [{"filename": f, "status": "modified"} for f in self.files])
+            return json_resp(200, self._file_entries())
         if method == "GET" and path.endswith(f"/issues/{n}/comments"):
             if self._comment_read_fails():
                 return FakeResponse(500, b"{}")
@@ -199,7 +233,7 @@ class ReviewHost:
         if method == "GET" and path.endswith(f"/pulls/{n}.diff"):
             return FakeResponse(200, self.diff.encode("utf-8"))
         if method == "GET" and path.endswith(f"/pulls/{n}/files"):
-            return json_resp(200, [{"filename": f, "status": "modified"} for f in self.files])
+            return json_resp(200, self._file_entries())
         if method == "GET" and path.endswith(f"/pulls/{n}"):
             return json_resp(200, copy.deepcopy(self.pull))
         if method == "GET" and path.endswith(f"/issues/{n}/comments"):

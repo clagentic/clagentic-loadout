@@ -139,6 +139,7 @@ def build_attestation_body(
     interface_notices: "list[str] | tuple[str, ...]" = (),
     removed_behaviour: "list[str] | tuple[str, ...] | None" = None,
     criterion_evidence: "list[str] | tuple[str, ...] | None" = None,
+    unproven_drops: "list[str] | tuple[str, ...]" = (),
     identity_provider: str | None = None,
     self_declared: bool | None = None,
 ) -> str:
@@ -209,6 +210,10 @@ def build_attestation_body(
         merge.criterion_evidence; or one line saying the spec names no evidence, or
         that the computation did not run. Rendered as a `Criterion evidence` row;
         report only. Omitted when None or empty.
+      - `unproven_drops`: one line per dropped candidate a reviewer's fence marks
+        unproven (reviewer, file:line:rule_id, the revision it was read at or its
+        absence), from merge.unproven_drops. Rendered as an `Unproven drops` row;
+        report only, it changes no gate. Omitted when empty.
       - `identity_provider`, `self_declared`: which identity provider vouched for
         the merging actor (`legacy` when no provider is configured) and whether
         nothing outside the process vouched for it. Rendered as `Identity
@@ -262,6 +267,10 @@ def build_attestation_body(
     if criterion_evidence:
         rows.append(
             ("Criterion evidence", "<br>".join(_escape_table_cell(line) for line in criterion_evidence))
+        )
+    if unproven_drops:
+        rows.append(
+            ("Unproven drops", "<br>".join(_escape_table_cell(line) for line in unproven_drops))
         )
     rows.append(("CI status", _escape_table_cell(ci_disposition)))
     if identity_provider is not None:

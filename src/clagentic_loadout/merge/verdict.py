@@ -489,9 +489,13 @@ def build_findings_verdict_body(
         lines.append("")
         lines.append(f"Dropped candidates ({len(dropped)}):")
         for entry in dropped:
+            mark = ""
+            if entry.get("proven") is False:
+                read_at = entry.get("read_at")
+                mark = f" [unproven: read at {read_at}]" if read_at else " [unproven: no read_at]"
             lines.append(
                 f"- {entry['file']}:{entry['line']} [{entry['rule_id']}] "
-                f"{entry['message']} (reason: {entry['reason']})"
+                f"{entry['message']} (reason: {entry['reason']}){mark}"
             )
     if outside_range:
         lines.append("")

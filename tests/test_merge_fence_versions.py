@@ -47,6 +47,7 @@ STEPS = {
     7: {"cleared_claims": [{"id": "f-1", "head": HEAD, "evidence": "e", "fingerprint": FINGERPRINT}]},
     8: {**EVALUATION, "evaluated_findings": [{**FINDING, "defect_class": "c"}]},
     9: {**EVALUATION, "evaluated_findings": [{**FINDING, "passes_seen": 1, "passes_total": 2}]},
+    10: {"dropped": [{**FINDING, "reason": "r", "read_at": "c" * 40, "proven": False}]},
 }
 
 
@@ -68,7 +69,7 @@ def test_every_definition_of_the_accepted_fence_versions_agrees():
         assert scanned is (1 < version <= top), version
     # The stamping chain reaches each stamped version, and the top one is the newest.
     assert {_stamped(raw) for raw in STEPS.values()} == set(FENCE_SCHEMA_VERSIONS) - {1}
-    assert _stamped(STEPS[9]) == top
+    assert _stamped(STEPS[10]) == top
     for version, raw in STEPS.items():
         body = build_verdict_block("reviewer", "blocking", HEAD, 1, findings_state=raw)
         assert parse_verdict_block(body)["fence_schema_version"] == _stamped(raw), version

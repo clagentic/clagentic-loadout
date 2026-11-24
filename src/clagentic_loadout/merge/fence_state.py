@@ -180,6 +180,12 @@ CLASS_FENCE_SCHEMA_VERSION = 8
 #: 1, so a single-pass review stamps what it always did.
 PASSES_FENCE_SCHEMA_VERSION = 9
 
+#: Version stamped on a fence whose dropped entries carry read_at or proven. A
+#: superset of version 9: a reader below it refuses the unknown keys, so a fence
+#: carrying one is never half-read. Additive: a fence whose dropped entries carry
+#: neither stamps what it always did.
+DROPPED_READ_FENCE_SCHEMA_VERSION = 10
+
 #: THE definition of the fence versions a reader accepts, and the one place a
 #: new version is added: one step constant above, one entry here. The fence
 #: regex below is derived from it; the review-result schema's enum and the
@@ -195,6 +201,7 @@ FENCE_SCHEMA_VERSIONS = (
     CLEARANCE_FENCE_SCHEMA_VERSION,
     CLASS_FENCE_SCHEMA_VERSION,
     PASSES_FENCE_SCHEMA_VERSION,
+    DROPPED_READ_FENCE_SCHEMA_VERSION,
 )
 
 KEY_FENCE_SCHEMA_VERSION = "fence_schema_version"
@@ -216,6 +223,11 @@ STATE_KEYS = (KEY_FINDINGS_OPEN, KEY_SUPERSEDES, KEY_CLEARED_CLAIMS, KEY_SCANNER
 
 KEY_FAILURE_SEQUENCES = "failure_sequences"
 KEY_DROPPED = "dropped"
+#: A dropped entry's optional keys: the revision the reviewer read the file at
+#: (a string, or null when it stated none) and whether that is the reviewed head.
+KEY_READ_AT = "read_at"
+KEY_PROVEN = "proven"
+DROPPED_READ_KEYS = (KEY_READ_AT, KEY_PROVEN)
 KEY_RESOLVED = "resolved"
 KEY_OUTSIDE_RANGE = "outside_range"
 KEY_RANGE = "range"
@@ -458,16 +470,22 @@ def _normalize_dropped(value: Any) -> list[dict[str, Any]]:
     rendered = []
     for index, entry in enumerate(_entries(value, KEY_DROPPED)):
         where = f"{KEY_DROPPED}[{index}]"
-        _exact_keys(entry, ("file", "line", "rule_id", "message", "reason"), where)
-        rendered.append(
-            {
-                "file": _text(entry.get("file"), f"{where}.file"),
-                "line": _line_number(entry.get("line"), f"{where}.line"),
-                "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
-                "message": _text(entry.get("message"), f"{where}.message", single_line=False),
-                "reason": _text(entry.get("reason"), f"{where}.reason", single_line=False),
-            }
-        )
+        _exact_keys(entry, ("file", "line", "rule_id", "message", "reason", *DROPPED_READ_KEYS), where)
+        item: dict[str, Any] = {
+            "file": _text(entry.get("file"), f"{where}.file"),
+            "line": _line_number(entry.get("line"), f"{where}.line"),
+            "rule_id": _text(entry.get("rule_id"), f"{where}.rule_id"),
+            "message": _text(entry.get("message"), f"{where}.message", single_line=False),
+            "reason": _text(entry.get("reason"), f"{where}.reason", single_line=False),
+        }
+        if KEY_READ_AT in entry:
+            read_at = entry[KEY_READ_AT]
+            item[KEY_READ_AT] = None if read_at is None else _text(read_at, f"{where}.{KEY_READ_AT}")
+        if KEY_PROVEN in entry:
+            if not isinstance(entry[KEY_PROVEN], bool):
+                raise ValueError(f"{where}.{KEY_PROVEN} must be true or false, got {entry[KEY_PROVEN]!r}")
+            item[KEY_PROVEN] = entry[KEY_PROVEN]
+        rendered.append(item)
     return rendered
 
 
@@ -757,6 +775,8 @@ def normalize_findings_state(
         key in entry for entry in out.get(KEY_EVALUATED_FINDINGS, ()) for key in PASSES_KEYS
     ):
         out[KEY_FENCE_SCHEMA_VERSION] = PASSES_FENCE_SCHEMA_VERSION
+    if any(key in entry for entry in out.get(KEY_DROPPED, ()) for key in DROPPED_READ_KEYS):
+        out[KEY_FENCE_SCHEMA_VERSION] = DROPPED_READ_FENCE_SCHEMA_VERSION
     return out
 
 
@@ -1258,7 +1278,11 @@ __all__ = [
     "KEY_VERDICT_OUTCOME",
     "KEY_VERDICT_REASONS",
     "VERDICT_OUTCOMES",
+    "DROPPED_READ_FENCE_SCHEMA_VERSION",
+    "DROPPED_READ_KEYS",
     "KEY_DROPPED",
+    "KEY_PROVEN",
+    "KEY_READ_AT",
     "KEY_OUTSIDE_RANGE",
     "KEY_ENGINES",
     "KEY_FAILURE_SEQUENCES",

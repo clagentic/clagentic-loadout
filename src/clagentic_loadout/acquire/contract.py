@@ -125,6 +125,10 @@ class AcquiredPr:
     #: recognise: callers treat None as the worst case, never as private.
     repo_visibility: str | None = None
     policy_base_sha: str = ""
+    #: The number of changed files the host's PR metadata states, or None when it
+    #: states none. Independent of ``changed_files``, which a paged or capped file
+    #: listing can leave short of the host's own count.
+    changed_file_count: int | None = None
 
     def __post_init__(self) -> None:
         if not self.policy_base_sha:
@@ -144,6 +148,15 @@ def pr_text(pr_info: dict, key: str) -> str:
     absent or non-string host value is ``""``."""
     value = pr_info.get(key)
     return value if isinstance(value, str) else ""
+
+
+def pr_changed_file_count(pr_info: dict) -> int | None:
+    """The host's own changed-file count from the PR metadata (``changed_files``),
+    or None when it is absent or not a non-negative integer."""
+    value = pr_info.get("changed_files")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 def tree_file_paths(entries: list, what: str) -> list[str]:
@@ -386,6 +399,7 @@ __all__ = [
     "RangeDiff",
     "RangeDiffBackend",
     "RangeFile",
+    "pr_changed_file_count",
     "pr_text",
     "repository_visibility",
     "tree_file_paths",

@@ -34,8 +34,8 @@
     },
     "fence_schema_version": {
       "type": "integer",
-      "enum": [1, 2, 3, 4, 5, 6, 7, 8, 9],
-      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. Version 5 marks a fence that carries the docs_only object; it is a superset of version 4 and adds nothing to the computed verdict. Version 6 marks a fence whose findings_open entries carry a fingerprint; it is a superset of version 5. Version 7 marks a fence whose cleared_claims entries carry a fingerprint; it is a superset of version 6. Version 8 marks a fence whose evaluated_findings carry a defect_class or class_fix; it is a superset of version 7 and adds nothing to the computed verdict. Version 9 marks a fence from a review of more than one independent pass: its evaluated_findings carry passes_seen and passes_total and it carries the stability block; it is a superset of version 8 and adds nothing to the computed verdict. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated. Readers accept every version from 1 to 9."
+      "enum": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      "description": "OPTIONAL fence schema version. Absent means 1. Version 2 marks a fence that carries findings state (findings_open, supersedes, cleared_claims, scanners_run). Version 3 marks a fence that also carries the computed verdict (verdict_outcome, verdict_reasons, evaluator_version, policy_base_sha, evaluated_findings). Version 4 marks a fence from a review that ran against a sealed spec, carrying spec_hash, spec_tags and spec_coverage; it is a superset of version 3 and adds nothing to the computed verdict. Version 5 marks a fence that carries the docs_only object; it is a superset of version 4 and adds nothing to the computed verdict. Version 6 marks a fence whose findings_open entries carry a fingerprint; it is a superset of version 5. Version 7 marks a fence whose cleared_claims entries carry a fingerprint; it is a superset of version 6. Version 8 marks a fence whose evaluated_findings carry a defect_class or class_fix; it is a superset of version 7 and adds nothing to the computed verdict. Version 9 marks a fence from a review of more than one independent pass: its evaluated_findings carry passes_seen and passes_total and it carries the stability block; it is a superset of version 8 and adds nothing to the computed verdict. Version 10 marks a fence whose dropped entries carry read_at or proven; it is a superset of version 9 and adds nothing to the computed verdict. A version 1 fence stays valid and reads as asserting no open findings; a fence below version 3 reads as not evaluated. Readers accept every version from 1 to 10."
     },
     "docs_only": {
       "type": "object",
@@ -178,7 +178,9 @@
           "line": {"type": "integer", "minimum": 1, "description": "Line the candidate was raised on."},
           "rule_id": {"type": "string", "minLength": 1, "description": "Rule the candidate was raised under."},
           "message": {"type": "string", "minLength": 1, "description": "What the candidate claimed."},
-          "reason": {"type": "string", "minLength": 1, "description": "Why it was dropped."}
+          "reason": {"type": "string", "minLength": 1, "description": "Why it was dropped."},
+          "read_at": {"type": ["string", "null"], "minLength": 1, "description": "OPTIONAL, fence version 10. The revision the reviewer read the file at when it dropped the candidate; null when it stated none."},
+          "proven": {"type": "boolean", "description": "OPTIONAL, fence version 10. True when read_at equals the reviewed head. Reported, never a merge rule."}
         }
       }
     },
