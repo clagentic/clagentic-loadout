@@ -23,6 +23,8 @@ verbs:
     exit_codes: {ok: 0, usage: 1, unreadable: 90, interface_invalid: 91}
   - name: loadout-merge
     exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, namespace_denied: 20, authority_denied: 21, stale_head_sha: 23, gate_result_blocked: 24, pr_title_invalid: 25, merge_failed: 26, gate_fact_unavailable: 27, ci_status_failed: 29, commit_subject_invalid: 30, merge_shape_mismatch: 31, merge_readback_failed: 32, caller_invoker_mismatch: 33, task_id_guard_violation: 36, pre_checks_failed: 37, pre_merge_canary_failed: 38}
+  - name: loadout-merge-procedure
+    exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, config_invalid: 3, wrong_platform: 4, caller_invoker_mismatch: 7, host_unavailable: 27, refused: 64}
   - name: loadout-poll-wait
   - name: loadout-post-merge
     exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, namespace_denied: 20, authority_denied: 21, gate_fact_unavailable: 27, pr_not_merged: 31, caller_invoker_mismatch: 32}

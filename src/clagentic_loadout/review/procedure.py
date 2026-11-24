@@ -185,7 +185,8 @@ def check_scanner_input(
             )
 
 
-def _command(*parts: str) -> str:
+def command_line(*parts: str) -> str:
+    """The parts as one shell-quoted physical line."""
     return " ".join(shlex.quote(part) for part in parts)
 
 
@@ -225,7 +226,7 @@ def build_lines(inputs: ProcedureInputs) -> list[dict[str, str]]:
     steps: list[dict[str, str]] = []
 
     def add(step: str, *parts: str) -> None:
-        steps.append({"step": step, "line": _command(*parts)})
+        steps.append({"step": step, "line": command_line(*parts)})
 
     if spec is not None:
         steps.append(
@@ -310,6 +311,7 @@ __all__ = [
     "ProcedureInputs",
     "add_procedure_parser",
     "build_lines",
+    "command_line",
     "check_printable",
     "check_not_option",
     "check_scanner_input",

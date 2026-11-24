@@ -3911,6 +3911,81 @@ than a full merge (see that verb's own module docstring, "SCOPE —
 deliberately NARROWER than merge.verb's full gate chain") rather than adding
 another flag to `loadout-merge`'s own 700+-line gate chain.
 
+### `loadout-merge-procedure` — print the release step for one pull request
+
+`clagentic_loadout.merge.procedure_verb`.
+
+```
+loadout-merge-procedure [--caller <role>] --role <role> --platform <p> --repo <owner/name> --pr <n>
+    --repo-path <dir> [--git-host-base-url <url>] [--merge-method merge|squash|rebase]
+    [--merge-message <text>] [--delete-branch] [--rulings <file>] [--out <file>]
+```
+
+Prints the release step of one pull request as finished command lines, and runs none of them. It
+reads the pull request live from the host with `--caller`'s own credential (bound to the attested
+identity as the other verbs bind it), pins its head, resolves the reviewer roles `loadout-merge`
+requires, reads the roles that hold the `merge` verb, and prints one JSON object: `result`
+(`procedure`), `role`, `repo`, `pr`, `platform`, `head_sha` (the 40-hex head as the host reports it
+now, never a caller value), `base_sha` (the base branch's tip now, the commit the gate is read at),
+`base_branch`, `state` (the host's state, or `merged`), `title`, `required_reviewers`
+(`roles`, `source`, `warnings`), `authorized_roles` (`roles`, `source`), `merge_method`, `notes`
+and `lines`, an ordered list of `{step, line}`:
+
+| `step` | Line |
+| --- | --- |
+| `head` | `loadout-git-host-api --caller <role> GET <the pull request's API path>`: the re-read of the head just before the lines below run (on GitHub the absolute API URL, on Forgejo the path, with `--git-host-base-url` when given) |
+| `merge_check` | `loadout-merge ... --report-only`: the merge line, run through the whole gate without merging |
+| `merge` | `loadout-merge --role --platform --repo --pr --expected-head-sha <head_sha>`, one `--required-reviewer` per role, one `--authorized-role` per role, `--merge-method`, `--merge-message` when given, `--repo-path` |
+| `post_merge` | `loadout-post-merge --role --platform --repo --pr`, each `--authorized-role`, `--repo-path` |
+| `close` | `loadout-close-pr --role --platform --repo --pr`, each `--authorized-role`, `--delete-branch` only when this verb was given it |
+| `ruling` | one per `--rulings` entry, in file order: `loadout-ruling record --role --platform --repo --pr`, the entry's values, one `--required-reviewer` per role, `--repo-path`, `--head <head_sha>` |
+
+Every line is one physical line naming an installed command and runs as written: no placeholder,
+shell variable, heredoc, pipe or redirect, and every value shell-quoted (a repository whose name
+starts with a dot is carried as given). `--git-host-base-url` is carried by every line that takes it
+when `--platform forgejo` is given one, and by none on GitHub. `--role` is an opaque word printed into
+the lines; `--caller` is the invoking identity that reads the host.
+
+**Reviewer roles.** The roles the repository's tracked gate declares at the base commit, read through
+the same loader and resolution `loadout-merge` uses (a role the deployment cannot resolve is dropped
+with a warning, carried in `required_reviewers.warnings`); `source` is the line `loadout-merge` prints
+for the gate. The procedure adds no role of its own.
+
+**Authority.** No input of this verb decides who may merge: it has no `--authorized-role`. The values
+it prints are the roles that hold the `merge` verb label in the effective mapping: the `roles:` mapping
+in the trusted user-level config file when present (it replaces the built-in mapping), else the built-in
+default. The file is read only if it passes the location check the ruling registry uses; an untrusted
+or unusable file exits **3** naming it and prints nothing. `authorized_roles.source` names the file or
+the built-in default. The same label is used for the close and post-merge lines, because those verbs
+share one authority seam. A caller who wants a different set changes the mapping, not this command.
+
+**Merge method.** The caller's: `--merge-method` (default `merge`) is printed on the merge and
+merge-check lines every time, including at the default. No repository setting names a method, because
+the right one is a choice per pull request.
+
+**`--rulings FILE`** is a JSON array of objects with `fence_comment` (an integer), `fingerprint`,
+`kind` (one of `loadout-ruling`'s kinds), `rationale`, `requested_by` and `source_ref`, and optionally
+`expires` and `reference`. The caller supplies which findings to rule on: the procedure never lists or
+chooses kept findings. A file that cannot be read as JSON, is not an array, or has an entry with a
+missing or unknown key, a non-integer `fence_comment` or an unknown `kind` exits **64** naming the file
+and the entry's index, before any host read.
+
+**It reports and prints.** A role that does not hold `merge`, a pull request that is not open, a gate
+that carries warnings or declares no reviewer, a gate whose `pre_checks` cannot be read, and scanners
+declared for a role no one requires are notes: one line each on stderr and in `notes`, with exit **0**
+and every line printed. Only an unusable input is refused, before any host read: a value that holds a
+control character or newline, a role, repository, repository path, base URL, merge message or rulings
+value that starts with `-` (the verb's parser would read it as an option), or a required role that
+holds `:` exits **1** naming the input.
+
+**`--out FILE`** writes the object to a new file and prints `{"result": "written", "path": ...}`; an
+existing file is never replaced (exit **64**, the same rule as `loadout-spec new --out`).
+
+Exit codes: **0** printed, **1** usage, **2** no credential for the caller, **3** the user-level role
+mapping is untrusted or unusable, **4** `--platform` does not match the backend that serves it, **7**
+`--caller` does not match the attested identity, **27** the host could not be read (pull request, head
+or base branch tip), **64** the rulings file or the `--out` path is unusable.
+
 ### `loadout-release-detect` / `loadout-release-dispatch`
 
 `clagentic_loadout.release.detector` / `clagentic_loadout.release.dispatch`.
