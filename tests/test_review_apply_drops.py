@@ -285,3 +285,125 @@ def test_a_scanner_input_stamped_for_another_head_than_the_manifest_is_refused(a
     )
 
     assert code == REFUSED and "stamped for head" in err
+
+
+def _inline(area, subdir, records, *extra, capsys, spec=False, flag="--record"):
+    """Run apply-drops with *records* given as one --record argument per line of the text
+    (a blank line is a blank argument), outputs under *subdir*."""
+    out = area.root / subdir
+    out.mkdir(exist_ok=True)
+    argv = [
+        "apply-drops", "--findings", area.write("findings.json", DOCUMENT),
+        "--judged-out", str(out / "judged.json"), "--dropped-out", str(out / "dropped.json"),
+        *extra,
+    ]
+    if isinstance(records, str):
+        records = records.removesuffix("\n").split("\n") if records else []
+    for record in records:
+        argv += [flag, record]
+    if spec:
+        argv += ["--coverage-out", str(out / "coverage.json"),
+                 "--reject-reason-out", str(out / "reject.txt")]
+    capsys.readouterr()
+    code = review_cli.main(argv)
+    captured = capsys.readouterr()
+    return code, captured.out.replace(str(out), "OUT"), captured.err, out
+
+
+def _file_form(area, subdir, records, *extra, capsys, spec=False):
+    out = area.root / subdir
+    out.mkdir(exist_ok=True)
+    argv = [
+        "apply-drops", "--findings", area.write("findings.json", DOCUMENT),
+        "--records", area.write(f"{subdir}-records.txt", records, raw=True),
+        "--judged-out", str(out / "judged.json"), "--dropped-out", str(out / "dropped.json"),
+        *extra,
+    ]
+    if spec:
+        argv += ["--coverage-out", str(out / "coverage.json"),
+                 "--reject-reason-out", str(out / "reject.txt")]
+    capsys.readouterr()
+    code = review_cli.main(argv)
+    captured = capsys.readouterr()
+    return code, captured.out.replace(str(out), "OUT"), captured.err, out
+
+
+#: (id, records, spec mode, scanner input, manifest, --records-out given). The blank
+#: lines of the records-out row differ between the forms only in the text --records-out keeps.
+PARITY = [
+    ("plain", "drop 1 not a defect\n\ndrop 0 second\n", False, False, False, False),
+    ("hostile-reason", f"drop 0 {HOSTILE}\n", False, False, False, False),
+    ("manifest", "drop 2 r\n", False, False, True, False),
+    ("scanner", "drop s2 fixture\ndrop 1 r\n", False, True, False, False),
+    ("scanner-manifest", "drop s1 a\n", False, True, True, False),
+    ("spec-tag-cover", "tag 0 in-spec\ntag 1 out-of-spec\ntag 2 fix-caused\ncover a met\ncover b unmet\n",
+     True, False, False, False),
+    ("spec-reject", "drop 1 r\ntag 0 in-spec\ntag 2 in-spec\ncover a met\nreject Behaviour is altered.\n",
+     True, True, True, False),
+    ("no-records-lists-hits", "", False, True, False, False),
+    ("records-out", "drop 0 a\n\n  \ndrop 1 b  \n", False, False, False, True),
+]
+
+
+@pytest.mark.parametrize(
+    "records,spec,scanner,manifest,records_out", [r[1:] for r in PARITY], ids=[r[0] for r in PARITY]
+)
+def test_inline_records_give_byte_identical_outputs_and_stdout_to_a_records_file(
+    area, capsys, records, spec, scanner, manifest, records_out
+):
+    extra = (["--scanner-input", area.write("scanner.json", SCANNERS)] if scanner else []) + (
+        ["--manifest", area.manifest()] if manifest else []
+    )
+    f_extra = [*extra, "--records-out", str(area.root / "file-records.txt")] if records_out else extra
+    i_extra = [*extra, "--records-out", str(area.root / "inline-records.txt")] if records_out else extra
+    f_code, f_out, _, f_dir = _file_form(area, "file", records, *f_extra, capsys=capsys, spec=spec)
+    i_code, i_out, _, i_dir = _inline(area, "inline", records, *i_extra, capsys=capsys, spec=spec)
+
+    assert f_code == i_code == 0 and f_out == i_out
+    names = sorted(p.name for p in f_dir.iterdir())
+    assert names == sorted(p.name for p in i_dir.iterdir())
+    for name in names:
+        assert (f_dir / name).read_bytes() == (i_dir / name).read_bytes()
+    if records_out:
+        # The file form keeps its text byte for byte; the inline form its non-blank records.
+        assert (area.root / "file-records.txt").read_bytes() == records.encode("utf-8")
+        assert (area.root / "inline-records.txt").read_bytes() == b"drop 0 a\ndrop 1 b  \n"
+    if not records:
+        assert json.loads(i_out)["hits"][0]["id"] == "s1" and area.read("inline/judged.json") == DOCUMENT
+
+
+#: Inline-only rows: (id, --record arguments, extra flags, exit code, needle, spec mode).
+#: RECORDS_FILE in the flags stands for a records file the test writes.
+INLINE_ONLY_REFUSALS = [
+    ("newline-in-argument", ["drop 1 fine", "drop 0 a\nb"], (), REFUSED, "--record argument 2", False),
+    ("carriage-return-in-argument", ["drop 0 a\rb"], (), REFUSED, "--record argument 1", False),
+    ("trailing-crlf-in-argument", ["drop 0 a\r\n"], (), REFUSED, "--record argument 1", False),
+    ("records-with-record", ["drop 0 r"], ("--records", "RECORDS_FILE"), 1, "--records", False),
+    ("no-records-in-spec-mode", [], (), REFUSED, "no tag record", True),
+]
+INLINE_REFUSALS = [
+    (name, records.removesuffix("\n").split("\n"), (), REFUSED, needle.replace("line ", "--record argument "), spec)
+    for name, records, needle, spec in REFUSALS
+] + INLINE_ONLY_REFUSALS
+
+
+@pytest.mark.parametrize(
+    "records,extra,code,needle,spec", [r[1:] for r in INLINE_REFUSALS], ids=[r[0] for r in INLINE_REFUSALS]
+)
+def test_an_unusable_inline_input_is_refused_naming_it_and_nothing_is_written(
+    area, capsys, records, extra, code, needle, spec
+):
+    judged = area.root / "inline" / "judged.json"
+    judged.parent.mkdir()
+    judged.write_text("earlier judged", encoding="utf-8")
+    records_out = area.root / "records-out.txt"
+    flags = [area.write("records.txt", "", raw=True) if f == "RECORDS_FILE" else f for f in extra]
+
+    got, out, err, _ = _inline(
+        area, "inline", records, "--scanner-input", area.write("scanner.json", SCANNERS),
+        "--records-out", str(records_out), *flags, capsys=capsys, spec=spec,
+    )
+
+    assert got == code and out == "" and needle in err
+    assert judged.read_text(encoding="utf-8") == "earlier judged"
+    assert not records_out.exists() and not (area.root / "inline" / "coverage.json").exists()

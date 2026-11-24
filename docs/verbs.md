@@ -1570,10 +1570,12 @@ Two more offline subcommands of `loadout-review` carry a reviewer's judgement to
 refuses a review or a verdict: the only refusal is exit **64** for an unusable input,
 with nothing written.
 
-**`apply-drops --findings <f> --records <r> --judged-out <p> --dropped-out <p>
-[--scanner-input <s>] [--manifest <m>] [--coverage-out <p> --reject-reason-out <p>]`**
-reads the findings document `run` wrote and a records file, UTF-8 text with one record
-per line (blank lines ignored):
+**`apply-drops --findings <f> [--records <r> | --record <text> ...] [--records-out <p>]
+--judged-out <p> --dropped-out <p> [--scanner-input <s>] [--manifest <m>]
+[--coverage-out <p> --reject-reason-out <p>]`**
+reads the findings document `run` wrote and the records, given as a records file (UTF-8
+text with one record per line, blank lines ignored) or inline, one record per repeatable
+`--record <text>` argument in the same grammar:
 
 | Record | Meaning |
 | --- | --- |
@@ -1584,8 +1586,18 @@ per line (blank lines ignored):
 
 Only the leading fields are split off. The rest of the line is stored as a string, byte
 for byte, and never reaches a shell, `eval` or a template, so a reason may hold quotes,
-braces, `$(...)` or backticks. A records file with no records is valid: the run writes
-the judged findings unchanged and lists the scanner hits with their `sN` ids.
+braces, `$(...)` or backticks. No records is valid, whether an empty records file or
+neither flag: the run writes the judged findings unchanged and lists the scanner hits
+with their `sN` ids.
+
+The inline form needs no file written beforehand, and a `--record` value is argv of one
+command, never read by a shell. A blank `--record` is ignored as a blank line is. A
+`--record` value holding a newline or a carriage return is unusable (exit **64**, naming
+the argument number): give each record as its own argument. `--records` together with
+`--record` is a usage error (exit **1**, naming both flags). `--records-out <p>` writes
+the records used, atomically: the records file's text byte for byte, or the inline
+records one per line. It is written only when every input is usable, so a refusal creates
+or changes nothing. The file form is unchanged.
 
 `--coverage-out` turns spec mode on and is given together with `--reject-reason-out`
 (else exit 1). In spec mode every kept finding needs exactly one `tag`, at least one
@@ -1609,10 +1621,10 @@ Outputs, each replacing an earlier file at its path atomically:
 
 Standard output is one JSON object: `result` (`written`), the output paths, the drop
 counts, `read_at` (or null) and `hits`, every scanner hit with its `sN` id, `scanner`,
-`file`, `line` and `rule_id`. Exit **64** names the line number (or the path) of an
-unreadable or malformed file, an unknown record, an id that names no finding or hit, an
-id dropped twice, a tag on a dropped finding, a kept finding with no tag, or a spec
-record outside spec mode.
+`file`, `line` and `rule_id`. Exit **64** names the line number (or the path, or for an
+inline record the `--record` argument number) of an unreadable or malformed file, an
+unknown record, an id that names no finding or hit, an id dropped twice, a tag on a
+dropped finding, a kept finding with no tag, or a spec record outside spec mode.
 
 **`keep-evidence --repo <owner/name> --pr <n> --head-sha <sha> --role <role>
 [--comment-id <id>] --file <path> [--file <path> ...]`** copies each file, byte for
@@ -1637,7 +1649,7 @@ Giving both flags, or a file that cannot be read, is a usage error (exit **1**) 
 any host call, naming the flags or the resolved path.
 
 Exit codes of the two subcommands: **0** done, **64** unusable input (`apply-drops` also
-**1** for a spec-mode flag given without its pair).
+**1** for a spec-mode flag given without its pair, or `--records` given with `--record`).
 
 ### The review procedure
 
@@ -1646,18 +1658,20 @@ Exit codes of the two subcommands: **0** done, **64** unusable input (`apply-dro
 one review as finished command lines. It reads the pull request through the host API and pins
 and stages the head exactly as `stage` does (`--caller` binds that read; `--out` follows
 `stage`'s rule, exit **64** for a path that exists and is not an empty directory), writes the
-head copies and manifest under `<dir>/head`, creates `<dir>/work` with an empty `records.txt`,
+head copies and manifest under `<dir>/head`, creates `<dir>/work` (it creates no records file),
 and prints one JSON object: `result` (`procedure`), `role`, `repo`, `pr`, `platform`, `head_sha`,
 `manifest`, `work_dir`, `spec_hash` (or null), `staging_gap` (only when the stage has one, also
-named on stderr), `files` (every path the lines read and write) and `lines`, an ordered list
+named on stderr), `files` (every path the lines read and write), `records_input` (`step`: the
+line that takes records, `flag`: `--record`, `rule`: append one shell-quoted `--record` argument
+per record to that line; with no records the line runs as printed) and `lines`, an ordered list
 of `{step, line}`:
 
 | `step` | Line | Present |
 | --- | --- | --- |
 | `criteria` | `loadout-spec show <hash> --field acceptance_criteria` | with `--spec-hash` |
 | `run` | `run --caller <role> ... --out <work>/run` (with `--spec-hash`) | always |
-| `hits` | `apply-drops` over an empty records file with its own outputs, listing the numbered scanner hits | with `--scanner-input` |
-| `apply` | `apply-drops` of `<work>/records.txt` to `judged.json` and `dropped.json` (with `--manifest`, so every drop carries `read_at`; with the scanner input, the coverage and the reject-reason file under a spec) | always |
+| `hits` | `apply-drops` with no records and its own outputs, listing the numbered scanner hits | with `--scanner-input` |
+| `apply` | `apply-drops` to `judged.json` and `dropped.json`, with `--records-out <work>/records.txt` (the records come from `--record` arguments appended to the line; see `records_input`) (with `--manifest`, so every drop carries `read_at`; with the scanner input, the coverage and the reject-reason file under a spec) | always |
 | `check` | `check-drops` against the manifest | always |
 | `post_clean`, `post_blocking` | `post --caller <role> ... --status clean` and `--status blocking` | always |
 | `post_clean_reject`, `post_blocking_reject` | the matching post line plus `--reject-justification-file <reject-reason file>` | with `--spec-hash` |
@@ -1666,8 +1680,8 @@ of `{step, line}`:
 
 Every line is one physical line that runs as written: no placeholder, heredoc or shell
 variable, and every value shell-quoted (a repository whose name starts with a dot is carried
-as given). The reviewer's judgement enters through `<work>/records.txt` only, written between
-`run` and `apply`. `--git-host-base-url` is carried by `run` and the post lines of a Forgejo
+as given). The reviewer's judgement enters as `--record` arguments appended to the `apply` line, which
+writes `<work>/records.txt` for `keep`; no file is written between `run` and `apply`. `--git-host-base-url` is carried by `run` and the post lines of a Forgejo
 procedure when given, else by none. `--role` is an opaque word printed into the lines; `--caller`
 is the invoking identity that reads the host, and no behaviour depends on either. The
 `--scanner-input` path is where the role's scanner input will be written; it is not read when

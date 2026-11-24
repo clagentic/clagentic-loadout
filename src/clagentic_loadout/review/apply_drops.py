@@ -1,6 +1,7 @@
 """review.apply_drops — the `apply-drops` subcommand of `loadout-review`.
 
-A reviewer's judgement of its candidates is a records file (review.drop_records):
+A reviewer's judgement of its candidates is a records file or inline --record
+arguments (review.drop_records):
 which findings and scanner hits it drops and why, and in a spec review the tag of
 each kept finding, the coverage of each criterion and, optionally, a rejection of
 the docs-only justification. `apply-drops` turns it into the files `post` reads:
@@ -11,8 +12,9 @@ texts are stored as strings. Offline: no host read, no caller. Every input is
 checked before any output is written, so a refusal (exit 64) leaves every output
 path as it was.
 
-Exit codes: 0 written; 64 an input is unusable (the message names the path or the
-line of the records file).
+Exit codes: 0 written; 1 usage (--records with --record, or a spec-mode flag without
+its pair); 64 an input is unusable (the message names the path, the line of the
+records file or the --record argument number).
 """
 
 from __future__ import annotations
@@ -25,7 +27,12 @@ from typing import Any
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.review import atomic_io, stage_manifest
-from clagentic_loadout.review.drop_records import Records, RecordsError, parse_records
+from clagentic_loadout.review.drop_records import (
+    Records,
+    RecordsError,
+    parse_arguments,
+    parse_records,
+)
 from clagentic_loadout.review.scanner_findings import finding_rule_id
 from clagentic_loadout.review.scanner_input import (
     ScannerHit,
@@ -48,19 +55,35 @@ def add_apply_drops_parser(subparsers: Any) -> None:
     apply = subparsers.add_parser(
         "apply-drops",
         help="Turn a reviewer's drop records into the files `post` reads.",
-        description="Reads the findings document of `run`, a records file (one record per "
-        "line: 'drop <id> <reason>', 'tag <n> <tag>', 'cover <criterion> <met|unmet>', "
-        "'reject <text>'; <id> is a finding's zero-based position or sN, a scanner hit's "
-        "number) and optionally the scanner input and a stage manifest. Writes the judged "
+        description="Reads the findings document of `run`, records (a records file with one "
+        "record per line, or one --record argument each: 'drop <id> <reason>', 'tag <n> <tag>', "
+        "'cover <criterion> <met|unmet>', 'reject <text>'; <id> is a finding's zero-based "
+        "position or sN, a scanner hit's number) and optionally the scanner input and a stage "
+        "manifest. Writes the judged "
         "findings (the document without the dropped findings), the dropped entries `post "
         "--dropped` takes (with read_at, the manifest's head, when --manifest is given) and, "
         "in spec mode, the coverage and the rejection reason. Prints one JSON object with the "
-        "paths, the drop counts and every scanner hit with its sN id; a records file with no "
-        "records lists the hits. Nothing is written when any input is unusable (exit 64). "
+        "paths, the drop counts and every scanner hit with its sN id; no records "
+        "lists the hits. Nothing is written when any input is unusable (exit 64). "
         "Offline: no host read, no caller.",
     )
     apply.add_argument("--findings", required=True, help="The findings document `run` wrote.")
-    apply.add_argument("--records", required=True, help="The records file (UTF-8 text).")
+    apply.add_argument("--records", default=None, help="The records file (UTF-8 text). Not with --record.")
+    apply.add_argument(
+        "--record",
+        action="append",
+        default=None,
+        help="One record, in the records-file grammar, as one argument; repeat it for more "
+        "records. Read as data, never by a shell, and it needs no file. A value holding a "
+        "newline or carriage return is refused. Not with --records. With neither, there are no "
+        "records.",
+    )
+    apply.add_argument(
+        "--records-out",
+        default=None,
+        help="Where to write the records used: the records file's text as read, or the inline "
+        "records one per line. Written only when every input is usable.",
+    )
     apply.add_argument("--judged-out", required=True, help="Where to write the judged findings.")
     apply.add_argument("--dropped-out", required=True, help="Where to write the dropped entries.")
     apply.add_argument(
@@ -176,7 +199,7 @@ def _check_drops(
     seen: dict[tuple[str, int], int] = {}
     entries: list[dict[str, Any]] = []
     for drop in records.drops:
-        where = f"records file {records.path!r}, line {drop.line}"
+        where = records.at(drop.line)
         kind, number = drop.target
         label = str(number) if kind == "finding" else f"s{number}"
         if kind == "finding" and number >= len(findings):
@@ -188,7 +211,7 @@ def _check_drops(
                 f"{where}: {label} names no scanner hit (the scanner input holds {len(hits)})"
             )
         if drop.target in seen:
-            raise ApplyError(f"{where}: {label} is already dropped on line {seen[drop.target]}")
+            raise ApplyError(f"{where}: {label} is already dropped on {records.ref(seen[drop.target])}")
         seen[drop.target] = drop.line
         source = findings[number] if kind == "finding" else _hit_source(hits[number - 1])
         entries.append(_entry(source, drop.reason, where))
@@ -205,39 +228,39 @@ def _spec_outputs(
     tags: dict[int, str] = {}
     tag_lines: dict[int, int] = {}
     for item in records.tags:
-        where = f"records file {records.path!r}, line {item.line}"
+        where = records.at(item.line)
         if item.position >= len(findings):
             raise ApplyError(f"{where}: tag {item.position} names no finding")
         if item.position in dropped_positions:
             raise ApplyError(f"{where}: finding {item.position} is dropped and cannot be tagged")
         if item.position in tags:
             raise ApplyError(
-                f"{where}: finding {item.position} is already tagged on line "
-                f"{tag_lines[item.position]}"
+                f"{where}: finding {item.position} is already tagged on "
+                f"{records.ref(tag_lines[item.position])}"
             )
         tags[item.position] = item.tag
         tag_lines[item.position] = item.line
     missing = [n for n in range(len(findings)) if n not in dropped_positions and n not in tags]
     if missing:
         raise ApplyError(
-            f"records file {records.path!r}: no tag record for kept finding(s) {missing}"
+            f"{records.label}: no tag record for kept finding(s) {missing}"
         )
     if not records.covers:
-        raise ApplyError(f"records file {records.path!r}: spec mode needs at least one cover record")
+        raise ApplyError(f"{records.label}: spec mode needs at least one cover record")
     coverage: list[dict[str, str]] = []
     cover_lines: dict[str, int] = {}
     for cover in records.covers:
         if cover.criterion in cover_lines:
             raise ApplyError(
-                f"records file {records.path!r}, line {cover.line}: criterion "
-                f"{cover.criterion!r} is already covered on line {cover_lines[cover.criterion]}"
+                f"{records.at(cover.line)}: criterion "
+                f"{cover.criterion!r} is already covered on {records.ref(cover_lines[cover.criterion])}"
             )
         cover_lines[cover.criterion] = cover.line
         coverage.append({"criterion": cover.criterion, "status": cover.status})
     if len(records.rejects) > 1:
         raise ApplyError(
-            f"records file {records.path!r}, line {records.rejects[1].line}: a second reject "
-            f"record (the first is on line {records.rejects[0].line})"
+            f"{records.at(records.rejects[1].line)}: a second reject "
+            f"record (the first is on {records.ref(records.rejects[0].line)})"
         )
     reject = records.rejects[0].text if records.rejects else None
     return tags, coverage, reject
@@ -259,9 +282,12 @@ def run_apply_drops(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_USAGE
+    if args.records is not None and args.record:
+        print("loadout-review: --records and --record cannot be given together", file=sys.stderr)
+        return EXIT_USAGE
     try:
         document, findings = _load_findings(args.findings)
-        records = parse_records(args.records)
+        records = parse_records(args.records) if args.records is not None else parse_arguments(args.record or [])
         head: str | None = None
         if args.manifest is not None:
             try:
@@ -275,7 +301,7 @@ def run_apply_drops(args: argparse.Namespace) -> int:
         if records.spec_records and not spec_mode:
             first = min(records.spec_records, key=lambda item: item.line)
             raise ApplyError(
-                f"records file {records.path!r}, line {first.line}: a tag, cover or reject "
+                f"{records.at(first.line)}: a tag, cover or reject "
                 "record needs --coverage-out and --reject-reason-out"
             )
         dropped = _check_drops(records, findings, hits)
@@ -294,6 +320,11 @@ def run_apply_drops(args: argparse.Namespace) -> int:
             if n not in dropped_positions
         ]
         judged: Any = {**document, "findings": kept} if isinstance(document, dict) else kept
+        if args.records_out is not None:
+            _write(
+                args.records_out,
+                lambda p: atomic_io.write_bytes_atomic(p, records.text.encode("utf-8")),
+            )
         _write(args.judged_out, lambda p: atomic_io.write_json_atomic(p, judged))
         _write(args.dropped_out, lambda p: atomic_io.write_json_atomic(p, dropped))
         if spec_mode:

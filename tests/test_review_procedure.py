@@ -198,8 +198,13 @@ def test_the_printed_object_pins_the_head_and_the_lines_hold_nothing_to_substitu
     assert payload["platform"] == world.host.platform and payload["spec_hash"] == spec_hash
     assert Path(payload["manifest"]).parent == out / "head"
     work = out / "work"
-    assert payload["work_dir"] == str(work) and (work / "records.txt").read_text() == ""
+    assert payload["work_dir"] == str(work) and work.is_dir()
+    assert not (work / "records.txt").exists() and not (work / "hits-records.txt").exists()
     assert payload["files"]["records"] == str(work / "records.txt")
+    assert "hits_records" not in payload["files"]
+    assert payload["records_input"]["step"] == "apply"
+    assert payload["records_input"]["flag"] == "--record"
+    assert "append one shell-quoted --record argument" in payload["records_input"]["rule"]
     assert payload["files"]["findings"] == str(work / "run" / "findings.json")
     expected = STEPS_SPEC if spec else STEPS
     steps = [item["step"] for item in payload["lines"]]
@@ -210,6 +215,10 @@ def test_the_printed_object_pins_the_head_and_the_lines_hold_nothing_to_substitu
         assert "\n" not in line and not any(ch in line for ch in "<>$`")
         assert shlex.split(line)[0] in ("loadout-review", "loadout-spec")
     tokens = _tokens(payload)
+    assert _value(tokens["apply"], "--records-out") == str(work / "records.txt")
+    assert "--records" not in tokens["apply"] and "--record" not in tokens["apply"]
+    if scanner:
+        assert "--records" not in tokens["hits"] and "--records-out" not in tokens["hits"]
     assert (repo in tokens["run"]) and _value(tokens["post_clean"], "--repo") == repo
     assert _value(tokens["keep"], "--repo") == repo
 
@@ -237,16 +246,22 @@ def test_every_printed_line_runs_as_written_in_order(world, tmp_path, capsys, ro
         step = item["step"]
         if step in skipped:
             continue
+        line = item["line"]
         if step == "apply":
-            Path(files["records"]).write_text(
-                _records(spec, scanner, reject=reject), encoding="utf-8"
+            # The records are only appended to the printed line, as records_input says.
+            line += "".join(
+                f" {payload['records_input']['flag']} {shlex.quote(record)}"
+                for record in _records(spec, scanner, reject=reject).splitlines()
             )
-        code, result, err = world.execute(item["line"], capsys)
+        code, result, err = world.execute(line, capsys)
         assert code == 0, (step, item["line"], err)
         results[step] = result
 
     assert Path(files["findings"]).is_file()
-    dropped = json.loads(Path(files["dropped"]).read_text(encoding="utf-8"))
+    assert Path(files["records"]).read_text(encoding="utf-8") == _records(
+        spec, scanner, reject=reject
+    )
+    dropped =json.loads(Path(files["dropped"]).read_text(encoding="utf-8"))
     # A spec review keeps its one finding, tagged; the others drop it, and a non-spec
     # scanner review drops its hit as well.
     assert len(dropped) == (0 if spec else 1 + (1 if scanner else 0))
@@ -303,8 +318,7 @@ def test_the_scanner_step_lists_hits_without_touching_the_judged_or_dropped_file
 
     tokens = _tokens(payload)
     files = payload["files"]
-    assert _value(tokens["hits"], "--records") == files["hits_records"]
-    assert Path(files["hits_records"]).read_text() == ""
+    assert "--records" not in tokens["hits"] and "--record" not in tokens["hits"]
     assert {_value(tokens["hits"], f) for f in ("--judged-out", "--dropped-out")} == {
         files["hits_judged"], files["hits_dropped"],
     }
@@ -381,7 +395,7 @@ def _refusal(world, tmp_path, capsys, case):
     elif case == "scanner-name-clash":
         extra = ["--scanner-input", str(tmp_path / "elsewhere" / "findings.json")]
     elif case == "scanner-path-alias":
-        extra = ["--scanner-input", str(out / "work" / "hits-records.txt")]
+        extra = ["--scanner-input", str(out / "work" / "hits-judged.json")]
     elif case == "newline-in-role":
         return out, world.procedure(out, capsys=capsys, role="two\nlines")
     elif case == "role-starts-with-dash":
@@ -398,7 +412,7 @@ def _refusal(world, tmp_path, capsys, case):
         ("malformed-hash", 1, "XYZ"),
         ("unknown-hash", review_cli.EXIT_SPEC_UNAVAILABLE, "e" * 64),
         ("scanner-name-clash", 1, "findings.json"),
-        ("scanner-path-alias", 1, "hits_records"),
+        ("scanner-path-alias", 1, "hits_judged"),
         ("newline-in-role", 1, "two"),
         ("role-starts-with-dash", 1, "'-x' starts with"),
         ("repo-starts-with-dash", 1, "'-o/name' starts with"),
