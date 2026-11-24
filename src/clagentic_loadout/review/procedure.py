@@ -26,6 +26,7 @@ from typing import Any
 
 from clagentic_loadout._version import get_version
 from clagentic_loadout.platform_detect import PLATFORM_FORGEJO
+from clagentic_loadout.review.atomic_io import write_bytes_atomic
 from clagentic_loadout.review.profile_spec_section import show_line
 from clagentic_loadout.review.stage_manifest import MANIFEST_NAME
 
@@ -267,9 +268,9 @@ def create_work_area(inputs: ProcedureInputs) -> None:
     """Create the work directory with an empty records file (and an empty records
     file for the scanner-hits step)."""
     inputs.work_dir.mkdir(parents=True, exist_ok=True)
-    (inputs.work_dir / RECORDS_NAME).write_text("", encoding="utf-8")
+    write_bytes_atomic(inputs.work_dir / RECORDS_NAME, b"")
     if inputs.scanner_input is not None:
-        (inputs.work_dir / HITS_RECORDS_NAME).write_text("", encoding="utf-8")
+        write_bytes_atomic(inputs.work_dir / HITS_RECORDS_NAME, b"")
 
 
 __all__ = [
