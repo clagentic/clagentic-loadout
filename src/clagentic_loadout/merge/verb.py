@@ -520,6 +520,7 @@ from clagentic_loadout.merge.attestation import build_attestation_body
 from clagentic_loadout.merge.criterion_evidence import CriterionEvidence, collect_criterion_evidence
 from clagentic_loadout.merge.interface_notice import InterfaceNotices, collect_interface_notices
 from clagentic_loadout.merge.removed_notice import RemovedNotices, collect_removed_notices
+from clagentic_loadout.merge.unproven_drops import unproven_drop_lines
 from clagentic_loadout.merge.authority import (
     AuthorityProvider,
     StaticRoleAuthorityProvider,
@@ -1731,6 +1732,9 @@ def _run(
 
     # 5. Reviewer-verdict fences — for each required reviewer.
     gate_evaluations: list[GateEvaluation] = []
+    # Dropped candidates whose read revision a passing fence marks unproven, named
+    # in the merge output and the attestation; report only, no gate reads it.
+    unproven_drops: list[str] = []
     # Records read from fences the checks below accepted at the exact head, for a
     # verdict posted before verdict records existed (verdict_record.reader).
     fence_records: dict[str, list[VerdictRecord]] = {}
@@ -1843,6 +1847,9 @@ def _run(
                         f"reviewer on this PR and clears nothing",
                         file=sys.stderr,
                     )
+                for unproven_line in unproven_drop_lines(reviewer_name, candidate.state.dropped):
+                    unproven_drops.append(unproven_line)
+                    print(f"merge: NOTICE -- {label}{unproven_line}", file=sys.stderr)
                 # The gate's own computation comes before the recorded status is
                 # read: an evaluated fence that says BLOCKED is refused here by
                 # name, and one a standing disposition now clears is passed.
@@ -2452,6 +2459,8 @@ def _run(
             print(f"merge: report-only -- verdict {gate_evaluation.attestation_line()}")
             if gate_evaluation.docs_only_waiver is not None:
                 print(f"merge: report-only -- waiver {gate_evaluation.docs_only_waiver}")
+        for unproven_line in unproven_drops:
+            print(f"merge: report-only -- {unproven_line}")
         print(
             f"merge: report-only -- all gates PASSED; PR #{args.pr_number} in "
             f"{owner}/{repo} would be merged (method={args.merge_method!r}, "
@@ -2571,6 +2580,7 @@ def _run(
         interface_notices=list(interface_notices.lines),
         removed_behaviour=list(removed_notices.attestation),
         criterion_evidence=list(criterion_evidence.lines),
+        unproven_drops=unproven_drops,
         identity_provider=provider_fields(attested_identity)["provider"],
         self_declared=provider_fields(attested_identity)["self_declared"],
     )
@@ -2621,6 +2631,7 @@ def _run(
             else {}
         ),
         **({"removed_undisposed": list(removed_notices.undisposed)} if removed_notices.undisposed else {}),
+        **({"unproven_drops": list(unproven_drops)} if unproven_drops else {}),
         **provider_fields(attested_identity),
     }))
 
