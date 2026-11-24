@@ -26,6 +26,7 @@ from typing import Any
 
 from clagentic_loadout.acquire.contract import AcquiredPr, PolicyFileBackend
 from clagentic_loadout.acquire.errors import AcquireFetchError
+from clagentic_loadout.review.atomic_io import write_bytes_atomic
 from clagentic_loadout.review.stage_manifest import (
     KEY_SCHEMA,
     KEY_STAGING_GAP,
@@ -42,6 +43,8 @@ _REASON_DELETED = "removed by the pull request"
 _REASON_BINARY = "binary: the head content is not UTF-8 text"
 _REASON_RESERVED = "path is the stage manifest's own name"
 _MAX_REASON_CHARS = 300
+#: Staged copies are read-only for everyone; the atomic writer creates them at this mode.
+_COPY_MODE = stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH
 
 
 class StageRefusedError(Exception):
@@ -75,8 +78,7 @@ def _write_copy(directory: Path, path: str, data: bytes) -> None:
     if directory not in target.resolve().parents:
         raise ValueError("resolves outside the output directory")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
-    target.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
+    write_bytes_atomic(target, data, mode=_COPY_MODE)
 
 
 def _staging_gap(acquired: AcquiredPr, staged: int, accounted: int) -> dict[str, Any] | None:
@@ -159,7 +161,7 @@ def stage_head(
     if gap is not None:
         manifest[KEY_STAGING_GAP] = gap
     manifest_path = directory / MANIFEST_NAME
-    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    write_bytes_atomic(manifest_path, (json.dumps(manifest, indent=2) + "\n").encode("utf-8"))
     return manifest_path, manifest
 
 
