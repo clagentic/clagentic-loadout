@@ -6,11 +6,14 @@ Every row goes through the real `main()` of both verbs: the spec is sealed by
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
 import pytest
 
 from clagentic_loadout.review import profile_verb as pv
+from clagentic_loadout.spec import model as spec_model
+from clagentic_loadout.spec import store as spec_store
 from clagentic_loadout.spec import verb as spec_verb
 from tests._review_evaluate_support import commit_files, run_git
 from tests._support.roles_groups import profile_repo, write_groups
@@ -207,3 +210,106 @@ def test_a_dot_named_repository_completes(tmp_path, capsys, name):
         )
         assert code == pv.EXIT_OK, err
         assert result["spec"]["spec_hash"] == spec_hash
+
+
+def _seal_sized(repo: Path, goal_bytes: int) -> str:
+    """Seal a spec whose goal is *goal_bytes* long, at a fixed time and head, so two of
+    them differ only in what the size changes."""
+    draft = spec_model.new_draft("planner-role")
+    draft["goal"] = "g" * goal_bytes
+    draft["acceptance_criteria"] = [{"id": "ac-1", "given": "g", "when": "w", "then": "t"}]
+    sealed = spec_model.seal(
+        draft, head_sha=run_git(repo, "rev-parse", "HEAD"), sealed_at="2026-01-01T00:00:00Z"
+    )
+    spec_store.write_sealed(spec_store.specs_root(), sealed)
+    return sealed.spec_hash
+
+
+def _reference_argv(repo: Path, spec_hash: str, *extra: str) -> list[str]:
+    return ["--role", "builder", "--repo-path", str(repo), "--spec", spec_hash, *extra]
+
+
+def test_the_reference_form_indexes_the_spec_and_every_show_line_prints_its_field(
+    tmp_path, capsys
+):
+    repo = profile_repo(tmp_path)
+    spec_hash = _seal_spec(tmp_path, repo, capsys)
+    document = json.loads(_stored(spec_hash).read_text(encoding="ascii"))
+
+    code, result, err = _brief(capsys, *_reference_argv(repo, spec_hash, "--spec-form", "reference"))
+
+    assert code == pv.EXIT_OK, err
+    section = result["spec"]
+    assert "document" not in section
+    assert list(section) == [
+        "spec_hash", "head_sha", "sealed_at", "role", "supersedes", "show", "fields",
+    ]
+    assert section["show"] == f"loadout-spec show {spec_hash}"
+    header = {"head_sha", "sealed_at", "role", "supersedes", "schema_version"}
+    assert [f["name"] for f in section["fields"]] == [k for k in document if k not in header]
+    for entry in section["fields"]:
+        assert entry["bytes"] == len(json.dumps(document[entry["name"]], ensure_ascii=False).encode())
+        assert entry["show"] == f"loadout-spec show {spec_hash} --field {entry['name']}"
+        assert spec_verb.main(shlex.split(entry["show"])[1:]) == 0
+        assert json.loads(capsys.readouterr().out) == {
+            "spec_hash": spec_hash, entry["name"]: document[entry["name"]],
+        }
+    assert spec_verb.main(shlex.split(section["show"])[1:]) == 0
+
+
+def test_the_reference_brief_does_not_grow_with_the_spec(tmp_path, capsys):
+    repo = profile_repo(tmp_path)
+    _, plain, _ = _brief(capsys, "--role", "builder", "--repo-path", str(repo))
+    small, large = _seal_sized(repo, 1000), _seal_sized(repo, 45_000)
+    briefs = {}
+    for name, spec_hash in (("small", small), ("large", large)):
+        code, briefs[name], err = _brief(
+            capsys, *_reference_argv(repo, spec_hash, "--spec-form", "reference")
+        )
+        assert code == pv.EXIT_OK, err
+        assert len(json.dumps(briefs[name])) - len(json.dumps(plain)) <= 8 * 1024
+
+    def masked(brief: dict, spec_hash: str) -> str:
+        section = dict(brief["spec"])
+        fields = [{**f, "bytes": 0} for f in section["fields"]]
+        text = json.dumps({**section, "fields": fields, "spec_hash": ""})
+        return text.replace(spec_hash, "")
+
+    assert masked(briefs["small"], small) == masked(briefs["large"], large)
+    sizes = {name: {f["name"]: f["bytes"] for f in b["spec"]["fields"]} for name, b in briefs.items()}
+    assert sizes["small"]["goal"] < 1100 and sizes["large"]["goal"] > 45_000
+
+
+@pytest.mark.parametrize("form", [None, "document"])
+def test_the_document_form_is_the_default_and_keeps_the_section_it_always_had(
+    tmp_path, capsys, form
+):
+    repo = profile_repo(tmp_path)
+    spec_hash = _seal_spec(tmp_path, repo, capsys)
+    document = json.loads(_stored(spec_hash).read_text(encoding="ascii"))
+    _, plain, _ = _brief(capsys, "--role", "builder", "--repo-path", str(repo))
+    expected = json.dumps(
+        {
+            **plain,
+            "spec": {
+                "spec_hash": spec_hash, "head_sha": document["head_sha"],
+                "sealed_at": document["sealed_at"], "role": document["role"],
+                "supersedes": document["supersedes"], "document": document,
+            },
+        }
+    )
+    extra = [] if form is None else ["--spec-form", form]
+
+    capsys.readouterr()
+    code = pv.main(["brief", *_reference_argv(repo, spec_hash, *extra)])
+
+    assert code == pv.EXIT_OK and capsys.readouterr().out == expected + "\n"
+
+
+@pytest.mark.parametrize("argv", [["--spec-form", "reference"], ["--spec-form", "document"]])
+def test_a_spec_form_without_a_spec_is_a_usage_error(tmp_path, capsys, argv):
+    repo = profile_repo(tmp_path)
+
+    code, result, err = _brief(capsys, "--role", "builder", "--repo-path", str(repo), *argv)
+
+    assert code == pv.EXIT_USAGE and result is None and "--spec-form" in err
