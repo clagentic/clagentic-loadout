@@ -175,12 +175,19 @@ def teardown_stage(manifest: Manifest) -> list[str]:
     """Remove the copies the manifest lists, the manifest, and the directories
     that are then empty, up to and including the manifest's directory. Returns
     what is left in the directory (empty when it is gone): only files the manifest
-    does not name are left, and they are never touched."""
+    does not name, and listed paths whose parent no longer resolves inside the
+    directory (a component swapped for a symlink after staging), are left, and
+    they are never touched."""
     directory = manifest.directory.resolve()
+    skipped: set[str] = set()
     for path in manifest.files:
         if unsafe_path_reason(path) is not None:
             continue
         target = directory / path
+        parent = target.parent.resolve()
+        if parent != directory and directory not in parent.parents:
+            skipped.add(path)
+            continue
         try:
             target.unlink(missing_ok=True)
         except OSError:
@@ -193,7 +200,8 @@ def teardown_stage(manifest: Manifest) -> list[str]:
             continue
     if not directory.exists():
         return []
-    return sorted(str(p.relative_to(directory)) for p in directory.rglob("*") if p.is_file())
+    left = {str(p.relative_to(directory)) for p in directory.rglob("*") if p.is_file()}
+    return sorted(left | skipped)
 
 
 __all__ = [

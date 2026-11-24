@@ -221,16 +221,30 @@ def test_teardown_removes_the_stage_and_a_second_call_reports_it_gone(world, tmp
     assert second["directory"] == str(out.resolve())
 
 
-def test_teardown_leaves_a_file_the_manifest_does_not_name(world, tmp_path, capsys):
+@pytest.mark.parametrize("kind", ["unlisted-file", "symlinked-parent"])
+def test_teardown_leaves_what_it_must_not_touch(world, tmp_path, capsys, kind):
     out = tmp_path / "stage"
     manifest = world.stage(out, capsys=capsys)[1]["manifest"]
-    (out / "mine.txt").write_text("keep", encoding="utf-8")
+    if kind == "unlisted-file":
+        (out / "mine.txt").write_text("keep", encoding="utf-8")
+        left, survivor = ["mine.txt"], out / "mine.txt"
+    else:
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        survivor = outside / "mod.py"
+        survivor.write_text("keep", encoding="utf-8")
+        (out / "src" / "mod.py").chmod(0o600)
+        (out / "src" / "mod.py").unlink()
+        (out / "src").rmdir()
+        (out / "src").symlink_to(outside, target_is_directory=True)
+        left = [MODIFIED]
 
     code, payload, err = world.call("teardown", "--manifest", manifest, capsys=capsys, with_host=False)
 
-    assert code == 0 and payload["remaining"] == ["mine.txt"]
-    assert (out / "mine.txt").read_text(encoding="utf-8") == "keep"
-    assert not (out / MODIFIED).exists()
+    assert code == 0 and payload["remaining"] == left
+    assert survivor.read_text(encoding="utf-8") == "keep"
+    if kind == "unlisted-file":
+        assert not (out / MODIFIED).exists()
 
 
 def test_teardown_refuses_what_is_not_the_manifest_of_its_own_directory(world, tmp_path, capsys):
