@@ -1148,10 +1148,11 @@ when it is a non-empty string (cut to 600 characters), and `post` renders it und
 the finding's bullet and copies it into the fence as `failure_sequences`. A finding
 without it posts exactly as before. `post --dropped <file>` takes the candidates the
 reviewer examined and dropped (an array, or an object with a `dropped` array, of
-`file`, `line`, `rule_id`, `message`, `reason`) and renders a `Dropped candidates`
+`file`, `line`, `rule_id`, `message`, `reason`, and an optional `read_at`: the
+revision the reviewer read the file at) and renders a `Dropped candidates`
 section, counted in the header (`clean (0 finding(s), 2 dropped)`) and copied into
 the fence as `dropped`; a dropped candidate is never a finding and never changes the
-verdict. When `--findings` is a `run` output, `post` also states, from the run's own
+verdict. See "Read-at-head staging and drop proof" below for `read_at` and `proven`. When `--findings` is a `run` output, `post` also states, from the run's own
 record, the range (`range: <base>..<head>`, or `range: since <sha>` for a delta
 review) and the engine that answered (`engine: carrier`, or
 `engine: fallback: <model>, reason usage_limit`, the model coming from the profile's
@@ -1494,6 +1495,73 @@ the current round. Exit codes: **0** computed, **1** usage, **3** profile invali
 the role's login not resolvable, **4** wrong platform, **5** comments not readable,
 **7** caller/attested-identity mismatch, **33** `--spec-hash` not in the specs store.
 The fields and exit codes are additive; no existing field or code changed.
+
+### Read-at-head staging and drop proof
+
+A reviewer that cites a file needs a source for the file at the reviewed head, and a
+record of whether each candidate it dropped was read there. Three subcommands of
+`loadout-review` provide the source and the check; none refuses a review, gates a
+verdict or changes a merge outcome.
+
+**`stage --repo <owner/name> --pr <n> --out <dir>`** reads the PR through the host
+API (no checkout, worktree or fetch), pins the head SHA the host reports at the time
+of the call, and writes under `<dir>` the head version of every changed file that
+exists there, read-only, each at its repository path. `<dir>` must not exist or be an
+empty directory; otherwise nothing is written and the exit code is **64**, with the
+resolved path in the message. A manifest, `.loadout-review-stage.json`, is written in
+`<dir>`:
+
+| Key | Content |
+| --- | --- |
+| `schema` | `loadout-review-stage/1` |
+| `repo`, `pr`, `platform` | the pull request, `repo` as given (a name that starts with a dot, as in an org profile repository, is accepted) |
+| `head_sha`, `base_sha` | the head as the host reported it, and the range base |
+| `dir` | the resolved directory |
+| `files` | `[{path, sha256}]`, the sha256 of each written copy |
+| `deleted` | `[{path, reason}]`, files the pull request removes |
+| `missing` | `[{path, reason}]`, changed files with no copy: binary content, a failed read, an absolute path or one with a `..` segment (never written outside `<dir>`) |
+| `staging_gap` | present only when the host's own changed-file count differs from `files` + `deleted` + `missing`, or when no copy was staged: `{reason, staged, accounted, host}` |
+
+Standard output is one JSON object with `manifest` and `head_sha` (and `staging_gap`
+when present). A gap, like a missing file, is reported and the exit code stays **0**;
+`5` means the host could not be read. `stage` takes `--caller`, `--platform`,
+`--repo-path` and `--git-host-base-url` like `run`. The host's changed-file listing is
+one page on both platforms, so a pull request with more files than a page shows a
+`staging_gap`.
+
+**`teardown --manifest <path>`** removes the copies the manifest lists, the manifest
+and its directory (files in the directory the manifest does not name are left and
+listed under `remaining`). A second call exits **0** and reports `already_gone`. A file
+that is not a stage manifest, or a manifest whose recorded `dir` is not the directory
+that holds it, removes nothing and exits **64**. It is offline and binds no caller.
+
+**`check-drops --manifest <m> --dropped <d> [--findings <f>]`** is a report. For each
+entry of the dropped file it says, by position and `file:line:rule_id`, whether the
+drop is proven: `read_at` equals the manifest's `head_sha` and the file has a copy or
+is in `deleted`. An unproven entry carries one reason: `no read_at`, `read at another
+revision (<sha>)` or `no head copy`. `gaps` lists the manifest's `missing` files and
+every dropped or finding file the manifest neither holds nor records as deleted. The
+exit code is **0** whatever the outcome; **64** only for an unreadable or malformed
+manifest, dropped file or findings file (the message names the resolved path and the
+parse error). It is offline and binds no caller.
+
+**`post` and `read_at`.** `post --dropped` records, on every dropped entry in the
+fence, `read_at` (the string given, or null) and `proven` (true only when `read_at`
+equals the reviewed head; computed by `post`, a `proven` in the file is replaced). A
+`read_at` that is not a full SHA is recorded as given and is unproven. The comment
+marks an unproven drop (`[unproven: read at <value>]` or `[unproven: no read_at]`)
+and stderr names it by `file:line:rule_id`. The drop is kept, the verdict and the exit
+code are those of the same post with every drop proven. A fence whose dropped entries
+carry either key is `fence_schema_version` **10**, a superset of version 9 (a reader
+below it refuses the unknown keys); a fence whose entries carry neither keeps the
+version it had.
+
+**`loadout-merge` and unproven drops.** For each reviewer fence it checks, the merge
+prints a `NOTICE` for every dropped entry whose `proven` is false (reviewer,
+`file:line:rule_id`, the revision it was read at or `no read_at recorded`), repeats
+them as `unproven_drops` in its result and as an `Unproven drops` row of the
+merge-completion attestation. An entry from a fence written before these keys existed
+has no `proven` key and is not reported. No gate outcome depends on any of it.
 
 ### Defect classes and class guidance
 

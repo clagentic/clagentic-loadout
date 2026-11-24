@@ -21,6 +21,10 @@ one to post its judgement, and nothing else:
         posted fences, for a caller that did not run the post.
   open  read-only: the findings the reviewer's own posted fences hold open at the
         current head, each with the id `post --clear` takes.
+  stage, teardown, check-drops
+        a read-at-head source for a reviewer (review.head_stage) and a report-only
+        check of each dropped candidate against it (review.drop_check). `teardown`
+        and `check-drops` are offline and bind no caller.
 
 Both bind --caller to the attested invoking identity before any I/O, exactly
 like every other verb. Profiles come from deployment config
@@ -43,7 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from clagentic_loadout._version import get_version
-from clagentic_loadout.acquire.contract import AcquiredPr
+from clagentic_loadout.acquire.contract import AcquiredPr, PolicyFileBackend
 from clagentic_loadout.acquire.errors import AcquireFetchError, PlatformMismatchError
 from clagentic_loadout.acquire.verb import AcquireVerbError, build_backend
 from clagentic_loadout.platform_detect import (
@@ -96,6 +100,7 @@ from clagentic_loadout.review import (
     class_guidance,
     spec_review,
 )
+from clagentic_loadout.review import head_stage, stage_verbs
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.churn_ledger import ChurnLedgerError
 from clagentic_loadout.review.churn_verb import churn_after_post, churn_on_demand
@@ -118,6 +123,7 @@ from clagentic_loadout.review.docs_only_review import (
     split_findings,
 )
 from clagentic_loadout.review.changed_lines import DiffUnreadableError
+from clagentic_loadout.review.drop_check import annotate_dropped
 from clagentic_loadout.review.dropped_overlap import drop_overlapping
 from clagentic_loadout.review.evaluate import OUTCOME_CLEAN, Verdict
 from clagentic_loadout.review.evaluate_render import finding_notes
@@ -436,10 +442,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="JSON file listing the candidate findings the reviewer examined "
         "and dropped: an array (or an object with a 'dropped' array) of "
-        "objects with 'file', 'line', 'rule_id', 'message' and 'reason'. "
-        "Shown in a 'Dropped candidates' section, counted in the verdict "
-        "header, and copied into the fence. Dropped candidates are never "
-        "findings and do not change the verdict.",
+        "objects with 'file', 'line', 'rule_id', 'message' and 'reason', and "
+        "optionally 'read_at': the revision the file was read at when the "
+        "candidate was dropped. 'read_at' and 'proven' (true only when 'read_at' "
+        "is the reviewed head; computed here, never taken from the file) are "
+        "recorded on every entry in the fence, and an unproven entry is marked in "
+        "the comment and named on stderr. Shown in a 'Dropped candidates' "
+        "section, counted in the verdict header, and copied into the fence. "
+        "Dropped candidates are never findings and do not change the verdict, "
+        "proven or not.",
     )
     post.add_argument(
         "--scanner-input",
@@ -538,6 +549,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "against. When given, step 1 of the brief quotes the spec's goal and scope.",
     )
 
+    stage_verbs.add_stage_parsers(subparsers, add_common)
     add_evaluate_parser(subparsers)
     return parser
 
@@ -1373,6 +1385,58 @@ def _clearance_state(
     return merged
 
 
+def _stage_command(
+    args: argparse.Namespace,
+    caller: str,
+    *,
+    owner: str,
+    repo: str,
+    platform: str,
+    token_provider,
+    opener,
+) -> int:
+    """`stage`: head copies of the PR's changed files under --out, with a manifest.
+    The output path is judged before the host is read, so a refusal writes nothing."""
+    try:
+        directory = head_stage.check_out_dir(args.out)
+    except head_stage.StageRefusedError as exc:
+        _fail(str(exc), stage_verbs.EXIT_REFUSED)
+    backend = _build_acquire_backend(
+        args, owner=owner, repo=repo, caller=caller, platform=platform,
+        token_provider=token_provider, opener=opener,
+    )
+    if not isinstance(backend, PolicyFileBackend):
+        _fail(
+            f"the {platform} acquisition backend cannot read file contents at a revision",
+            EXIT_ACQUIRE_FAILED,
+        )
+    acquired = _fetch_acquired(backend, args, owner=owner, repo=repo)
+    try:
+        manifest_path, manifest = head_stage.stage_head(
+            backend, acquired, directory=directory, repo=args.repo.strip(), platform=platform
+        )
+    except head_stage.StageHeadError as exc:
+        _fail(str(exc), EXIT_ACQUIRE_FAILED)
+    except OSError as exc:
+        _fail(f"cannot write the stage under {str(directory)!r}: {exc}", EXIT_ACQUIRE_FAILED)
+    payload: dict[str, Any] = {
+        "result": "staged",
+        "manifest": str(manifest_path),
+        "head_sha": manifest["head_sha"],
+        "staged": len(manifest["files"]),
+        "deleted": len(manifest["deleted"]),
+        "missing": len(manifest["missing"]),
+    }
+    if "staging_gap" in manifest:
+        payload["staging_gap"] = manifest["staging_gap"]
+        print(
+            f"loadout-review: staging gap: {manifest['staging_gap']['reason']}",
+            file=sys.stderr,
+        )
+    print(json.dumps(payload))
+    return EXIT_OK
+
+
 def _churn_command(
     args: argparse.Namespace,
     caller: str,
@@ -1496,8 +1560,21 @@ def _post_command(
         evaluation = context_from_config(config_root)
     except EvaluateError as exc:
         _fail(str(exc), EXIT_PROFILE_INVALID)
+    # The review record keeps the entries as the reviewer gave them; only the
+    # fence carries the read revision the tool computed.
+    dropped_as_given: list[Any] | None = None
     if args.dropped:
-        dropped = _load_dropped(args.dropped)
+        dropped_as_given = _load_dropped(args.dropped)
+        dropped, unproven = annotate_dropped(dropped_as_given, head_sha)
+        # Named, never refused: the drop is kept and the verdict is the one it
+        # would be with every drop proven.
+        for drop_id, read_at in unproven:
+            print(
+                f"loadout-review: notice: dropped {drop_id} is unproven "
+                f"({f'read at {read_at}' if read_at else 'no read_at'}, not the reviewed head "
+                f"{head_sha}); it is kept as a drop and the verdict is unchanged",
+                file=sys.stderr,
+            )
         if dropped:
             evidence = {**evidence, KEY_DROPPED: dropped}
     findings, evidence = _apply_caller_resolutions(
@@ -1877,7 +1954,7 @@ def _post_command(
         evaluated=body[KEY_EVALUATED_FINDINGS],
         open_findings=open_findings,
         advisory=[{k: item[k] for k in _FINDING_KEYS if k in item} for item in advisory],
-        dropped=evidence.get(KEY_DROPPED),
+        dropped=dropped_as_given if dropped_as_given else evidence.get(KEY_DROPPED),
         chunks=loaded_meta.get("chunks"),
     )
     if guidance is not None:
@@ -1978,6 +2055,10 @@ def main(
     if args.command == "evaluate":
         # Offline: no host call, no posting, so no caller identity to bind.
         return run_evaluate(args, config_root=config_root)
+    if args.command == "teardown":
+        return stage_verbs.run_teardown(args)
+    if args.command == "check-drops":
+        return stage_verbs.run_check_drops(args)
 
     try:
         owner, repo = _parse_owner_repo(args.repo)
@@ -2000,6 +2081,11 @@ def main(
             )
         if args.command == "open":
             return _open_command(
+                args, caller, owner=owner, repo=repo, platform=platform,
+                token_provider=token_provider, opener=opener,
+            )
+        if args.command == "stage":
+            return _stage_command(
                 args, caller, owner=owner, repo=repo, platform=platform,
                 token_provider=token_provider, opener=opener,
             )
