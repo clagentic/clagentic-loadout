@@ -26,6 +26,7 @@ from typing import Any
 from clagentic_loadout._version import get_version
 from clagentic_loadout.review import atomic_io, stage_manifest
 from clagentic_loadout.review.drop_records import Records, RecordsError, parse_records
+from clagentic_loadout.review.scanner_findings import finding_rule_id
 from clagentic_loadout.review.scanner_input import (
     ScannerHit,
     ScannerInput,
@@ -158,7 +159,13 @@ def _entry(source: dict[str, Any], reason: str, where: str) -> dict[str, Any]:
 
 
 def _hit_source(hit: ScannerHit) -> dict[str, Any]:
-    return {"file": hit.file, "line": hit.line, "rule_id": hit.rule_id, "message": hit.message}
+    # `post` matches a dropped scanner finding by the id form the finding carries.
+    return {
+        "file": hit.file,
+        "line": hit.line,
+        "rule_id": finding_rule_id(hit),
+        "message": hit.message,
+    }
 
 
 def _check_drops(

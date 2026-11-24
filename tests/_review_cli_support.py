@@ -51,6 +51,10 @@ STUB_SCRIPT = textwrap.dedent(
             "impact": {"confidentiality": "none", "integrity": "none", "availability": "none"},
             "durability": "durable"}
 
+    HARMLESS = {"category": "correctness", "reachable": "no", "attacker_precondition": "none",
+                "impact": {"confidentiality": "none", "integrity": "none", "availability": "none"},
+                "durability": "durable"}
+
     def with_facts(facts, **extra):
         return json.dumps([{"file": path, "line": 1, "rule_id": "R1",
                             "message": "stub finding", "facts": facts, **extra}])
@@ -61,6 +65,8 @@ STUB_SCRIPT = textwrap.dedent(
         print(with_facts(SERIOUS))
     elif mode == "facts_mild":
         print(with_facts(MILD))
+    elif mode == "facts_harmless":
+        print(with_facts(HARMLESS))
     elif mode == "distinct_per_call":
         # Every other call raises a different finding: the first a blocking one,
         # the second a mild one, as two samples of one model can.

@@ -25,6 +25,9 @@ one to post its judgement, and nothing else:
         a read-at-head source for a reviewer (review.head_stage) and a report-only
         check of each dropped candidate against it (review.drop_check). `teardown`
         and `check-drops` are offline and bind no caller.
+  procedure
+        binds the caller like `stage`, stages the head, and prints the review steps
+        as command lines that run as written (review.procedure).
   apply-drops, keep-evidence
         offline, no caller: the reviewer's drop records become the files `post`
         reads (review.apply_drops), and the review's files are kept by comment id
@@ -104,7 +107,13 @@ from clagentic_loadout.review import (
     class_guidance,
     spec_review,
 )
-from clagentic_loadout.review import apply_drops, head_stage, keep_evidence_verb, stage_verbs
+from clagentic_loadout.review import (
+    apply_drops,
+    head_stage,
+    keep_evidence_verb,
+    procedure,
+    stage_verbs,
+)
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.churn_ledger import ChurnLedgerError
 from clagentic_loadout.review.churn_verb import churn_after_post, churn_on_demand
@@ -566,6 +575,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     stage_verbs.add_stage_parsers(subparsers, add_common)
+    procedure.add_procedure_parser(subparsers, add_common)
     apply_drops.add_apply_drops_parser(subparsers)
     keep_evidence_verb.add_keep_evidence_parser(subparsers)
     add_evaluate_parser(subparsers)
@@ -1433,6 +1443,38 @@ def _stage_command(
         directory = head_stage.check_out_dir(args.out)
     except head_stage.StageRefusedError as exc:
         _fail(str(exc), stage_verbs.EXIT_REFUSED)
+    manifest_path, manifest = _pin_and_stage(
+        args, caller, owner=owner, repo=repo, platform=platform,
+        token_provider=token_provider, opener=opener, directory=directory,
+    )
+    payload: dict[str, Any] = {
+        "result": "staged",
+        "manifest": str(manifest_path),
+        "head_sha": manifest["head_sha"],
+        "staged": len(manifest["files"]),
+        "deleted": len(manifest["deleted"]),
+        "missing": len(manifest["missing"]),
+    }
+    if "staging_gap" in manifest:
+        payload["staging_gap"] = manifest["staging_gap"]
+    print(json.dumps(payload))
+    return EXIT_OK
+
+
+def _pin_and_stage(
+    args: argparse.Namespace,
+    caller: str,
+    *,
+    owner: str,
+    repo: str,
+    platform: str,
+    token_provider,
+    opener,
+    directory: Path,
+) -> tuple[Path, dict[str, Any]]:
+    """Read the PR's head once from the host and write its head copies and manifest
+    under *directory* (a path `head_stage.check_out_dir` accepted). A staging gap is
+    named on stderr and never changes the outcome. Shared by `stage` and `procedure`."""
     backend = _build_acquire_backend(
         args, owner=owner, repo=repo, caller=caller, platform=platform,
         token_provider=token_provider, opener=opener,
@@ -1451,20 +1493,98 @@ def _stage_command(
         _fail(str(exc), EXIT_ACQUIRE_FAILED)
     except OSError as exc:
         _fail(f"cannot write the stage under {str(directory)!r}: {exc}", EXIT_ACQUIRE_FAILED)
-    payload: dict[str, Any] = {
-        "result": "staged",
-        "manifest": str(manifest_path),
-        "head_sha": manifest["head_sha"],
-        "staged": len(manifest["files"]),
-        "deleted": len(manifest["deleted"]),
-        "missing": len(manifest["missing"]),
-    }
     if "staging_gap" in manifest:
-        payload["staging_gap"] = manifest["staging_gap"]
         print(
             f"loadout-review: staging gap: {manifest['staging_gap']['reason']}",
             file=sys.stderr,
         )
+    return manifest_path, manifest
+
+
+def _procedure_command(
+    args: argparse.Namespace,
+    caller: str,
+    *,
+    owner: str,
+    repo: str,
+    platform: str,
+    token_provider,
+    opener,
+    config_root,
+) -> int:
+    """`procedure`: stage the PR's head and print the review steps as command lines.
+    Every input is judged before the host is read, so a refusal writes nothing."""
+    role, repo_arg = args.role.strip(), args.repo.strip()
+    if not role:
+        _fail("--role must not be empty", EXIT_USAGE)
+    base_url = args.git_host_base_url
+    try:
+        procedure.check_printable(
+            {
+                "--role": role,
+                "--repo": repo_arg,
+                "--out": args.out,
+                **({"--scanner-input": args.scanner_input} if args.scanner_input else {}),
+                **({"--git-host-base-url": base_url} if base_url else {}),
+            }
+        )
+        procedure.check_not_option(
+            {
+                "--role": role,
+                "--repo": repo_arg,
+                **({"--scanner-input": args.scanner_input} if args.scanner_input else {}),
+                **({"--git-host-base-url": base_url} if base_url else {}),
+            }
+        )
+        procedure.check_scanner_input(
+            args.scanner_input, args.spec_hash, Path(args.out).expanduser().resolve()
+        )
+    except procedure.ProcedureInputError as exc:
+        _fail(str(exc), EXIT_USAGE)
+    _spec_facts_of_flag(args, config_root)
+    try:
+        out = head_stage.check_out_dir(args.out)
+    except head_stage.StageRefusedError as exc:
+        _fail(str(exc), stage_verbs.EXIT_REFUSED)
+    stage_dir = out / procedure.STAGE_DIR_NAME
+    manifest_path, manifest = _pin_and_stage(
+        args, caller, owner=owner, repo=repo, platform=platform,
+        token_provider=token_provider, opener=opener, directory=stage_dir,
+    )
+    inputs = procedure.ProcedureInputs(
+        role=role,
+        repo=repo_arg,
+        pr=args.pr,
+        platform=platform,
+        head_sha=manifest["head_sha"],
+        stage_dir=stage_dir,
+        work_dir=out / procedure.WORK_DIR_NAME,
+        spec_hash=args.spec_hash,
+        scanner_input=args.scanner_input,
+        git_host_base_url=base_url,
+    )
+    try:
+        procedure.create_work_area(inputs)
+    except OSError as exc:
+        _fail(
+            f"cannot create the work directory {str(inputs.work_dir)!r}: {exc}",
+            EXIT_ACQUIRE_FAILED,
+        )
+    payload: dict[str, Any] = {
+        "result": "procedure",
+        "role": role,
+        "repo": repo_arg,
+        "pr": args.pr,
+        "platform": platform,
+        "head_sha": manifest["head_sha"],
+        "manifest": str(manifest_path),
+        "work_dir": str(inputs.work_dir),
+        "spec_hash": args.spec_hash,
+        "files": procedure.work_files(inputs),
+        "lines": procedure.build_lines(inputs),
+    }
+    if "staging_gap" in manifest:
+        payload["staging_gap"] = manifest["staging_gap"]
     print(json.dumps(payload))
     return EXIT_OK
 
@@ -2124,6 +2244,11 @@ def main(
             return _stage_command(
                 args, caller, owner=owner, repo=repo, platform=platform,
                 token_provider=token_provider, opener=opener,
+            )
+        if args.command == "procedure":
+            return _procedure_command(
+                args, caller, owner=owner, repo=repo, platform=platform,
+                token_provider=token_provider, opener=opener, config_root=config_root,
             )
         if args.command == "churn":
             return _churn_command(

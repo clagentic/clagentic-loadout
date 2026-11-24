@@ -3,7 +3,8 @@
   loadout-profile check [--repo-path DIR] [--ref REV]
   loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
   loadout-profile brief --role ROLE [--step STEP] [--repo-path DIR] [--ref REV] [--repo NAME]
-                        [--groups-file FILE] [--spec HASH] [--out FILE]
+                        [--groups-file FILE] [--spec HASH [--spec-form document|reference]]
+                        [--out FILE]
 
 ``brief`` prints the profile shaped for the role that will read it: for a role of
 the scope class (a planner) the class and group rules as acceptance-criteria
@@ -22,7 +23,9 @@ With --spec HASH the brief also carries a ``spec`` section for a role of any cla
 the sealed spec exactly as stored, read through the loader `loadout-spec show` uses
 (which recomputes the hash), with its head, seal time, author role and supersession.
 When --ref names a commit other than the one the spec was sealed at, the section
-carries a note naming both; the exit code does not change. Without --spec the output is
+carries a note naming both; the exit code does not change. With --spec-form reference the
+section is a fixed-size index of the spec (each top-level field's name, size and the
+`loadout-spec show` line that prints it) instead of the document. Without --spec the output is
 what it was before the flag existed. With --out FILE the brief is written to a new file
 (never replacing one) and standard output carries one JSON line naming it.
 
@@ -79,7 +82,7 @@ from clagentic_loadout.review.policy_source import (
 )
 from clagentic_loadout.review.profile_role_brief import role_brief
 from clagentic_loadout.review.profile_rules import classes_in_effect, rule_statements
-from clagentic_loadout.review.profile_spec_section import spec_section
+from clagentic_loadout.review.profile_spec_section import FORM_DOCUMENT, SPEC_FORMS, spec_section
 from clagentic_loadout.role_vocabulary import (
     CLASS_GATE,
     CLASS_SCOPE,
@@ -237,6 +240,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="A sealed spec (see `loadout-spec`): the brief gains a `spec` section holding the "
         "spec as sealed, verified against HASH, for a role of any class. With --ref at a commit "
         "other than the one the spec was sealed at, the section carries a note naming both.",
+    )
+    brief.add_argument(
+        "--spec-form",
+        default=None,
+        choices=SPEC_FORMS,
+        help="With --spec: 'document' (the default) puts the whole sealed spec in the `spec` "
+        "section; 'reference' puts a fixed-size index there instead (the hash, head, seal "
+        "time, role, supersession, and per top-level field its name, size in bytes and the "
+        "`loadout-spec show` line that prints it), so the brief does not grow with the spec. "
+        "Without --spec it is a usage error.",
     )
     brief.add_argument(
         "--out",
@@ -421,6 +434,8 @@ def _emit_brief(args: argparse.Namespace, payload: dict[str, object]) -> int:
 
 
 def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
+    if args.spec_form is not None and args.spec is None:
+        raise ProfileVerbError("--spec-form needs --spec", EXIT_USAGE)
     resolution, role_note = _resolve_brief_role(args.role, config_root)
     stored_spec = _load_spec(args.spec, config_root, args.repo_path) if args.spec is not None else None
     reader, read_at, base = _reader(args)
@@ -436,7 +451,9 @@ def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
     spec_extra: dict[str, object] = {}
     if stored_spec is not None:
         spec_extra["spec"] = spec_section(
-            stored_spec, read_commit=read_at if args.ref is not None else None
+            stored_spec,
+            read_commit=read_at if args.ref is not None else None,
+            form=args.spec_form or FORM_DOCUMENT,
         )
     if resolution.role_class == CLASS_GATE:
         # A gate's read of the profile is its own, at the merge base. The tree
