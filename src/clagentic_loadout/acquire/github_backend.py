@@ -49,6 +49,7 @@ from clagentic_loadout.acquire.contract import (
     IssueComment,
     RangeDiff,
     RangeFile,
+    pr_changed_file_count,
     pr_text,
     repository_visibility,
     tree_file_paths,
@@ -379,6 +380,7 @@ def fetch_pr_content(
         title=pr_text(pr_info, "title"),
         body=pr_text(pr_info, "body"),
         repo_visibility=repository_visibility(pr_info),
+        changed_file_count=pr_changed_file_count(pr_info),
     )
 
 
