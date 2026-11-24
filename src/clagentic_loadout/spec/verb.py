@@ -4,7 +4,7 @@
                     [--consumers-file FILE] [--path GLOB]... [--element NAME]... [--symbol SYMBOL]...
                     [--removed-at REV] [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
   loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
-  loadout-spec show HASH [--chain]
+  loadout-spec show HASH [--chain | [--out FILE] [--field NAME]...]
 
 `new` writes a draft for ROLE: the sections the repo profile can fill (the class
 rules, the declared test commands and the profile completeness items) are filled
@@ -42,7 +42,11 @@ removal ledger lines with no disposition (stderr, and ``removal_ledger_undispose
 
 `show` prints the sealed spec stored under HASH, byte for byte, after recomputing
 the hash and refusing a file that does not match its name. With --chain it prints
-the hashes of the seals HASH supersedes instead.
+the hashes of the seals HASH supersedes instead. A large spec does not fit a caller's
+read of standard output: --out FILE writes the stored bytes to a new file (never replacing
+one) and prints one JSON line naming it, and each --field NAME prints only ``spec_hash``
+and that top-level field. --out with --field writes the field object. --chain cannot be
+combined with --out or --field. Without them the output is unchanged.
 
 The specs root is resolved as in spec.store: the CLAGENTIC_LOADOUT_SPECS_DIR
 environment variable, the user-level ``specs.dir`` setting, then the default under
@@ -80,6 +84,7 @@ from clagentic_loadout.artifact_store import RootUnreadableError, StoreError
 from clagentic_loadout.git_origin import OriginBindingError, read_origin_target
 from clagentic_loadout.interface.consumers import consumers_of, locate_consumers
 from clagentic_loadout.interface.notice import draft_items
+from clagentic_loadout.new_file_out import NewFileError, emit_new_file
 from clagentic_loadout.review.policy_source import PROFILE_INVALID, PROFILE_MISSING, PROFILE_PATH
 from clagentic_loadout.review.profile_brief import (
     ProfileReadError,
@@ -278,6 +283,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--chain",
         action="store_true",
         help="Print the hashes of the seals HASH supersedes, newest first, as JSON.",
+    )
+    show.add_argument(
+        "--out",
+        default=None,
+        help="Write the output (the stored bytes, or the --field object) to this new file and "
+        "print one JSON line naming it. An existing file is never replaced.",
+    )
+    show.add_argument(
+        "--field",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Print only spec_hash and this top-level field of the spec, as JSON. May be "
+        "repeated. An unknown name is a usage error that lists the spec's fields.",
     )
     show.add_argument(
         "--repo-path",
@@ -526,17 +545,15 @@ def _new(
     if args.out is None:
         sys.stdout.write(text)
         return EXIT_OK
-    try:
-        with open(args.out, "x", encoding="utf-8") as handle:
-            handle.write(text)
-    except FileExistsError as exc:
-        raise SpecVerbError(
-            f"{args.out!r} already exists; this verb never replaces a file", EXIT_IO_FAILED
-        ) from exc
-    except OSError as exc:
-        raise SpecVerbError(f"cannot write {args.out!r}: {exc}", EXIT_IO_FAILED) from exc
-    print(json.dumps({"result": "written", "path": args.out}))
+    _emit_file(args.out, text)
     return EXIT_OK
+
+
+def _emit_file(path: str, data: bytes | str) -> None:
+    try:
+        emit_new_file(path, data)
+    except NewFileError as exc:
+        raise SpecVerbError(str(exc), EXIT_IO_FAILED) from exc
 
 
 def _read_draft(path: str) -> object:
@@ -630,8 +647,22 @@ def _seal(args: argparse.Namespace, root: Path) -> int:
     return EXIT_OK
 
 
+def _selected_fields(stored: spec_store.StoredSpec, names: list[str]) -> dict[str, object]:
+    """``spec_hash`` and the top-level fields of the spec named in *names*."""
+    unknown = [name for name in names if name not in stored.doc]
+    if unknown:
+        raise SpecVerbError(
+            f"the spec {stored.spec_hash} has no field {', '.join(map(repr, unknown))}; "
+            f"its fields are: {', '.join(stored.doc)}",
+            EXIT_USAGE,
+        )
+    return {"spec_hash": stored.spec_hash, **{name: stored.doc[name] for name in names}}
+
+
 def _show(args: argparse.Namespace, root: Path) -> int:
     untrusted = _untrusted_roots(args.repo_path)
+    if args.chain and (args.out is not None or args.field):
+        raise SpecVerbError("--chain cannot be combined with --out or --field", EXIT_USAGE)
     if args.chain:
         if not model.is_spec_hash(args.spec_hash):
             raise SpecVerbError(
@@ -645,7 +676,16 @@ def _show(args: argparse.Namespace, root: Path) -> int:
         print(json.dumps({"spec_hash": args.spec_hash, "chain": [link.spec_hash for link in links]}))
         return EXIT_OK
     stored = _load(root, args.spec_hash, untrusted)
-    sys.stdout.write(stored.data.decode("ascii"))
+    if args.field:
+        text = json.dumps(_selected_fields(stored, args.field)) + "\n"
+        if args.out is None:
+            sys.stdout.write(text)
+        else:
+            _emit_file(args.out, text)
+    elif args.out is None:
+        sys.stdout.write(stored.data.decode("ascii"))
+    else:
+        _emit_file(args.out, stored.data)
     return EXIT_OK
 
 
