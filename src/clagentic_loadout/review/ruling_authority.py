@@ -28,6 +28,7 @@ owned by someone else. A file that fails is refused, not skipped.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
@@ -51,16 +52,31 @@ class UntrustedRolesSourceError(Exception):
     request under review could write, so it is not used."""
 
 
-def ruling_authorized_roles(config_root: str | Path | None = None) -> frozenset[str]:
-    """The roles that hold the ``ruling`` verb in the effective mapping.
+#: The ``source`` of a result decided by the built-in mapping, not a file.
+DEFAULT_SOURCE = "built-in default mapping"
+
+
+@dataclass(frozen=True)
+class VerbHolders:
+    """The roles that hold one verb label, and where that answer came from."""
+
+    roles: frozenset[str]
+    #: The user-level file whose ``roles:`` mapping decided, else DEFAULT_SOURCE.
+    source: str
+
+
+def verb_holders(verb: str, config_root: str | Path | None = None) -> VerbHolders:
+    """The roles that hold *verb* in the effective mapping: the trusted
+    user-level ``roles:`` when present, else the built-in default.
 
     Raises UntrustedRolesSourceError when the user-level config file exists but
     fails the location check, and InvalidRoleConfigError when it exists, passes
     it, and its ``roles:`` value or the file itself is unusable."""
+    default = VerbHolders(roles_holding_verb(verb), DEFAULT_SOURCE)
     root = Path(config_root) if config_root is not None else provider_config.DEFAULT_USER_CONFIG_ROOT
     path = root / provider_config.USER_CONFIG_FILENAME
     if not path.exists():
-        return roles_holding_verb(AUTHORIZING_VERB)
+        return default
     reason = untrusted_reason(path)
     if reason is not None:
         raise UntrustedRolesSourceError(
@@ -75,15 +91,30 @@ def ruling_authorized_roles(config_root: str | Path | None = None) -> frozenset[
     except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
         raise InvalidRoleConfigError(f"{path}: could not be read as YAML: {exc}.") from exc
     if document is None:
-        return roles_holding_verb(AUTHORIZING_VERB)
+        return default
     if not isinstance(document, dict):
         raise InvalidRoleConfigError(
             f"{path}: top-level document must be a mapping, got {type(document).__name__}."
         )
     if CONFIG_SECTION_ROLES not in document:
-        return roles_holding_verb(AUTHORIZING_VERB)
+        return default
     mapping = parse_roles_section(document[CONFIG_SECTION_ROLES], source=str(path))
-    return frozenset(role for role, verbs in mapping.items() if AUTHORIZING_VERB in verbs)
+    return VerbHolders(
+        frozenset(role for role, verbs in mapping.items() if verb in verbs), str(path)
+    )
 
 
-__all__ = ["AUTHORIZING_VERB", "UntrustedRolesSourceError", "ruling_authorized_roles"]
+def ruling_authorized_roles(config_root: str | Path | None = None) -> frozenset[str]:
+    """The roles that hold the ``ruling`` verb in the effective mapping; the
+    errors are those of ``verb_holders``."""
+    return verb_holders(AUTHORIZING_VERB, config_root).roles
+
+
+__all__ = [
+    "AUTHORIZING_VERB",
+    "DEFAULT_SOURCE",
+    "UntrustedRolesSourceError",
+    "VerbHolders",
+    "ruling_authorized_roles",
+    "verb_holders",
+]

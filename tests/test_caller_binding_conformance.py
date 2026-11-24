@@ -451,6 +451,10 @@ _MINIMAL_ARGV_BY_SCRIPT: dict[str, list[str]] = {
         "--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1",
         "--no-post-merge-tree",
     ],
+    "loadout-merge-procedure": [
+        "--role", "some-role", "--platform", "github", "--repo", "some-owner/some-repo",
+        "--pr", "1", "--repo-path", "{git-tree}",
+    ],
     "loadout-close-pr": ["--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1"],
     "loadout-post-merge": [
         "--platform", "github", "--repo", "some-owner/some-repo", "--pr", "1",

@@ -39,6 +39,7 @@ from clagentic_loadout.cli import EXIT_UMBRELLA_USAGE, main as umbrella_main
 from clagentic_loadout.doctor import cli as doctor_cli
 from clagentic_loadout.interface import verb as interface_verb
 from clagentic_loadout.merge import close_verb as merge_close_verb
+from clagentic_loadout.merge import procedure_verb as merge_procedure_verb
 from clagentic_loadout.merge import reviewer_login_verb
 from clagentic_loadout.merge import verb as merge_verb
 from clagentic_loadout.provisioning import cli as provisioning_cli
@@ -78,6 +79,7 @@ _ARGPARSE_VERBS = [
     ("rules", rules_verb.main, "--version"),
     ("merge", merge_verb.main, "--version"),
     ("close-pr", merge_close_verb.main, "--version"),
+    ("merge-procedure", merge_procedure_verb.main, "--version"),
     ("reviewer-login", reviewer_login_verb.main, "--version"),
     ("git-host-api", git_host_api.main, "--version"),
     ("stage-body", stage_body_verb.main, "--version"),
