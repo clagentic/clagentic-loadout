@@ -145,12 +145,17 @@ def _make_dir(path: Path, mode: int, *, parents: bool = False) -> bool:
         return False
 
 
-def _write_once(root: Path, directory: Path, file_name: str, payload: bytes) -> Path:
-    # Imported here, not at module level: the review package imports the review
-    # verb, which writes records, so a module-level import would make importing
-    # this store first (for example from the push verb) a circular import.
-    from clagentic_loadout.review.atomic_io import write_bytes_atomic
+def ensure_head_dir(root: Path, head_sha: str) -> Path:
+    """Create *root* and the directory of *head_sha* under it when they are
+    missing, and return the head directory. Raises StoreError when *head_sha* is
+    not a full commit sha or the head directory is a symlink or not a directory,
+    and OSError when a directory cannot be created."""
+    directory = head_dir(root, head_sha)
+    _prepare_head_dir(root, directory)
+    return directory
 
+
+def _prepare_head_dir(root: Path, directory: Path) -> None:
     if directory.is_symlink():
         raise StoreError(f"{str(directory)!r} is a symlink, refusing to write through it")
     # A root this call creates is made traversable for every user (the umask
@@ -172,6 +177,15 @@ def _write_once(root: Path, directory: Path, file_name: str, payload: bytes) -> 
     head_mode = stat.S_IMODE(root.stat().st_mode)
     if _make_dir(directory, head_mode):
         os.chmod(directory, head_mode)
+
+
+def _write_once(root: Path, directory: Path, file_name: str, payload: bytes) -> Path:
+    # Imported here, not at module level: the review package imports the review
+    # verb, which writes records, so a module-level import would make importing
+    # this store first (for example from the push verb) a circular import.
+    from clagentic_loadout.review.atomic_io import write_bytes_atomic
+
+    _prepare_head_dir(root, directory)
     target = directory / file_name
     write_bytes_atomic(target, payload, mode=FILE_MODE)
     os.chmod(target, FILE_MODE)
@@ -199,6 +213,7 @@ __all__ = [
     "RootUnreadableError",
     "StoreError",
     "StoreKind",
+    "ensure_head_dir",
     "head_dir",
     "list_head_dirs",
     "refuse_untrusted",

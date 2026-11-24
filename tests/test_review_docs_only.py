@@ -510,6 +510,99 @@ class TestRejection:
         assert code == review_cli.EXIT_USAGE and "--reject-justification" in err
         assert world.host.posted == []
 
+    @pytest.mark.parametrize("case", ["both-flags", "unreadable-file", "file-reason-not-clean"])
+    def test_the_file_flag_is_a_usage_error_before_any_host_call_when_it_cannot_be_used(
+        self, world, capsys, case
+    ):
+        spec = world.seal()
+        missing = world.root / "no-such-reason.txt"
+        bad = world.root / "bad.txt"
+        bad.write_text("two\nlines\n", encoding="utf-8")
+        extra, needle = {
+            "both-flags": (
+                ["--reject-justification", self.REASON, "--reject-justification-file", str(bad)],
+                "--reject-justification-file",
+            ),
+            "unreadable-file": (["--reject-justification-file", str(missing)], str(missing.resolve())),
+            "file-reason-not-clean": (["--reject-justification-file", str(bad)], "one line"),
+        }[case]
+
+        code, _, err = world.post([_finding()], *extra, spec=spec, capsys=capsys)
+
+        assert code == review_cli.EXIT_USAGE and needle in err
+        assert world.host.requests == [] and world.host.posted == []
+
+
+class TestApplyDropsThenPost:
+    """The files `apply-drops` writes are what `post` reads."""
+
+    def _apply(self, world, records: str, capsys, *extra: str):
+        (world.root / "records.txt").write_text(records, encoding="utf-8")
+        capsys.readouterr()
+        code = review_cli.main([
+            "apply-drops",
+            "--findings", world.write("run-findings.json", world._document(
+                [_finding(), _finding(line=9, rule_id="R2")])),
+            "--records", str(world.root / "records.txt"),
+            "--judged-out", str(world.root / "judged.json"),
+            "--dropped-out", str(world.root / "dropped.json"),
+            *extra,
+        ])
+        assert code == 0, capsys.readouterr().err
+        return json.loads(capsys.readouterr().out)
+
+    def test_dropped_entries_read_at_the_staged_head_are_proven_in_the_fence(self, world, capsys):
+        (world.root / "m").mkdir()
+        manifest = world.write("m/.loadout-review-stage.json", {
+            "schema": "loadout-review-stage/1", "dir": str(world.root / "m"), "repo": "some-owner/some-repo",
+            "pr": world.host.number, "platform": world.host.platform, "head_sha": world.host.head_sha,
+            "base_sha": world.env.base_sha, "files": [], "deleted": [], "missing": [],
+        })
+        self._apply(world, "drop 1 guarded by the caller\n", capsys, "--manifest", manifest)
+
+        code, result, err = world.review(
+            "post", "--findings", str(world.root / "judged.json"), "--head-sha", world.host.head_sha,
+            "--base-sha", world.env.base_sha, "--dropped", str(world.root / "dropped.json"),
+            capsys=capsys,
+        )
+
+        assert code == 0, err
+        entries = world.fence()["dropped"]
+        assert [(e["rule_id"], e["reason"], e["read_at"], e["proven"]) for e in entries] == [
+            ("R2", "guarded by the caller", world.host.head_sha, True)
+        ]
+        assert result["status"] == "blocking" and result["blocking_count"] == 1
+        assert "unproven" not in err
+
+    def test_a_reject_text_apply_drops_accepted_posts_as_the_inline_flag_does(self, world, capsys):
+        spec = world.seal()
+        records = "tag 0 in-spec\ntag 1 in-spec\ncover ac-1 met\ncover ac-2 met\n" f"reject {TestRejection.REASON}\n"
+        self._apply(
+            world, records, capsys,
+            "--coverage-out", str(world.root / "coverage.json"),
+            "--reject-reason-out", str(world.root / "reject.txt"),
+        )
+        shared = [
+            "--head-sha", world.host.head_sha, "--base-sha", world.env.base_sha,
+            "--spec-hash", spec.spec_hash, "--spec-coverage", str(world.root / "coverage.json"),
+            "--findings", str(world.root / "judged.json"),
+        ]
+
+        code, inline, err = world.review(
+            "post", *shared, "--reject-justification", TestRejection.REASON, capsys=capsys
+        )
+        assert code == 0, err
+        inline_fence, inline_body = world.fence(), world.host.last_body
+        code, from_file, err = world.review(
+            "post", *shared, "--reject-justification-file", str(world.root / "reject.txt"),
+            capsys=capsys,
+        )
+
+        assert code == 0, err
+        assert world.fence() == inline_fence and world.host.last_body == inline_body
+        assert from_file["docs_only"] == inline["docs_only"]
+        assert world.fence()["docs_only"]["rejection_reason"] == TestRejection.REASON
+
 
 class TestRun:
     def test_the_run_result_records_the_classification_and_its_allowlist_source(

@@ -25,6 +25,10 @@ one to post its judgement, and nothing else:
         a read-at-head source for a reviewer (review.head_stage) and a report-only
         check of each dropped candidate against it (review.drop_check). `teardown`
         and `check-drops` are offline and bind no caller.
+  apply-drops, keep-evidence
+        offline, no caller: the reviewer's drop records become the files `post`
+        reads (review.apply_drops), and the review's files are kept by comment id
+        (review.keep_evidence_verb).
 
 Both bind --caller to the attested invoking identity before any I/O, exactly
 like every other verb. Profiles come from deployment config
@@ -100,7 +104,7 @@ from clagentic_loadout.review import (
     class_guidance,
     spec_review,
 )
-from clagentic_loadout.review import head_stage, stage_verbs
+from clagentic_loadout.review import apply_drops, head_stage, keep_evidence_verb, stage_verbs
 from clagentic_loadout.review import verb as review_post_verb
 from clagentic_loadout.review.churn_ledger import ChurnLedgerError
 from clagentic_loadout.review.churn_verb import churn_after_post, churn_on_demand
@@ -239,6 +243,9 @@ EXIT_FINDINGS_INVALID = 32
 #: `post`: the spec named by --spec-hash is not in the specs store, does not
 #: verify against its hash, or the store cannot be used.
 EXIT_SPEC_UNAVAILABLE = 33
+#: `stage`, `teardown`, `check-drops`, `apply-drops` and `keep-evidence`: an input
+#: is unusable (unreadable, malformed or naming nothing), and nothing was written.
+EXIT_REFUSED = 64
 
 _GIT_PROBE_TIMEOUT_SECONDS = 10
 RUN_ROOT_ENV_VAR = "CLAGENTIC_LOADOUT_REVIEW_RUN_ROOT"
@@ -510,6 +517,15 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "that is or may be a secret, and the scanners the deployment requires are still "
         "required. Requires a --spec-hash spec that carries a justification.",
     )
+    post.add_argument(
+        "--reject-justification-file",
+        default=None,
+        metavar="PATH",
+        help="Like --reject-justification, with the reason read from this UTF-8 file (one "
+        "trailing newline removed), so the text never travels on a command line. The file is "
+        "the one `apply-drops --reject-reason-out` writes. Cannot be combined with "
+        "--reject-justification.",
+    )
 
     post.add_argument(
         "--profile",
@@ -550,6 +566,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
 
     stage_verbs.add_stage_parsers(subparsers, add_common)
+    apply_drops.add_apply_drops_parser(subparsers)
+    keep_evidence_verb.add_keep_evidence_parser(subparsers)
     add_evaluate_parser(subparsers)
     return parser
 
@@ -1160,15 +1178,29 @@ def _spec_inputs(
 def _reject_reason(args: argparse.Namespace, facts: spec_review.SpecFacts | None) -> str | None:
     """The checked reason the reviewer rejects the docs-only justification, or
     None when it does not. A rejection needs a justification to reject."""
-    if args.reject_justification is None:
+    flag, text = "--reject-justification", args.reject_justification
+    if args.reject_justification_file is not None:
+        if text is not None:
+            _fail(
+                "--reject-justification and --reject-justification-file cannot be combined",
+                EXIT_USAGE,
+            )
+        flag = "--reject-justification-file"
+        path = Path(args.reject_justification_file).expanduser()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            _fail(f"{flag}: cannot read {str(path.resolve())!r}: {exc}", EXIT_USAGE)
+        text = text.removesuffix("\n")
+    if text is None:
         return None
     try:
-        reason = check_reason(args.reject_justification)
+        reason = check_reason(text)
     except DocsOnlyError as exc:
-        _fail(f"--reject-justification: {exc}", EXIT_USAGE)
+        _fail(f"{flag}: {exc}", EXIT_USAGE)
     if facts is None or facts.docs_only_justification is None:
         _fail(
-            "--reject-justification needs a --spec-hash spec that carries a docs-only "
+            f"{flag} needs a --spec-hash spec that carries a docs-only "
             "justification; this review has none to reject",
             EXIT_USAGE,
         )
@@ -2059,6 +2091,10 @@ def main(
         return stage_verbs.run_teardown(args)
     if args.command == "check-drops":
         return stage_verbs.run_check_drops(args)
+    if args.command == "apply-drops":
+        return apply_drops.run_apply_drops(args)
+    if args.command == "keep-evidence":
+        return keep_evidence_verb.run_keep_evidence(args, config_root=config_root)
 
     try:
         owner, repo = _parse_owner_repo(args.repo)
