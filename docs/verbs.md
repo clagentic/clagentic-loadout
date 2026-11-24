@@ -1639,6 +1639,45 @@ any host call, naming the flags or the resolved path.
 Exit codes of the two subcommands: **0** done, **64** unusable input (`apply-drops` also
 **1** for a spec-mode flag given without its pair).
 
+### The review procedure
+
+**`procedure --role <role> --repo <owner/name> --pr <n> --out <dir> [--spec-hash <hash>]
+[--scanner-input <path>] [--platform <p>] [--git-host-base-url <url>]`** prints the steps of
+one review as finished command lines. It reads the pull request through the host API and pins
+and stages the head exactly as `stage` does (`--caller` binds that read; `--out` follows
+`stage`'s rule, exit **64** for a path that exists and is not an empty directory), writes the
+head copies and manifest under `<dir>/head`, creates `<dir>/work` with an empty `records.txt`,
+and prints one JSON object: `result` (`procedure`), `role`, `repo`, `pr`, `platform`, `head_sha`,
+`manifest`, `work_dir`, `spec_hash` (or null), `staging_gap` (only when the stage has one, also
+named on stderr), `files` (every path the lines read and write) and `lines`, an ordered list
+of `{step, line}`:
+
+| `step` | Line | Present |
+| --- | --- | --- |
+| `criteria` | `loadout-spec show <hash> --field acceptance_criteria` | with `--spec-hash` |
+| `run` | `run --caller <role> ... --out <work>/run` (with `--spec-hash`) | always |
+| `hits` | `apply-drops` over an empty records file with its own outputs, listing the numbered scanner hits | with `--scanner-input` |
+| `apply` | `apply-drops` of `<work>/records.txt` to `judged.json` and `dropped.json` (with `--manifest`, so every drop carries `read_at`; with the scanner input, the coverage and the reject-reason file under a spec) | always |
+| `check` | `check-drops` against the manifest | always |
+| `post_clean`, `post_blocking` | `post --caller <role> ... --status clean` and `--status blocking` | always |
+| `post_clean_reject`, `post_blocking_reject` | the matching post line plus `--reject-justification-file <reject-reason file>` | with `--spec-hash` |
+| `keep` | `keep-evidence --role <role> --file ...` for the findings, judged, dropped and records files, the coverage file under a spec and the scanner input | always |
+| `teardown` | `teardown --manifest <manifest>` | always |
+
+Every line is one physical line that runs as written: no placeholder, heredoc or shell
+variable, and every value shell-quoted (a repository whose name starts with a dot is carried
+as given). The reviewer's judgement enters through `<work>/records.txt` only, written between
+`run` and `apply`. `--git-host-base-url` is carried by `run` and the post lines of a Forgejo
+procedure when given, else by none. `--role` is an opaque word printed into the lines; `--caller`
+is the invoking identity that reads the host, and no behaviour depends on either. The
+`--scanner-input` path is where the role's scanner input will be written; it is not read when
+the procedure prints, and a file name equal to another kept file's (`findings.json`,
+`judged.json`, `dropped.json`, `records.txt`, `coverage.json`) is a usage error. Nothing is
+staged for a refused input. Exit codes: **0** printed, **1** usage (a malformed `--spec-hash`, a
+control character in a value, a clashing scanner file name), **5** host unreadable, **7** caller
+mismatch, **33** the spec is not in the store, **64** `--out` unusable. The procedure runs
+nothing and applies no rule; `teardown` removes `<dir>/head`, and `<dir>/work` is the caller's.
+
 ### Defect classes and class guidance
 
 A finding may carry two optional keys: `defect_class`, a short name for the recurring
@@ -1747,7 +1786,7 @@ registry format and exit codes:
 loadout-profile check [--repo-path DIR] [--ref REV]
 loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
 loadout-profile brief --role ROLE [--step STEP] [--repo-path DIR] [--ref REV] [--repo NAME]
-                      [--groups-file FILE] [--spec HASH] [--out FILE]
+                      [--groups-file FILE] [--spec HASH [--spec-form document|reference]] [--out FILE]
 ```
 
 The repo profile (`.clagentic/loadout/profile.yaml`) states a repository's class,
@@ -1794,6 +1833,16 @@ hash; no profile output is printed. When `--ref` resolves to a commit other than
 `head_sha`, the section carries a `note` naming both commits; the exit code is unchanged. No
 role, class or step is refused because a spec was named, and without `--spec` the output is
 unchanged.
+
+**The reference form (`--spec-form reference`).** `--spec-form` is `document` (the default, and
+the output described above, unchanged) or `reference`; given without `--spec` it is a usage error
+(exit `1`). The reference form replaces `document` with an index, so the text handed to a
+builder does not grow with the spec: the section holds `spec_hash`, `head_sha`, `sealed_at`,
+`role`, `supersedes`, the head `note` when `--ref` differs, `show` (the line `loadout-spec show
+HASH`) and `fields`, one entry per top-level field of the sealed document other than those keys
+and `schema_version`, in document order: `name`, `bytes` (the UTF-8 length of the field's JSON
+encoding) and `show` (`loadout-spec show HASH --field NAME`, which prints that field). The
+builder reads the fields it needs with those lines.
 
 **The file form (`--out FILE`).** The whole brief is written to a new file and standard output
 carries one line, `{"result": "written", "path": FILE}`; the exit code is what it would be
