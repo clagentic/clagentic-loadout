@@ -285,3 +285,177 @@ def test_a_scanner_input_stamped_for_another_head_than_the_manifest_is_refused(a
     )
 
     assert code == REFUSED and "stamped for head" in err
+
+
+def _inline(area, subdir, records, *extra, capsys, spec=False, flag="--record"):
+    """Run apply-drops with *records* given as one --record argument per line of the text
+    (a blank line is a blank argument), outputs under *subdir*."""
+    out = area.root / subdir
+    out.mkdir(exist_ok=True)
+    argv = [
+        "apply-drops", "--findings", area.write("findings.json", DOCUMENT),
+        "--judged-out", str(out / "judged.json"), "--dropped-out", str(out / "dropped.json"),
+        *extra,
+    ]
+    for record in records.removesuffix("\n").split("\n") if records else []:
+        argv += [flag, record]
+    if spec:
+        argv += ["--coverage-out", str(out / "coverage.json"),
+                 "--reject-reason-out", str(out / "reject.txt")]
+    capsys.readouterr()
+    code = review_cli.main(argv)
+    captured = capsys.readouterr()
+    return code, captured.out.replace(str(out), "OUT"), captured.err, out
+
+
+def _file_form(area, subdir, records, *extra, capsys, spec=False):
+    out = area.root / subdir
+    out.mkdir(exist_ok=True)
+    argv = [
+        "apply-drops", "--findings", area.write("findings.json", DOCUMENT),
+        "--records", area.write(f"{subdir}-records.txt", records, raw=True),
+        "--judged-out", str(out / "judged.json"), "--dropped-out", str(out / "dropped.json"),
+        *extra,
+    ]
+    if spec:
+        argv += ["--coverage-out", str(out / "coverage.json"),
+                 "--reject-reason-out", str(out / "reject.txt")]
+    capsys.readouterr()
+    code = review_cli.main(argv)
+    captured = capsys.readouterr()
+    return code, captured.out.replace(str(out), "OUT"), captured.err, out
+
+
+#: (id, records, spec mode, scanner input, manifest)
+PARITY = [
+    ("plain", "drop 1 not a defect\n\ndrop 0 second\n", False, False, False),
+    ("hostile-reason", f"drop 0 {HOSTILE}\n", False, False, False),
+    ("manifest", "drop 2 r\n", False, False, True),
+    ("scanner", "drop s2 fixture\ndrop 1 r\n", False, True, False),
+    ("scanner-manifest", "drop s1 a\n", False, True, True),
+    ("spec-tag-cover", "tag 0 in-spec\ntag 1 out-of-spec\ntag 2 fix-caused\ncover a met\ncover b unmet\n",
+     True, False, False),
+    ("spec-reject", "drop 1 r\ntag 0 in-spec\ntag 2 in-spec\ncover a met\nreject Behaviour is altered.\n",
+     True, True, True),
+]
+
+
+@pytest.mark.parametrize("records,spec,scanner,manifest", [r[1:] for r in PARITY], ids=[r[0] for r in PARITY])
+def test_inline_records_give_byte_identical_outputs_and_stdout_to_a_records_file(
+    area, capsys, records, spec, scanner, manifest
+):
+    extra = (["--scanner-input", area.write("scanner.json", SCANNERS)] if scanner else []) + (
+        ["--manifest", area.manifest()] if manifest else []
+    )
+    f_code, f_out, _, f_dir = _file_form(area, "file", records, *extra, capsys=capsys, spec=spec)
+    i_code, i_out, _, i_dir = _inline(area, "inline", records, *extra, capsys=capsys, spec=spec)
+
+    assert f_code == i_code == 0 and f_out == i_out
+    names = sorted(p.name for p in f_dir.iterdir())
+    assert names == sorted(p.name for p in i_dir.iterdir())
+    for name in names:
+        assert (f_dir / name).read_bytes() == (i_dir / name).read_bytes()
+
+
+@pytest.mark.parametrize("records,needle,spec", [r[1:] for r in REFUSALS], ids=[r[0] for r in REFUSALS])
+def test_an_unusable_inline_record_is_refused_naming_its_argument_and_nothing_is_written(
+    area, capsys, records, needle, spec
+):
+    judged = area.root / "inline" / "judged.json"
+    judged.parent.mkdir()
+    judged.write_text("earlier judged", encoding="utf-8")
+    records_out = area.root / "records-out.txt"
+    scanner = area.write("scanner.json", SCANNERS)
+
+    code, out, err, _ = _inline(
+        area, "inline", records, "--scanner-input", scanner, "--records-out", str(records_out),
+        capsys=capsys, spec=spec,
+    )
+
+    assert code == REFUSED and out == ""
+    assert needle.replace("line ", "--record argument ") in err or needle in err
+    assert judged.read_text(encoding="utf-8") == "earlier judged"
+    assert not records_out.exists() and not (area.root / "inline" / "coverage.json").exists()
+
+
+@pytest.mark.parametrize("bad", ["drop 0 a\nb", "drop 0 a\rb", "drop 0 a\r\n"])
+def test_a_record_argument_holding_a_line_break_is_refused_and_nothing_is_written(area, capsys, bad):
+    out = area.root / "o"
+    out.mkdir()
+    records_out = area.root / "records-out.txt"
+
+    capsys.readouterr()
+    code = review_cli.main([
+        "apply-drops", "--findings", area.write("findings.json", DOCUMENT),
+        "--record", "drop 1 fine", "--record", bad, "--records-out", str(records_out),
+        "--judged-out", str(out / "j.json"), "--dropped-out", str(out / "d.json"),
+    ])
+
+    assert code == REFUSED and "--record argument 2" in capsys.readouterr().err
+    assert list(out.iterdir()) == [] and not records_out.exists()
+
+
+def test_records_and_record_together_are_a_usage_error_naming_both_flags(area, capsys):
+    out = area.root / "o"
+    out.mkdir()
+
+    capsys.readouterr()
+    code = review_cli.main([
+        "apply-drops", "--findings", area.write("findings.json", DOCUMENT),
+        "--records", area.write("records.txt", "", raw=True), "--record", "drop 0 r",
+        "--records-out", str(area.root / "records-out.txt"),
+        "--judged-out", str(out / "j.json"), "--dropped-out", str(out / "d.json"),
+    ])
+
+    err = capsys.readouterr().err
+    assert code == review_cli.EXIT_USAGE and "--records" in err and "--record" in err
+    assert list(out.iterdir()) == [] and not (area.root / "records-out.txt").exists()
+
+
+def test_no_records_input_behaves_as_an_empty_records_file(area, capsys):
+    extra = ["--scanner-input", area.write("scanner.json", SCANNERS)]
+    f_code, f_out, _, f_dir = _file_form(area, "file", "", *extra, capsys=capsys)
+    n_code, n_out, _, n_dir = _inline(area, "none", "", *extra, capsys=capsys)
+
+    assert f_code == n_code == 0 and f_out == n_out
+    assert json.loads(n_out)["hits"][0]["id"] == "s1"
+    for name in ("judged.json", "dropped.json"):
+        assert (f_dir / name).read_bytes() == (n_dir / name).read_bytes()
+    assert area.read("none/judged.json") == DOCUMENT
+
+
+def test_no_records_input_in_spec_mode_is_refused_as_an_empty_file_is(area, capsys):
+    code, out, err, _ = _inline(area, "none", "", capsys=capsys, spec=True)
+
+    assert code == REFUSED and out == "" and "no tag record" in err
+
+
+def test_records_out_holds_the_inline_records_or_the_files_text_byte_for_byte(area, capsys):
+    text = "drop 0 a\r\n\r\n  \ndrop 1 b  \n"
+    from_file = area.root / "from-file.txt"
+    from_inline = area.root / "from-inline.txt"
+
+    _file_form(area, "file", text, "--records-out", str(from_file), capsys=capsys)
+    code, *_ = _inline(
+        area, "inline", "drop 0 a\n\n  \ndrop 1 b  ", "--records-out", str(from_inline), capsys=capsys
+    )
+
+    assert code == 0
+    assert from_file.read_bytes() == text.encode("utf-8")
+    assert from_inline.read_bytes() == b"drop 0 a\ndrop 1 b  \n"
+
+
+def test_records_out_is_written_through_the_atomic_writer(area, capsys, monkeypatch):
+    from clagentic_loadout.review import atomic_io
+
+    seen: list[str] = []
+    real = atomic_io.write_bytes_atomic
+    monkeypatch.setattr(
+        atomic_io, "write_bytes_atomic", lambda path, data: (seen.append(Path(path).name), real(path, data))[1]
+    )
+
+    code, *_ = _inline(
+        area, "inline", "drop 0 a", "--records-out", str(area.root / "r.txt"), capsys=capsys
+    )
+
+    assert code == 0 and "r.txt" in seen

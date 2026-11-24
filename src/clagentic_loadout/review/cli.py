@@ -1581,6 +1581,7 @@ def _procedure_command(
         "work_dir": str(inputs.work_dir),
         "spec_hash": args.spec_hash,
         "files": procedure.work_files(inputs),
+        "records_input": procedure.records_input(),
         "lines": procedure.build_lines(inputs),
     }
     if "staging_gap" in manifest:
