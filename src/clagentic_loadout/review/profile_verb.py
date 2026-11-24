@@ -92,6 +92,7 @@ from clagentic_loadout.role_vocabulary import (
     undeclared_resolution,
 )
 from clagentic_loadout.spec.model import is_spec_hash
+from clagentic_loadout.spec.repo_roots import untrusted_roots
 from clagentic_loadout.spec.store import StoredSpec, load_sealed, specs_root
 
 EXIT_OK = 0
@@ -385,17 +386,20 @@ def _resolve_brief_role(
         )
 
 
-def _load_spec(spec_hash: str, config_root: str | Path | None) -> StoredSpec:
+def _load_spec(
+    spec_hash: str, config_root: str | Path | None, repo_path: str
+) -> StoredSpec:
     """The sealed spec *spec_hash*, verified by the store loader `loadout-spec
-    show` uses. A hash of the wrong shape is a usage error; a spec that cannot be
-    read is an input failure (EXIT_SPEC_UNREADABLE) naming the specs root."""
+    show` uses, with a specs root inside the repository at *repo_path* refused as
+    it refuses one. A hash of the wrong shape is a usage error; a spec that cannot
+    be read is an input failure (EXIT_SPEC_UNREADABLE) naming the specs root."""
     if not is_spec_hash(spec_hash):
         raise ProfileVerbError(
             f"--spec must be 64 lowercase hex digits, got {spec_hash!r}", EXIT_USAGE
         )
     root = specs_root(config_root=config_root)
     try:
-        return load_sealed(root, spec_hash)
+        return load_sealed(root, spec_hash, untrusted_roots=untrusted_roots(repo_path))
     except StoreError as exc:
         raise ProfileVerbError(
             f"cannot read the sealed spec {spec_hash} under the specs root {str(root)!r}: {exc}",
@@ -418,7 +422,7 @@ def _emit_brief(args: argparse.Namespace, payload: dict[str, object]) -> int:
 
 def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
     resolution, role_note = _resolve_brief_role(args.role, config_root)
-    stored_spec = _load_spec(args.spec, config_root) if args.spec is not None else None
+    stored_spec = _load_spec(args.spec, config_root, args.repo_path) if args.spec is not None else None
     reader, read_at, base = _reader(args)
     try:
         present = set(reader.list_paths(read_at))

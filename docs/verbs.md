@@ -1645,7 +1645,7 @@ usage error, exit `1`, naming the value). It is read through the store loader `l
 uses, which recomputes the hash, from the specs root resolved as for `loadout-spec`. The section
 holds `spec_hash`, `head_sha`, `sealed_at`, `role` (the author's), `supersedes` and `document`,
 the sealed spec exactly as stored, parsed. A spec that is not found, does not verify, or sits
-under a specs root that cannot be used exits `64` with a message naming the specs root and the
+under a specs root that cannot be used, or that is inside the repository at `--repo-path` (refused as `loadout-spec show` refuses it), exits `64` with a message naming the specs root and the
 hash; no profile output is printed. When `--ref` resolves to a commit other than the spec's
 `head_sha`, the section carries a `note` naming both commits; the exit code is unchanged. No
 role, class or step is refused because a spec was named, and without `--spec` the output is

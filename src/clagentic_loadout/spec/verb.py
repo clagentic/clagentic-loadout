@@ -75,7 +75,6 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -104,6 +103,8 @@ from clagentic_loadout.review.policy_reader import GitPolicyReader, PolicyReadEr
 from clagentic_loadout.spec import removals as removals_mod
 from clagentic_loadout.spec import remedy as remedy_mod
 from clagentic_loadout.spec import store as spec_store
+from clagentic_loadout.spec.repo_roots import git_output as _git_output
+from clagentic_loadout.spec.repo_roots import untrusted_roots as _untrusted_roots
 from clagentic_loadout.verdict_record.record import is_full_sha, utc_timestamp
 from clagentic_loadout.verdict_record.review_record import review_records_root
 
@@ -119,7 +120,6 @@ EXIT_IO_FAILED = 55
 
 GUIDANCE_SOURCE = "profile brief, build role"
 _MAX_DRAFT_BYTES = 1024 * 1024
-_GIT_TIMEOUT_SECONDS = 10
 
 
 class SpecVerbError(Exception):
@@ -304,28 +304,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="A repository the specs root may not be inside.",
     )
     return parser
-
-
-def _git_output(repo_path: str, *git_args: str) -> str | None:
-    try:
-        done = subprocess.run(
-            ["git", "-C", repo_path, *git_args],
-            capture_output=True,
-            text=True,
-            timeout=_GIT_TIMEOUT_SECONDS,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return done.stdout.strip() if done.returncode == 0 else None
-
-
-def _untrusted_roots(repo_path: str | None) -> tuple[Path, ...]:
-    """The repository the specs root must stay out of: the top level of the
-    repository at *repo_path*, when it is one."""
-    if repo_path is None:
-        return ()
-    toplevel = _git_output(repo_path, "rev-parse", "--show-toplevel")
-    return (Path(toplevel),) if toplevel else ()
 
 
 def _store_error_code(exc: StoreError) -> int:

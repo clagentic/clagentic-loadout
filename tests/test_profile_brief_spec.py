@@ -100,7 +100,7 @@ def _tamper(artifact: Path) -> None:
     artifact.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")), encoding="ascii")
 
 
-@pytest.mark.parametrize("failure", ["not-found", "tampered", "unusable-root"])
+@pytest.mark.parametrize("failure", ["not-found", "tampered", "unusable-root", "root-inside-repo"])
 def test_an_unreadable_spec_exits_64_naming_the_specs_root_and_the_hash(
     tmp_path, capsys, monkeypatch, failure
 ):
@@ -112,6 +112,9 @@ def test_an_unreadable_spec_exits_64_naming_the_specs_root_and_the_hash(
         asked = "e" * 64
     elif failure == "tampered":
         _tamper(_stored(spec_hash))
+    elif failure == "root-inside-repo":
+        root = repo / "specs-inside"
+        monkeypatch.setenv(spec_verb.spec_store.SPECS_DIR_ENV_VAR, str(root))
     else:
         unusable = tmp_path / "a-file-not-a-directory"
         unusable.write_text("x", encoding="utf-8")
