@@ -605,6 +605,95 @@ class TestShow:
         os.symlink(outside, artifact)
         assert _run(["show", sealed["spec_hash"]], capsys)[0] == spec_verb.EXIT_STORED_INVALID
 
+    @pytest.fixture
+    def large(self, repo, tmp_path, capsys):
+        """A sealed spec whose `show` output is over 40KB: far more than a caller's
+        inline read of standard output holds."""
+        criteria = [
+            {"id": f"ac-{n}", "given": "g" * 80, "when": "w" * 80, "then": "t" * 80}
+            for n in range(150)
+        ]
+        rulings = [f"ruling {n}: " + "r" * 120 for n in range(60)]
+        draft = _fill(_new_draft(repo, capsys), acceptance_criteria=criteria, rulings_already_made=rulings)
+        code, sealed, err = _seal(tmp_path, repo, capsys, draft, head=HEAD_A)
+        assert code == 0, err
+        stored = Path(sealed["artifact"]).read_bytes()
+        assert len(stored) > 40 * 1024
+        return sealed["spec_hash"], stored, criteria, rulings
+
+    def test_out_writes_the_stored_bytes_to_a_new_file_and_never_replaces_one(
+        self, large, tmp_path, capsys
+    ):
+        spec_hash, stored, _, _ = large
+        target = tmp_path / "spec-copy.json"
+
+        code, out, err = _run(["show", spec_hash, "--out", str(target)], capsys)
+
+        assert code == 0, err
+        assert json.loads(out) == {"result": "written", "path": str(target)}
+        assert target.read_bytes() == stored
+        code, out, err = _run(["show", spec_hash, "--out", str(target)], capsys)
+        assert code == spec_verb.EXIT_IO_FAILED and "already exists" in err and out == ""
+        assert target.read_bytes() == stored
+
+    def test_field_prints_only_the_named_fields_with_every_item(self, large, capsys):
+        spec_hash, _, criteria, rulings = large
+
+        code, out, err = _run(
+            ["show", spec_hash, "--field", "acceptance_criteria", "--field", "rulings_already_made"],
+            capsys,
+        )
+
+        assert code == 0, err
+        assert json.loads(out) == {
+            "spec_hash": spec_hash,
+            "acceptance_criteria": criteria,
+            "rulings_already_made": rulings,
+        }
+
+    def test_an_unknown_field_is_a_usage_error_listing_the_fields_the_spec_has(self, large, capsys):
+        spec_hash, _, _, _ = large
+
+        code, out, err = _run(["show", spec_hash, "--field", "nonesuch"], capsys)
+
+        assert code == spec_verb.EXIT_USAGE and out == ""
+        assert "nonesuch" in err and "acceptance_criteria" in err and "goal" in err
+
+    def test_field_and_out_together_write_the_field_object(self, large, tmp_path, capsys):
+        spec_hash, _, criteria, _ = large
+        target = tmp_path / "criteria.json"
+
+        code, _, err = _run(
+            ["show", spec_hash, "--field", "acceptance_criteria", "--out", str(target)], capsys
+        )
+
+        assert code == 0, err
+        assert json.loads(target.read_text(encoding="utf-8")) == {
+            "spec_hash": spec_hash, "acceptance_criteria": criteria,
+        }
+
+    @pytest.mark.parametrize("extra", [["--out", "x.json"], ["--field", "goal"]])
+    def test_chain_cannot_be_combined_with_out_or_field(self, large, tmp_path, capsys, extra):
+        spec_hash, _, _, _ = large
+        argv = ["show", spec_hash, "--chain", *extra]
+        if extra[0] == "--out":
+            argv[-1] = str(tmp_path / "x.json")
+
+        code, out, err = _run(argv, capsys)
+
+        assert code == spec_verb.EXIT_USAGE and out == "" and "--chain" in err
+        assert not (tmp_path / "x.json").exists()
+
+    def test_the_default_output_and_chain_are_the_stored_bytes_and_the_hash_list(
+        self, large, capsys
+    ):
+        spec_hash, stored, _, _ = large
+
+        assert _run(["show", spec_hash], capsys)[1] == stored.decode("ascii")
+        assert json.loads(_run(["show", spec_hash, "--chain"], capsys)[1]) == {
+            "spec_hash": spec_hash, "chain": [spec_hash],
+        }
+
 
 def _finding(file="src/a.py", line=3, rule="R1", **extra):
     return {"file": file, "line": line, "rule_id": rule, "message": "m", **extra}

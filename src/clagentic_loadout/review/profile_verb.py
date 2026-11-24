@@ -3,7 +3,7 @@
   loadout-profile check [--repo-path DIR] [--ref REV]
   loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
   loadout-profile brief --role ROLE [--step STEP] [--repo-path DIR] [--ref REV] [--repo NAME]
-                        [--groups-file FILE]
+                        [--groups-file FILE] [--spec HASH] [--out FILE]
 
 ``brief`` prints the profile shaped for the role that will read it: for a role of
 the scope class (a planner) the class and group rules as acceptance-criteria
@@ -17,6 +17,14 @@ Every brief, of any class, also carries a ``rules`` section: the group rules tha
 apply to the repository, narrowed to the role and to the optional --step (a name
 from the ``rules.steps`` list of the user-level config file). The brief reports
 only; no role, step or rule changes the exit code.
+
+With --spec HASH the brief also carries a ``spec`` section for a role of any class:
+the sealed spec exactly as stored, read through the loader `loadout-spec show` uses
+(which recomputes the hash), with its head, seal time, author role and supersession.
+When --ref names a commit other than the one the spec was sealed at, the section
+carries a note naming both; the exit code does not change. Without --spec the output is
+what it was before the flag existed. With --out FILE the brief is written to a new file
+(never replacing one) and standard output carries one JSON line naming it.
 
 The profile is ``.clagentic/loadout/profile.yaml`` (see review.repo_profile).
 ``check`` reads it from the working tree, or from revision REV when given (the
@@ -38,6 +46,8 @@ passed through):
   61  check, brief: the profile is invalid
   62  the repository, the revision, the file or the groups file could not be read or written
   63  init: the profile already exists (use --force to replace it)
+  64  brief --spec: the sealed spec cannot be read (no spec has that hash, the stored file
+      does not verify, or the specs root cannot be used)
 """
 
 from __future__ import annotations
@@ -49,6 +59,8 @@ import sys
 from pathlib import Path
 
 from clagentic_loadout._version import get_version
+from clagentic_loadout.artifact_store import StoreError
+from clagentic_loadout.new_file_out import NewFileError, emit_new_file
 from clagentic_loadout.review import repo_profile as rp
 from clagentic_loadout.review.atomic_io import write_bytes_atomic
 from clagentic_loadout.review.policy_reader import (
@@ -67,6 +79,7 @@ from clagentic_loadout.review.policy_source import (
 )
 from clagentic_loadout.review.profile_role_brief import role_brief
 from clagentic_loadout.review.profile_rules import classes_in_effect, rule_statements
+from clagentic_loadout.review.profile_spec_section import spec_section
 from clagentic_loadout.role_vocabulary import (
     CLASS_GATE,
     CLASS_SCOPE,
@@ -78,6 +91,9 @@ from clagentic_loadout.role_vocabulary import (
     resolve_role,
     undeclared_resolution,
 )
+from clagentic_loadout.spec.model import is_spec_hash
+from clagentic_loadout.spec.repo_roots import untrusted_roots
+from clagentic_loadout.spec.store import StoredSpec, load_sealed, specs_root
 
 EXIT_OK = 0
 EXIT_USAGE = 1
@@ -85,6 +101,7 @@ EXIT_PROFILE_MISSING = 60
 EXIT_PROFILE_INVALID = 61
 EXIT_IO_FAILED = 62
 EXIT_EXISTS = 63
+EXIT_SPEC_UNREADABLE = 64
 
 _WORKING_TREE = "working tree"
 
@@ -131,7 +148,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
             "  loadout-profile init --repo-path . --stdout\n"
             "\n"
             "Exit codes: 0 ok, 1 usage, 60 no profile, 61 invalid profile, 62 repository or "
-            "file unreadable or unwritable, 63 profile already exists."
+            "file unreadable or unwritable, 63 profile already exists, 64 brief --spec: the "
+            "sealed spec cannot be read."
         ),
     )
     parser.add_argument(
@@ -211,6 +229,20 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--groups-file",
         default=None,
         help="The groups file for group rules; see `loadout-rules --help` for the other sources.",
+    )
+    brief.add_argument(
+        "--spec",
+        default=None,
+        metavar="HASH",
+        help="A sealed spec (see `loadout-spec`): the brief gains a `spec` section holding the "
+        "spec as sealed, verified against HASH, for a role of any class. With --ref at a commit "
+        "other than the one the spec was sealed at, the section carries a note naming both.",
+    )
+    brief.add_argument(
+        "--out",
+        default=None,
+        help="Write the brief to this new file and print one JSON line naming it. An existing "
+        "file is never replaced.",
     )
     return parser
 
@@ -354,8 +386,43 @@ def _resolve_brief_role(
         )
 
 
+def _load_spec(
+    spec_hash: str, config_root: str | Path | None, repo_path: str
+) -> StoredSpec:
+    """The sealed spec *spec_hash*, verified by the store loader `loadout-spec
+    show` uses, with a specs root inside the repository at *repo_path* refused as
+    it refuses one. A hash of the wrong shape is a usage error; a spec that cannot
+    be read is an input failure (EXIT_SPEC_UNREADABLE) naming the specs root."""
+    if not is_spec_hash(spec_hash):
+        raise ProfileVerbError(
+            f"--spec must be 64 lowercase hex digits, got {spec_hash!r}", EXIT_USAGE
+        )
+    root = specs_root(config_root=config_root)
+    try:
+        return load_sealed(root, spec_hash, untrusted_roots=untrusted_roots(repo_path))
+    except StoreError as exc:
+        raise ProfileVerbError(
+            f"cannot read the sealed spec {spec_hash} under the specs root {str(root)!r}: {exc}",
+            EXIT_SPEC_UNREADABLE,
+        ) from exc
+
+
+def _emit_brief(args: argparse.Namespace, payload: dict[str, object]) -> int:
+    """Print the brief, or with --out write it to a new file and print the line
+    that names the file."""
+    if args.out is None:
+        print(json.dumps(payload))
+        return EXIT_OK
+    try:
+        emit_new_file(args.out, json.dumps(payload) + "\n")
+    except NewFileError as exc:
+        raise ProfileVerbError(str(exc), EXIT_IO_FAILED) from exc
+    return EXIT_OK
+
+
 def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
     resolution, role_note = _resolve_brief_role(args.role, config_root)
+    stored_spec = _load_spec(args.spec, config_root, args.repo_path) if args.spec is not None else None
     reader, read_at, base = _reader(args)
     try:
         present = set(reader.list_paths(read_at))
@@ -366,13 +433,20 @@ def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
             raise ProfileVerbError(
                 f"cannot list {args.repo_path!r} at {base}: {exc}", EXIT_IO_FAILED
             ) from exc
+    spec_extra: dict[str, object] = {}
+    if stored_spec is not None:
+        spec_extra["spec"] = spec_section(
+            stored_spec, read_commit=read_at if args.ref is not None else None
+        )
     if resolution.role_class == CLASS_GATE:
         # A gate's read of the profile is its own, at the merge base. The tree
         # is listed above so a --ref that does not exist is refused rather than
         # reported as read; without --ref a gate brief needs no tree at all.
         section, _, _ = _brief_rules(args, resolution, role_note, None, config_root)
-        print(json.dumps({"result": "brief", "at": base, **role_brief(None, resolution, rules=section)}))
-        return EXIT_OK
+        return _emit_brief(
+            args,
+            {"result": "brief", "at": base, **role_brief(None, resolution, rules=section), **spec_extra},
+        )
     profile, state, problem = read_repo_profile(reader, read_at, present)
     if state == PROFILE_MISSING:
         print(json.dumps({"result": "missing", "path": PROFILE_PATH, "at": base}))
@@ -397,8 +471,9 @@ def _brief(args: argparse.Namespace, config_root: str | Path | None) -> int:
         group_note=note,
         rules=section,
     )
-    print(json.dumps({"result": "brief", "path": PROFILE_PATH, "at": base, **result}))
-    return EXIT_OK
+    return _emit_brief(
+        args, {"result": "brief", "path": PROFILE_PATH, "at": base, **result, **spec_extra}
+    )
 
 
 def _init(args: argparse.Namespace) -> int:

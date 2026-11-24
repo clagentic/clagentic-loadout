@@ -27,7 +27,7 @@ verbs:
   - name: loadout-post-merge
     exit_codes: {ok: 0, usage: 1, token_fetch_failed: 2, wrong_platform: 4, namespace_denied: 20, authority_denied: 21, gate_fact_unavailable: 27, pr_not_merged: 31, caller_invoker_mismatch: 32}
   - name: loadout-profile
-    exit_codes: {ok: 0, usage: 1, profile_missing: 60, profile_invalid: 61, io_failed: 62, exists: 63}
+    exit_codes: {ok: 0, usage: 1, profile_missing: 60, profile_invalid: 61, io_failed: 62, exists: 63, spec_unreadable: 64}
   - name: loadout-provision-allowlist
     exit_codes: {ok: 0, usage: 1, role_config_invalid: 2, settings_path_invalid: 3, settings_write_failed: 4}
   - name: loadout-push

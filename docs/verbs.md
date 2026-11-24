@@ -1603,7 +1603,7 @@ registry format and exit codes:
 loadout-profile check [--repo-path DIR] [--ref REV]
 loadout-profile init  [--repo-path DIR] [--ref REV] [--force] [--stdout]
 loadout-profile brief --role ROLE [--step STEP] [--repo-path DIR] [--ref REV] [--repo NAME]
-                      [--groups-file FILE]
+                      [--groups-file FILE] [--spec HASH] [--out FILE]
 ```
 
 The repo profile (`.clagentic/loadout/profile.yaml`) states a repository's class,
@@ -1612,7 +1612,7 @@ loader the review uses (working tree by default, a revision with `--ref`) and pr
 rules and overrides as JSON. `init` drafts a profile from the file tree for a repository that
 has none and never overwrites without `--force`. Both are local, need no credential and bind no
 caller. Exit codes: `0` ok, `1` usage, `60` no profile, `61` invalid, `62` unreadable or
-unwritable, `63` already exists. The file format, the findings `loadout-review run` states from
+unwritable, `63` already exists, `64` (`brief --spec`) the sealed spec cannot be read. The file format, the findings `loadout-review run` states from
 it, and the deployment's denial list: [repo-profile.md](repo-profile.md).
 
 `brief` hands an author the rules it writes under before it writes, shaped by the **class** of
@@ -1634,8 +1634,27 @@ groups file `loadout-rules` reads (`--groups-file`, else the environment variabl
 setting named in [`loadout-rules`](#loadout-rules--the-group-rules-for-a-repository)); the
 repository name is `--repo`, else the name of the origin of `--repo-path`. With no groups file
 the brief says why in `group_rules_note`. Exit codes of `brief`: `0` ok, `1` usage, `60` no
-profile, `61` invalid profile, `62` the repository, revision or groups file could not be read.
-The verb is read-only and is not an input to any gate.
+profile, `61` invalid profile, `62` the repository, revision, groups file or `--out` file could
+not be read or written, `64` the sealed spec named by `--spec` could not be read. The verb is
+read-only (apart from `--out`) and is not an input to any gate.
+
+**The `spec` section (`--spec HASH`).** With `--spec`, a brief of any class gains a `spec` key,
+so the text a project orchestrator hands a builder is one document. `HASH` is a sealed spec (see
+[`loadout-spec`](#loadout-spec-the-standard-spec)), 64 lowercase hex digits (anything else is a
+usage error, exit `1`, naming the value). It is read through the store loader `loadout-spec show`
+uses, which recomputes the hash, from the specs root resolved as for `loadout-spec`. The section
+holds `spec_hash`, `head_sha`, `sealed_at`, `role` (the author's), `supersedes` and `document`,
+the sealed spec exactly as stored, parsed. A spec that is not found, does not verify, or sits
+under a specs root that cannot be used, or that is inside the repository at `--repo-path` (refused as `loadout-spec show` refuses it), exits `64` with a message naming the specs root and the
+hash; no profile output is printed. When `--ref` resolves to a commit other than the spec's
+`head_sha`, the section carries a `note` naming both commits; the exit code is unchanged. No
+role, class or step is refused because a spec was named, and without `--spec` the output is
+unchanged.
+
+**The file form (`--out FILE`).** The whole brief is written to a new file and standard output
+carries one line, `{"result": "written", "path": FILE}`; the exit code is what it would be
+without `--out`. An existing file is never replaced (exit `62`). A brief that carries a large
+spec is read from the file.
 
 **The `rules` section.** Every brief, of every class including `gate`, carries `rules`: the group
 rules that apply to the repository (selected by jurisdiction exactly as `loadout-rules` selects
@@ -4023,7 +4042,7 @@ loadout-spec new  --role ROLE [--repo-path DIR] [--ref REV] [--repo NAME] [--gro
                   [--consumers-file FILE] [--path GLOB]... [--element NAME]... [--symbol SYMBOL]...
                   [--removed-at REV] [--supersedes HASH] [--from-review COMMENT_ID]... [--out FILE]
 loadout-spec seal --file FILE [--repo-path DIR] [--head SHA]
-loadout-spec show HASH [--chain]
+loadout-spec show HASH [--chain | [--out FILE] [--field NAME]...]
 ```
 
 (also `clagentic-loadout spec new|seal|show`.) A spec is one document, written by
@@ -4286,6 +4305,16 @@ recomputing the hash and refusing a file whose bytes do not hash to its name, ar
 a valid spec, are not in canonical form, or are filed under a different head than the
 one they were sealed at. `show HASH --chain` prints `{"spec_hash", "chain": [...]}`,
 the hashes of that seal and every seal it supersedes, newest first.
+
+A sealed spec can be larger than a caller reads from standard output in one piece.
+`show HASH --out FILE` writes the stored bytes, unchanged, to a new file and prints
+`{"result": "written", "path": FILE}`; an existing file is never replaced (exit 55).
+`show HASH --field NAME [--field NAME]...` prints `{"spec_hash", NAME: ...}` with only the
+named top-level fields of the spec, each in full (for example `--field acceptance_criteria`);
+a name the spec does not have is a usage error (exit 1) that lists the fields it does have.
+`--out` together with `--field` writes that object to the file. `--chain` cannot be combined
+with `--out` or `--field` (exit 1). With none of the three flags the output is as before. The
+file form is the one `new --out` uses.
 
 ### Artifact location, hash and PR-body copy
 
