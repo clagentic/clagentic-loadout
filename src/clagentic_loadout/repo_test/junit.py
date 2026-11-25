@@ -13,6 +13,7 @@ counts entries.
 from __future__ import annotations
 
 import xml.etree.ElementTree as ET
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -70,15 +71,36 @@ def _load_root(path: Path) -> ET.Element:
     return root
 
 
+OUTCOME_PASSED = "passed"
+OUTCOME_FAILED = "failed"
+OUTCOME_SKIPPED = "skipped"
+
+
+def _outcome(case: ET.Element) -> str:
+    tags = {child.tag for child in case}
+    if tags & {"failure", "error"}:
+        return OUTCOME_FAILED
+    if "skipped" in tags:
+        return OUTCOME_SKIPPED
+    return OUTCOME_PASSED
+
+
+def iter_cases(path: Path) -> Iterator[tuple[str, str]]:
+    """Every case of the report as ``(id, outcome)``, in report order, one entry
+    per ``testcase`` element. The outcome rule lives here, so every view of a
+    report agrees on it. The report is loaded when iteration starts, so a
+    ``JunitError`` surfaces from the first ``next``."""
+    for case in _load_root(path).iter("testcase"):
+        yield _test_id(case), _outcome(case)
+
+
 def parse_junit(path: Path) -> JunitSummary:
-    root = _load_root(path)
     failing: list[str] = []
     passed = skipped = 0
-    for case in root.iter("testcase"):
-        tags = {child.tag for child in case}
-        if tags & {"failure", "error"}:
-            failing.append(_test_id(case))
-        elif "skipped" in tags:
+    for test_id, outcome in iter_cases(path):
+        if outcome == OUTCOME_FAILED:
+            failing.append(test_id)
+        elif outcome == OUTCOME_SKIPPED:
             skipped += 1
         else:
             passed += 1
@@ -91,26 +113,20 @@ def parse_junit(path: Path) -> JunitSummary:
     )
 
 
-OUTCOME_PASSED = "passed"
-OUTCOME_FAILED = "failed"
-OUTCOME_SKIPPED = "skipped"
-
-
 def parse_outcomes(path: Path) -> dict[str, tuple[str, ...]]:
     """Every case's outcome keyed by its id: one entry per case, in report order,
     each ``passed``, ``failed`` or ``skipped`` by the same rule as ``parse_junit``.
     An id absent from the report is absent from the result."""
     outcomes: dict[str, list[str]] = {}
-    for case in _load_root(path).iter("testcase"):
-        tags = {child.tag for child in case}
-        if tags & {"failure", "error"}:
-            outcome = OUTCOME_FAILED
-        elif "skipped" in tags:
-            outcome = OUTCOME_SKIPPED
-        else:
-            outcome = OUTCOME_PASSED
-        outcomes.setdefault(_test_id(case), []).append(outcome)
+    for test_id, outcome in iter_cases(path):
+        outcomes.setdefault(test_id, []).append(outcome)
     return {test_id: tuple(found) for test_id, found in outcomes.items()}
+
+
+def parse_collected_ids(path: Path) -> list[str]:
+    """The id of every case in the report, passed, failed and skipped, one entry
+    per case in report order (two cases that share an id appear twice)."""
+    return [test_id for test_id, _ in iter_cases(path)]
 
 
 def parse_failed_cases(path: Path) -> list[FailedCase]:
@@ -140,6 +156,8 @@ __all__ = [
     "FailedCase",
     "JunitError",
     "JunitSummary",
+    "iter_cases",
+    "parse_collected_ids",
     "parse_failed_cases",
     "parse_junit",
     "parse_outcomes",

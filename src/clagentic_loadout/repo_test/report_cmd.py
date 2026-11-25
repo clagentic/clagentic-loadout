@@ -1,8 +1,8 @@
 """repo_test.report_cmd — ``clagentic-loadout test report``.
 
 Picks one recorded run by id, by ``latest``, or by exact commit, and answers with
-its summary, its failing test ids, the failure records of its failed cases, or a
-comparison with another run. It creates
+its summary, its failing test ids, the failure records of its failed cases, every
+test id it collected, or a comparison with another run (of failing or collected ids). It creates
 and deletes nothing under the reports root; the one record it can write is the
 ``result.json`` of a detached run whose process is gone (state ``interrupted``,
 see ``repo_test.store``).
@@ -43,7 +43,7 @@ from clagentic_loadout.repo_test import exits, store
 from clagentic_loadout.repo_test.failures import bound_failures
 from clagentic_loadout.repo_test.go_test_json import GoStreamError
 from clagentic_loadout.repo_test.go_test_json import parse_failed_cases as parse_go_failed_cases
-from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, parse_failed_cases
+from clagentic_loadout.repo_test.junit import ID_SCHEME, JunitError, parse_collected_ids, parse_failed_cases
 from clagentic_loadout.repo_test.provenance import toplevel
 from clagentic_loadout.repo_test.repo_match import (
     SHA_ARG_RE,
@@ -435,6 +435,53 @@ def failures_of(root: Path, run: RunRecord) -> list[dict[str, Any]]:
     return bound_failures(cases)
 
 
+def _collected_ids(root: Path, run: RunRecord) -> list[str]:
+    """Every collected id of a complete junit run, one per case, in report order.
+    Refuses a go-test-json run, and a run whose junit file is missing, a symlink
+    or unreadable, naming the run and the reason."""
+    if report_format_of(run) == REPORT_GO_TEST_JSON:
+        raise ReportRefused(
+            f"run {run.run_id} was recorded as {REPORT_GO_TEST_JSON}, a format the collected view does not support",
+            exits.EXIT_DIFF_REFUSED,
+        )
+    report_path = root / run.run_id / store.JUNIT_FILE
+    if report_path.is_symlink():
+        raise ReportRefused(
+            f"run {run.run_id}: {str(report_path)!r} is a symlink, refusing it", exits.EXIT_DIFF_REFUSED
+        )
+    try:
+        return parse_collected_ids(report_path)
+    except JunitError as exc:
+        raise ReportRefused(
+            f"run {run.run_id}: its recorded JUnit report cannot be read: {exc}", exits.EXIT_DIFF_REFUSED
+        ) from exc
+
+
+def collected_ids_of(root: Path, run: RunRecord) -> list[str]:
+    """The sorted collected ids of a complete run, one entry per case, read from
+    the junit report recorded with it."""
+    _require_complete(run, "its collected ids")
+    return sorted(_collected_ids(root, run))
+
+
+def collected_diff_of(root: Path, head: RunRecord, base: RunRecord) -> dict[str, Any]:
+    """Collected ids only in *head*, only in *base*, and how many are in both,
+    compared as a multiset like ``diff_of`` and refused on the same pairs."""
+    _require_complete(head, "a comparison")
+    _require_complete(base, "a comparison")
+    _require_like_tiers(head, base)
+    repo_check = _repo_check(head, base)
+    head_ids, base_ids = Counter(_collected_ids(root, head)), Counter(_collected_ids(root, base))
+    return {
+        "head_run": head.run_id,
+        "base_run": base.run_id,
+        "head_only": sorted((head_ids - base_ids).elements()),
+        "base_only": sorted((base_ids - head_ids).elements()),
+        "shared_count": sum((head_ids & base_ids).values()),
+        "repo_check": repo_check,
+    }
+
+
 def report_format_of(run: RunRecord) -> str:
     """The report format a run was recorded with; a record without the key is junit."""
     value = run.result.get("report_format")
@@ -591,6 +638,8 @@ __all__ = [
     "REPO_SAME",
     "REPO_UNVERIFIED",
     "ReportRefused",
+    "collected_diff_of",
+    "collected_ids_of",
     "date_mark",
     "diff_of",
     "failing_ids_of",
