@@ -5,7 +5,8 @@ and read the results by run id.
   clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout S] [--detach]
   clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout S] [--detach]
   clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
-                                [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
+                                [--summary | --failing-ids | --failures | --collected-ids
+                                 | --diff BASE_RUN_ID [--collected]]
   clagentic-loadout test list [--repo R] [--limit N]
   clagentic-loadout test stop RUN_ID
 
@@ -67,7 +68,8 @@ Usage: {_PROG} run full|impacted [--repo-root DIR] [--base REV] [--timeout SECON
        {_PROG} run files PATH... [--repo-root DIR] [--timeout SECONDS] [--detach]
        {_PROG} run tier NAME [--repo-root DIR] [--timeout SECONDS] [--detach]
        {_PROG} report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
-                                    [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
+                                    [--summary | --failing-ids | --failures | --collected-ids
+                                     | --diff BASE_RUN_ID [--collected]]
        {_PROG} list [--repo R] [--limit N]
        {_PROG} stop RUN_ID
        {_PROG} --help | --version
@@ -149,7 +151,7 @@ def _run_parser() -> argparse.ArgumentParser:
 def _report_parser() -> argparse.ArgumentParser:
     report = _new_parser(
         "report",
-        "Print a summary, the failing test ids, the failure messages, or a comparison of a recorded run. A run is "
+        "Print a summary, the failing test ids, the failure messages, the collected test ids, or a comparison of a recorded run. A run is "
         "chosen by run id, or `latest` (the default), optionally narrowed with --repo and "
         "--sha. Without --repo, `latest` is scoped to the git repository of the current directory, "
         "or refused when that is none and several repositories are on record. With a run id, "
@@ -187,11 +189,23 @@ def _report_parser() -> argparse.ArgumentParser:
         "omitted_cases.",
     )
     shape.add_argument(
+        "--collected-ids",
+        action="store_true",
+        help="Print every test id the run collected (passed, failed and skipped), read from its "
+        "stored JUnit report, sorted, one line per test case. A run recorded as go-test-json is refused.",
+    )
+    shape.add_argument(
         "--diff",
         metavar="BASE_RUN_ID",
         default=None,
         help="Print the failing ids only in this run, only in BASE_RUN_ID, and the shared "
         "count, as JSON. Refuses runs from different repositories.",
+    )
+    report.add_argument(
+        "--collected",
+        action="store_true",
+        help="With --diff: compare the collected ids of the two runs instead of the failing ids. "
+        "Same JSON shape, same refusals.",
     )
     return report
 
@@ -425,7 +439,14 @@ def _report(args: argparse.Namespace) -> int:
             time.sleep(min(_WAIT_POLL_SECONDS, remaining))
             run = _select_waiting(args, root, deadline, None)
         if args.diff is not None:
-            _print_json(report_cmd.diff_of(run, report_cmd.load_base_run(root, args.diff, note=note)))
+            base = report_cmd.load_base_run(root, args.diff, note=note)
+            _print_json(
+                report_cmd.collected_diff_of(root, run, base) if args.collected else report_cmd.diff_of(run, base)
+            )
+        elif args.collected_ids:
+            # Resolved before the first print so a refusal leaves stdout empty.
+            for test_id in report_cmd.collected_ids_of(root, run):
+                print(test_id)
         elif args.failures:
             _print_json(report_cmd.failures_of(root, run))
         elif args.failing_ids:
@@ -500,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
             if after and (len(after) > 1 or args.run_id is not None):
                 parser.error(f"unexpected arguments after '--': {' '.join(after)}")
             args.run_id = after[0] if after else (args.run_id or LATEST)
+            if args.collected and args.diff is None:
+                parser.error("--collected compares two runs, so it needs --diff BASE_RUN_ID")
         elif after:
             parser.error(f"unexpected arguments after '--': {' '.join(after)}")
     except SystemExit as exc:

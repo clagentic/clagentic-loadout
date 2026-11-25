@@ -15,7 +15,8 @@ clagentic-loadout test run full|impacted [--repo-root DIR] [--base REV] [--timeo
 clagentic-loadout test run files PATH... [--repo-root DIR] [--timeout SECONDS] [--detach]
 clagentic-loadout test run tier NAME [--repo-root DIR] [--timeout SECONDS] [--detach]
 clagentic-loadout test report [RUN_ID|latest] [--repo R] [--sha S] [--wait SECONDS]
-                              [--summary | --failing-ids | --failures | --diff BASE_RUN_ID]
+                              [--summary | --failing-ids | --failures | --collected-ids
+                               | --diff BASE_RUN_ID [--collected]]
 clagentic-loadout test list [--repo R] [--limit N]
 clagentic-loadout test stop RUN_ID
 ```
@@ -274,10 +275,23 @@ below).
   URLs are compared when both runs recorded one, otherwise resolved paths. When only one run
   recorded a remote and the paths differ, or either run recorded no repository, `repo_check`
   is `unverified` instead of a refusal.
+- **`--collected-ids`**: every test id the run collected (passed, failed and skipped), sorted,
+  one per line, read from the run's stored JUnit report. One line per test case, so two cases
+  that share an id appear twice and the line count equals `counts.collected`. Ids have the same
+  form as `--failing-ids`. A run whose stored report is missing, is a symlink or is not readable
+  XML is refused (exit `78`) with the run and the reason named, and nothing is printed. A
+  `go-test-json` run is refused (exit `78`) naming the format: the collected view reads JUnit
+  only.
+- **`--diff BASE_RUN_ID --collected`**: the same JSON as `--diff` (`head_run`, `base_run`,
+  `head_only`, `base_only`, `shared_count`, `repo_check`), but over collected ids instead of
+  failing ids, so it names the tests one run collected and the other did not. Ids are compared
+  as a multiset. It refuses the same pairs as `--diff` (different repositories, unlike tiers) and
+  the same runs as `--collected-ids`. `--collected` without `--diff` is a usage error (exit `1`),
+  as is `--collected-ids` together with another form.
 - `--diff` compares like with like: it refuses (exit `78`) when exactly one of the two runs is
   a tier run, or when both are tier runs of different tiers. Two runs of the same tier, and two
   non-tier runs, compare as before.
-- An `unrunnable` run has no results, so `--failing-ids`, `--failures` and `--diff` refuse it (exit `78`)
+- An `unrunnable` run has no results, so `--failing-ids`, `--failures`, `--collected-ids` and `--diff` refuse it (exit `78`)
   rather than report an empty set.
 
 | Code | Meaning |
@@ -287,8 +301,8 @@ below).
 | `75` | The reports root does not exist, or holds no matching finished run. |
 | `76` | The run id is malformed or no such run exists; the message names the id. |
 | `77` | No clean run matches `--sha` (or the prefix is ambiguous). |
-| `78` | Refused: `--diff` across repositories or unlike tiers, a run without results, `RUN_ID --repo` naming another repository, or `latest` outside git with several repositories on record. |
-| `79` | The run is still running: `--wait` timed out, or `--failing-ids` / `--failures` / `--diff` was asked of a running run. |
+| `78` | Refused: `--collected-ids` or `--collected` on a run whose JUnit report cannot be read or is go-test-json, `--diff` across repositories or unlike tiers, a run without results, `RUN_ID --repo` naming another repository, or `latest` outside git with several repositories on record. |
+| `79` | The run is still running: `--wait` timed out, or `--failing-ids` / `--failures` / `--collected-ids` / `--diff` was asked of a running run. |
 
 The code `79` is also the installer helper's code for a settings file it could not read or write
 (see below). That helper is a separate process the installer calls, never a `test report`
@@ -395,7 +409,7 @@ in its own session; `test stop` does not reach it, because a run whose superviso
 already terminal.
 
 `--summary` of a running, interrupted, timed-out or stopped run prints that state and exits `0`.
-`--failing-ids`, `--failures` and `--diff` of a running run exit `79` and name the state; of an
+`--failing-ids`, `--failures`, `--collected-ids` and `--diff` of a running run exit `79` and name the state; of an
 interrupted, timed-out or stopped run they exit `78`, like an unrunnable run. `latest` and `--sha`
 are unchanged: they select finished runs, and an interrupted, timed-out or stopped run, which has
 no result, is never selected by them, so what they pick does not depend on whether anyone has
