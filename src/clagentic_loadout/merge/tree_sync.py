@@ -124,6 +124,7 @@ what mutates and what does not.
 from __future__ import annotations
 
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from clagentic_loadout.merge.fetch_transport import (
@@ -392,6 +393,101 @@ def fetch_merged_sha_object(
     return fetched_sha
 
 
+@dataclass(frozen=True)
+class StepsTarget:
+    """The commit post_merge_steps run at, and why it may differ from the PR's
+    merge SHA. *reason* is None when they are the same commit; otherwise it is a
+    complete sentence naming both SHAs, fit to print as-is."""
+
+    sha: str
+    merged_sha: str
+    reason: str | None
+
+    def result_fields(self) -> dict[str, str]:
+        """The additive keys a verb's JSON result carries for this target."""
+        fields = {"merged_sha": self.merged_sha, "steps_sha": self.sha}
+        if self.reason is not None:
+            fields["steps_sha_reason"] = self.reason
+        return fields
+
+
+def resolve_steps_target(
+    repo_path: str | Path,
+    *,
+    base_branch: str,
+    merged_sha: str,
+    fetch_auth: MergeFetchAuth | None = None,
+) -> StepsTarget:
+    """Pick the commit post_merge_steps run at: the base branch tip read now.
+
+    A re-run, or a merge whose base branch moved before its post-merge tail,
+    would otherwise install *merged_sha* over a newer tip and regress whatever
+    the steps install. The tip contains an older merge, so running there
+    satisfies that merge's deploy too. Never raises and never refuses:
+
+    - tip is *merged_sha*: run there, no reason.
+    - *merged_sha* is an ancestor of the tip: run at the tip.
+    - *merged_sha* is not in the tip: still run at the tip (nothing older than
+      the tip is installed), and the reason says that change is not in it.
+    - the tip cannot be read: run at *merged_sha* as before, reason says why.
+    """
+    repo_path = Path(repo_path)
+
+    def _unreadable(detail: str) -> StepsTarget:
+        return StepsTarget(
+            sha=merged_sha,
+            merged_sha=merged_sha,
+            reason=(
+                f"the tip of base branch {base_branch!r} could not be read "
+                f"({detail}); steps run at merge SHA {merged_sha}"
+            ),
+        )
+
+    try:
+        _fetch(repo_path, base_branch, base_branch, fetch_auth)
+    except TreeSyncError as exc:
+        return _unreadable(str(exc))
+    tip_result = _run_git(["rev-parse", "FETCH_HEAD"], cwd=repo_path)
+    tip = tip_result.stdout.strip()
+    if tip_result.returncode != 0 or not tip:
+        return _unreadable(
+            f"git rev-parse FETCH_HEAD exit {tip_result.returncode}: "
+            f"{tip_result.stderr.strip()[:400]}"
+        )
+    commit_result = _run_git(["cat-file", "-e", f"{tip}^{{commit}}"], cwd=repo_path)
+    if commit_result.returncode != 0:
+        return _unreadable(f"{tip} is not a commit in {repo_path}")
+    if tip == merged_sha:
+        return StepsTarget(sha=tip, merged_sha=merged_sha, reason=None)
+
+    ancestry = _run_git(["merge-base", "--is-ancestor", merged_sha, tip], cwd=repo_path)
+    if ancestry.returncode == 0:
+        return StepsTarget(
+            sha=tip,
+            merged_sha=merged_sha,
+            reason=(
+                f"merge SHA {merged_sha} is contained in the newer tip {tip} of "
+                f"base branch {base_branch!r}; steps run at {tip} so an older "
+                f"commit is never installed"
+            ),
+        )
+    if ancestry.returncode == 1:
+        return StepsTarget(
+            sha=tip,
+            merged_sha=merged_sha,
+            reason=(
+                f"merge SHA {merged_sha} is not contained in the tip {tip} of "
+                f"base branch {base_branch!r}, so that change is not in what the "
+                f"steps ran against; steps run at {tip} so an older commit is "
+                f"never installed"
+            ),
+        )
+    return _unreadable(
+        f"whether merge SHA {merged_sha} is contained in {tip} could not be "
+        f"read, git exit {ancestry.returncode}"
+    )
+
+
 def land_on_base_branch(
     repo_path: str | Path,
     *,
@@ -477,7 +573,9 @@ def land_on_base_branch(
 
 
 __all__ = [
+    "StepsTarget",
     "TreeSyncError",
+    "resolve_steps_target",
     "advance_repo_to_merged_sha",
     "fetch_merged_sha_object",
     "land_on_base_branch",
