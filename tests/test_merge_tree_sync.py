@@ -50,6 +50,7 @@ from clagentic_loadout.merge.tree_sync import (
     fetch_merged_sha_object,
     land_on_base_branch,
     resolve_base_branch,
+    resolve_steps_target,
 )
 
 _BASE_BRANCH = "main"
@@ -518,4 +519,47 @@ class TestFetchMergedShaObject:
         clone_dir, _origin_dir, _merged_sha, stale_sha = repo_with_origin
         with pytest.raises(TreeSyncError, match="git fetch"):
             fetch_merged_sha_object(clone_dir, base_branch="branch-that-does-not-exist")
+        assert _head_sha(clone_dir) == stale_sha
+
+
+class TestResolveStepsTarget:
+    """The SHA post_merge_steps run at: the base branch tip read now, with the
+    relation to the PR's merge SHA stated. Never raises."""
+
+    @pytest.mark.parametrize(
+        "relation, reason_fragment",
+        [
+            ("equal", None),
+            ("superseded", "is contained in the newer tip"),
+            ("not_contained", "is not contained in the tip"),
+            ("tip_unreadable", "could not be read"),
+        ],
+    )
+    def test_relation(self, repo_with_origin, relation, reason_fragment):
+        clone_dir, _origin_dir, tip_sha, stale_sha = repo_with_origin
+        base_branch = _BASE_BRANCH
+        merged_sha = tip_sha
+        expected_sha = tip_sha
+        if relation == "superseded":
+            merged_sha = _run_git(["rev-parse", f"{tip_sha}~1"], cwd=clone_dir).stdout.strip()
+        elif relation == "not_contained":
+            merged_sha = stale_sha
+        elif relation == "tip_unreadable":
+            base_branch = "branch-that-does-not-exist"
+            expected_sha = merged_sha
+
+        target = resolve_steps_target(
+            clone_dir, base_branch=base_branch, merged_sha=merged_sha
+        )
+
+        assert target.sha == expected_sha
+        assert target.merged_sha == merged_sha
+        if reason_fragment is None:
+            assert target.reason is None
+            assert "steps_sha_reason" not in target.result_fields()
+        else:
+            assert reason_fragment in target.reason
+            assert merged_sha in target.reason
+            assert target.result_fields()["steps_sha_reason"] == target.reason
+        assert target.result_fields()["steps_sha"] == expected_sha
         assert _head_sha(clone_dir) == stale_sha

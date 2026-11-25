@@ -575,6 +575,7 @@ from clagentic_loadout.merge.post_merge_config import (
     config_path_tracked_at_git_sha,
     find_foreign_config_files_declaring_post_merge_steps,
     load_post_merge_steps,
+    load_post_merge_steps_at_sha,
     load_post_merge_steps_from_git_sha,
     post_merge_steps_key_declared,
     resolve_enforce_merge_shape,
@@ -637,11 +638,13 @@ from clagentic_loadout.merge.live_base import resolve_live_base_tip
 from clagentic_loadout.merge.reviewer_login import resolve_reviewer_login
 from clagentic_loadout.merge.stale_sha import check_stale_head_sha
 from clagentic_loadout.merge.tree_sync import (
+    StepsTarget,
     TreeSyncError,
     advance_repo_to_merged_sha,
     fetch_merged_sha_object,
     land_on_base_branch,
     resolve_base_branch,
+    resolve_steps_target,
 )
 from clagentic_loadout.merge.tool_merge_tree import (
     TOOL_TREE_FAILURE_NOTE,
@@ -2823,7 +2826,22 @@ def _run(
                     f"post-merge working-tree sync FAILED -- {exc}",
                     code=EXIT_POST_MERGE_FAILED,
                 )
-            isolate_reason = unsafe_tree_reason(git_tree_path, base_branch, fetched_sha)
+            # The steps run at the base branch tip read now, never at an older merge
+            # SHA (the base branch can move between the merge and this tail). Only
+            # when steps will run: nothing is installed otherwise. The merge
+            # attestation and the merge-shape readback stay on `fetched_sha`.
+            steps_target: StepsTarget | None = None
+            if steps_will_run:
+                steps_target = resolve_steps_target(
+                    git_tree_path,
+                    base_branch=base_branch,
+                    merged_sha=fetched_sha,
+                    fetch_auth=fetch_auth,
+                )
+                if steps_target.reason is not None:
+                    print(f"merge: {steps_target.reason}", file=sys.stderr)
+            steps_sha = steps_target.sha if steps_target is not None else fetched_sha
+            isolate_reason = unsafe_tree_reason(git_tree_path, base_branch, steps_sha)
             try:
                 if steps_will_run and isolate_reason is None:
                     # lr-7c5540: advance the --repo-path working tree to the
@@ -2843,7 +2861,7 @@ def _run(
                         landed_sha = advance_repo_to_merged_sha(
                             git_tree_path,
                             base_branch=base_branch,
-                            known_merged_sha=fetched_sha,
+                            known_merged_sha=steps_sha,
                             fetch_auth=fetch_auth,
                         )
                     except TreeSyncError as exc:
@@ -2864,7 +2882,7 @@ def _run(
                     # database WITHOUT checking anything out. Never a `git
                     # checkout`, so the working tree/index/HEAD are left exactly
                     # as the caller had them.
-                    landed_sha = fetched_sha
+                    landed_sha = steps_sha
                     # lr-cd3644 followup: tracked so the drift check below can
                     # tell whether a real checkout already happened (the
                     # steps_will_run branch above) or only a fetch (this branch)
@@ -3026,6 +3044,44 @@ def _run(
                     ):
                         landed_steps = []
 
+                # The merged commit declares steps the pre-sync read did not see,
+                # so they are about to run and the tip was not read yet. Read it
+                # now, then take the steps from the SHA they will run at: a step
+                # the tip removed or changed must not run as the merged commit
+                # declared it. The merged-commit read above only decided that
+                # steps are needed.
+                if (
+                    landed_steps
+                    and landed_steps != steps
+                    and not args.skip_post_merge
+                    and steps_target is None
+                ):
+                    steps_target = resolve_steps_target(
+                        git_tree_path,
+                        base_branch=base_branch,
+                        merged_sha=fetched_sha,
+                        fetch_auth=fetch_auth,
+                    )
+                    if steps_target.reason is not None:
+                        print(f"merge: {steps_target.reason}", file=sys.stderr)
+                    if steps_target.sha != landed_sha:
+                        landed_sha = steps_target.sha
+                        isolate_reason = unsafe_tree_reason(
+                            git_tree_path, base_branch, landed_sha
+                        )
+                        try:
+                            landed_steps = load_post_merge_steps_at_sha(
+                                args.repo_path, git_tree_path, landed_sha
+                            )
+                        except PostMergeConfigError as exc:
+                            _fail(
+                                f"post-merge config FAILED to load from commit "
+                                f"{landed_sha!r} -- {exc}",
+                                code=EXIT_POST_MERGE_FAILED,
+                            )
+                        if landed_steps is None:
+                            landed_steps = []
+
                 drifted = (
                     landed_steps is not None
                     and landed_steps != steps
@@ -3120,7 +3176,7 @@ def _run(
                 # this check.
                 try:
                     shape_check = check_merge_shape(
-                        landed_sha, args.merge_method, git_tree_path
+                        fetched_sha, args.merge_method, git_tree_path
                     )
                 except MergeShapeCheckError as exc:
                     _fail(
