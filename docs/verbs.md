@@ -3360,6 +3360,24 @@ commit lacking the step directory) the verb exits with the post-merge-failed cod
 `merge-tree-unavailable` message before any step runs; it never falls back to moving
 `--repo-path`. `sync_tree_after_merge: false` still applies to `loadout-merge` only.
 
+**Steps run at the base branch tip, never at an older merge SHA.** Before the steps
+run, `loadout-merge` (its post-merge tail) and `loadout-post-merge` read the base
+branch tip with a fresh fetch and run the steps at it. When the PR's merge SHA is the
+tip, nothing changes. When the base branch has moved on and the merge SHA is contained
+in the newer tip, the steps run at the tip, so a re-run for a superseded PR never
+installs an older build over a newer one, and the PR's change is still in what is
+installed. When the merge SHA is not contained in the tip, the steps still run at the
+tip and the output says plainly that the PR's change is not in what ran. When the tip
+cannot be read, the steps run at the merge SHA as before and the output says why. None
+of these adds a refusal or an exit code. Whenever the steps run at a SHA other than the
+merge SHA, or the tip could not be read, stderr carries one line naming the merge SHA,
+the SHA the steps ran at and the reason. `loadout-post-merge`'s JSON result also carries
+`merged_sha` and `steps_sha` (equal when nothing was redirected) and, only when they
+differ or the tip was unreadable, `steps_sha_reason` with that same sentence.
+`loadout-merge`'s attestation and merge-shape readback stay on the merged SHA, and its
+JSON result (printed before the tail runs) is unchanged. A clean `--repo-path` is
+landed on the base branch at the SHA the steps ran at.
+
 What a step can rely on in the tool tree:
 
 - **The tree is ephemeral.** It is removed after the steps, pass or fail. A step must

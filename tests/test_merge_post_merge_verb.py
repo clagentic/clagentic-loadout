@@ -584,3 +584,95 @@ class TestWrapperRepoPathIsRefusedUpFront:
         )
         assert code == post_merge_verb.EXIT_OK
         assert Path(marker.read_text()).resolve() == tree.resolve()
+
+
+def _push_origin_commit(tmp_path, *, branch: str) -> str:
+    """Land one more commit on *branch* of the fixture's bare origin from a
+    separate clone, so --repo-path itself stays behind. Returns its SHA."""
+    remote_dir = tmp_path.parent / f"{tmp_path.name}-origin.git"
+    pusher = tmp_path.parent / f"{tmp_path.name}-pusher-{branch}"
+    _run_git(["clone", str(remote_dir), str(pusher)], cwd=tmp_path.parent)
+    _run_git(["config", "user.email", "test@example.com"], cwd=pusher)
+    _run_git(["config", "user.name", "test"], cwd=pusher)
+    if branch != _BASE_BRANCH:
+        _run_git(["checkout", "-b", branch], cwd=pusher)
+    (pusher / f"{branch}.txt").write_text(f"{branch}\n", encoding="utf-8")
+    _run_git(["add", f"{branch}.txt"], cwd=pusher)
+    _run_git(["commit", "-m", f"commit on {branch}"], cwd=pusher)
+    _run_git(["push", "origin", f"{branch}:{branch}"], cwd=pusher)
+    return _head_sha(pusher)
+
+
+class TestStepsRunAtBaseBranchTip:
+    """The steps run at the base branch tip read at run time, never at an older
+    merge SHA, and the output says which SHA they ran at and why."""
+
+    @pytest.mark.parametrize(
+        "shape, reason_fragment",
+        [
+            ("superseded", "is contained in the newer tip"),
+            ("at_tip", None),
+            ("not_contained", "is not contained in the tip"),
+            ("tip_unreadable", "could not be read"),
+        ],
+    )
+    def test_steps_sha_and_its_report(self, tmp_path, monkeypatch, capsys, shape, reason_fragment):
+        import json
+
+        from clagentic_loadout.merge import tree_sync
+        from clagentic_loadout.merge.fetch_transport import MergeFetchFailedError
+
+        merged_sha = _init_repo_with_origin(tmp_path)
+        expected_steps_sha = merged_sha
+        if shape == "superseded":
+            expected_steps_sha = _push_origin_commit(tmp_path, branch=_BASE_BRANCH)
+        elif shape == "not_contained":
+            merged_sha = _push_origin_commit(tmp_path, branch="side")
+            expected_steps_sha = _head_sha(tmp_path)
+        elif shape == "tip_unreadable":
+            real_fetch = tree_sync.fetch_from_tracking_remote
+
+            def _tip_fetch_fails(git_tree, base_branch, target, fetch_auth):
+                if target == base_branch:
+                    raise MergeFetchFailedError("git fetch exited 128")
+                return real_fetch(git_tree, base_branch, target, fetch_auth)
+
+            monkeypatch.setattr(tree_sync, "fetch_from_tracking_remote", _tip_fetch_fails)
+
+        marker = tmp_path / "steps-ran-at.txt"
+        _write_merge_config(
+            tmp_path,
+            [{"cmd": [
+                _PY, "-c",
+                "import subprocess; "
+                f"open(r'{marker}', 'w').write(subprocess.check_output("
+                "['git', 'rev-parse', 'HEAD'], text=True).strip())",
+            ]}],
+        )
+        code = post_merge_verb.main(
+            _base_args(str(tmp_path)),
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=merged_sha),
+        )
+        captured = capsys.readouterr()
+        assert code == post_merge_verb.EXIT_OK
+        assert marker.read_text() == expected_steps_sha
+
+        result = json.loads(captured.out.strip().splitlines()[-1])
+        assert result["merged_sha"] == merged_sha
+        assert result["steps_sha"] == expected_steps_sha
+        if reason_fragment is None:
+            assert "steps_sha_reason" not in result
+            assert "newer tip" not in captured.err
+        else:
+            assert reason_fragment in result["steps_sha_reason"]
+            assert f"post-merge: {result['steps_sha_reason']}" in captured.err
+            assert merged_sha in captured.err
+            assert expected_steps_sha in captured.err
+        if shape in ("superseded", "not_contained"):
+            landed = subprocess.run(
+                ["git", "rev-parse", f"refs/heads/{_BASE_BRANCH}"],
+                capture_output=True, text=True, cwd=str(tmp_path),
+            )
+            assert landed.stdout.strip() == expected_steps_sha

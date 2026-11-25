@@ -142,6 +142,7 @@ from clagentic_loadout.merge.tree_sync import (
     fetch_merged_sha_object,
     land_on_base_branch,
     resolve_base_branch,
+    resolve_steps_target,
 )
 from clagentic_loadout.merge.tool_merge_tree import (
     TOOL_TREE_FAILURE_NOTE,
@@ -607,12 +608,21 @@ def _run(
     # advance is safe only when the checkout's HEAD is contained in it: a local
     # commit outside it would be dropped from the base branch by the reset.
     try:
-        landed_sha = fetch_merged_sha_object(
+        merged_fetched_sha = fetch_merged_sha_object(
             git_tree_path,
             base_branch=base_branch,
             known_merged_sha=known_merged_sha,
             fetch_auth=fetch_auth,
         )
+        # The steps run at the base branch tip, never at an older merge SHA: a
+        # re-run for a superseded PR must not regress what the steps install.
+        steps_target = resolve_steps_target(
+            git_tree_path,
+            base_branch=base_branch,
+            merged_sha=merged_fetched_sha,
+            fetch_auth=fetch_auth,
+        )
+        landed_sha = steps_target.sha
         isolate_reason = unsafe_tree_reason(git_tree_path, base_branch, landed_sha)
         if isolate_reason is None:
             landed_sha = advance_repo_to_merged_sha(
@@ -626,6 +636,8 @@ def _run(
             f"post-merge working-tree sync FAILED -- {exc}",
             code=EXIT_POST_MERGE_FAILED,
         )
+    if steps_target.reason is not None:
+        print(f"post-merge: {steps_target.reason}", file=sys.stderr)
     if isolate_reason is None:
         print(
             f"post-merge: working tree at {git_tree_path} advanced to merged "
@@ -835,6 +847,7 @@ def _run(
                 "owner": owner,
                 "repo": repo,
                 "steps_run": steps_run,
+                **steps_target.result_fields(),
                 **provider_fields(attested_identity),
                 **(
                     {"post_merge_tree": tool_tree_used, "post_merge_tree_removed": True}
