@@ -126,6 +126,7 @@ from clagentic_loadout.merge.post_merge import (
 from clagentic_loadout.merge.post_merge_config import (
     DEFAULT_CONFIG_RELATIVE_PATH as DEFAULT_POST_MERGE_CONFIG_RELATIVE_PATH,
     load_post_merge_steps,
+    load_post_merge_steps_at_sha,
     resolve_env_overrides,
     resolve_git_working_tree,
     resolve_post_merge_step_timeout_seconds,
@@ -142,6 +143,7 @@ from clagentic_loadout.merge.tree_sync import (
     fetch_merged_sha_object,
     land_on_base_branch,
     resolve_base_branch,
+    resolve_steps_target,
 )
 from clagentic_loadout.merge.tool_merge_tree import (
     TOOL_TREE_FAILURE_NOTE,
@@ -607,12 +609,21 @@ def _run(
     # advance is safe only when the checkout's HEAD is contained in it: a local
     # commit outside it would be dropped from the base branch by the reset.
     try:
-        landed_sha = fetch_merged_sha_object(
+        merged_fetched_sha = fetch_merged_sha_object(
             git_tree_path,
             base_branch=base_branch,
             known_merged_sha=known_merged_sha,
             fetch_auth=fetch_auth,
         )
+        # The steps run at the base branch tip, never at an older merge SHA: a
+        # re-run for a superseded PR must not regress what the steps install.
+        steps_target = resolve_steps_target(
+            git_tree_path,
+            base_branch=base_branch,
+            merged_sha=merged_fetched_sha,
+            fetch_auth=fetch_auth,
+        )
+        landed_sha = steps_target.sha
         isolate_reason = unsafe_tree_reason(git_tree_path, base_branch, landed_sha)
         if isolate_reason is None:
             landed_sha = advance_repo_to_merged_sha(
@@ -626,6 +637,8 @@ def _run(
             f"post-merge working-tree sync FAILED -- {exc}",
             code=EXIT_POST_MERGE_FAILED,
         )
+    if steps_target.reason is not None:
+        print(f"post-merge: {steps_target.reason}", file=sys.stderr)
     if isolate_reason is None:
         print(
             f"post-merge: working tree at {git_tree_path} advanced to merged "
@@ -672,6 +685,15 @@ def _run(
     try:
         try:
             steps = load_post_merge_steps(args.repo_path)
+            if isolate_reason is not None:
+                # --repo-path was not moved, so its file is not the config at the
+                # SHA the steps run at; take the steps committed there (an
+                # untracked config has none and stays as read).
+                steps_at_sha = load_post_merge_steps_at_sha(
+                    args.repo_path, git_tree_path, landed_sha
+                )
+                if steps_at_sha is not None:
+                    steps = steps_at_sha
         except PostMergeConfigError as exc:
             _fail(
                 f"post-merge config FAILED to load -- {exc}",
@@ -835,6 +857,7 @@ def _run(
                 "owner": owner,
                 "repo": repo,
                 "steps_run": steps_run,
+                **steps_target.result_fields(),
                 **provider_fields(attested_identity),
                 **(
                     {"post_merge_tree": tool_tree_used, "post_merge_tree_removed": True}

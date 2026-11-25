@@ -615,6 +615,56 @@ class TestSyncTreeAfterMergeDefaultOn:
         assert code == verb.EXIT_OK
         _assert_landed_on_base_branch(tmp_path, merged_sha)
 
+    def test_steps_run_at_the_tip_when_the_base_branch_moved_past_the_merge(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        # The base branch advances after the merge landed and before the
+        # post-merge tail runs its steps: the steps must run at the new tip,
+        # while the merge-shape readback keeps naming the merged commit.
+        merged_sha = _init_repo_with_origin(tmp_path)
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
+        marker = tmp_path / "steps-ran-at.txt"
+        _write_merge_config(
+            tmp_path,
+            [{"cmd": [
+                _PY, "-c",
+                "import subprocess; "
+                f"open(r'{marker}', 'w').write(subprocess.check_output("
+                "['git', 'rev-parse', 'HEAD'], text=True).strip())",
+            ]}],
+        )
+        pushed: dict[str, str] = {}
+        real_fetch = verb.fetch_merged_sha_object
+
+        def _fetch_then_base_moves(*args, **kwargs):
+            fetched = real_fetch(*args, **kwargs)
+            remote_dir = tmp_path.parent / f"{tmp_path.name}-origin.git"
+            pusher = tmp_path.parent / f"{tmp_path.name}-pusher"
+            _run_git(["clone", str(remote_dir), str(pusher)], cwd=tmp_path.parent)
+            _run_git(["config", "user.email", "test@example.com"], cwd=pusher)
+            _run_git(["config", "user.name", "test"], cwd=pusher)
+            (pusher / "later.txt").write_text("later\n", encoding="utf-8")
+            _run_git(["add", "later.txt"], cwd=pusher)
+            _run_git(["commit", "-m", "later merge"], cwd=pusher)
+            _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=pusher)
+            pushed["tip"] = _head_sha(pusher)
+            return fetched
+
+        monkeypatch.setattr(verb, "fetch_merged_sha_object", _fetch_then_base_moves)
+        argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_github_opener(merged_sha=merged_sha),
+        )
+        err = capsys.readouterr().err
+        assert code == verb.EXIT_OK
+        assert pushed["tip"] != merged_sha
+        assert marker.read_text() == pushed["tip"]
+        assert f"merge SHA {merged_sha} is contained in the newer tip {pushed['tip']}" in err
+        _assert_landed_on_base_branch(tmp_path, pushed["tip"])
+
     def test_github_platform_missing_sha_falls_back_to_base_branch_resolution(
         self, tmp_path
     ):
@@ -1584,6 +1634,27 @@ class TestStalePreSyncConfigDriftCheck:
         # as it would for a non-drifted merge whose steps were known from
         # the start.
         _assert_landed_on_base_branch(tmp_path, merged_sha)
+
+    def test_steps_come_from_the_tip_the_tail_runs_at_not_the_merged_commit(self, tmp_path):
+        # The merged commit adds a step; the base branch then moves on to a tip
+        # that removes it. The steps run at the tip, so the removed step must
+        # not run as the merged commit declared it.
+        _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
+        marker = tmp_path / "removed-at-tip.txt"
+        merged_sha = _push_tracked_config_commit_to_origin(
+            tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}]
+        )
+        _push_tracked_config_commit_to_origin(tmp_path, [], parent_sha=merged_sha)
+        argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_github_opener(merged_sha=merged_sha),
+        )
+        assert code == verb.EXIT_OK
+        assert not marker.exists()
 
     def test_merged_commit_config_unreadable_still_fails_loud(self, tmp_path):
         # FAIL LOUD is preserved for the one case the drift check cannot
