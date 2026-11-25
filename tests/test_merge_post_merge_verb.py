@@ -676,3 +676,32 @@ class TestStepsRunAtBaseBranchTip:
                 capture_output=True, text=True, cwd=str(tmp_path),
             )
             assert landed.stdout.strip() == expected_steps_sha
+
+    def test_steps_come_from_the_steps_sha_when_the_checkout_is_left_untouched(self, tmp_path):
+        # --repo-path is on another branch, so it is never moved and its own
+        # config file still declares a step. The tip no longer declares it: the
+        # steps are read at the SHA they run at, so the step must not run.
+        merged_sha = _init_repo_with_origin(tmp_path)
+        marker = tmp_path / "removed-at-tip.txt"
+        _write_merge_config(
+            tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}]
+        )
+        _run_git(["checkout", "-b", "feature"], cwd=tmp_path)
+        remote_dir = tmp_path.parent / f"{tmp_path.name}-origin.git"
+        pusher = tmp_path.parent / f"{tmp_path.name}-config-pusher"
+        _run_git(["clone", str(remote_dir), str(pusher)], cwd=tmp_path.parent)
+        _run_git(["config", "user.email", "test@example.com"], cwd=pusher)
+        _run_git(["config", "user.name", "test"], cwd=pusher)
+        _write_merge_config(pusher, [])
+        _run_git(["add", "-f", ".clagentic/loadout/config.yaml"], cwd=pusher)
+        _run_git(["commit", "-m", "declare no steps"], cwd=pusher)
+        _run_git(["push", "origin", f"{_BASE_BRANCH}:{_BASE_BRANCH}"], cwd=pusher)
+
+        code = post_merge_verb.main(
+            _base_args(str(tmp_path)),
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_opener(merge_commit_sha=merged_sha),
+        )
+        assert code == post_merge_verb.EXIT_OK
+        assert not marker.exists()

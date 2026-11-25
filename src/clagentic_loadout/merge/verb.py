@@ -575,6 +575,7 @@ from clagentic_loadout.merge.post_merge_config import (
     config_path_tracked_at_git_sha,
     find_foreign_config_files_declaring_post_merge_steps,
     load_post_merge_steps,
+    load_post_merge_steps_at_sha,
     load_post_merge_steps_from_git_sha,
     post_merge_steps_key_declared,
     resolve_enforce_merge_shape,
@@ -3043,6 +3044,44 @@ def _run(
                     ):
                         landed_steps = []
 
+                # The merged commit declares steps the pre-sync read did not see,
+                # so they are about to run and the tip was not read yet. Read it
+                # now, then take the steps from the SHA they will run at: a step
+                # the tip removed or changed must not run as the merged commit
+                # declared it. The merged-commit read above only decided that
+                # steps are needed.
+                if (
+                    landed_steps
+                    and landed_steps != steps
+                    and not args.skip_post_merge
+                    and steps_target is None
+                ):
+                    steps_target = resolve_steps_target(
+                        git_tree_path,
+                        base_branch=base_branch,
+                        merged_sha=fetched_sha,
+                        fetch_auth=fetch_auth,
+                    )
+                    if steps_target.reason is not None:
+                        print(f"merge: {steps_target.reason}", file=sys.stderr)
+                    if steps_target.sha != landed_sha:
+                        landed_sha = steps_target.sha
+                        isolate_reason = unsafe_tree_reason(
+                            git_tree_path, base_branch, landed_sha
+                        )
+                        try:
+                            landed_steps = load_post_merge_steps_at_sha(
+                                args.repo_path, git_tree_path, landed_sha
+                            )
+                        except PostMergeConfigError as exc:
+                            _fail(
+                                f"post-merge config FAILED to load from commit "
+                                f"{landed_sha!r} -- {exc}",
+                                code=EXIT_POST_MERGE_FAILED,
+                            )
+                        if landed_steps is None:
+                            landed_steps = []
+
                 drifted = (
                     landed_steps is not None
                     and landed_steps != steps
@@ -3067,22 +3106,6 @@ def _run(
                     )
                     steps = landed_steps
                     steps_will_run = bool(steps)
-                    if steps_will_run and steps_target is None:
-                        # Steps were not expected to run, so the tip was not
-                        # read earlier; read it now, before anything is
-                        # checked out for them.
-                        steps_target = resolve_steps_target(
-                            git_tree_path,
-                            base_branch=base_branch,
-                            merged_sha=fetched_sha,
-                            fetch_auth=fetch_auth,
-                        )
-                        if steps_target.reason is not None:
-                            print(f"merge: {steps_target.reason}", file=sys.stderr)
-                        landed_sha = steps_target.sha
-                        isolate_reason = unsafe_tree_reason(
-                            git_tree_path, base_branch, landed_sha
-                        )
                     if steps_will_run and not tree_checked_out and isolate_reason is None:
                         # lr-173768's checkout-vs-fetch-only decision (above) ran
                         # off the STALE pre-sync `steps_will_run` and chose the

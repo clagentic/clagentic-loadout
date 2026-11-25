@@ -732,6 +732,22 @@ def load_post_merge_steps_from_git_sha(
     return steps
 
 
+def load_post_merge_steps_at_sha(
+    config_root: str | Path, git_tree_path: str | Path, sha: str
+) -> list[dict] | None:
+    """The post_merge_steps *config_root*'s config file declares as committed at
+    *sha*, for a caller that runs the steps at *sha* in a tree other than its own
+    working tree (a redirected SHA, a tool-owned tree). Same contract as
+    `load_post_merge_steps_from_git_sha` (None when the file is not tracked at
+    *sha*), with the config path resolved against the git top level so a
+    subdirectory or wrapper layout reads the file the working-tree loader names."""
+    git_read_tree = find_git_top_level(git_tree_path) or Path(git_tree_path)
+    relative, legacy = resolve_git_tree_relative_config_paths(config_root, git_read_tree)
+    return load_post_merge_steps_from_git_sha(
+        git_read_tree, sha, config_relative_path=relative, legacy_relative_path=legacy
+    )
+
+
 def config_path_tracked_at_git_sha(
     git_tree_path: str | Path,
     sha: str,
@@ -1473,6 +1489,7 @@ __all__ = [
     "config_path_tracked_at_git_sha",
     "find_foreign_config_files_declaring_post_merge_steps",
     "load_post_merge_steps",
+    "load_post_merge_steps_at_sha",
     "load_post_merge_steps_from_git_sha",
     "post_merge_steps_key_declared",
     "resolve_enforce_merge_shape",

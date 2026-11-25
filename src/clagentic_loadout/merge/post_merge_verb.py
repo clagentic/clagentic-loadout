@@ -126,6 +126,7 @@ from clagentic_loadout.merge.post_merge import (
 from clagentic_loadout.merge.post_merge_config import (
     DEFAULT_CONFIG_RELATIVE_PATH as DEFAULT_POST_MERGE_CONFIG_RELATIVE_PATH,
     load_post_merge_steps,
+    load_post_merge_steps_at_sha,
     resolve_env_overrides,
     resolve_git_working_tree,
     resolve_post_merge_step_timeout_seconds,
@@ -684,6 +685,15 @@ def _run(
     try:
         try:
             steps = load_post_merge_steps(args.repo_path)
+            if isolate_reason is not None:
+                # --repo-path was not moved, so its file is not the config at the
+                # SHA the steps run at; take the steps committed there (an
+                # untracked config has none and stays as read).
+                steps_at_sha = load_post_merge_steps_at_sha(
+                    args.repo_path, git_tree_path, landed_sha
+                )
+                if steps_at_sha is not None:
+                    steps = steps_at_sha
         except PostMergeConfigError as exc:
             _fail(
                 f"post-merge config FAILED to load -- {exc}",

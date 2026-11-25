@@ -1635,6 +1635,27 @@ class TestStalePreSyncConfigDriftCheck:
         # the start.
         _assert_landed_on_base_branch(tmp_path, merged_sha)
 
+    def test_steps_come_from_the_tip_the_tail_runs_at_not_the_merged_commit(self, tmp_path):
+        # The merged commit adds a step; the base branch then moves on to a tip
+        # that removes it. The steps run at the tip, so the removed step must
+        # not run as the merged commit declared it.
+        _init_repo_with_origin_and_tracked_config(tmp_path, [])
+        make_origin_confirmable(tmp_path, url=CONFIRMABLE_GITHUB_ORIGIN)
+        marker = tmp_path / "removed-at-tip.txt"
+        merged_sha = _push_tracked_config_commit_to_origin(
+            tmp_path, [{"cmd": [_PY, "-c", f"open(r'{marker}', 'w').write('ran')"]}]
+        )
+        _push_tracked_config_commit_to_origin(tmp_path, [], parent_sha=merged_sha)
+        argv = _base_args(**{"--repo-path": str(tmp_path), "--platform": "github"})
+        code = verb.main(
+            argv,
+            token_provider=_RecordingTokenProvider(),
+            authority_provider=_AllowingAuthorityProvider(),
+            opener=_make_github_opener(merged_sha=merged_sha),
+        )
+        assert code == verb.EXIT_OK
+        assert not marker.exists()
+
     def test_merged_commit_config_unreadable_still_fails_loud(self, tmp_path):
         # FAIL LOUD is preserved for the one case the drift check cannot
         # self-correct: the merged SHA's own committed config cannot be READ
