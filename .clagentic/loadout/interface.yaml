@@ -50,6 +50,8 @@ verbs:
   - name: loadout-rules
     exit_codes: {ok: 0, usage: 1, groups_file: 80, profile_invalid: 81}
   - name: loadout-scoped-test-wait
+  - name: loadout-session
+    exit_codes: {ok: 0, usage: 1, config_invalid: 114, runtime_not_found: 115, write_failed: 116, exec_failed: 117}
   - name: loadout-spec
     exit_codes: {ok: 0, usage: 1, store_unusable: 3, not_found: 50, stored_invalid: 51, draft_invalid: 52, refused: 53, profile_invalid: 54, io_failed: 55}
   - name: loadout-stage-body

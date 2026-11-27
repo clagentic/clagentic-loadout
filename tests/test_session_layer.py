@@ -292,7 +292,7 @@ def test_write_replaces_the_previous_layer(tmp_path, capsys):
     assert "mcp__notes" not in stored["permissions"]["allow"]
 
 
-@pytest.mark.parametrize("role", ["../escape", "a/b", ".hidden", ""])
+@pytest.mark.parametrize("role", ["../escape", "a/b", ".hidden", "", "role-a\n"])
 def test_role_must_be_a_plain_token(tmp_path, capsys, role):
     rc, out, err = run_layer(tmp_path, capsys, copy.deepcopy(BASE), role=role)
     assert rc == 1 and out == ""

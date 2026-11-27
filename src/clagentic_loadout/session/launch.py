@@ -20,7 +20,7 @@ from clagentic_loadout.session.config import DEFAULT_RUNTIME_COMMAND
 
 SESSION_SUBDIR = "session"
 _RUNTIME_PARTS = (".clagentic", "loadout")
-_ROLE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_ROLE_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 
 SOURCE_FLAG = "the --runtime flag"
 SOURCE_CONFIG = "session_profile.runtime_command"
@@ -33,7 +33,7 @@ class RuntimeNotFoundError(LookupError):
 
 def valid_role(role: str) -> bool:
     """Roles are opaque keys, but one becomes a file name, so it is a plain token."""
-    return bool(_ROLE_PATTERN.match(role)) and ".." not in role
+    return bool(_ROLE_PATTERN.fullmatch(role)) and ".." not in role
 
 
 def runtime_dir(base: str | Path | None = None) -> Path:
