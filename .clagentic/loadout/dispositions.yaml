@@ -9,14 +9,14 @@ dispositions:
   - path: "docs/session-profile.md"
     rule_id: "released-tool.4"
     kind: false_positive
-    rationale: "False positive for rule released-tool.4 (clagentic-config loadout/groups.yaml released-tool.no-identity-keyed-permissions): the per-role hosts, credential paths and MCP servers are written by the user in their own user-level session_profile config and selected by an explicit --role; roles are opaque keys and no agent or consumer is named, so permission behaviour is a documented user-controlled setting. lr-015df5 ownership: 'loadout owns the profile keyed by role and the launch form, and names no consumer.' Operator approval, 2026-11-27: 'Approved, do the probes'. Ruled by holden; ROCI go 2026-11-27."
-    by: holden
+    rationale: "False positive for rule released-tool.4 (clagentic-config loadout/groups.yaml released-tool.no-identity-keyed-permissions): the per-role hosts, credential paths and MCP servers are written by the user in their own user-level session_profile config and selected by an explicit --role; roles are opaque keys and no agent or consumer is named, so permission behaviour is a documented user-controlled setting. lr-015df5 ownership: 'loadout owns the profile keyed by role and the launch form, and names no consumer.' Operator approval, 2026-11-27: 'Approved, do the probes'. Ruled by the project orchestrator with the coordinator's go, 2026-11-27."
+    by: "project-orchestrator"
     at: 2026-11-27
     fingerprint: "fp2:2428c0e8140e7ed5"
   - path: "src/clagentic_loadout/session/layer.py"
     rule_id: "released-tool.4"
     kind: false_positive
-    rationale: "False positive for rule released-tool.4 (clagentic-config loadout/groups.yaml released-tool.no-identity-keyed-permissions): the per-role hosts, credential paths and MCP servers are written by the user in their own user-level session_profile config and selected by an explicit --role; roles are opaque keys and no agent or consumer is named, so permission behaviour is a documented user-controlled setting. lr-015df5 ownership: 'loadout owns the profile keyed by role and the launch form, and names no consumer.' Operator approval, 2026-11-27: 'Approved, do the probes'. Ruled by holden; ROCI go 2026-11-27."
-    by: holden
+    rationale: "False positive for rule released-tool.4 (clagentic-config loadout/groups.yaml released-tool.no-identity-keyed-permissions): the per-role hosts, credential paths and MCP servers are written by the user in their own user-level session_profile config and selected by an explicit --role; roles are opaque keys and no agent or consumer is named, so permission behaviour is a documented user-controlled setting. lr-015df5 ownership: 'loadout owns the profile keyed by role and the launch form, and names no consumer.' Operator approval, 2026-11-27: 'Approved, do the probes'. Ruled by the project orchestrator with the coordinator's go, 2026-11-27."
+    by: "project-orchestrator"
     at: 2026-11-27
     fingerprint: "fp2:7565419d215ee940"
