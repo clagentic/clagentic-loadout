@@ -4076,6 +4076,20 @@ loadout-identity verify TOKEN [--dir DIR | --peer-id ID] [--now SECONDS]
 Exit codes: `0` ok, `1` usage, `90`-`111` one per refusal kind. Full reference:
 [identity.md](identity.md).
 
+### `loadout-session` — build a role's settings layer, or launch the runtime with it
+
+```
+loadout-session layer  --role ROLE [--write]
+loadout-session launch --role ROLE [--runtime COMMAND] [-- RUNTIME_ARGS...]
+```
+
+`layer` prints the role's runtime settings layer as JSON; `--write` stores it under
+`~/.clagentic/loadout/session/<role>.json` and prints only the path. `launch` writes the
+layer the same way and execs `<runtime> --settings <path> <runtime args>`. The layer is
+built from the user-level `session_profile` config section. Exit codes: `0` ok (a missing
+config is reported on stderr, exit `0`, no layer), `1` usage, `114`-`117` one per failure
+kind. Full reference: [session-profile.md](session-profile.md).
+
 ### `clagentic-loadout lint` and `build` — run the declared lint and build commands
 
 ```

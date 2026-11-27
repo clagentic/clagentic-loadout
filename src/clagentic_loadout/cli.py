@@ -195,6 +195,18 @@ def _rules_main(argv: list[str]) -> int:
     return rules_main(argv)
 
 
+def _session_layer_main(argv: list[str]) -> int:
+    from clagentic_loadout.session.verb import main as session_main
+
+    return session_main(["layer", *argv])
+
+
+def _session_launch_main(argv: list[str]) -> int:
+    from clagentic_loadout.session.verb import main as session_main
+
+    return session_main(["launch", *argv])
+
+
 def _ci_rerun_main(argv: list[str]) -> int:
     from clagentic_loadout.ci.verb import rerun_main
 
@@ -285,6 +297,16 @@ _GROUPED_VERBS: dict[str, dict[str, tuple[str, Callable[[list[str]], int]]]] = {
     "release": {
         "dispatch": ("Fire a signed 'task shipped' release event.", _release_dispatch_main),
         "detect": ("Scan a v*-tag commit range and dispatch per-task.", _release_detect_main),
+    },
+    "session": {
+        "layer": (
+            "Print a role's runtime settings layer (--write stores it and prints its path).",
+            _session_layer_main,
+        ),
+        "launch": (
+            "Write a role's settings layer, then exec the runtime with it.",
+            _session_launch_main,
+        ),
     },
     "wait": {
         "poll": ("Poll a file for a line-count/grep condition.", _wait_poll_main),
