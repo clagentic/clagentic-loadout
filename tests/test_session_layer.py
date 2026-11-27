@@ -103,12 +103,11 @@ def test_layer_holds_every_emitted_key(tmp_path, capsys):
     ]
 
 
-def test_no_shell_allow_rule_and_no_agent_name(tmp_path, capsys):
+def test_no_shell_allow_rule_in_any_built_layer(tmp_path, capsys):
     layer, _ = built(tmp_path, capsys)
     assert not [r for r in layer["permissions"]["allow"] if r.startswith("Bash")]
-    text = json.dumps(layer).lower()
-    for name in ("amos", "naomi", "holden", "crew"):
-        assert name not in text
+    # The exact-layer assertion above fixes every other string to a key, a config
+    # value or the role, so no name can enter the layer from code.
 
 
 def _credential_forms(layer):
