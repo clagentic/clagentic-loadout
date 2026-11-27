@@ -124,7 +124,7 @@ def build_layer(
             "filesystem": {"denyRead": deny_read},
         },
         "permissions": {
-            "defaultMode": "acceptEdits",
+            "defaultMode": profile.default_mode,
             "additionalDirectories": [scratch],
             "allow": [*web_rules, *(f"mcp__{name}" for name in servers)],
             "deny": deny_rules,

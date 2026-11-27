@@ -194,13 +194,23 @@ def test_pin_same_host_false_emits_no_address_entry_and_no_resolution(tmp_path, 
     assert "warning" not in err
 
 
-@pytest.mark.parametrize("value,expected", [(None, False), (True, True), (False, False)])
-def test_weaker_nested_sandbox_default_and_set(tmp_path, capsys, value, expected):
+@pytest.mark.parametrize(
+    "key,value,block,emitted,expected",
+    [
+        ("weaker_nested_sandbox", None, "sandbox", "enableWeakerNestedSandbox", False),
+        ("weaker_nested_sandbox", True, "sandbox", "enableWeakerNestedSandbox", True),
+        ("weaker_nested_sandbox", False, "sandbox", "enableWeakerNestedSandbox", False),
+        ("default_mode", None, "permissions", "defaultMode", "acceptEdits"),
+        ("default_mode", "plan", "permissions", "defaultMode", "plan"),
+    ],
+    ids=["nested-default", "nested-true", "nested-false", "mode-default", "mode-set"],
+)
+def test_setting_default_and_set(tmp_path, capsys, key, value, block, emitted, expected):
     section = copy.deepcopy(BASE)
     if value is not None:
-        section["weaker_nested_sandbox"] = value
+        section[key] = value
     layer, _ = built(tmp_path, capsys, section)
-    assert layer["sandbox"]["enableWeakerNestedSandbox"] is expected
+    assert layer[block][emitted] == expected
 
 
 def test_role_without_entry_gets_shared_lists_and_a_note(tmp_path, capsys):
@@ -242,8 +252,10 @@ def test_missing_config_file_names_the_path_it_read(tmp_path, capsys):
         ({"weaker_nested_sandbox": "yes"}, "weaker_nested_sandbox"),
         ({"hosts": "api.example.test"}, "hosts"),
         ({"credential_paths": ["relative.env"]}, "relative.env"),
+        ({"default_mode": ""}, "session_profile.default_mode"),
+        ({"default_mode": 7}, "7"),
     ],
-    ids=["relative-scratch", "bad-bool", "bad-list", "relative-credential"],
+    ids=["relative-scratch", "bad-bool", "bad-list", "relative-credential", "empty-mode", "non-string-mode"],
 )
 def test_malformed_value_is_a_config_error_naming_key_and_value(tmp_path, capsys, patch, fragment):
     section = {**copy.deepcopy(BASE), **patch}

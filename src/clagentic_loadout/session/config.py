@@ -10,6 +10,7 @@ read, so a cloned repository cannot steer a session's sandbox.
       weaker_nested_sandbox: false           # default false
       runtime_command: claude                # default "claude"
       pin_same_host: true                    # default true
+      default_mode: acceptEdits              # default "acceptEdits"
       hosts: [api.example.test:443]          # host or host:port, shared by every role
       credential_paths: [/etc/example/secret.env]
       mcp_servers: [notes]
@@ -42,6 +43,7 @@ KEY_SCRATCH_ROOT = "scratch_root"
 KEY_WEAKER_NESTED = "weaker_nested_sandbox"
 KEY_RUNTIME_COMMAND = "runtime_command"
 KEY_PIN_SAME_HOST = "pin_same_host"
+KEY_DEFAULT_MODE = "default_mode"
 KEY_HOSTS = "hosts"
 KEY_CREDENTIAL_PATHS = "credential_paths"
 KEY_MCP_SERVERS = "mcp_servers"
@@ -55,6 +57,7 @@ _KNOWN_KEYS = frozenset(
         KEY_WEAKER_NESTED,
         KEY_RUNTIME_COMMAND,
         KEY_PIN_SAME_HOST,
+        KEY_DEFAULT_MODE,
         KEY_ROLES,
         *_LIST_KEYS,
     }
@@ -62,6 +65,9 @@ _KNOWN_KEYS = frozenset(
 _KNOWN_ROLE_KEYS = frozenset(_LIST_KEYS)
 
 DEFAULT_RUNTIME_COMMAND = "claude"
+# The approved model's edit auto-accept. The runtime owns its mode names, so the
+# value is passed through as written and never checked against a list here.
+DEFAULT_PERMISSION_MODE = "acceptEdits"
 
 
 class SessionConfigError(ValueError):
@@ -86,6 +92,7 @@ class SessionProfile:
     shared: RoleLists
     roles: dict[str, RoleLists]
     unknown_keys: tuple[str, ...] = ()
+    default_mode: str = DEFAULT_PERMISSION_MODE
 
 
 @dataclass(frozen=True)
@@ -201,6 +208,12 @@ def load_session_profile(*, config_root: str | Path | None = None) -> LoadResult
         raise SessionConfigError(
             f"{CONFIG_SECTION}.{KEY_RUNTIME_COMMAND} must be a non-empty string, got {runtime!r}"
         )
+    mode = section.get(KEY_DEFAULT_MODE, DEFAULT_PERMISSION_MODE)
+    if not isinstance(mode, str) or not mode.strip() or mode != mode.strip():
+        raise SessionConfigError(
+            f"{CONFIG_SECTION}.{KEY_DEFAULT_MODE} must be a non-empty string without "
+            f"surrounding whitespace, got {mode!r}"
+        )
     roles, unknown_in_roles = _parse_roles(section.get(KEY_ROLES))
     unknown = [k for k in section if k not in _KNOWN_KEYS] + unknown_in_roles
     profile = SessionProfile(
@@ -212,5 +225,6 @@ def load_session_profile(*, config_root: str | Path | None = None) -> LoadResult
         shared=_role_lists(section, ""),
         roles=roles,
         unknown_keys=tuple(str(k) for k in unknown),
+        default_mode=mode,
     )
     return LoadResult(path, profile=profile)

@@ -30,6 +30,7 @@ session_profile:
   weaker_nested_sandbox: false          # default false
   runtime_command: claude               # default "claude"
   pin_same_host: true                   # default true
+  default_mode: acceptEdits             # default "acceptEdits"
   hosts:                                # host or host:port, shared by every role
     - api.example.test:443
   credential_paths:                     # absolute paths, shared by every role
@@ -48,8 +49,15 @@ entry under `roles:` gets the shared lists and a note on stderr. A role key is n
 checked against any roster; because it becomes the file name `<role>.json`, it must be a
 plain token (letters, digits, `.`, `_`, `-`, starting with a letter or digit).
 
-A value that is present but unusable (a relative scratch root, a non-boolean flag, a
-list that is not a list) is a configuration error: the message names the key and the
+`default_mode` is the runtime permission mode the session starts in, written to
+`permissions.defaultMode`. The default, `acceptEdits`, is the approved model's edit
+auto-accept: the file tools edit inside the working and scratch directories without a
+prompt while everything else still follows the deny rules. Set it when a deployment
+wants a stricter or different start mode. The value is passed through as written; the
+verb does not list the runtime's mode names, so the runtime judges an unknown name.
+
+A value that is present but unusable (a relative scratch root, a non-boolean flag, an
+empty `default_mode`, a list that is not a list) is a configuration error: the message names the key and the
 value it resolved to, and the verb exits 114. An unrecognised key is reported on stderr
 and ignored.
 
@@ -70,7 +78,7 @@ runtime; the right-hand column is what was observed.
 | `sandbox.enableWeakerNestedSandbox` | from config, default `false` | Needed on hosts where the sandbox itself runs inside a container; accepted as a documented setting. |
 | `sandbox.network.allowedDomains` | every listed host exactly as written, then pinned address entries | The proxy admits only listed `host` or `host:port` targets. |
 | `sandbox.filesystem.denyRead` | every credential path | Shell commands cannot read the path. |
-| `permissions.defaultMode` | `acceptEdits` | The native file tools auto-accept edits inside the working directories and the additional directories. |
+| `permissions.defaultMode` | from `session_profile.default_mode`, default `acceptEdits` | With the default, the native file tools auto-accept edits inside the working directories and the additional directories. |
 | `permissions.additionalDirectories` | `[<scratch_root with {role} replaced>]` | Clears the runtime's write wall around the role scratch root. `sandbox.filesystem.allowWrite` is not needed for it. |
 | `permissions.allow` | `WebFetch(domain:<hostname>)` per host, `mcp__<server>` per server | The server-level form `mcp__<server>` allows every tool of that server without a prompt. |
 | `permissions.deny` | `Read(//<path>)` and `Edit(//<path>)` per credential path | An absolute path takes the runtime's `//` form, for example `Read(//etc/example/shared.env)`. |
