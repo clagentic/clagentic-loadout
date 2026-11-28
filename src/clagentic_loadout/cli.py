@@ -183,6 +183,12 @@ def _identity_main(argv: list[str]) -> int:
     return identity_main(argv)
 
 
+def _transcript_main(argv: list[str]) -> int:
+    from clagentic_loadout.transcript.verb import main as transcript_main
+
+    return transcript_main(argv)
+
+
 def _update_main(argv: list[str]) -> int:
     from clagentic_loadout.update.verb import main as update_main
 
@@ -283,6 +289,10 @@ _SIMPLE_VERBS: dict[str, tuple[str, Callable[[list[str]], int]]] = {
         _update_main,
     ),
     "identity": ("Show the resolved identity, or verify an assertion token (whoami, verify).", _identity_main),
+    "transcript": (
+        "Read a session transcript: permission decisions by class (decisions).",
+        _transcript_main,
+    ),
 }
 
 #: Parent verb name -> {subverb name: (summary, callable)}.

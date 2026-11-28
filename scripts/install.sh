@@ -750,7 +750,7 @@ _pip_bin() {
 # with a readable pyproject.toml (e.g. a bare sdist/wheel path).
 # ---------------------------------------------------------------------------
 
-_FALLBACK_SCRIPT_NAMES="clagentic-loadout loadout-poll-wait loadout-scoped-test-wait loadout-release-dispatch loadout-release-detect loadout-git-host-api loadout-review-post loadout-push loadout-merge loadout-provision-allowlist loadout-session"
+_FALLBACK_SCRIPT_NAMES="clagentic-loadout loadout-poll-wait loadout-scoped-test-wait loadout-release-dispatch loadout-release-detect loadout-git-host-api loadout-review-post loadout-push loadout-merge loadout-provision-allowlist loadout-session loadout-transcript"
 
 _project_script_names() {
     _pyproject="$1/pyproject.toml"

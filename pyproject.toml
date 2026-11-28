@@ -74,6 +74,7 @@ loadout-spec = "clagentic_loadout.spec.verb:main"
 loadout-interface = "clagentic_loadout.interface.verb:main"
 loadout-identity = "clagentic_loadout.identity.verb:main"
 loadout-session = "clagentic_loadout.session.verb:main"
+loadout-transcript = "clagentic_loadout.transcript.verb:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

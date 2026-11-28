@@ -4090,6 +4090,19 @@ built from the user-level `session_profile` config section. Exit codes: `0` ok (
 config is reported on stderr, exit `0`, no layer), `1` usage, `114`-`117` one per failure
 kind. Full reference: [session-profile.md](session-profile.md).
 
+### `loadout-transcript` — read a session transcript
+
+```
+loadout-transcript decisions TRANSCRIPT [--json]
+```
+
+`decisions` counts the permission decisions of one session, with its subagent
+transcripts, per class (`person-asked`, `rule-or-config`, `unclassified`) and per raw
+value combination, and lists each person-asked and unclassified decision with its
+agent, tool and full input. It reports only: exit `0` on readable input whatever the
+counts, `1` usage, `118` when a transcript cannot be read. Full reference:
+[transcript-decisions.md](transcript-decisions.md).
+
 ### `clagentic-loadout lint` and `build` — run the declared lint and build commands
 
 ```
