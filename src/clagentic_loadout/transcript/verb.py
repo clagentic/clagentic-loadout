@@ -73,6 +73,7 @@ def render_text(report: Report) -> str:
         if item.rule_source is not None:
             lines.append(f"    ruleSource: {item.rule_source}")
         lines.append(f"    timestamp: {item.timestamp}")
+    lines.append(f"ambiguous records: {report.ambiguous_records}")
     lines.append(f"skipped lines: {report.skipped_lines}")
     return "\n".join(lines)
 

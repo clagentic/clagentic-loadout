@@ -24,7 +24,10 @@ input whatever the counts; nothing in it checks, gates or refuses on a count.
 | Subagent transcripts | `<directory of TRANSCRIPT>/<session id>/subagents/agent-<id>.jsonl`, where `<session id>` is the transcript file's stem |
 | Attribution | the `agentId` each subagent record carries (the file name's `<id>` when a record has none); decisions in TRANSCRIPT itself are attributed to `main` |
 
-One decision is counted per tool-result record. A decision whose `tool_use` block is
+One decision is counted per record whose `message.content[]` holds exactly one
+`tool_result` block. A record carrying `permissionDecision` with no such block, or with
+two or more, has no single call to tie the decision to: it yields no decision and is
+counted in `ambiguous records`. A decision whose `tool_use` block is
 not in the file is still counted; its tool and input print as `null`. A call that
 has a `tool_use` and no result (a prompt unanswered when the session ended) is not
 counted. The subagents' `meta.json` files are not read.
@@ -66,6 +69,7 @@ listed (person-asked and unclassified): <n>
     reasonType: <reasonType>
     ruleSource: <ruleSource, when present>
     timestamp: <timestamp>
+ambiguous records: <n>
 skipped lines: <n>
 ```
 
@@ -73,10 +77,11 @@ skipped lines: <n>
 `counts_by_combination` (a list of `class`, `decision`, `source`, `reasonType`,
 `count`), `listed_decisions` (the person-asked and unclassified decisions, each with
 `class`, `agent`, `tool`, `input`, `decision`, `source`, `reasonType`, `timestamp`,
-plus `ruleSource` when present), `subagent_transcripts` and `skipped_lines`. Inputs
-are never truncated in either form.
+plus `ruleSource` when present), `subagent_transcripts`, `skipped_lines` and
+`ambiguous_records`. Inputs are never truncated in either form.
 
-A line that is not a JSON object is skipped and counted in `skipped lines`.
+A line that is not a JSON object is skipped and counted in `skipped lines`. Blank
+lines are ignored and not counted.
 
 ## Exit codes
 

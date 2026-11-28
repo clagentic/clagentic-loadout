@@ -59,7 +59,7 @@ def classify(decision: str | None, source: str | None, reason_type: str | None) 
 
 
 SUBAGENT_DIR = "subagents"
-SUBAGENT_GLOB = "agent-*.jsonl"
+SUBAGENT_SUFFIX = ".jsonl"
 SUBAGENT_FILE_PREFIX = "agent-"
 
 
@@ -100,6 +100,7 @@ class Report:
     decisions: list[Decision] = field(default_factory=list)
     subagent_transcripts: int = 0
     skipped_lines: int = 0
+    ambiguous_records: int = 0
     unreadable: list[str] = field(default_factory=list)
 
     @property
@@ -135,6 +136,7 @@ class Report:
             "listed_decisions": [d.to_json_dict() for d in self.listed],
             "subagent_transcripts": self.subagent_transcripts,
             "skipped_lines": self.skipped_lines,
+            "ambiguous_records": self.ambiguous_records,
         }
 
 
@@ -148,7 +150,13 @@ def subagent_paths(transcript: Path) -> list[Path]:
     directory = transcript.parent / transcript.stem / SUBAGENT_DIR
     if not directory.is_dir():
         return []
-    return sorted(p for p in directory.glob(SUBAGENT_GLOB) if p.is_file())
+    # iterdir, not glob: glob swallows a PermissionError and would report zero
+    # subagents for a directory that could not be listed.
+    return sorted(
+        p
+        for p in directory.iterdir()
+        if p.name.startswith(SUBAGENT_FILE_PREFIX) and p.suffix == SUBAGENT_SUFFIX and p.is_file()
+    )
 
 
 def _blocks(record: dict[str, Any]) -> list[dict[str, Any]]:
@@ -161,7 +169,8 @@ def _blocks(record: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _read_records(path: Path) -> tuple[list[dict[str, Any]], int]:
     """Parsed object records of one JSONL file and the number of lines skipped
-    because they were not a JSON object. Raises OSError when unreadable."""
+    because they were not a JSON object. Blank lines are ignored and not counted.
+    Raises OSError when unreadable."""
     records: list[dict[str, Any]] = []
     skipped = 0
     with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -180,8 +189,11 @@ def _read_records(path: Path) -> tuple[list[dict[str, Any]], int]:
     return records, skipped
 
 
-def _decisions_of(records: list[dict[str, Any]], agent_for: Any) -> list[Decision]:
-    """Decisions in *records*; *agent_for(record)* names the agent of each."""
+def _decisions_of(records: list[dict[str, Any]], agent_for: Any) -> tuple[list[Decision], int]:
+    """Decisions in *records* (*agent_for(record)* names the agent of each) and the
+    number of ambiguous records: a record carrying ``permissionDecision`` whose
+    content holds zero or several ``tool_result`` blocks has no single call to tie the
+    decision to, so it yields no decision."""
     uses: dict[str, tuple[Any, Any]] = {}
     for record in records:
         if record.get("type") != "assistant":
@@ -190,14 +202,16 @@ def _decisions_of(records: list[dict[str, Any]], agent_for: Any) -> list[Decisio
             if block.get("type") == "tool_use" and isinstance(block.get("id"), str):
                 uses[block["id"]] = (block.get("name"), block.get("input"))
     found: list[Decision] = []
+    ambiguous = 0
     for record in records:
         perm = record.get("permissionDecision")
         if record.get("type") != "user" or not isinstance(perm, dict):
             continue
-        use_id = next(
-            (b.get("tool_use_id") for b in _blocks(record) if b.get("type") == "tool_result"),
-            None,
-        )
+        results = [b for b in _blocks(record) if b.get("type") == "tool_result"]
+        if len(results) != 1:
+            ambiguous += 1
+            continue
+        use_id = results[0].get("tool_use_id")
         name, tool_input = uses.get(use_id, (None, None)) if isinstance(use_id, str) else (None, None)
         found.append(
             Decision(
@@ -211,7 +225,7 @@ def _decisions_of(records: list[dict[str, Any]], agent_for: Any) -> list[Decisio
                 timestamp=_str_or_none(record.get("timestamp")),
             )
         )
-    return found
+    return found, ambiguous
 
 
 def read_decisions(transcript: Path) -> Report:
@@ -237,5 +251,7 @@ def read_decisions(transcript: Path) -> Report:
         if path is not transcript:
             report.subagent_transcripts += 1
         report.skipped_lines += skipped
-        report.decisions.extend(_decisions_of(records, agent_for))
+        decisions, ambiguous = _decisions_of(records, agent_for)
+        report.decisions.extend(decisions)
+        report.ambiguous_records += ambiguous
     return report

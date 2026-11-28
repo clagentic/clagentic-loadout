@@ -218,6 +218,58 @@ def test_malformed_lines_are_skipped_and_counted(tmp_path, capsys):
     assert rc == EXIT_OK and data["skipped_lines"] == 2 and data["decisions"] == 1
 
 
+def _record_with_blocks(blocks: list[dict]) -> str:
+    return json.dumps(
+        {
+            "type": "user",
+            "message": {"content": blocks},
+            "permissionDecision": {"decision": "accept", "source": "config", "reasonType": "rule"},
+        }
+    )
+
+
+def _tool_result(use_id: str) -> dict:
+    return {"type": "tool_result", "tool_use_id": use_id, "content": "ok"}
+
+
+#: (label, content blocks of a record that carries permissionDecision, decisions emitted,
+#: ambiguous records)
+RECORD_SHAPE_ROWS = [
+    ("one tool_result", [_tool_result("t1")], 1, 0),
+    ("no tool_result", [{"type": "text", "text": "hi"}], 0, 1),
+    ("two tool_results", [_tool_result("t1"), _tool_result("t2")], 0, 1),
+]
+
+
+@pytest.mark.parametrize("label,blocks,emitted,ambiguous", RECORD_SHAPE_ROWS, ids=[r[0] for r in RECORD_SHAPE_ROWS])
+def test_only_a_record_with_exactly_one_tool_result_yields_a_decision(
+    tmp_path, capsys, label, blocks, emitted, ambiguous
+):
+    lead = _lead(tmp_path, ["", _record_with_blocks(blocks), "   "])
+
+    rc, out, _ = _run(["decisions", str(lead), "--json"], capsys)
+
+    data = json.loads(out)
+    assert rc == EXIT_OK
+    assert (data["decisions"], data["ambiguous_records"]) == (emitted, ambiguous)
+    assert data["skipped_lines"] == 0
+
+
+def test_an_unlistable_subagents_directory_is_named_and_no_count_printed(tmp_path, capsys, monkeypatch):
+    lead = _lead(tmp_path, [_use("t1", "Read", {}), _result("t1", "config", "rule")])
+    _sub(tmp_path, [_use("s1", "Read", {}, AGENT)])
+    subagents_dir = tmp_path / SESSION / "subagents"
+
+    def _refuse(self):
+        raise PermissionError(13, "denied", str(self))
+
+    monkeypatch.setattr(Path, "iterdir", _refuse)
+
+    rc, out, err = _run(["decisions", str(lead)], capsys)
+
+    assert rc == EXIT_UNREADABLE_INPUT and out == "" and str(subagents_dir) in err
+
+
 def test_a_decision_without_its_tool_use_is_still_counted(tmp_path, capsys):
     lead = _lead(tmp_path, [_result("orphan", "user_reject", "other", "reject")])
 
@@ -300,6 +352,7 @@ def test_text_and_json_output_on_a_mixed_session(tmp_path, capsys):
             "    source: never_recorded",
             "    reasonType: other",
             f"    timestamp: {stamp}",
+            "ambiguous records: 0",
             "skipped lines: 0",
             "",
         ]
