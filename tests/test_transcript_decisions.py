@@ -248,6 +248,69 @@ def test_counts_never_change_the_exit_code(tmp_path, capsys):
     assert rc == EXIT_OK and "person-asked: 5" in out and "unclassified: 5" in out
 
 
+def test_text_and_json_output_on_a_mixed_session(tmp_path, capsys):
+    lead = _lead(
+        tmp_path,
+        [
+            _use("t1", "Bash", {"command": "ls -la"}),
+            _result("t1", "user_reject", "other", "reject"),
+            _use("t2", "Write", {"file_path": "notes.txt"}),
+            _result("t2", "never_recorded", "other"),
+        ],
+    )
+    _sub(
+        tmp_path,
+        [
+            _use("s1", "Read", {"file_path": "a.txt"}, AGENT),
+            _result("s1", "user_permanent", "rule", rule_source="userSettings", agent=AGENT),
+        ],
+    )
+    stamp = "2026-01-02T03:04:05Z"
+
+    _, text, _ = _run(["decisions", str(lead)], capsys)
+    _, raw, _ = _run(["decisions", str(lead), "--json"], capsys)
+
+    assert text == "\n".join(
+        [
+            f"transcript: {lead}",
+            "subagent transcripts read: 1",
+            "decisions: 3",
+            "  person-asked: 1",
+            "  unclassified: 1",
+            "  rule-or-config: 1",
+            "by decision/source/reasonType:",
+            "  accept/never_recorded/other: 1 (unclassified)",
+            "  accept/user_permanent/rule: 1 (rule-or-config)",
+            "  reject/user_reject/other: 1 (person-asked)",
+            "listed (person-asked and unclassified): 2",
+            "  class: person-asked",
+            "    agent: main",
+            "    tool: Bash",
+            '    input: {"command": "ls -la"}',
+            "    decision: reject",
+            "    source: user_reject",
+            "    reasonType: other",
+            f"    timestamp: {stamp}",
+            "  class: unclassified",
+            "    agent: main",
+            "    tool: Write",
+            '    input: {"file_path": "notes.txt"}',
+            "    decision: accept",
+            "    source: never_recorded",
+            "    reasonType: other",
+            f"    timestamp: {stamp}",
+            "skipped lines: 0",
+            "",
+        ]
+    )
+    data = json.loads(raw)
+    assert data["counts_by_class"] == {"person-asked": 1, "unclassified": 1, "rule-or-config": 1}
+    assert [(d["class"], d["agent"], d["tool"]) for d in data["listed_decisions"]] == [
+        ("person-asked", "main", "Bash"),
+        ("unclassified", "main", "Write"),
+    ]
+
+
 def test_usage_error_exits_one(capsys):
     assert main(["decisions"]) == verb.EXIT_USAGE
     capsys.readouterr()
