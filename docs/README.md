@@ -48,6 +48,7 @@ reference lives.
 | [provisioning.md](provisioning.md) | The per-role permission-allowlist side: declaring which verbs a role may invoke and generating its allowlist fragment. |
 | [identity.md](identity.md) | The identity provider seam: the `gatekeeper`, `jwks` and `static` classes, the provider interface, accepted contract majors, the `prefer-assertion` and `assertion-or-legacy` transition values, and `loadout-identity`. |
 | [session-profile.md](session-profile.md) | `loadout-session`: build a role's runtime settings layer (sandbox, credential and host lists, scratch root, MCP servers) from the user-level `session_profile` config and launch the runtime with it. |
+| [transcript-decisions.md](transcript-decisions.md) | `loadout-transcript decisions`: count a session's permission decisions by class, and show each person-asked or unclassified one with its agent, tool and full input. |
 | [merge-authority.md](merge-authority.md) | The `loadout-merge` identity-binding model, fail-closed guarantee, attestation-source configuration, and the git-host attestation mark. |
 | [guard-policy.md](guard-policy.md) | The `clagentic_loadout.guard` policy contract: every guard category, its API, its config shape. |
 | [integration.md](integration.md) | The runtime contract a harness spawning a loadout-driven agent must satisfy: env vars, config-file tiers, precedence. |
