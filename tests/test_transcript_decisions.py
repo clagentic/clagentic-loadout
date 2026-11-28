@@ -88,6 +88,7 @@ CLASS_ROWS = [
     ("accept", "never_recorded", "other", None, "unclassified"),
     ("accept", "user_permanent", "other", None, "unclassified"),
     ("accept", None, None, None, "unclassified"),
+    ("reject", "user_reject", "rule", None, "unclassified"),
 ]
 
 

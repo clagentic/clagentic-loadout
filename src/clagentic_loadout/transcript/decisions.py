@@ -13,9 +13,9 @@ where ``<session id>`` is the transcript file's stem. Every record in them carri
 line is the main session.
 
 Each decision is put in one class by CLASSIFICATION, a table over the raw
-``decision``, ``source`` and ``reasonType`` values; the first matching row wins. A
-combination no row matches is ``unclassified``: it is counted and listed with its raw
-values, never guessed. A newly recorded value is added as one row. Reading never
+``decision``, ``source`` and ``reasonType`` values. A combination no row matches, or
+that rows of two classes match, is ``unclassified``: it is counted and listed with
+its raw values, never guessed. A newly recorded value is added as one row. Reading never
 writes, and nothing here refuses on a count.
 """
 
@@ -32,7 +32,8 @@ PERSON_ASKED = "person-asked"
 UNCLASSIFIED = "unclassified"
 CLASSES = (PERSON_ASKED, UNCLASSIFIED, RULE_OR_CONFIG)
 
-#: (class, decision, source, reasonType); None matches any value. First match wins.
+#: (class, decision, source, reasonType); None matches any value. A decision is in
+#: the one class its matching rows name; rows of two classes are a conflict.
 #: A saved allow rule (reasonType "rule") matches with no person asked even when its
 #: source reads user_permanent; a shown card that timed out or was rejected records
 #: user_reject.
@@ -45,14 +46,16 @@ CLASSIFICATION: tuple[tuple[str, str | None, str | None, str | None], ...] = (
 
 
 def classify(decision: str | None, source: str | None, reason_type: str | None) -> str:
-    for cls, want_decision, want_source, want_reason in CLASSIFICATION:
-        if (
-            want_decision in (None, decision)
-            and want_source in (None, source)
-            and want_reason in (None, reason_type)
-        ):
-            return cls
-    return UNCLASSIFIED
+    matched = {
+        cls
+        for cls, want_decision, want_source, want_reason in CLASSIFICATION
+        if want_decision in (None, decision)
+        and want_source in (None, source)
+        and want_reason in (None, reason_type)
+    }
+    # Rows of two classes matching is a combination never recorded: the evidence
+    # cannot settle it, so it is shown with its raw values rather than guessed.
+    return matched.pop() if len(matched) == 1 else UNCLASSIFIED
 
 
 SUBAGENT_DIR = "subagents"

@@ -32,13 +32,14 @@ counted. The subagents' `meta.json` files are not read.
 ## Classes
 
 One table in the code (`CLASSIFICATION` in `transcript/decisions.py`) maps the raw
-values to a class; the first matching row wins.
+values to a class. A decision matched by rows of two classes (for example `user_reject`
+with `reasonType` `rule`) is a combination never recorded and is `unclassified`.
 
 | Class | Rows |
 |---|---|
 | `rule-or-config` | `reasonType` is `rule`, with any `source` or `ruleSource` (this includes `source` `user_permanent` with `ruleSource` `userSettings`: a saved allow rule matching, no card shown); `source` `config` with `reasonType` `subcommandResults` |
 | `person-asked` | `user_reject` as the value of `source` or of `decision`: a card that was shown and timed out or was rejected |
-| `unclassified` | every other combination, including a missing value. It is counted and listed with its raw values, never guessed |
+| `unclassified` | every other combination, including a missing value and a combination that rows of two classes match. It is counted and listed with its raw values, never guessed |
 
 A newly recorded value is added as one row of the table.
 
